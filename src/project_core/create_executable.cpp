@@ -53,9 +53,17 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
 {
     fs::path mainLuaPath = fs::path(dir) / "main.lua";
 
-    if (!fs::exists(mainLuaPath))
+    // CORRECTIF (revue ChatGPT post-audit v21) : fichier RÉGULIER
+    // exigé. Un DOSSIER nommé main.lua passait fs::exists ; le ZIP ne
+    // prend que les fichiers réguliers, donc --create-exe produisait
+    // en silence un binaire SANS main.lua embarqué — échec différé et
+    // déroutant au premier lancement. is_regular_file suit les
+    // symlinks : un lien vers un vrai main.lua reste accepté.
+    std::error_code mec;
+    if (!fs::is_regular_file(mainLuaPath, mec))
     {
-        std::cerr << "Error: main.lua not found in the directory " << dir << std::endl;
+        std::cerr << "Error: main.lua not found (or not a regular file) in the directory "
+                  << dir << std::endl;
         return false;
     }
 
@@ -121,6 +129,21 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
     try
     {
         std::string exe = getExecutablePath();
+        // CORRECTIF (revue post-audit v21, vérifié) : refuser
+        // une sortie ÉQUIVALENTE au binaire en cours d'exécution.
+        // mergeFiles ouvre la sortie en ofstream (troncature) pendant
+        // qu'il LIT le binaire courant : si output désigne le même
+        // inode (chemin direct, symlink ou hardlink),
+        // `babet --create-exe proj /chemin/vers/babet` DÉTRUISAIT
+        // babet lui-même (il ne restait souvent que le zip).
+        // fs::equivalent résout liens symboliques et durs.
+        std::error_code eq_ec;
+        if (fs::exists(output, eq_ec) && fs::equivalent(exe, output, eq_ec))
+        {
+            std::cerr << "Error: output must not overwrite the running Babet executable."
+                      << std::endl;
+            return false;
+        }
         mergeFiles(exe, zipFileName, output);
     }
     catch (const std::exception &e)

@@ -2,6 +2,8 @@
 #include "lua_utils.hpp"
 #include "signal.hpp"
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <cerrno>
@@ -62,6 +64,20 @@ int lua_sleep(lua_State *L)
     }
 
     double duration = lua_tonumber(L, 1);
+    // CORRECTIF (audit v21) : rejeter NaN et ±Inf AVANT le cast
+    // time_t plus bas. L'ancien code ne testait que `duration < 0`,
+    // qui laisse passer NaN (toute comparaison avec NaN est fausse)
+    // et +Inf ; static_cast<time_t>(NaN/Inf) est un comportement
+    // indéfini. babet.sleep(0/0) ou babet.sleep(math.huge) le
+    // déclenchait. Cohérent avec socket.set_timeout, exec
+    // opts.timeout, workers et inotify, qui refusent tous NaN/Inf.
+    // Convention : erreur d'argument, comme la durée négative juste
+    // en dessous (faute de programmation, pas erreur runtime).
+    // Longjmp-safe : uniquement des POD vivants à ce point.
+    if (!std::isfinite(duration))
+    {
+        return luaL_argerror(L, 1, "Duration must be finite (not NaN or inf)");
+    }
     if (duration < 0)
     {
         return luaL_argerror(L, 1, "Duration must be non-negative");
@@ -93,6 +109,20 @@ int lua_sleep(lua_State *L)
     catch (const std::invalid_argument &e)
     {
         return push_fail(L, e.what());
+    }
+
+    // CORRECTIF (audit v21) : borne haute avant le cast vers time_t.
+    // Subtilité : (double)INT64_MAX n'est PAS représentable en double
+    // et s'arrondit à 2^63 exactement, donc le test doit être `>=`
+    // (un `>` laisserait passer seconds == 2^63, dont le cast est
+    // indéfini). 2^63 secondes ≈ 292 milliards d'années : aucune
+    // attente légitime n'est restreinte. Longjmp-safe : seuls des
+    // POD sont vivants ici (duration_chrono est mort avec le try).
+    constexpr double kMaxTimeT =
+        static_cast<double>(std::numeric_limits<time_t>::max());
+    if (seconds >= kMaxTimeT)
+    {
+        return luaL_argerror(L, 1, "Duration too large");
     }
 
     // Phase B signal : on passe par nanosleep direct (et non

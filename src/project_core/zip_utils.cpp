@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <system_error>
 #include <cerrno>
+#include <exception>
 
 namespace fs = std::filesystem;
 
@@ -19,21 +20,74 @@ bool createZipFromDirectory(const std::string &dir, const std::string &zipFileNa
         return false;
     }
 
-    for (const auto &entry : fs::recursive_directory_iterator(dir))
+    // CORRECTIF (audit v21) : try/catch autour de l'itération.
+    //
+    // recursive_directory_iterator (variante sans error_code) JETTE
+    // filesystem_error sur une erreur d'OS — typiquement un
+    // sous-dossier illisible (EACCES) rencontré pendant le parcours.
+    // L'appelant (createExecutableWithDir) appelle cette fonction HORS
+    // de son try/catch : avant ce correctif, l'exception remontait
+    // jusqu'à main() sans être attrapée -> std::terminate (abort,
+    // code 134) au lieu d'un message d'erreur propre + exit 1.
+    //
+    // Politique : on échoue FORT et PROPREMENT. Pas de
+    // skip_permission_denied ici (contrairement à copyTree) : un
+    // --create-exe qui embarquerait silencieusement un projet
+    // incomplet produirait un binaire cassé de façon différée et
+    // difficile à diagnostiquer. Mieux vaut refuser tout de suite
+    // avec la cause.
+    try
     {
-        if (!fs::is_regular_file(entry))
-            continue;
-
-        std::string relativePath = fs::relative(entry.path(), dir).string();
-
-        if (!mz_zip_writer_add_file(&zip, relativePath.c_str(),
-                                    entry.path().string().c_str(),
-                                    nullptr, 0, MZ_BEST_COMPRESSION))
+        for (const auto &entry : fs::recursive_directory_iterator(dir))
         {
-            std::cerr << "Error adding to ZIP: " << entry.path() << std::endl;
-            mz_zip_writer_end(&zip);
-            return false;
+            if (!fs::is_regular_file(entry))
+                continue;
+
+            // CORRECTIF (audit v21) : PURE lexical, surtout PAS
+            // fs::relative — même bug (et même fix) que copyTree.cpp /
+            // moveTree.cpp. fs::relative équivaut à
+            // weakly_canonical(path).lexically_relative(
+            // weakly_canonical(dir)) : il RÉSOUT les symlinks. Pour un
+            // module du projet qui est un symlink vers un fichier hors
+            // du dossier (ex : proj/mylib.lua -> ../shared/mylib.lua),
+            // le nom d'entrée ZIP devenait le chemin de la CIBLE
+            // relatif au projet ("../shared/mylib.lua") au lieu de la
+            // position du lien ("mylib.lua") -> require("mylib")
+            // échouait dans le binaire empaqueté.
+            //
+            // L'itérateur fournit toujours path = dir/... littéral,
+            // donc lexically_relative donne la structure exacte vue
+            // dans le projet, sans suivre aucun lien. Le CONTENU, lui,
+            // est lu par mz_zip_writer_add_file qui ouvre le chemin et
+            // suit donc le symlink : on embarque le bon contenu sous
+            // le bon nom. Vérifié aussi avec un slash final sur `dir`
+            // (forme produite par la complétion tab) : la
+            // décomposition en composants de lexically_relative
+            // l'absorbe correctement.
+            //
+            // Limite préexistante (inchangée) : les symlinks vers des
+            // DOSSIERS ne sont pas suivis par
+            // recursive_directory_iterator (comportement par défaut),
+            // leur contenu n'est donc pas embarqué.
+            std::string relativePath =
+                entry.path().lexically_relative(dir).string();
+
+            if (!mz_zip_writer_add_file(&zip, relativePath.c_str(),
+                                        entry.path().string().c_str(),
+                                        nullptr, 0, MZ_BEST_COMPRESSION))
+            {
+                std::cerr << "Error adding to ZIP: " << entry.path() << std::endl;
+                mz_zip_writer_end(&zip);
+                return false;
+            }
         }
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error scanning directory '" << dir << "': "
+                  << e.what() << std::endl;
+        mz_zip_writer_end(&zip);
+        return false;
     }
 
     if (!mz_zip_writer_finalize_archive(&zip))

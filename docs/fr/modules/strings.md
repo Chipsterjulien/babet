@@ -18,14 +18,27 @@ escaping.
 
 | Fonction | Renvoie |
 | --- | --- |
-| `babet.split(s, sep)` | `table` (array) des sous-chaînes |
+| `babet.split(s [, sep [, max_splits]])` | `table` (array) des sous-chaînes |
 
-- `s` : la chaîne à découper.
-- `sep` : la chaîne séparateur (littéral, pas de pattern).
+- `s` : la chaîne à découper. Binaire-safe : les octets NUL sont
+  préservés.
+- `sep` : séparateur optionnel — **un seul caractère**, littéral
+  (pas de pattern). Une chaîne vide, ou l'omission de l'argument,
+  bascule en **mode caractères** : `s` est découpée en caractères
+  individuels. Plus d'un caractère → lève.
+- `max_splits` : nombre maximal de coupes, optionnel (défaut `-1` =
+  illimité). Le reste non découpé atterrit dans le dernier élément ;
+  `0` renvoie donc `{ s }`. Ignoré en mode caractères.
 
 Si `sep` n'apparaît pas dans `s`, le résultat est une table à un
-élément contenant `s` en entier. Si `s` est vide, renvoie une table
-vide.
+élément contenant `s` en entier.
+
+Cas limites de la chaîne vide (comportement historique, figé et
+testé) :
+
+- `babet.split("", sep)` renvoie `{ "" }` — une entrée vide, pas une
+  table vide.
+- `babet.split("")` (mode caractères) renvoie `{}` — table vide.
 
 ## Exemple rapide
 
@@ -35,11 +48,21 @@ local parts = babet.split("a,b,c,d", ",")
 
 local one = babet.split("hello", ",")
 -- one == { "hello" }
+
+-- Mode caractères (sep omis ou vide)
+local chars = babet.split("abc")
+-- chars == { "a", "b", "c" }
+
+-- Nombre de coupes borné : le reste dans le dernier élément
+local kv = babet.split("clé,val,ue", ",", 1)
+-- kv == { "clé", "val,ue" }
 ```
 
 ## Contrat d'erreur
 
 - **Mauvais type d'argument** → lève via `luaL_error`.
+- **`sep` de plus d'un caractère** → lève.
+- **`max_splits` non entier ou < -1** → lève.
 - Sinon, réussit toujours.
 
 ## Décisions de design
@@ -51,10 +74,21 @@ local one = babet.split("hello", ",")
 - **Les entrées vides sont préservées**. `"a,,b"` se découpe en
   `{"a", "", "b"}`. Les consommateurs qui veulent filtrer les
   strings vides le font en une ligne de Lua.
+- **`split("", sep)` renvoie `{ "" }`**. C'est la conséquence
+  naturelle de la règle "entrées vides préservées" (zéro séparateur
+  trouvé → un élément, la chaîne entière — qui se trouve être
+  vide). Comportement observable depuis la v1, donc figé plutôt que
+  changé.
+- **Mode caractères quand `sep` est omis ou vide**. Il n'y a pas de
+  séparateur par défaut : sans séparateur, la seule interprétation
+  cohérente d'un découpage est caractère par caractère. Précision :
+  le découpage se fait par **octets**, pas par points de code
+  Unicode — un caractère UTF-8 multi-octets sera éclaté.
 
 ## Hors v1
 
 - Découpage basé pattern (avec règles d'échappement). Utilise
   `string.gmatch` si nécessaire.
+- Séparateurs multi-caractères.
 - Miroir `joinTable(t, sep)` — `table.concat` existe déjà dans la
   stdlib.

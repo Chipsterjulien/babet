@@ -69,4 +69,28 @@ void set_workers_init_context(const std::string &projectDir,
                               const std::string &exePath,
                               bool embedded);
 
+#include <functional>
+
+/*
+ * État processus partagé (option A validée — revues croisées triées).
+ *
+ * setenv(3) et le répertoire courant sont PROCESS-WIDE : une mutation
+ * pendant qu'un worker lit l'environnement (getenv, exec, résolution
+ * DNS) est une course de données (setenv peut realloc `environ`), et
+ * un chdir change le CWD de tous les threads. Règle unique, simple et
+ * sans course : mutations autorisées AVANT le premier workers.spawn,
+ * interdites ensuite — définitivement, même après join, même si le
+ * spawn a ensuite échoué.
+ *
+ * with_process_env_lock(fn) : exécute fn() sous le verrou d'état
+ * processus SI aucun worker n'a jamais été lancé, et rend true.
+ * Rend false (sans exécuter fn) si un worker a déjà été lancé.
+ * spawn marque le drapeau sous le MÊME verrou, avant toute création
+ * effective : aucun worker ne peut naître pendant une mutation.
+ * IMPORTANT : fn ne doit faire AUCUNE opération Lua (un longjmp sous
+ * verrou laisserait le mutex tenu) — uniquement le syscall, résultats
+ * capturés dans des locales.
+ */
+bool with_process_env_lock(const std::function<void()> &fn);
+
 #endif // WORKERS_HPP

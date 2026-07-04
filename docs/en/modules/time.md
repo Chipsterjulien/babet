@@ -2,16 +2,18 @@
 
 # `babet` time — monotonic and realtime clocks
 
-Two clocks with sub-second precision and a sleep that honours both
-`s`/`ms`/`us`/`ns` units and signals. Fills the gaps in `os.time` /
-`os.clock`. Lives directly on `babet`, no sub-namespace.
+Two clocks with sub-second precision and a sleep that honors
+`s`/`ms`/`us` units and signals. Fills the gaps in `os.time` /
+`os.clock`. The three historical functions live directly on
+`babet`; the date and duration utilities live under the `babet.time`
+sub-table (which also exposes the first three as aliases).
 
 ## Why
 
 Lua's `os.time()` only gives seconds, and `os.clock()` measures
 CPU time, not wall time. Neither is appropriate for measuring real
 durations (request latency, retry backoff, timeouts). And `os` has
-no portable nanosecond sleep.
+no portable sub-second sleep.
 
 `babet.monotonic()` and `babet.now()` expose
 `CLOCK_MONOTONIC` (durations) and `CLOCK_REALTIME` (timestamps),
@@ -25,8 +27,9 @@ with `babet.sleep()` honouring signal interruption.
 | `babet.now()` | `number` — POSIX time (seconds since 1970-01-01 UTC) |
 | `babet.sleep(amount, unit?)` | `(true, nil)` \| `(nil, "interrupted")` |
 
-`unit` for `sleep` is one of `"s"` (default), `"ms"`, `"us"`,
-`"ns"`. Floats are accepted.
+`unit` for `sleep` is one of `"s"` (default), `"ms"`, `"us"`.
+Floats are accepted. (No `"ns"`: nanosleep doesn't guarantee that
+granularity anyway, and the code does not accept it.)
 
 ## API — date and duration utilities (v1.8.0+)
 
@@ -97,7 +100,7 @@ print(babet.time.iso(0))                        -- "1970-01-01T00:00:00Z"
 
 -- Parse a log line back to a Unix timestamp
 local ts = assert(babet.time.parse_iso("2026-06-17T10:00:00+02:00"))
--- ts is 1750147200 (which is 08:00:00 UTC)
+-- ts is 1781683200 (which is 2026-06-17T08:00:00Z)
 
 -- Human-readable durations
 local cache_ttl = babet.time.parse_duration("2h30m")  -- 9000

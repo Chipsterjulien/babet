@@ -90,6 +90,16 @@ This means callbacks always run in Lua context, never from inside
 a signal handler. They can use any Lua features (no async-signal-
 safety restrictions).
 
+**Interaction with `debug.sethook`** (v21 audit) : outside blocking
+calls, dispatch relies on a Lua debug hook (`lua_sethook`, fired
+periodically by instruction count). Consequences : a
+`debug.sethook(...)` installed by the script **overwrites** this
+mechanism — callbacks will then only be dispatched when the script
+enters a babet blocking call — and conversely, the first
+`signal.handle(...)` replaces any user hook already installed.
+Avoid mixing `babet.signal` and `debug.sethook` in the same
+script.
+
 ## Error contract
 
 - **Unknown signal name** → `(nil, "signal: unknown name 'XYZ'")`.

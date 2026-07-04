@@ -9,6 +9,8 @@
 #include "lua_utils.hpp"
 
 #include <cctype>
+#include <climits>
+#include <cmath>
 #include <cstddef>
 #include <ctime>
 #include <exception>
@@ -328,9 +330,36 @@ namespace
             has_timeout = true;
         }
         lua_pop(L, 1);
-        if (has_timeout && !(timeout_s > 0.0))
+        // CORRECTIF (audit v21) : rejeter NaN/±Inf et borner AVANT les
+        // casts effectués plus bas (set_max_timeout : ms -> size_t ;
+        // set_connection_timeout : timeout_s -> time_t). L'ancien test
+        // `!(timeout_s > 0.0)` rejetait NaN par accident (toute
+        // comparaison avec NaN est fausse) mais avec un message
+        // trompeur, et laissait passer +Inf ainsi que des finis
+        // énormes (1e300) : static_cast<size_t>(Inf) est un
+        // comportement indéfini. Borne alignée sur socket.set_timeout :
+        // INT_MAX ms (~24,8 jours), largement au-delà de tout usage
+        // HTTP légitime, et sans risque pour les deux casts
+        // (INT_MAX ms ≈ 2,1e6 s). NB : timeout_s * 1000.0 peut
+        // déborder en +Inf pour timeout_s proche de DBL_MAX — Inf >
+        // INT_MAX reste vrai, le rejet tient. INT_MAX est exactement
+        // représentable en double (< 2^53), le `>` strict est correct
+        // ici, contrairement au cas int64 de time_format.
+        if (has_timeout)
         {
-            return push_fail(L, "http: timeout must be > 0");
+            if (!std::isfinite(timeout_s))
+            {
+                return push_fail(
+                    L, "http: timeout must be finite (not NaN or inf)");
+            }
+            if (!(timeout_s > 0.0))
+            {
+                return push_fail(L, "http: timeout must be > 0");
+            }
+            if (timeout_s * 1000.0 > static_cast<double>(INT_MAX))
+            {
+                return push_fail(L, "http: timeout too large");
+            }
         }
 
         // --- verify (optionnel, défaut true) --------------------------

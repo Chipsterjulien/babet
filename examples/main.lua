@@ -466,6 +466,60 @@ do
     ok_act("link(new.txt -> link.txt)",
         babet.link(sb("new.txt"), sb("link.txt")))
 
+    -- Régression (audit v21) : listFiles utilisait fs::relative, qui
+    -- canonicalise et RÉSOUT les symlinks (même famille de bug que
+    -- copyTree/moveTree/zip_utils). Un lien lfl/ln.txt -> ../out.txt
+    -- était listé "../out_lfl.txt" (chemin de la CIBLE, sortant du
+    -- dossier listé) au lieu de "ln.txt" (sa position). Désormais
+    -- lexically_relative : la structure vue sur le disque.
+    do
+        babet.mkdir(sb("lfl"))
+        babet.touch(sb("out_lfl.txt"))
+        babet.touch(sb("lfl/real.txt"))
+        ok_act("link relatif pour listFiles",
+            babet.link("../out_lfl.txt", sb("lfl/ln.txt")))
+        local files, lerr = babet.listFiles(sb("lfl"))
+        ok_val("listFiles(lfl) -> table", files, lerr,
+            function(x) return type(x) == "table" and #x == 2 end)
+        local has_ln, has_dotdot = false, false
+        if files then
+            for _, f in ipairs(files) do
+                if f == "ln.txt" then has_ln = true end
+                if f:find("..", 1, true) then has_dotdot = true end
+            end
+        end
+        ok("  contient 'ln.txt' (position du lien, pas sa cible)",
+            has_ln)
+        ok("  aucun chemin résolu sortant ('..')", not has_dotdot)
+    end
+
+    -- Régression (revue ChatGPT post-audit v21) : listFiles RÉCURSIF
+    -- suivait les symlinks de dossiers (fs::is_directory suit les
+    -- liens) : évasion hors de l'arbre listé, et une BOUCLE de liens
+    -- (lfr/loop -> .) récursait jusqu'à ENAMETOOLONG au lieu d'un
+    -- listing normal. Aligné sur find : liens de dossiers non suivis.
+    -- Le premier test discrimine : l'ancien code rendait (nil, err).
+    do
+        babet.mkdir(sb("lfr/sub"))
+        babet.mkdir(sb("lfr_out"))
+        babet.touch(sb("lfr/real.txt"))
+        babet.touch(sb("lfr/sub/inner.txt"))
+        babet.touch(sb("lfr_out/ext.txt"))
+        babet.link("../lfr_out", sb("lfr/goes_out"))
+        babet.link(".", sb("lfr/loop"))
+        local rfiles, rerr = babet.listFiles(sb("lfr"), true)
+        ok_val("listFiles récursif + boucle de liens -> table propre",
+            rfiles, rerr,
+            function(x) return type(x) == "table" and #x == 2 end)
+        local has_ext = false
+        if rfiles then
+            for _, f in ipairs(rfiles) do
+                if f:find("ext.txt", 1, true) then has_ext = true end
+            end
+        end
+        ok("  lien de dossier non suivi (ext.txt absent)", not has_ext)
+    end
+
     -- copyTree
     babet.mkdir(sb("treesrc"))
     babet.touch(sb("treesrc/a.txt"))
@@ -652,6 +706,52 @@ end
 
 -- =====================================================================
 print("")
+print("=== env / cwd (avant le premier worker) ===")
+-- Option A validée : setenv et chdir mutent un état PROCESS-WIDE et
+-- sont donc interdits dès le premier workers.spawn (le premier de la
+-- suite arrive dans la section find, juste en dessous). Les tests de
+-- succès vivent donc ICI.
+do
+    local name = "BABET_SYS_TEST_VAR"
+    local ok_set, err = babet.setenv(name, "hello-42")
+    ok_val("setenv('NAME', 'val') -> (true, nil)", ok_set, err)
+    ok("  env() reflects setenv",
+        babet.env(name) == "hello-42",
+        "got=" .. tostring(babet.env(name)))
+
+    babet.setenv(name, "world")
+    ok("  setenv overwrite", babet.env(name) == "world")
+
+    local v, e = babet.setenv("bad=name", "x")
+    ok_fail("setenv('bad=name') -> (nil, err)", v, e)
+
+    -- chdir no-op (vers le CWD courant) : succès avant le premier
+    -- worker, sans déplacer la suite.
+    ok_act("chdir(currentDir()) avant le premier worker",
+        babet.chdir(babet.currentDir()))
+
+    -- Aller-retour RÉEL (bloc relocalisé depuis la fin de suite,
+    -- lot 17 : chdir est verrouillé après le premier spawn). SB et
+    -- startDir sont posés par le setup ; on revient à startDir dans
+    -- ce même bloc, rien en aval n'est déplacé.
+    local r, e = babet.chdir(SB)
+    ok_act("chdir(sandbox)", r, e)
+
+    local cwd = babet.currentDir()
+    ok("currentDir() reflects chdir",
+        type(cwd) == "string" and cwd:find(SB, 1, true) ~= nil,
+        "cwd=" .. tostring(cwd))
+
+    r, e = babet.chdir("/n/existe/pas")
+    ok_fail("chdir(bad path) -> (nil, err)", r, e)
+
+    -- retour au répertoire de départ
+    r, e = babet.chdir(startDir)
+    ok_act("chdir(back to startDir)", r, e)
+end
+
+-- =====================================================================
+print("")
 print("=== find ===")
 
 do
@@ -706,6 +806,66 @@ do
         end
         ok("concurrent find x4 workers (thread_local RegexCache)",
             all_ok)
+    end
+
+    -- =================================================================
+    -- Régression (audit v21) : élagage maxdepth via pop() cassé.
+    -- L'ancien code faisait `it.pop(); continue;` : pop() avance DÉJÀ
+    -- l'itérateur sur l'entrée suivante du parent, et le ++it de la
+    -- boucle avançait une SECONDE fois. Deux symptômes reproduits :
+    --   1. L'entrée suivant un dossier élagué NON VIDE était
+    --      silencieusement absente du résultat.
+    --   2. Si le dossier élagué non vide était la DERNIÈRE entrée du
+    --      parent, find retournait (nil, "cannot increment recursive
+    --      directory iterator") au lieu du résultat.
+    -- Fixture : prune/{d1,d2,d3} tous non vides + f1..f3.txt à la
+    -- racine. Quel que soit l'ordre readdir, chaque dossier non vide
+    -- est suivi d'une entrée OU est en dernière position : l'ancien
+    -- code ne peut donc jamais rendre 6 entrées sans erreur.
+    -- =================================================================
+    do
+        local P = sb("prune")
+        ok_act("find prune: mkdir fixture", babet.mkdir(P .. "/d1/deep"))
+        babet.mkdir(P .. "/d2")
+        babet.mkdir(P .. "/d3")
+        babet.touch(P .. "/d1/c1.txt")
+        babet.touch(P .. "/d1/deep/dd.txt")
+        babet.touch(P .. "/d2/c2.txt")
+        babet.touch(P .. "/d3/c3.txt")
+        babet.touch(P .. "/f1.txt")
+        babet.touch(P .. "/f2.txt")
+        babet.touch(P .. "/f3.txt")
+
+        -- maxdepth=0 : exactement les 6 entrées de la racine
+        -- (3 dossiers + 3 fichiers), aucune sautée, aucune erreur.
+        local r0, e0 = babet.find(P, { maxdepth = 0 })
+        ok_val("find maxdepth=0 -> 6 entrées, aucune sautée", r0, e0,
+            function(x) return type(x) == "table" and #x == 6 end)
+
+        -- maxdepth=0 + type=f : exactement f1..f3.
+        local rf, ef = babet.find(P, { maxdepth = 0, type = "f" })
+        ok_val("find maxdepth=0 type=f -> 3 fichiers", rf, ef,
+            function(x) return type(x) == "table" and #x == 3 end)
+
+        -- maxdepth=1 : c1..c3 inclus (depth 1), deep/dd.txt (depth 2)
+        -- exclu.
+        local r1, e1 = babet.find(P, { maxdepth = 1, type = "f" })
+        ok_val("find maxdepth=1 type=f -> 6 fichiers (dd.txt exclu)", r1, e1,
+            function(x) return type(x) == "table" and #x == 6 end)
+
+        -- mindepth=1 + maxdepth=1 : la traversée sous mindepth doit
+        -- continuer (mindepth filtre les RÉSULTATS, pas la descente).
+        local rm, em = babet.find(P, { mindepth = 1, maxdepth = 1, type = "f" })
+        ok_val("find mindepth=1 maxdepth=1 type=f -> 3 fichiers", rm, em,
+            function(x) return type(x) == "table" and #x == 3 end)
+
+        -- mindepth=2 sans maxdepth : seulement dd.txt.
+        local r2, e2 = babet.find(P, { mindepth = 2, type = "f" })
+        ok_val("find mindepth=2 type=f -> dd.txt seul", r2, e2,
+            function(x)
+                return type(x) == "table" and #x == 1
+                    and x[1]:find("dd.txt", 1, true) ~= nil
+            end)
     end
 end
 
@@ -987,6 +1147,37 @@ do
         "[1]=" .. tostring(sparse_copy[1]) ..
         " [10]=" .. tostring(sparse_copy[10]))
 
+    -- Régression (revue Gemini post-audit v21) : la récursion ne
+    -- réservait pas la pile Lua (lua_checkstack). Une table imbriquée
+    -- LÉGALE (sous MAX_DEPTH = 75) consommait ~5 slots par niveau
+    -- alors que l'API n'en garantit que ~20 au total -> corruption
+    -- mémoire silencieuse ou crash bien avant le garde-fou de
+    -- profondeur. Avec le garde, checkstack fait grandir la pile :
+    -- 70 niveaux (~350 slots) doivent passer proprement.
+    do
+        local t = { v = 42 }
+        for _ = 1, 69 do t = { c = t } end
+        local copy = babet.deepCopyTable(t)
+        local n, d = copy, 0
+        while type(n) == "table" and n.c do
+            n = n.c; d = d + 1
+        end
+        ok("deepCopyTable : 70 niveaux copiés (checkstack)",
+            d == 69 and type(n) == "table" and n.v == 42,
+            "d=" .. tostring(d))
+        -- et c'est bien une copie, pas la source
+        ok("deepCopyTable : 70 niveaux -> copie distincte",
+            copy ~= t and copy.c ~= t.c)
+        -- Au-delà du cap : erreur PROPRE (raise), pas un crash.
+        local deep = { v = 1 }
+        for _ = 1, 80 do deep = { c = deep } end
+        local okp, err = pcall(babet.deepCopyTable, deep)
+        ok("deepCopyTable : au-delà de MAX_DEPTH -> raise propre",
+            okp == false and type(err) == "string"
+            and err:find("too deep", 1, true) ~= nil,
+            tostring(err))
+    end
+
     -- clés numeric NON basées sur 1 : pas de renumérotation
     local offset = { [5] = "x", [6] = "y" }
     local offset_copy = babet.deepCopyTable(offset)
@@ -1051,6 +1242,80 @@ do
     ok("split('a,b,c', ',') -> 3 elements",
         type(parts) == "table" and #parts == 3)
 
+    -- Régression (audit v21) : split tronquait le SUJET au premier
+    -- NUL (std::strlen) alors que le délimiteur, lui, était mesuré
+    -- avec lua_rawlen. split("a\0b,c", ",") rendait {"a"} — tout ce
+    -- qui suivait le NUL était silencieusement perdu. Désormais
+    -- binaire-safe de bout en bout (luaL_checklstring).
+    do
+        local subject = "a" .. string.char(0) .. "b,c"
+        local p = babet.split(subject, ",")
+        ok("split('a\\0b,c', ',') -> 2 éléments (binaire-safe)",
+            type(p) == "table" and #p == 2,
+            p and ("#=" .. #p) or "nil")
+        ok("  1er élément == 'a\\0b' (NUL préservé)",
+            p ~= nil and p[1] == "a" .. string.char(0) .. "b")
+        ok("  2e élément == 'c'", p ~= nil and p[2] == "c")
+    end
+
+    -- Comportements historiques FIGÉS (décision post-audit v21 : la
+    -- doc est alignée sur le code, l'API ne change pas). Ces tests
+    -- verrouillent le contrat documenté dans docs/*/modules/strings.md.
+    do
+        -- chaîne vide + séparateur -> { "" } : UNE entrée vide
+        -- (conséquence de "les entrées vides sont préservées"),
+        -- PAS une table vide.
+        local e1 = babet.split("", ",")
+        ok("split('', ',') -> {''} (figé)",
+            type(e1) == "table" and #e1 == 1 and e1[1] == "")
+
+        -- chaîne vide en mode caractères -> table vide.
+        local e2 = babet.split("")
+        ok("split('') -> {} (mode caractères, figé)",
+            type(e2) == "table" and #e2 == 0)
+
+        -- 1 argument = mode caractères (PAS d'espace par défaut).
+        local ch = babet.split("ab c")
+        ok("split('ab c') -> 4 caractères (figé)",
+            type(ch) == "table" and #ch == 4 and ch[1] == "a"
+            and ch[2] == "b" and ch[3] == " " and ch[4] == "c")
+
+        -- sep vide explicite : même mode caractères.
+        local ch2 = babet.split("xy", "")
+        ok("split('xy', '') -> {'x','y'} (mode caractères)",
+            type(ch2) == "table" and #ch2 == 2
+            and ch2[1] == "x" and ch2[2] == "y")
+
+        -- max_splits : le reste non découpé dans le dernier élément.
+        local m1 = babet.split("a,b,c", ",", 1)
+        ok("split('a,b,c', ',', 1) -> {'a','b,c'}",
+            type(m1) == "table" and #m1 == 2
+            and m1[1] == "a" and m1[2] == "b,c")
+        local m0 = babet.split("a,b,c", ",", 0)
+        ok("split('a,b,c', ',', 0) -> {'a,b,c'}",
+            type(m0) == "table" and #m0 == 1 and m0[1] == "a,b,c")
+
+        -- Contrat d'erreur figé.
+        ok("split(s, ', ') raises (sep > 1 caractère)",
+            pcall(babet.split, "a, b", ", ") == false)
+        ok("split(s, ',', -2) raises (max_splits < -1)",
+            pcall(babet.split, "a", ",", -2) == false)
+
+        -- Régression (revue ChatGPT post-audit v21) : max_splits était
+        -- rangé dans un int -> narrowing du lua_Integer. 2^32 devenait
+        -- silencieusement 0 (résultat {s} au lieu du découpage), et
+        -- 2^31 donnait l'erreur absurde "should be -1 or greater"
+        -- pour une entrée positive. Désormais lua_Integer de bout en
+        -- bout : toute valeur >= #coupes possibles découpe tout.
+        local w1 = babet.split("a,b,c", ",", 4294967296)
+        ok("split(s, ',', 2^32) -> 3 éléments (pas de narrowing)",
+            type(w1) == "table" and #w1 == 3 and w1[3] == "c",
+            "#=" .. tostring(w1 and #w1))
+        local w2 = babet.split("a,b,c", ",", 2147483648)
+        ok("split(s, ',', 2^31) -> 3 éléments (pas de raise absurde)",
+            type(w2) == "table" and #w2 == 3)
+    end
+
     -- mergeTables
     local merged = babet.mergeTables({ "a", "b" }, { "c", "d" })
     ok("mergeTables -> table", type(merged) == "table")
@@ -1070,6 +1335,30 @@ do
 
     -- sleep : action courte
     ok_act("sleep(1, 'ms')", babet.sleep(1, "ms"))
+
+    -- =================================================================
+    -- Régression (audit v21) : NaN/Inf non filtrés dans sleep.
+    -- L'ancien code ne testait que `duration < 0`, qui laisse passer
+    -- NaN (toute comparaison avec NaN est fausse) et math.huge ; le
+    -- cast time_t qui suivait était un comportement indéfini (en
+    -- pratique : tv_sec poubelle -> nanosleep EINVAL -> (nil, err)
+    -- trompeur). Désormais : erreur d'ARGUMENT, comme une durée
+    -- négative -> pcall doit rendre false.
+    -- =================================================================
+    ok("sleep(0/0) raises (NaN rejeté)",
+        pcall(babet.sleep, 0 / 0) == false)
+    ok("sleep(math.huge) raises (+Inf rejeté)",
+        pcall(babet.sleep, math.huge) == false)
+    ok("sleep(-math.huge) raises (-Inf rejeté)",
+        pcall(babet.sleep, -math.huge) == false)
+    -- Borne haute du cast : (double)time_t_max s'arrondit à 2^63
+    -- exactement, d'où un `>=` côté C++ ; 2^63 s doit être rejeté.
+    -- (Avant correctif : cast UB -> (nil, err) SANS raise, donc ce
+    -- pcall == false discrimine bien ancien/nouveau comportement.)
+    ok("sleep(2^63) raises (au-delà de time_t)",
+        pcall(babet.sleep, 2 ^ 63) == false)
+    -- Sanity après les gardes : une durée normale dort toujours.
+    ok_act("sleep(1000, 'us') après les gardes", babet.sleep(1000, "us"))
 end
 
 -- =====================================================================
@@ -1157,6 +1446,32 @@ do
         babet.time.iso(-86400) == "1969-12-31T00:00:00Z",
         "got " .. tostring(babet.time.iso(-86400)))
 
+    -- =================================================================
+    -- Régression (audit v21) : borne haute int64 de iso().
+    -- (double)INT64_MAX s'arrondit à 2^63 exactement ; l'ancien test
+    -- `>` laissait donc passer iso(2^63) -> cast int64 indéfini (en
+    -- pratique INT64_MIN sur x86-64 : une date absurde était rendue
+    -- SANS erreur, donc pcall == true). Désormais `>=` -> luaL_error,
+    -- et le pcall == false discrimine ancien/nouveau comportement.
+    -- =================================================================
+    ok("iso(2^63) raises (cas limite exact de la borne)",
+        pcall(babet.time.iso, 2 ^ 63) == false)
+    ok("iso(9.3e18) raises (au-dessus de la borne)",
+        pcall(babet.time.iso, 9.3e18) == false)
+    -- Bornes VALIDES : -2^63 est exactement représentable en double
+    -- et valide en int64 ; 2^53 est une grande valeur propre. Les
+    -- deux doivent rendre une string sans lever.
+    do
+        local okk, v = pcall(babet.time.iso, -(2 ^ 63))
+        ok("iso(-2^63) -> string (borne min acceptée)",
+            okk and type(v) == "string", "got=" .. tostring(v))
+    end
+    do
+        local okk, v = pcall(babet.time.iso, 2 ^ 53)
+        ok("iso(2^53) -> string (grande valeur valide)",
+            okk and type(v) == "string", "got=" .. tostring(v))
+    end
+
     -- iso() without arg returns the current time as a 20-char ISO string.
     do
         local s = babet.time.iso()
@@ -1233,6 +1548,23 @@ do
     end
 
     -- ---- parse_duration -------------------------------------------------
+    -- Régression (revue ChatGPT post-audit v21) : l'ancienne règle
+    -- « 18 chiffres max » rejetait à tort INT64_MAX en secondes (19
+    -- chiffres, durée représentable) et les zéros de tête. Remplacée
+    -- par un contrôle de débordement chiffre par chiffre — les gardes
+    -- de multiplication/accumulation en aval sont inchangés.
+    ok("parse_duration(INT64_MAX .. 's') == math.maxinteger",
+        babet.time.parse_duration(tostring(math.maxinteger) .. "s")
+        == math.maxinteger)
+    do
+        local v, e = babet.time.parse_duration("9223372036854775808s")
+        ok("parse_duration(INT64_MAX+1 .. 's') -> (nil, 'out of range')",
+            v == nil and type(e) == "string"
+            and e:find("out of range", 1, true) ~= nil, tostring(e))
+    end
+    ok("parse_duration('00000000000000000001s') == 1 (zéros de tête)",
+        babet.time.parse_duration("00000000000000000001s") == 1)
+
     ok("parse_duration('0s') == 0", babet.time.parse_duration("0s") == 0)
     ok("parse_duration('1s') == 1", babet.time.parse_duration("1s") == 1)
     ok("parse_duration('5m') == 300", babet.time.parse_duration("5m") == 300)
@@ -1363,6 +1695,36 @@ do
 
         v, e = H.request({ url = "http://127.0.0.1:1/", timeout = -1 })
         ok_fail("timeout <= 0 -> (nil, err)", v, e)
+
+        -- Régression (audit v21) : NaN/Inf/valeurs énormes dans
+        -- timeout. L'ancien test `> 0` rejetait NaN par accident
+        -- (message trompeur) et laissait passer math.huge et les
+        -- finis énormes -> cast size_t/time_t indéfini plus bas.
+        -- Ces validations précèdent tout accès réseau : aucune
+        -- connexion tentée, tests hermétiques. Les vérifications de
+        -- MESSAGE sont les vrais gardes de régression (l'ancien code
+        -- rendait aussi (nil, err) mais avec une erreur de connexion
+        -- ou un message trompeur).
+        v, e = H.request({ url = "http://127.0.0.1:1/", timeout = 0 / 0 })
+        ok_fail("timeout NaN -> (nil, err)", v, e)
+        ok("  message mentions 'finite'",
+            type(e) == "string" and e:find("finite", 1, true) ~= nil,
+            "err=" .. tostring(e))
+
+        v, e = H.request({
+            url = "http://127.0.0.1:1/",
+            timeout = math.huge
+        })
+        ok_fail("timeout math.huge -> (nil, err)", v, e)
+        ok("  message mentions 'finite'",
+            type(e) == "string" and e:find("finite", 1, true) ~= nil,
+            "err=" .. tostring(e))
+
+        v, e = H.request({ url = "http://127.0.0.1:1/", timeout = 1e300 })
+        ok_fail("timeout 1e300 -> (nil, err)", v, e)
+        ok("  message mentions 'too large'",
+            type(e) == "string" and e:find("too large", 1, true) ~= nil,
+            "err=" .. tostring(e))
 
         v, e = H.request({
             url = "http://127.0.0.1:1/", method = "FOO", timeout = 1,
@@ -2068,22 +2430,13 @@ do
             type(p) == "string" and #p > 0)
     end
 
-    -- ----- setenv: (true, nil) or (nil, err); observable via env ---
-
-    do
-        local name = "BABET_SYS_TEST_VAR"
-        local ok_set, err = babet.setenv(name, "hello-42")
-        ok_val("setenv('NAME', 'val') -> (true, nil)", ok_set, err)
-        ok("  env() reflects setenv",
-            babet.env(name) == "hello-42",
-            "got=" .. tostring(babet.env(name)))
-
-        babet.setenv(name, "world")
-        ok("  setenv overwrite", babet.env(name) == "world")
-
-        local v, e = babet.setenv("bad=name", "x")
-        ok_fail("setenv('bad=name') -> (nil, err)", v, e)
-    end
+    -- ----- setenv : tests de MUTATION déplacés avant le premier ----
+    -- worker (section « env / cwd », avant find) : option A validée,
+    -- setenv/chdir sont verrouillés dès le premier workers.spawn, et
+    -- le premier spawn de la suite (find concurrent) précède cette
+    -- section. Les tests d'interdiction post-spawn vivent dans la
+    -- section workers. Les tests d'arité ci-dessous restent valides
+    -- ici : ils lèvent à la validation d'arguments, avant le verrou.
 
     -- ----- which : found / pas found / chemin direct --------------
 
@@ -3087,6 +3440,41 @@ do
         ok("exec with ':name' but no params -> (nil, err)",
             ok2 == nil and type(err2) == "string")
 
+        -- Régression (audit v21) : le garde ne sondait que le PREMIER
+        -- statement (prepare s'arrête au premier ';') puis relançait
+        -- le tout via sqlite3_exec : un '?' dans le 2e statement
+        -- passait et liait NULL silencieusement (l'ancien code
+        -- rendait true ET une ligne NULL était insérée — les deux
+        -- assertions ci-dessous discriminent). Désormais : exécution
+        -- statement par statement, garde sur chacun.
+        do
+            local okm, errm = db:exec(
+                "CREATE TABLE t2s (x); INSERT INTO t2s VALUES (?)")
+            ok("exec multi-stmt avec '?' dans le 2e -> (nil, err)",
+                okm == nil and type(errm) == "string")
+            ok("  message mentions 'placeholders'",
+                type(errm) == "string" and errm:find("placeholders"))
+            -- Le CREATE (1er statement, valide) a été exécuté — comme
+            -- sqlite3_exec, l'arrêt se fait AU statement fautif — mais
+            -- l'INSERT ne doit jamais avoir tourné : zéro ligne.
+            local n = nil
+            for row in db:query("SELECT COUNT(*) AS c FROM t2s") do
+                n = row.c
+            end
+            ok("  aucune ligne NULL insérée (COUNT == 0)", n == 0,
+                "count=" .. tostring(n))
+            -- Sanity : multi-statement propre, toujours OK, et les
+            -- effets des DEUX statements sont visibles.
+            local oks = db:exec(
+                "INSERT INTO t2s VALUES (1); INSERT INTO t2s VALUES (2)")
+            ok("exec multi-stmt sans placeholder -> true", oks == true)
+            local n2 = nil
+            for row in db:query("SELECT COUNT(*) AS c FROM t2s") do
+                n2 = row.c
+            end
+            ok("  2 lignes insérées", n2 == 2, "count=" .. tostring(n2))
+        end
+
         -- query() same check
         local iter, err3 = db:query("SELECT * FROM t WHERE a = ?")
         ok("query with '?' but no params -> (nil, err)",
@@ -3171,6 +3559,25 @@ do
     -- ----- minimal success : (table, nil) ---------------------------
 
     do
+        -- Régression (revue Gemini post-audit v21) : push_toml_node
+        -- ne réservait pas la pile Lua, et la profondeur vient du
+        -- DOCUMENT décodé (potentiellement hostile). 59 tables inline
+        -- imbriquées doivent se convertir proprement.
+        do
+            local s = "root = " .. string.rep("{ k = ", 59)
+                .. "1" .. string.rep(" }", 59)
+            local rd, ed = T.decode(s)
+            local n, d = rd and rd.root, 0
+            while type(n) == "table" and n.k ~= nil do
+                if type(n.k) ~= "table" then break end
+                n = n.k; d = d + 1
+            end
+            ok("toml : 59 tables inline imbriquées (checkstack)",
+                rd ~= nil and d == 58 and type(n) == "table"
+                and n.k == 1,
+                ed or ("d=" .. tostring(d)))
+        end
+
         local r, e = T.decode('title = "TOML Example"')
         ok_val("decode minimal -> (table, nil)", r, e)
         ok("  title returned",
@@ -3664,6 +4071,82 @@ do
             local v2, e2 = lst:recv(10)
             ok_fail("recv on listening socket -> (nil, err)", v2, e2)
             lst:close()
+        end
+    end
+
+    -- =================================================================
+    -- Régression (audit v21, option A) : connect unifié.
+    --   1. Deadline GLOBALE : timeout = T borne l'appel COMPLET,
+    --      toutes adresses confondues (avant : deadline recréée par
+    --      addrinfo, N × T possible).
+    --   2. Connect bloquant interruptible : un signal géré pendant
+    --      connect() sans timeout rend (nil, "interrupted") + dispatch
+    --      (avant : "Interrupted system call" générique, callback
+    --      perdu jusqu'au retour).
+    -- Technique hermétique : listener backlog=1 jamais accepté ; une
+    -- fois la file pleine, le kernel ignore les SYN entrants et le
+    -- connect suivant reste en attente (comportement Linux standard,
+    -- tcp_abort_on_overflow=0).
+    -- =================================================================
+    do
+        local sat = S.listen("127.0.0.1", 0, 1)
+        ok("connect-audit: listener backlog=1", sat ~= nil)
+        if sat then
+            local name = sat:sockname()
+            local port = name and tonumber(name.port)
+            ok("connect-audit: sockname -> port", port ~= nil)
+
+            -- Saturer la file : quelques connects gardés ouverts.
+            -- Les premiers réussissent vite ; timeout court sur les
+            -- suivants (résultat ignoré, on veut juste remplir).
+            local keep = {}
+            for _ = 1, 4 do
+                local c = S.connect("127.0.0.1", port, 0.3)
+                if c then keep[#keep + 1] = c end
+            end
+
+            -- 1. Borne globale : timeout 0.6 s -> (nil, "timeout")
+            --    en temps borné, mesuré en horloge monotone.
+            local t0 = babet.monotonic()
+            local c1, e1 = S.connect("127.0.0.1", port, 0.6)
+            local dt = babet.monotonic() - t0
+            ok("connect(saturé, 0.6) -> (nil, 'timeout')",
+                c1 == nil and e1 == "timeout",
+                "e=" .. tostring(e1))
+            ok("  temps borné (0.5 <= dt <= 3)", dt >= 0.5 and dt <= 3,
+                "dt=" .. tostring(dt))
+
+            -- 2. Connect bloquant (SANS timeout) interrompu par un
+            --    signal géré : USR1 tiré par un sous-shell détaché
+            --    (fds redirigés -> exec rend la main tout de suite).
+            local fired = false
+            babet.signal.handle("USR1", function() fired = true end)
+            -- Garde de sûreté : le connect ci-dessous est SANS
+            -- timeout ; si le kill différé ne partait pas, la suite
+            -- pendrait. On vérifie donc que le lanceur a démarré
+            -- AVANT de bloquer, et on échoue explicitement sinon
+            -- (pas de skip silencieux : sh manquant = environnement
+            -- cassé, on veut le voir).
+            local launcher = babet.exec("sh", { "-c",
+                "( sleep 0.4; kill -USR1 " .. babet.pid()
+                .. " ) >/dev/null 2>&1 &" })
+            ok("connect-audit: lancement du kill différé",
+                type(launcher) == "table")
+            if type(launcher) == "table" then
+                t0 = babet.monotonic()
+                local c2, e2 = S.connect("127.0.0.1", port)
+                dt = babet.monotonic() - t0
+                ok("connect bloquant + USR1 -> (nil, 'interrupted')",
+                    c2 == nil and e2 == "interrupted",
+                    "e=" .. tostring(e2))
+                ok("  callback USR1 dispatché", fired)
+                ok("  réactivité (dt <= 3)", dt <= 3,
+                    "dt=" .. tostring(dt))
+            end
+            babet.signal.handle("USR1", nil)
+
+            for _, c in ipairs(keep) do c:close() end
+            sat:close()
         end
     end
 end
@@ -4273,6 +4756,42 @@ end
 -- =====================================================================
 print("")
 print("=== workers ===")
+
+-- Régression (revue Gemini post-audit v21) : lua_to_json et
+-- json_to_lua (sérialisation spawn/join) ne réservaient pas la pile.
+-- 30 niveaux (sous MAX_SERIALIZATION_DEPTH = 32) traversent les 4
+-- conversions : args parent->json, json->worker, retour worker->json,
+-- json->parent.
+do
+    local t = { v = 42 }
+    for _ = 1, 29 do t = { c = t } end
+    local job = babet.workers.spawn("return worker.args", t)
+    if job then
+        local okj, result = job:join()
+        local n, d = result, 0
+        while type(n) == "table" and n.c do
+            n = n.c; d = d + 1
+        end
+        ok("workers : aller-retour 30 niveaux (checkstack)",
+            okj == true and d == 29
+            and type(n) == "table" and n.v == 42,
+            "ok=" .. tostring(okj) .. " d=" .. tostring(d))
+    else
+        ok("workers : spawn 30 niveaux", false)
+    end
+end
+
+-- Option A (validée) : dès le premier spawn — définitivement, même
+-- après join — les mutations d'état process-wide sont verrouillées.
+do
+    local sv, se = babet.setenv("BABET_AFTER_SPAWN", "x")
+    ok_fail("setenv après le premier spawn -> (nil, err)", sv, se)
+    ok("  message mentions 'workers'",
+        type(se) == "string" and se:find("workers", 1, true) ~= nil,
+        tostring(se))
+    local cv, ce = babet.chdir(babet.currentDir())
+    ok_fail("chdir après le premier spawn -> (nil, err)", cv, ce)
+end
 
 do
     local W = babet.workers
@@ -4989,25 +5508,10 @@ do
 end
 
 -- =====================================================================
-print("")
-print("=== chdir (last: changes cwd) ===")
-
-do
-    local r, e = babet.chdir(SB)
-    ok_act("chdir(sandbox)", r, e)
-
-    local cwd = babet.currentDir()
-    ok("currentDir() reflects chdir",
-        type(cwd) == "string" and cwd:find(SB, 1, true) ~= nil,
-        "cwd=" .. tostring(cwd))
-
-    r, e = babet.chdir("/n/existe/pas")
-    ok_fail("chdir(bad path) -> (nil, err)", r, e)
-
-    -- retour au répertoire de départ
-    r, e = babet.chdir(startDir)
-    ok_act("chdir(back to startDir)", r, e)
-end
+-- (Les tests d'aller-retour chdir qui vivaient ici sont relocalisés
+-- dans la section « env / cwd (avant le premier worker) » : depuis le
+-- lot 17, chdir est verrouillé dès le premier workers.spawn. Les
+-- tests d'interdiction post-spawn vivent dans la section workers.)
 
 -- =====================================================================
 print("")

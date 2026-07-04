@@ -386,6 +386,44 @@ static void push_lua_arg(lua_State *L, int argc, char *argv[], int script_index)
     lua_setglobal(L, "arg");
 }
 
+// Exécute un fichier Lua avec l'environnement outil complet (lot 10,
+// audit v21 : factorisation du mode dossier historique, réutilisée à
+// l'identique par le nouveau mode fichier).
+//
+// `anchorDir` ancre package.path (require des voisins) et le contexte
+// workers : le répertoire du projet en mode dossier, le répertoire du
+// script en mode fichier. `scriptPath` est le fichier chargé
+// (<dir>/main.lua ou le script passé en argument). La table `arg` est
+// construite depuis argv : arg[-1] = binaire babet, arg[0] = cible
+// lancée telle que tapée (dossier ou script), arg[1..n] = arguments
+// utilisateur.
+static int run_tool_script(const fs::path &anchorDir,
+                           const std::string &scriptPath,
+                           int argc, char *argv[])
+{
+    lua_State *L = luaL_newstate();
+    if (!L)
+    {
+        std::cerr << "Erreur : impossible d'allouer un état Lua" << std::endl;
+        return 1;
+    }
+    luaL_openlibs(L);
+    register_bundled_modules(L);
+    register_babet(L);
+    prepend_project_to_package_path(L, anchorDir);
+
+    // Workers (Chantier 8) : indiquer le mode d'exécution pour que
+    // require() utilisateur fonctionne aussi dans les workers
+    // (cf. set_workers_init_context).
+    set_workers_init_context(anchorDir.string(), "", false);
+
+    push_lua_arg(L, argc, argv, 1);
+
+    bool ok = loadLuaFile(L, scriptPath);
+    lua_close(L);
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char *argv[])
 {
     // === ÉTAPE 0 : capturer le thread principal pour signal.cpp =====
@@ -523,38 +561,54 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // Mode "exécution depuis un dossier"
+    // Mode "exécution" (lot 10, audit v21) : l'argument est soit un
+    // SCRIPT (fichier régulier — n'importe quelle extension : Lua
+    // ignore nativement une première ligne shebang `#!`, donc
+    // `#!/usr/bin/env babet` fonctionne), soit un DOSSIER de projet
+    // contenant main.lua. Avant ce lot, l'argument était toujours
+    // traité comme un dossier, et `babet script.lua` échouait avec
+    // le message trompeur « main.lua introuvable dans le répertoire
+    // script.lua ».
     std::string path = argv[1];
-    fs::path projectDir = fs::absolute(path);
-    std::string mainLuaPath = (projectDir / "main.lua").string();
+    fs::path target = fs::absolute(path);
+    std::error_code ec;
 
-    if (!fs::exists(mainLuaPath))
+    if (fs::is_regular_file(target, ec))
     {
-        std::cerr << "Erreur : main.lua introuvable dans le répertoire " << path << std::endl;
-        return 1;
+        // Mode FICHIER : package.path et le contexte workers sont
+        // ancrés au répertoire du script, pour que require() des
+        // fichiers voisins fonctionne exactement comme en mode
+        // dossier. arg[0] reste le chemin tel que tapé (via argv).
+        return run_tool_script(target.parent_path(), target.string(),
+                               argc, argv);
     }
 
-    lua_State *L = luaL_newstate();
-    if (!L)
+    if (fs::is_directory(target, ec))
     {
-        std::cerr << "Erreur : impossible d'allouer un état Lua" << std::endl;
-        return 1;
+        // Mode DOSSIER : comportement historique inchangé.
+        std::string mainLuaPath = (target / "main.lua").string();
+        // CORRECTIF (revue ChatGPT post-audit v21) : fichier RÉGULIER
+        // exigé, pas seulement l'existence. Un DOSSIER nommé main.lua
+        // passait fs::exists, puis luaL_dofile échouait avec un
+        // message OS abscons ("Is a directory"). is_regular_file suit
+        // les symlinks : un lien vers un vrai main.lua reste accepté.
+        // Le message conserve "main.lua introuvable" (Test 5 le
+        // greppe) et précise le cas non-régulier.
+        std::error_code mec;
+        if (!fs::is_regular_file(mainLuaPath, mec))
+        {
+            std::cerr << "Erreur : main.lua introuvable (ou pas un fichier régulier) dans le répertoire "
+                      << path << std::endl;
+            return 1;
+        }
+        return run_tool_script(target, mainLuaPath, argc, argv);
     }
-    luaL_openlibs(L);
-    register_bundled_modules(L);
-    register_babet(L);
-    prepend_project_to_package_path(L, projectDir);
 
-    // Workers (Chantier 8) : indiquer le mode d'exécution pour que
-    // require() utilisateur fonctionne aussi dans les workers
-    // (cf. set_workers_init_context).
-    set_workers_init_context(projectDir.string(), "", false);
-
-    // Runner de dossier : le "script" est le dossier lancé.
-    // arg[-1] = binaire babet, arg[0] = <dir>, arg[1..n] = args.
-    push_lua_arg(L, argc, argv, 1);
-
-    bool ok = loadLuaFile(L, mainLuaPath);
-    lua_close(L);
-    return ok ? 0 : 1;
+    // Ni fichier régulier ni dossier : chemin inexistant, FIFO,
+    // socket… — erreur explicite au lieu de l'ancien message
+    // « main.lua introuvable » hors sujet.
+    std::cerr << "Erreur : '" << path
+              << "' n'est ni un script Lua (fichier) ni un dossier de projet contenant main.lua"
+              << std::endl;
+    return 1;
 }

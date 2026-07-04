@@ -93,6 +93,16 @@ Lua, jamais depuis l'intérieur d'un signal handler. Ils peuvent
 utiliser n'importe quelle fonctionnalité Lua (pas de restrictions
 async-signal-safe).
 
+**Interaction avec `debug.sethook`** (audit v21) : hors des appels
+bloquants, le dispatch s'appuie sur un debug hook Lua
+(`lua_sethook`, déclenché périodiquement par compteur
+d'instructions). Conséquences : un `debug.sethook(...)` posé par
+le script **écrase** ce mécanisme — les callbacks ne seront plus
+dispatchés que lorsque le script entre dans un appel bloquant
+babet — et réciproquement, le premier `signal.handle(...)`
+remplace un hook utilisateur déjà installé. Évite de mélanger
+`babet.signal` et `debug.sethook` dans le même script.
+
 ## Contrat d'erreur
 
 - **Nom de signal inconnu** → `(nil, "signal: unknown name 'XYZ'")`.

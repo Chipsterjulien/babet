@@ -48,6 +48,10 @@ pattern explicite.
 | `babet.remove(path)` | `(true, nil)` \| `(nil, err)` — fichier ou symlink |
 | `babet.rename(old, new)` | `(true, nil)` \| `(nil, err)` |
 | `babet.chdir(path)` | `(true, nil)` \| `(nil, err)` |
+
+> `chdir` mute le répertoire courant de TOUT le processus : il est
+> interdit dès qu'un `workers.spawn` a eu lieu (`(nil, err)`,
+> définitif). Voir la note dans [sys](sys.md).
 | `babet.currentDir()` | `string` (absolu) |
 | `babet.joinPath(a, b, ...)` | `string` — comme `path/a/b/c` ; accepte aussi une seule table de segments |
 | `babet.link(target, link, opts?)` | `(true, nil)` \| `(nil, err)` — `opts.symbolic = true` pour symlink |

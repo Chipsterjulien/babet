@@ -125,10 +125,17 @@ db:close()
 
 - All runtime errors → `(nil, "sqlite: <description>")` with the
   SQLite error code in the message.
-- **`exec(sql, params)` with `?` placeholders but no `params`
-  argument** → `(nil, "sqlite: placeholders found but no params
-  table provided")` — explicit error rather than silent NULL
-  binding, which is a classic injection footgun.
+- **`exec(sql)` with placeholders but no `params` argument** →
+  `(nil, "sqlite: SQL contains placeholders but no params table
+  provided; …")` — an explicit error instead of silently binding
+  NULL. The guard applies to **every** statement of a
+  multi-statement SQL string (v21 audit).
+- **Supported placeholders** : `?` (positional, bound from
+  `params[1]`, `params[2]`, …) and `:name` / `@name` / `$name`
+  (named, bound from `params.name` — the prefix is ignored).
+  Numbered **`?NNN` placeholders are not supported** : the binder
+  would treat them as a "named" parameter whose name is `"NNN"`
+  (string key), a trap more than a feature. Use `?` or `:name`.
 - **Sparse keys in `params`** (e.g. `{[1] = "a", [3] = "c"}`) →
   `(nil, err)`.
 - **Empty BLOB string** → stored correctly as empty BLOB

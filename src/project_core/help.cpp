@@ -5,7 +5,7 @@
 void printHelp()
 {
     std::cout
-        << "Usage: babet [options] [script-dir]\n"
+        << "Usage: babet [options] [script.lua | script-dir]\n"
         << "\n"
         << "Options:\n"
         << "  -h, --help            Show this help and exit.\n"
@@ -18,12 +18,19 @@ void printHelp()
         << "                        of babet.\n"
         << "\n"
         << "Execution modes:\n"
+        << "  babet <file>       Run the file as a Lua script (any extension;\n"
+        << "                        a leading '#!' shebang line is ignored, so\n"
+        << "                        '#!/usr/bin/env babet' scripts work).\n"
+        << "                        require() resolves next to the script.\n"
         << "  babet <directory>  Run <directory>/main.lua (folder mode).\n"
         << "  babet              When invoked as a binary produced by --create-exe,\n"
         << "                        run the embedded main.lua. Without an embedded\n"
         << "                        script, prints this help and exits with status 1.\n"
         << "\n"
         << "Examples:\n"
+        << "  babet tool.lua --fast\n"
+        << "      Run tool.lua ; the script reads '--fast' via arg[1].\n"
+        << "\n"
         << "  babet my_scripts\n"
         << "      Run my_scripts/main.lua.\n"
         << "\n"

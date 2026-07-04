@@ -214,10 +214,13 @@ namespace
     //   == 0 : timeout par deadline (avant tout event)
     //   == -1: erreur fatale (errno renseigné, à passer à push_errno_fail)
     //   == WAIT_INTERRUPTED : interrompu par un signal géré par
-    //          babet.signal. Le callback Lua a DÉJÀ été dispatché
-    //          avant le retour ; le caller n'a qu'à renvoyer
-    //          (nil, "interrupted") en sauvegardant son buffer si
-    //          nécessaire.
+    //          babet.signal. Le callback Lua N'EST PAS encore
+    //          dispatché (cette fonction n'a pas accès à la
+    //          lua_State) : c'est au CALLER d'appeler
+    //          signal_dispatch_pending(L) puis de renvoyer
+    //          (nil, "interrupted"), en sauvegardant son buffer si
+    //          nécessaire. (Commentaire corrigé — revue ChatGPT :
+    //          l'ancienne formulation affirmait le contraire.)
     constexpr int WAIT_INTERRUPTED = -2;
 
     int wait_ready_deadline(int fd, short events, Deadline deadline)
@@ -227,6 +230,26 @@ namespace
         pfd.events = events;
         for (;;)
         {
+            // CORRECTIF (option A validée, revues ChatGPT lots
+            // 13/14) : ferme la race PRÉ-poll. Le chemin EINTR
+            // ci-dessous ne couvre que les signaux arrivant PENDANT
+            // poll() ; un signal géré livré juste AVANT l'entrée
+            // (flag posé, poll non interrompu) laissait l'attente
+            // aller à son terme et retardait le dispatch du callback
+            // jusqu'au hook Lua. Priorité assumée : un signal en
+            // attente passe avant une opération réseau qui serait
+            // prête à réussir — c'est le contrat "interrupted" du
+            // module. Placé DANS la boucle : les réitérations (EINTR
+            // étranger -> continue) re-vérifient aussi. La protection
+            // main-thread est déjà dans signal_any_handled_pending
+            // (no-op hors main thread, cf. signal.cpp), et le
+            // dispatch reste fait par le caller, comme pour le chemin
+            // EINTR.
+            if (signal_any_handled_pending())
+            {
+                return WAIT_INTERRUPTED;
+            }
+
             // Note : on ne court-circuite PAS quand t == 0. POSIX
             // garantit que poll(..., 0) retourne immédiatement avec
             // les fd déjà prêts (sans bloquer). Court-circuiter avant
@@ -1846,10 +1869,36 @@ namespace
 namespace
 {
     // Helper interne factorisé (sous-étape 1.2) : effectue un TCP
-    // connect bloquant avec timeout (deadline globale). Renvoie le FD
-    // connecté ou -1. En cas d'erreur :
+    // connect avec deadline GLOBALE. Renvoie le FD connecté ou -1.
+    // En cas d'erreur :
     //   - `timed_out` mis à true si la deadline a expiré
+    //   - `err == "interrupted"` si un signal géré est arrivé (le
+    //     caller dispatche le callback puis renvoie (nil, err))
     //   - sinon `err` contient un message lisible
+    //
+    // CORRECTIF (audit v21, option A validée) : chemin UNIFIÉ.
+    //
+    // 1. La deadline est créée UNE FOIS, avant la boucle d'addrinfo.
+    //    L'ancienne version la recréait à CHAQUE tentative :
+    //    connect(host, port, 5) sur un host multi-A/AAAA pouvait
+    //    durer N × 5 s au total (ex : IPv6 trou noir qui échoue par
+    //    SO_ERROR à 4,9 s → la deadline repartait à zéro pour
+    //    l'IPv4). timeout = 5 signifie désormais 5 s pour l'appel
+    //    COMPLET, toutes adresses confondues — cohérent avec
+    //    send/recv, qui créent leur deadline une fois.
+    //
+    // 2. Le connect passe TOUJOURS par O_NONBLOCK + poll, y compris
+    //    sans timeout (deadline = NO_DEADLINE → poll infini).
+    //    L'ancien chemin bloquant (timeout_ms == 0) faisait un
+    //    connect() kernel : un EINTR de signal géré (handlers babet
+    //    installés SANS SA_RESTART) était traité comme une erreur
+    //    ordinaire — close, adresse suivante, et au final
+    //    (nil, "socket: connect: Interrupted system call"), sans
+    //    dispatch. Via wait_ready_deadline, l'interruption devient
+    //    (nil, "interrupted") + dispatch du callback, identique à
+    //    recv/send/accept. (poll(2) n'est jamais redémarré par
+    //    SA_RESTART, donc l'interruption est fiable dans tous les
+    //    cas.)
     //
     // Réutilisé par lua_socket_connect (TCP brut) et
     // lua_socket_connect_tls (avant le handshake TLS).
@@ -1869,6 +1918,10 @@ namespace
             return -1;
         }
 
+        // Deadline GLOBALE : une seule pour toutes les tentatives.
+        // NO_DEADLINE (poll infini) si timeout_ms == 0.
+        Deadline deadline = make_deadline(timeout_ms);
+
         // Essaie chaque addrinfo dans l'ordre (IPv4/IPv6 selon DNS).
         int fd = -1;
         int last_errno = 0;
@@ -1885,32 +1938,64 @@ namespace
                 continue;
             }
             ensure_cloexec(fd); // belt + suspenders
-            // Pour le timeout sur connect : on passe en non-bloquant
-            // le temps du connect, on attend la disponibilité via poll,
-            // on remet bloquant ensuite. Pattern POSIX standard.
+
+            // Non-bloquant SYSTÉMATIQUE le temps du connect (remis
+            // bloquant en cas de succès). Si fcntl échoue (quasi
+            // impossible), on ne peut pas garantir le pattern : on
+            // abandonne cette adresse plutôt que de risquer un
+            // connect kernel bloquant non maîtrisé.
             int flags = ::fcntl(fd, F_GETFL, 0);
-            if (timeout_ms > 0 && flags >= 0)
-            {
-                ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-            }
-            int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
-            if (rc == 0)
-            {
-                if (timeout_ms > 0 && flags >= 0)
-                {
-                    ::fcntl(fd, F_SETFL, flags);
-                }
-                break; // connecté direct (loopback typique)
-            }
-            if (errno != EINPROGRESS || timeout_ms == 0)
+            if (flags < 0 ||
+                ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
             {
                 last_errno = errno;
                 ::close(fd);
                 fd = -1;
                 continue;
             }
-            // En cours, attendre POLLOUT avec deadline globale.
-            Deadline deadline = make_deadline(timeout_ms);
+
+            int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
+            if (rc == 0)
+            {
+                // Connecté direct (loopback typique) : remettre
+                // bloquant. CORRECTIF (revue ChatGPT, ajusté) : si la
+                // restauration échoue (quasi impossible), le socket
+                // resterait silencieusement non-bloquant alors que ses
+                // méthodes supposent le mode bloquant sans timeout —
+                // on préfère abandonner cette adresse proprement.
+                if (::fcntl(fd, F_SETFL, flags) < 0)
+                {
+                    last_errno = errno;
+                    ::close(fd);
+                    fd = -1;
+                    continue;
+                }
+                break;
+            }
+            // CORRECTIF (revue ChatGPT, sémantique CORRIGÉE) : un
+            // EINTR de connect() est traité comme EINPROGRESS, pas
+            // comme une erreur. POSIX : « si connect() est interrompu
+            // par un signal, la connexion est établie de façon
+            // asynchrone » — la suite correcte est d'attendre POLLOUT
+            // (où l'interruption par signal géré est déjà rendue
+            // proprement en "interrupted" via wait_ready_deadline),
+            // PAS de fermer le FD. Sur Linux un connect NON-BLOQUANT
+            // ne rend pas EINTR ; ce traitement est une robustesse
+            // portable. NB : la revue proposait de rendre
+            // "interrupted" ici — c'était incorrect : la tentative
+            // continue en arrière-plan, l'abandonner casserait des
+            // connects légitimes.
+            if (errno != EINPROGRESS && errno != EINTR)
+            {
+                // Échec immédiat (réseau inaccessible, refus
+                // synchrone…) : adresse suivante — la deadline
+                // globale continue de courir.
+                last_errno = errno;
+                ::close(fd);
+                fd = -1;
+                continue;
+            }
+            // En cours, attendre POLLOUT sous la deadline GLOBALE.
             int wr = wait_ready_deadline(fd, POLLOUT, deadline);
             if (wr == WAIT_INTERRUPTED)
             {
@@ -1925,10 +2010,13 @@ namespace
             }
             if (wr == 0)
             {
+                // Deadline globale expirée : inutile d'essayer les
+                // autres addrinfo, elles n'auraient plus aucun
+                // budget.
                 timed_out = true;
                 ::close(fd);
                 fd = -1;
-                break; // inutile d'essayer les autres addrinfo
+                break;
             }
             if (wr < 0)
             {
@@ -1947,8 +2035,16 @@ namespace
                 fd = -1;
                 continue;
             }
-            // Succès : remettre bloquant
-            ::fcntl(fd, F_SETFL, flags);
+            // Succès : remettre bloquant. Même garde que le connect
+            // direct ci-dessus : une restauration échouée rendrait un
+            // socket silencieusement non-bloquant.
+            if (::fcntl(fd, F_SETFL, flags) < 0)
+            {
+                last_errno = errno;
+                ::close(fd);
+                fd = -1;
+                continue;
+            }
             break;
         }
         ::freeaddrinfo(res);
@@ -2159,10 +2255,18 @@ int lua_socket_connect_tls(lua_State *L)
     // En cas d'ÉCHEC handshake, on remet bloquant avant de fermer
     // (cohérence : le FD reste bloquant si jamais quelqu'un le voyait
     // dans un état intermédiaire avant ::close).
+    // CORRECTIF (revue ChatGPT post-audit v21) : si fcntl échoue
+    // (quasi impossible), le handshake tournerait sur un FD BLOQUANT
+    // et la deadline ne serait plus garantie — on échoue franchement
+    // plutôt que de dégrader silencieusement le contrat.
     int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags >= 0)
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
     {
-        ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int e = errno;
+        SSL_free(ssl);
+        ::close(fd);
+        return push_fail(L, std::string("socket: connect_tls: fcntl: ") +
+                                std::strerror(e));
     }
     bool hs_ok = tls_handshake(ssl, fd, opts.timeout_ms, err);
     if (!hs_ok)
@@ -2281,23 +2385,42 @@ int sock_starttls(lua_State *L)
     // garder le FD en O_NONBLOCK après le handshake pour que les
     // SSL_read/SSL_write ultérieurs respectent réellement la deadline
     // globale. cf. note détaillée dans connect_tls.
+    // CORRECTIF (revue ChatGPT post-audit v21) : si fcntl échoue ici
+    // (quasi impossible), on n'a RIEN modifié — le socket reste
+    // bloquant et utilisable en clair, on échoue proprement sans le
+    // toucher.
     int flags = ::fcntl(s->fd, F_GETFL, 0);
-    if (flags >= 0)
+    if (flags < 0 || ::fcntl(s->fd, F_SETFL, flags | O_NONBLOCK) < 0)
     {
-        ::fcntl(s->fd, F_SETFL, flags | O_NONBLOCK);
+        int e = errno;
+        SSL_free(ssl);
+        return push_fail(L, std::string("socket: starttls: fcntl: ") +
+                                std::strerror(e));
     }
     bool hs_ok = tls_handshake(ssl, s->fd, s->timeout_ms, err);
     if (!hs_ok)
     {
-        if (flags >= 0)
-        {
-            ::fcntl(s->fd, F_SETFL, flags); // remettre bloquant si échec
-        }
-        SSL_free(ssl);
+        // CORRECTIF (revue ChatGPT post-audit v21) : le contrat après
+        // un échec de starttls est « socket rendu tel quel, bloquant,
+        // toujours ouvert ». Si la remise en bloquant échoue (quasi
+        // impossible), ce contrat n'est plus garantissable : le
+        // script continuerait avec un socket silencieusement
+        // NON-BLOQUANT (recv rendrait EAGAIN). Dans ce cas on ferme
+        // le socket et on le dit dans l'erreur — un état sûr et
+        // explicite vaut mieux qu'un état plausible et faux.
+        // Dispatch AVANT d'éventuellement suffixer err : le test
+        // d'égalité stricte doit voir "interrupted" nu.
         if (err == "interrupted")
         {
             signal_dispatch_pending(L);
         }
+        if (::fcntl(s->fd, F_SETFL, flags) < 0)
+        {
+            ::close(s->fd);
+            s->fd = -1;
+            err += " (socket closed: could not restore blocking mode)";
+        }
+        SSL_free(ssl);
         return push_fail(L, err);
     }
     // Succès : NE PAS remettre bloquant. FD reste O_NONBLOCK pour

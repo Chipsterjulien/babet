@@ -107,6 +107,18 @@ print("Detailed:", a, b)
   a boolean check, use `which(cmd) ~= nil`.
 - **`uname()` returns a table, not multiple values**. Makes it
   forward-compatible if a field is ever added (e.g. `domainname`).
+- **`setenv` and workers don't mix** (v21 audit ; rule now
+  **enforced by the runtime** since the cross-review). POSIX does
+  not synchronize `setenv`/`getenv` across threads : a
+  `babet.setenv` while a worker — or the runtime itself (DNS
+  resolution, locale, `exec`) — reads the environment is a data
+  race. `babet.setenv` (and `babet.chdir` — the working directory
+  is also shared process-wide) therefore return `(nil, err)` once a
+  `workers.spawn` has happened — permanently, even after `join`,
+  even if the spawn later failed. The transition is serialized by
+  the same lock as the mutations : no worker can be born during a
+  `setenv`/`chdir`. Set environment and working directory
+  **before** the first worker.
 
 ## Not in v1
 

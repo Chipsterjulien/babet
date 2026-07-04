@@ -32,9 +32,20 @@ Can be used in three modes:
 git clone https://github.com/Chipsterjulien/babet.git
 cd babet
 ./build_local.sh        # downloads deps and compiles (~5 min first time)
-./run_tests.sh          # offline harness — should print 890 PASS / 0 FAIL
+./run_tests.sh          # offline harness — should print 939 PASS / 0 FAIL
 ./test/babet --help
 ```
+
+Run a single script, or a project directory :
+
+```sh
+./test/babet hello.lua greetings   # file mode — arg[1] == "greetings"
+./test/babet my_project/           # folder mode — runs my_project/main.lua
+```
+
+File mode accepts any extension and skips a leading `#!` line, so
+`#!/usr/bin/env babet` shebang scripts work. In both modes,
+`require()` resolves modules next to the script (or project).
 
 The build script vendors and compiles all its dependencies. The only
 prerequisites on your system are a C++23 compiler, CMake, `wget`, and

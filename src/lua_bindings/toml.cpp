@@ -19,6 +19,7 @@
 
 #include <cstdint>
 #include <exception>
+#include <stdexcept>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -91,6 +92,18 @@ namespace
 
     void push_toml_node(lua_State *L, const toml::node &node)
     {
+        // CORRECTIF (revue Gemini post-audit v21, vérifié) : réserver
+        // la pile avant de pousser. push_toml_node / push_toml_table
+        // se récursent mutuellement (~2 slots simultanés par niveau :
+        // table + valeur ; 4 avec marge) et la profondeur vient du
+        // document TOML DÉCODÉ — donc potentiellement hostile. Le
+        // throw rejoint le try/catch de lua_toml_decode -> (nil,
+        // "toml: ..."), le canal d'erreur existant du module.
+        if (!lua_checkstack(L, 4))
+        {
+            throw std::runtime_error("lua stack overflow during toml conversion");
+        }
+
         // Le test des types se fait via is_X() ; la récupération de
         // la valeur via value<T>() (qui renvoie std::optional<T>).
         if (node.is_table())

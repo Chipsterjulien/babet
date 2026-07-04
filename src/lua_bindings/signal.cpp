@@ -355,6 +355,24 @@ namespace
 
 void signal_dispatch_pending(lua_State *L)
 {
+    // CORRECTIF (audit v21) : réservé au main thread. Cette fonction
+    // (et signal_any_handled_pending ci-dessous) est appelée depuis
+    // les boucles d'attente de socket/sleep/inotify — y compris dans
+    // les threads workers, qui enregistrent tout babet. Scénario de
+    // vol de flag : un signal géré arrive (flag posé, signal livré au
+    // main thread) ; un worker dont le poll() prend un EINTR (autre
+    // signal, non bloqué par le masque des workers) voyait le flag,
+    // le CONSOMMAIT ici, puis cherchait le callback dans SA registry
+    // (vide : handle() est interdit hors main thread) -> le callback
+    // du main thread était perdu et le worker recevait un
+    // "interrupted" parasite. Fenêtre très étroite (les signaux gérés
+    // sont bloqués dans les workers), mais l'invariant doit être
+    // garanti : les flags g_pending n'appartiennent qu'au main
+    // thread. No-op partout ailleurs.
+    if (!is_main_thread())
+    {
+        return;
+    }
     for (size_t i = 0; i < NUM_SUPPORTED; ++i)
     {
         int signum = SUPPORTED_SIGNALS[i].signum;
@@ -398,6 +416,15 @@ void signal_dispatch_pending(lua_State *L)
 
 bool signal_any_handled_pending()
 {
+    // CORRECTIF (audit v21) : même garde que signal_dispatch_pending
+    // (cf. commentaire ci-dessus). Un worker ne doit ni voir ni
+    // consommer les flags du main thread : après un EINTR étranger,
+    // ses attentes (sleep/socket/inotify) reprennent simplement,
+    // sans "interrupted" parasite.
+    if (!is_main_thread())
+    {
+        return false;
+    }
     for (size_t i = 0; i < NUM_SUPPORTED; ++i)
     {
         if (g_pending[SUPPORTED_SIGNALS[i].signum])

@@ -484,7 +484,8 @@ int lua_exec(lua_State *L)
     // hérités par l'exec final, comme avant. Seul le fd "source"
     // (par exemple pipe_in[0] avant dup2 dans le child, ou
     // pipe_in[1] dans le parent) bénéficie de la protection.
-    auto make_pipe = [](int p[2]) -> int {
+    auto make_pipe = [](int p[2]) -> int
+    {
 #ifdef O_CLOEXEC
         return pipe2(p, O_CLOEXEC);
 #else
@@ -492,7 +493,8 @@ int lua_exec(lua_State *L)
         // (fenêtre de race), mais maintient le comportement sur des
         // systèmes sans pipe2. Babet vise Linux où pipe2 est
         // toujours disponible (glibc 2.9+, Linux 2.6.27+).
-        if (pipe(p) != 0) return -1;
+        if (pipe(p) != 0)
+            return -1;
         fcntl(p[0], F_SETFD, fcntl(p[0], F_GETFD) | FD_CLOEXEC);
         fcntl(p[1], F_SETFD, fcntl(p[1], F_GETFD) | FD_CLOEXEC);
         return 0;
@@ -638,6 +640,13 @@ int lua_exec(lua_State *L)
         close(pipe_out[0]);
         close(pipe_err[0]);
         int status;
+        // Limite assumée (revue Gemini post-audit v21) : après le
+        // SIGKILL du timeout, ce waitpid bloquant peut ne jamais
+        // rendre la main si l'enfant est gelé en état D
+        // (uninterruptible sleep kernel, ex : NFS mort) — le timeout
+        // n'est donc pas infaillible à 100 %. WNOHANG éviterait le
+        // blocage mais laisserait un zombie ; bloquer est le choix
+        // POSIX propre, documenté ici en connaissance de cause.
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
         {
         }

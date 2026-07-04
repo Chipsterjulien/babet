@@ -223,12 +223,48 @@ namespace
                  it != fs::recursive_directory_iterator(); ++it)
             {
                 int depth = it.depth();
+
+                // CORRECTIF (audit v21) : élagage maxdepth par PRÉVENTION
+                // de la descente, plus par pop().
+                //
+                // L'ancien code faisait `it.pop(); continue;` quand
+                // depth > maxdepth. Or pop() avance DÉJÀ l'itérateur sur
+                // l'entrée suivante du parent ; le ++it du for avançait
+                // une SECONDE fois. Deux symptômes reproduits :
+                //   1. Dossier élagué non vide suivi d'un frère : le
+                //      frère était silencieusement absent du résultat
+                //      (root/{sub/x.txt, a.txt, b.txt}, maxdepth=0 ->
+                //      a.txt manquant).
+                //   2. Dossier élagué non vide en DERNIÈRE position :
+                //      pop() rendait l'itérateur end, et ++it sur end
+                //      jetait filesystem_error ("cannot increment
+                //      recursive directory iterator") -> find retournait
+                //      une erreur parasite au lieu du résultat.
+                //
+                // Nouvelle stratégie : ne JAMAIS descendre au-delà de
+                // maxdepth. Si l'entrée courante est un dossier situé à
+                // depth >= maxdepth, ses enfants seraient à depth+1 >
+                // maxdepth : on annule la récursion en attente AVANT
+                // l'incrément via disable_recursion_pending(). Ainsi
+                // aucune entrée ne dépasse maxdepth (hors maxdepth < 0,
+                // couvert par le filtre ci-dessous), pop() disparaît, et
+                // l'incrément du for reste le SEUL à faire avancer
+                // l'itérateur.
+                //
+                // Ce test est fait AVANT le filtre mindepth : un dossier
+                // sous mindepth doit quand même être traversé (mindepth
+                // filtre les RÉSULTATS, pas la descente). NB : les
+                // symlinks vers des dossiers ne sont pas suivis par
+                // recursive_directory_iterator (comportement par défaut,
+                // inchangé) ; leur appliquer disable_recursion_pending
+                // est un no-op inoffensif.
+                if (depth >= options.maxdepth && it->is_directory())
+                {
+                    it.disable_recursion_pending();
+                }
+
                 if (depth < options.mindepth || depth > options.maxdepth)
                 {
-                    if (depth > options.maxdepth)
-                    {
-                        it.pop();
-                    }
                     continue;
                 }
 

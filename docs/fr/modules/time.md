@@ -3,16 +3,18 @@
 # `babet` time — horloges monotone et temps réel
 
 Deux horloges avec précision sub-seconde et un sleep qui respecte
-les unités `s`/`ms`/`us`/`ns` ainsi que les signaux. Comble les
-trous de `os.time` / `os.clock`. Vit directement sur `babet`,
-pas de sous-namespace.
+les unités `s`/`ms`/`us` ainsi que les signaux. Comble les trous de
+`os.time` / `os.clock`. Les trois fonctions historiques vivent
+directement sur `babet` ; les utilitaires de dates et durées vivent
+sous la sous-table `babet.time` (qui expose aussi les trois
+premières en alias).
 
 ## Pourquoi
 
 `os.time()` ne donne que des secondes, et `os.clock()` mesure le
 temps CPU, pas le temps réel. Aucun des deux n'est approprié pour
 mesurer des durées réelles (latence de requête, backoff de retry,
-timeouts). Et `os` n'a pas de sleep portable à la nanoseconde.
+timeouts). Et `os` n'a pas de sleep portable sub-seconde.
 
 `babet.monotonic()` et `babet.now()` exposent
 `CLOCK_MONOTONIC` (durées) et `CLOCK_REALTIME` (timestamps), avec
@@ -26,8 +28,9 @@ timeouts). Et `os` n'a pas de sleep portable à la nanoseconde.
 | `babet.now()` | `number` — temps POSIX (secondes depuis 1970-01-01 UTC) |
 | `babet.sleep(amount, unit?)` | `(true, nil)` \| `(nil, "interrupted")` |
 
-`unit` pour `sleep` est l'un de `"s"` (défaut), `"ms"`, `"us"`,
-`"ns"`. Les floats sont acceptés.
+`unit` pour `sleep` est l'un de `"s"` (défaut), `"ms"`, `"us"`.
+Les floats sont acceptés. (Pas de `"ns"` : nanosleep ne garantit de
+toute façon pas cette granularité, et le code ne l'accepte pas.)
 
 ## API — utilitaires de dates et durées (v1.8.0+)
 
@@ -98,7 +101,7 @@ print(babet.time.iso(0))                        -- "1970-01-01T00:00:00Z"
 
 -- Parser une ligne de log en timestamp Unix
 local ts = assert(babet.time.parse_iso("2026-06-17T10:00:00+02:00"))
--- ts vaut 1750147200 (qui est 08:00:00 UTC)
+-- ts vaut 1781683200 (qui est 2026-06-17T08:00:00Z)
 
 -- Durées lisibles par un humain
 local cache_ttl = babet.time.parse_duration("2h30m")  -- 9000

@@ -46,6 +46,10 @@ needed. Functions never expand globs ; for glob support, use
 | `babet.remove(path)` | `(true, nil)` \| `(nil, err)` — file or symlink |
 | `babet.rename(old, new)` | `(true, nil)` \| `(nil, err)` |
 | `babet.chdir(path)` | `(true, nil)` \| `(nil, err)` |
+
+> `chdir` mutates the working directory of the WHOLE process : it is
+> forbidden once a `workers.spawn` has happened (`(nil, err)`,
+> permanent). See the note in [sys](sys.md).
 | `babet.currentDir()` | `string` (absolute) |
 | `babet.joinPath(a, b, ...)` | `string` — like `path/a/b/c` ; also accepts a single table of segments |
 | `babet.link(target, link, opts?)` | `(true, nil)` \| `(nil, err)` — `opts.symbolic = true` for symlinks |

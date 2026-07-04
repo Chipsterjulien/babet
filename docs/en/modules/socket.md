@@ -22,16 +22,24 @@ one-liners.
 
 | Function | Returns |
 | --- | --- |
-| `babet.socket.connect(host, port, opts?)` | `socket` \| `(nil, err)` |
-| `babet.socket.listen(host, port, opts?)` | `server_socket` \| `(nil, err)` |
+| `babet.socket.connect(host, port, timeout?)` | `socket` \| `(nil, err)` |
+| `babet.socket.listen(host, port, backlog?)` | `server_socket` \| `(nil, err)` |
 
-`opts` :
+- `timeout` : seconds (float), optional — default infinite (blocking).
+  This is the budget for the TCP attempts **after DNS resolution**: a
+  **global** deadline across all A/AAAA addresses. If DNS returns
+  several addresses (typical dual-stack), successive attempts share
+  the same budget — never `timeout` per address. On expiry:
+  `(nil, "timeout")`. Known limit: DNS resolution itself
+  (`getaddrinfo`, synchronous) is not covered by this deadline nor
+  interruptible by signal — a slow resolver can add its own delay
+  upfront.
+- `backlog` : integer > 0, optional — default 16. `listen(2)` queue
+  size.
 
-- `timeout = N` — default timeout in seconds for blocking I/O
-  (default infinite).
-- `connect_timeout = N` — only for `connect`, default 30 s.
-- `nodelay = true` — set `TCP_NODELAY`.
-- `keepalive = true` — set `SO_KEEPALIVE`.
+A `connect` — with or without a timeout — interrupted by a signal
+handled via [`signal`](signal.md) returns `(nil, "interrupted")`
+after dispatching the callback, like `recv`/`accept`.
 
 ### Methods (client socket)
 
@@ -43,7 +51,8 @@ one-liners.
 | `s:recv_all(timeout?)` | `string` (read until EOF) \| `(nil, …)` |
 | `s:set_timeout(seconds)` | sets default timeout (`0` = infinite) |
 | `s:close()` | idempotent |
-| `s:peer()` | `(host, port)` \| `(nil, err)` — remote endpoint |
+| `s:peer()` | table `{host, port}` \| `(nil, err)` — remote endpoint |
+| `s:sockname()` | table `{host, port}` \| `(nil, err)` — local endpoint |
 
 `recv_line` reads bytes until `\n` (LF) is found. CR is stripped
 if present (`\r\n` → returned without the trailing `\r`). Has a
@@ -61,10 +70,9 @@ hard 8 MiB cap to prevent DoS via an endless single line.
 ### TCP echo client
 
 ```lua
-local s = assert(babet.socket.connect("localhost", 4000, {
-    timeout = 5,
-    nodelay = true,
-}))
+-- 5 s timeout for the WHOLE connect (all DNS addresses combined);
+-- omit it for a blocking connect.
+local s = assert(babet.socket.connect("localhost", 4000, 5))
 
 s:send("hello\n")
 local reply, err = s:recv_line()
@@ -102,7 +110,9 @@ srv:close()
 
 ## Error contract
 
-- **Connect errors** (DNS, refused, timeout) → `(nil, "socket: ...")`.
+- **Connect errors** (DNS, refused, network) → `(nil, "socket: ...")`.
+  Timeout expiry → bare `(nil, "timeout")`. Handled signal during
+  connect → `(nil, "interrupted")`.
 - **Bind errors** (port in use, permission) → `(nil, "socket: ...")`.
 - **`recv`** :
   - `string` (any length up to `n` requested).
@@ -126,9 +136,13 @@ srv:close()
 - **`recv_line` has an 8 MiB cap**. Protects against a peer that
   sends megabytes without ever sending `\n`. Configurable later
   if a use case needs more.
-- **Signal-aware blocking**. All `recv*` and `accept` return
-  `"interrupted"` on a handled signal, so the script can exit
-  cleanly.
+- **Signal-aware blocking**. All `recv*`, `accept` — and `connect`,
+  including without a timeout — return `"interrupted"` on a handled
+  signal, so scripts can exit cleanly.
+- **`connect` timeout is global, not per-address** (v21 audit). The
+  deadline is created once for the whole call; a dual-stack host
+  whose first address stalls doesn't multiply the delay. Accepted
+  trade-off: a fallback address only gets the remaining budget.
 - **`recv` returns `""` on clean close, not `nil`**. Lets scripts
   distinguish "remote went away" (`""`) from "no data yet"
   (`"timeout"`) without inventing yet another sentinel.

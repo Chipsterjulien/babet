@@ -1,4 +1,5 @@
 #include "sys.hpp"
+#include "workers.hpp"
 #include "lua_utils.hpp"
 
 #include <cerrno>
@@ -142,9 +143,26 @@ int lua_sys_setenv(lua_State *L)
     // attendu d'un setter, sinon on aurait un setter qui ne fait
     // parfois rien selon l'état du process — exactement le « muet »
     // qu'on évite).
-    if (::setenv(name, value, 1) != 0)
+    // CORRECTIF (option A validée, revue Gemini triée) : mutation
+    // d'état PROCESS-WIDE, interdite dès qu'un worker a été lancé.
+    // setenv(3) peut réallouer `environ` pendant qu'un worker le lit
+    // (getenv, exec, résolution DNS) -> course de données, SIGSEGV
+    // possible. Le syscall s'exécute sous le verrou partagé avec
+    // spawn (cf. workers.hpp) ; AUCUNE opération Lua sous le verrou.
+    int rc = 0;
+    int saved = 0;
+    if (!with_process_env_lock([&]()
+                               {
+            rc = ::setenv(name, value, 1);
+            saved = errno; }))
     {
-        int saved = errno;
+        return push_fail(L,
+                         "setenv: forbidden after workers.spawn (the process "
+                         "environment is shared across threads; set it before "
+                         "spawning workers)");
+    }
+    if (rc != 0)
+    {
         return push_fail(L,
                          std::string("setenv: ") + std::strerror(saved));
     }

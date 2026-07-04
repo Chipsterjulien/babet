@@ -151,6 +151,236 @@ else
 fi
 echo ""
 
+# === Test 4 : --create-exe et symlinks (régression audit v21) =======
+# Deux bugs corrigés dans zip_utils.cpp :
+#   a) fs::relative résolvait les symlinks : un module du projet qui
+#      est un symlink vers un fichier HORS du projet (proj/mylib.lua
+#      -> ../shared/mylib.lua) était embarqué sous le nom d'entrée
+#      "../shared/mylib.lua" au lieu de "mylib.lua", et
+#      require("mylib") échouait dans le binaire empaqueté.
+#      Fix : entry.path().lexically_relative(dir), comme copyTree.
+#   b) recursive_directory_iterator (variante jetante) était appelé
+#      hors de tout try/catch : un sous-dossier illisible pendant
+#      --create-exe levait une filesystem_error non attrapée ->
+#      std::terminate (abort, code 134) au lieu d'une erreur propre.
+#      Fix : try/catch dans createZipFromDirectory -> message + exit 1.
+echo "### Test 4 : --create-exe et symlinks ###"
+modes_total=$((modes_total + 1))
+test4_ok=1
+
+SYMLINK_ROOT=$(mktemp -d)
+if [ -z "${SYMLINK_ROOT}" ] || [ ! -d "${SYMLINK_ROOT}" ]; then
+    echo "  -> ÉCHEC (impossible de créer un dossier temporaire)"
+    test4_ok=0
+else
+    # --- 4a : projet dont un module est un symlink hors projet ------
+    mkdir -p "${SYMLINK_ROOT}/shared" "${SYMLINK_ROOT}/proj"
+    cat > "${SYMLINK_ROOT}/shared/mylib.lua" << 'LUA'
+return { value = 42 }
+LUA
+    cat > "${SYMLINK_ROOT}/proj/main.lua" << 'LUA'
+local ok, lib = pcall(require, "mylib")
+if ok and type(lib) == "table" and lib.value == 42 then
+    print("SYMLINK_OK")
+else
+    print("SYMLINK_FAIL: " .. tostring(lib))
+    os.exit(1)
+end
+LUA
+    ln -s ../shared/mylib.lua "${SYMLINK_ROOT}/proj/mylib.lua"
+
+    SYM_BIN="${SYMLINK_ROOT}/app_symlink"
+    # Slash final volontaire sur le dossier : forme produite par la
+    # complétion tab, absorbée par lexically_relative.
+    if ! "${BINARY}" --create-exe "${SYMLINK_ROOT}/proj/" "${SYM_BIN}" > /dev/null 2>&1; then
+        echo "  -> module symlinké : ÉCHEC (création du binaire)"
+        test4_ok=0
+    else
+        sym_out=$("${SYM_BIN}" 2>&1)
+        if echo "${sym_out}" | grep -q "SYMLINK_OK"; then
+            echo "  -> module symlinké empaqueté : OK"
+        else
+            echo "  -> module symlinké : ÉCHEC (${sym_out})"
+            test4_ok=0
+        fi
+    fi
+
+    # --- 4b : sous-dossier illisible -> erreur propre, pas un abort -
+    # chmod 000 est sans effet pour root (il lit tout) : on saute
+    # proprement dans ce cas plutôt que d'échouer à tort.
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "  -> sous-dossier illisible : SKIP (exécuté en root)"
+    else
+        mkdir -p "${SYMLINK_ROOT}/proj/locked"
+        : > "${SYMLINK_ROOT}/proj/locked/secret.lua"
+        chmod 000 "${SYMLINK_ROOT}/proj/locked"
+        "${BINARY}" --create-exe "${SYMLINK_ROOT}/proj" \
+            "${SYMLINK_ROOT}/app_locked" > /dev/null 2>&1
+        locked_rc=$?
+        chmod 755 "${SYMLINK_ROOT}/proj/locked"
+        if [ ${locked_rc} -eq 1 ]; then
+            echo "  -> sous-dossier illisible : OK (erreur propre, code 1)"
+        else
+            echo "  -> sous-dossier illisible : ÉCHEC (code ${locked_rc}," \
+                 "attendu 1 ; 134 = abort/std::terminate)"
+            test4_ok=0
+        fi
+    fi
+
+    # --- 4c : refus d'écraser le binaire courant (revue ChatGPT) ----
+    # mergeFiles lit le binaire pendant qu'il tronque la sortie : si
+    # la sortie désignait le même inode (chemin direct, symlink,
+    # hardlink), --create-exe DÉTRUISAIT babet lui-même. Les deux
+    # formes doivent être refusées, et le binaire rester intact
+    # (hash vérifié).
+    hash_before=$(sha256sum "${BINARY}" | cut -d' ' -f1)
+    "${BINARY}" --create-exe "${SYMLINK_ROOT}/proj" "${BINARY}" \
+        > /dev/null 2>&1
+    rc_self=$?
+    ln -s "${BINARY}" "${SYMLINK_ROOT}/self_sl"
+    "${BINARY}" --create-exe "${SYMLINK_ROOT}/proj" \
+        "${SYMLINK_ROOT}/self_sl" > /dev/null 2>&1
+    rc_selfsl=$?
+    hash_after=$(sha256sum "${BINARY}" | cut -d' ' -f1)
+    if [ ${rc_self} -eq 1 ] && [ ${rc_selfsl} -eq 1 ] \
+        && [ "${hash_before}" = "${hash_after}" ]; then
+        echo "  -> refus d'écraser le binaire courant (direct + symlink) : OK"
+    else
+        echo "  -> ÉCHEC (auto-écrasement : rc=${rc_self}/${rc_selfsl}," \
+             "hash $([ \"${hash_before}\" = \"${hash_after}\" ] && echo intact || echo MODIFIÉ))"
+        test4_ok=0
+    fi
+
+    rm -rf "${SYMLINK_ROOT}"
+fi
+
+if [ ${test4_ok} -eq 1 ]; then
+    echo "  -> Test 4 : OK"
+    modes_ok=$((modes_ok + 1))
+else
+    echo "  -> Test 4 : ÉCHEC"
+fi
+echo ""
+
+# === Test 5 : exécution d'un script seul (lot 10, audit v21) ========
+# `babet <fichier>` exécute le fichier directement (mode fichier) :
+#   - n'importe quelle extension (shebang '#!' ignoré par Lua) ;
+#   - package.path ancré au répertoire du script -> require() des
+#     fichiers voisins ;
+#   - arg[0] = chemin du script tel que tapé, arg[1..] = arguments.
+# Avant ce lot, l'argument était toujours traité comme un dossier et
+# `babet script.lua` échouait avec un message trompeur.
+echo "### Test 5 : babet <script.lua> ###"
+modes_total=$((modes_total + 1))
+test5_ok=1
+
+SCRIPT_ROOT=$(mktemp -d)
+if [ -z "${SCRIPT_ROOT}" ] || [ ! -d "${SCRIPT_ROOT}" ]; then
+    echo "  -> ÉCHEC (impossible de créer un dossier temporaire)"
+    test5_ok=0
+else
+    # --- 5a : script .lua + module voisin + table arg ---------------
+    cat > "${SCRIPT_ROOT}/helper.lua" << 'LUA'
+return { greet = function(n) return "hello " .. n end }
+LUA
+    cat > "${SCRIPT_ROOT}/tool.lua" << 'LUA'
+local h = require("helper")
+print(h.greet("script"))
+print("arg0=" .. tostring(arg[0]))
+print("arg1=" .. tostring(arg[1]))
+print("arg2=" .. tostring(arg[2]))
+LUA
+    t5_out=$("${BINARY}" "${SCRIPT_ROOT}/tool.lua" un deux 2>&1)
+    if echo "${t5_out}" | grep -q "hello script"; then
+        echo "  -> require() d'un voisin en mode fichier : OK"
+    else
+        echo "  -> ÉCHEC (require voisin) : ${t5_out}"
+        test5_ok=0
+    fi
+    if echo "${t5_out}" | grep -q "arg0=.*tool\.lua" \
+        && echo "${t5_out}" | grep -q "arg1=un" \
+        && echo "${t5_out}" | grep -q "arg2=deux"; then
+        echo "  -> table arg (arg[0]=script, arg[1..]=args) : OK"
+    else
+        echo "  -> ÉCHEC (table arg) : ${t5_out}"
+        test5_ok=0
+    fi
+
+    # --- 5b : fichier SANS extension + shebang, exécuté directement -
+    # Le shebang doit pointer un chemin SANS espace (limitation
+    # kernel) : on symlinke le binaire dans le mktemp (chemin sûr),
+    # ce qui valide au passage que /proc/self/exe résout le lien.
+    ln -s "${BINARY}" "${SCRIPT_ROOT}/babet_bin"
+    {
+        printf '#!%s\n' "${SCRIPT_ROOT}/babet_bin"
+        printf 'print("SHEBANG_OK arg1=" .. tostring(arg[1]))\n'
+    } > "${SCRIPT_ROOT}/mytool"
+    chmod +x "${SCRIPT_ROOT}/mytool"
+    t5b_out=$("${SCRIPT_ROOT}/mytool" direct 2>&1)
+    if echo "${t5b_out}" | grep -q "SHEBANG_OK arg1=direct"; then
+        echo "  -> shebang #!babet (fichier sans extension) : OK"
+    else
+        echo "  -> ÉCHEC (shebang) : ${t5b_out}"
+        test5_ok=0
+    fi
+
+    # --- 5c : erreurs claires ----------------------------------------
+    "${BINARY}" "${SCRIPT_ROOT}/nexiste.pas" > /dev/null 2>&1
+    rc_missing=$?
+    err_missing=$("${BINARY}" "${SCRIPT_ROOT}/nexiste.pas" 2>&1)
+    if [ ${rc_missing} -eq 1 ] \
+        && echo "${err_missing}" | grep -q "n'est ni un script"; then
+        echo "  -> chemin inexistant : erreur claire + code 1 : OK"
+    else
+        echo "  -> ÉCHEC (chemin inexistant : rc=${rc_missing}, ${err_missing})"
+        test5_ok=0
+    fi
+    mkdir -p "${SCRIPT_ROOT}/vide"
+    err_dir=$("${BINARY}" "${SCRIPT_ROOT}/vide" 2>&1)
+    if echo "${err_dir}" | grep -q "main.lua introuvable"; then
+        echo "  -> dossier sans main.lua : message historique : OK"
+    else
+        echo "  -> ÉCHEC (dossier sans main.lua) : ${err_dir}"
+        test5_ok=0
+    fi
+
+    # --- 5d : main.lua est un DOSSIER (revue ChatGPT post-audit) ----
+    # fs::exists laissait passer un dossier nommé main.lua : le mode
+    # dossier échouait avec un "Is a directory" abscons, et
+    # --create-exe produisait EN SILENCE un binaire sans main.lua
+    # embarqué (le zip ne prend que les fichiers réguliers). Les deux
+    # doivent désormais échouer proprement, code 1, message clair.
+    mkdir -p "${SCRIPT_ROOT}/bad_project/main.lua"
+    err_badrun=$("${BINARY}" "${SCRIPT_ROOT}/bad_project" 2>&1)
+    rc_badrun=$?
+    if [ ${rc_badrun} -eq 1 ] \
+        && echo "${err_badrun}" | grep -q "main.lua introuvable"; then
+        echo "  -> main.lua-dossier (exécution) : erreur claire : OK"
+    else
+        echo "  -> ÉCHEC (main.lua-dossier exécution : rc=${rc_badrun}, ${err_badrun})"
+        test5_ok=0
+    fi
+    "${BINARY}" --create-exe "${SCRIPT_ROOT}/bad_project" \
+        "${SCRIPT_ROOT}/bad_out" > /dev/null 2>&1
+    rc_badexe=$?
+    if [ ${rc_badexe} -eq 1 ] && [ ! -e "${SCRIPT_ROOT}/bad_out" ]; then
+        echo "  -> main.lua-dossier (--create-exe) : refus propre : OK"
+    else
+        echo "  -> ÉCHEC (main.lua-dossier --create-exe : rc=${rc_badexe})"
+        test5_ok=0
+    fi
+
+    rm -rf "${SCRIPT_ROOT}"
+fi
+
+if [ ${test5_ok} -eq 1 ]; then
+    echo "  -> Test 5 : OK"
+    modes_ok=$((modes_ok + 1))
+else
+    echo "  -> Test 5 : ÉCHEC"
+fi
+echo ""
+
 # --- 4. Bilan -------------------------------------------------------
 echo "=========================================="
 echo "Bilan : ${modes_ok}/${modes_total} modes OK"

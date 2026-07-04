@@ -431,7 +431,8 @@ namespace
     }
 
     // ============================================================
-    // db_exec : sans params (sqlite3_exec) ou avec (prepare+step).
+    // db_exec : avec ou sans params, prepare+step statement par
+    // statement (audit v21 : sqlite3_exec abandonné, cf. db_exec).
     // ============================================================
 
     // db:close() → (true, nil) | (nil, err)
@@ -457,7 +458,8 @@ namespace
 
     // db:exec(sql, params?) → (true, nil) | (nil, err)
     //
-    // Sans params : sqlite3_exec direct. Supporte plusieurs
+    // Sans params : boucle prepare/step statement par statement,
+    //   avec garde anti-placeholder sur CHACUN. Supporte plusieurs
     //   statements séparés par ';' (utile pour CREATE TABLE ... ;
     //   CREATE INDEX ... d'un coup).
     //
@@ -492,56 +494,85 @@ namespace
         }
 
         // -------------------------------------------------------
-        // Cas simple : pas de params → on prepare d'abord pour
-        // détecter d'éventuels placeholders non liés.
+        // Cas simple : pas de params → exécution statement par
+        // statement, avec garde anti-placeholder sur CHACUN.
         //
         // Sans ce check, "INSERT INTO t VALUES (?)" sans params
         // bind silencieusement NULL — typiquement un bug de
         // copier-coller chez l'appelant qui insère du NULL
         // silencieusement. On préfère raise.
         //
-        // Si 0 placeholders, on finalise et on repasse à
-        // sqlite3_exec pour conserver le support multi-statement
-        // (CREATE TABLE ... ; CREATE INDEX ... ;).
+        // CORRECTIF (audit v21) : l'ancienne version ne sondait que
+        // le PREMIER statement (sqlite3_prepare_v2 s'arrête au
+        // premier ';') puis relançait le tout via sqlite3_exec. Un
+        // placeholder dans un statement SUIVANT
+        // ("CREATE TABLE t(x); INSERT INTO t VALUES(?)") échappait
+        // au garde-fou et sqlite3_exec liait NULL silencieusement —
+        // exactement le bug que la sonde voulait empêcher.
+        //
+        // On ne peut pas non plus sonder tous les statements
+        // d'avance : le 2e peut référencer une table créée par le
+        // 1er (prepare rendrait "no such table" avant toute
+        // exécution). La seule approche correcte est la boucle
+        // prepare → check placeholders → step → finalize → avancer
+        // sur le tail, qui remplace sqlite3_exec. Sémantique
+        // conservée : exécution en ordre, arrêt à la première
+        // erreur (les statements déjà exécutés restent acquis,
+        // comme avec sqlite3_exec), lignes de SELECT ignorées
+        // (comme sqlite3_exec avec callback nul).
         // -------------------------------------------------------
         if (!has_params)
         {
-            sqlite3_stmt *probe = nullptr;
-            const char *probe_tail = nullptr;
-            int rc = sqlite3_prepare_v2(db->handle, sql,
-                                        static_cast<int>(sql_len),
-                                        &probe, &probe_tail);
-            if (rc != SQLITE_OK)
+            const char *cursor = sql;
+            const char *sql_end = sql + sql_len;
+            while (cursor < sql_end)
             {
-                std::string msg = sqlite3_errmsg(db->handle);
-                if (probe)
-                    sqlite3_finalize(probe);
-                return push_sqlite_fail(L, msg);
-            }
+                sqlite3_stmt *stmt = nullptr;
+                const char *tail = nullptr;
+                int rc = sqlite3_prepare_v2(db->handle, cursor,
+                                            static_cast<int>(sql_end - cursor),
+                                            &stmt, &tail);
+                if (rc != SQLITE_OK)
+                {
+                    std::string msg = sqlite3_errmsg(db->handle);
+                    if (stmt)
+                        sqlite3_finalize(stmt);
+                    return push_sqlite_fail(L, msg);
+                }
+                if (!stmt)
+                {
+                    // Le reste n'est que blancs/commentaires. Garde
+                    // anti-boucle : si le tail ne progresse pas, on
+                    // sort (ne devrait pas arriver, ceinture).
+                    if (tail == nullptr || tail <= cursor)
+                        break;
+                    cursor = tail;
+                    continue;
+                }
 
-            int n_placeholders = probe ? sqlite3_bind_parameter_count(probe) : 0;
+                if (sqlite3_bind_parameter_count(stmt) > 0)
+                {
+                    sqlite3_finalize(stmt);
+                    return push_sqlite_fail(L,
+                                            "SQL contains placeholders but no params table "
+                                            "provided; pass params to bind, or remove "
+                                            "placeholders from SQL");
+                }
 
-            if (n_placeholders > 0)
-            {
-                sqlite3_finalize(probe);
-                return push_sqlite_fail(L,
-                                        "SQL contains placeholders but no params table "
-                                        "provided; pass params to bind, or remove "
-                                        "placeholders from SQL");
-            }
+                while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+                {
+                    // SELECT sans params : lignes ignorées, comme le
+                    // faisait sqlite3_exec avec callback nul.
+                }
+                if (rc != SQLITE_DONE)
+                {
+                    std::string msg = sqlite3_errmsg(db->handle);
+                    sqlite3_finalize(stmt);
+                    return push_sqlite_fail(L, msg);
+                }
+                sqlite3_finalize(stmt);
 
-            // 0 placeholders : retomber sur sqlite3_exec pour le
-            // multi-statement. Le probe est seulement le premier
-            // statement, donc on l'abandonne et on relance via exec.
-            sqlite3_finalize(probe);
-
-            char *errmsg = nullptr;
-            rc = sqlite3_exec(db->handle, sql, nullptr, nullptr, &errmsg);
-            if (rc != SQLITE_OK)
-            {
-                std::string msg = errmsg ? errmsg : sqlite3_errmsg(db->handle);
-                sqlite3_free(errmsg);
-                return push_sqlite_fail(L, msg);
+                cursor = (tail != nullptr && tail > cursor) ? tail : sql_end;
             }
             return push_ok(L);
         }
@@ -751,8 +782,16 @@ namespace
                 break;
             case SQLITE_TEXT:
             {
+                // CORRECTIF (revue Gemini post-audit v21) : la doc
+                // SQLite exige d'appeler column_text/column_blob
+                // AVANT column_bytes (une conversion peut modifier la
+                // longueur). Ici le type brut est déjà vérifié donc
+                // aucune conversion n'avait lieu en pratique — ordre
+                // corrigé pour la pureté sémantique et la robustesse
+                // aux évolutions.
+                const unsigned char *text = sqlite3_column_text(stmt, i);
                 int len = sqlite3_column_bytes(stmt, i);
-                if (len == 0)
+                if (len == 0 || text == nullptr)
                 {
                     // sqlite3_column_text() peut retourner NULL pour
                     // un TEXT de 0 octet (même cas que BLOB ci-dessous).
@@ -762,7 +801,6 @@ namespace
                 }
                 else
                 {
-                    const unsigned char *text = sqlite3_column_text(stmt, i);
                     lua_pushlstring(L,
                                     reinterpret_cast<const char *>(text),
                                     static_cast<size_t>(len));
@@ -771,8 +809,10 @@ namespace
             }
             case SQLITE_BLOB:
             {
+                // Même ordre pointeur-puis-longueur que TEXT ci-dessus.
+                const void *blob = sqlite3_column_blob(stmt, i);
                 int len = sqlite3_column_bytes(stmt, i);
-                if (len == 0)
+                if (len == 0 || blob == nullptr)
                 {
                     // sqlite3_column_blob() peut retourner NULL pour
                     // un BLOB de 0 octets. lua_pushlstring(L, NULL, 0)
@@ -783,7 +823,6 @@ namespace
                 }
                 else
                 {
-                    const void *blob = sqlite3_column_blob(stmt, i);
                     lua_pushlstring(L,
                                     static_cast<const char *>(blob),
                                     static_cast<size_t>(len));

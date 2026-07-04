@@ -23,11 +23,31 @@ no data races — just send work in, get results out.
 
 | Function | Returns |
 | --- | --- |
-| `babet.workers.spawn(code, args?)` | `job` (userdata) \| `(nil, err)` |
-| `babet.workers.cpu_count()` | `integer` — number of logical CPUs |
-| `job:join(timeout?)` | `(true, result)` \| `(false, err)` \| `(nil, "timeout")` |
-| `job:done()` | `boolean` — non-blocking check |
-| `job:cancel()` | `(true, nil)` — cooperative ; sets a flag |
+| `babet.workers.spawn(code, args?, opts?)` | `job` (userdata) \| `(nil, err)` |
+| `job:join()` | `(true, result)` \| `(false, err)` — **blocking**, see pitfall below |
+| `job:poll()` | `string` — `"running"` \| `"done"` \| `"error"`, non-blocking |
+| `job:send(v, timeout?)` | `(true)` \| `(false, err)` — into the worker's inbox |
+| `job:recv(timeout?)` | `(true, v)` \| `(false, err)` — from the worker's outbox |
+| `job:close()` | closes both queues ; unblocks worker and parent |
+
+`opts` : `inbox_capacity` / `outbox_capacity` (integers, default
+64) — message queue sizes.
+
+`timeout` (seconds) for `send`/`recv` : omitted or `nil` = block
+indefinitely ; `0` = non-blocking (`err == "full"` / `"empty"`) ;
+otherwise bounded wait (`err == "timeout"`). A closed queue yields
+`err == "closed"`. On the worker side, `worker.send(v, timeout?)`
+and `worker.recv(timeout?)` are symmetrical.
+
+**`join()` pitfall : possible deadlock.** `join()` waits for the
+worker to finish, with no deadline. If the worker is blocked in a
+`worker.recv()` without a timeout (waiting for a message that will
+never come), `join()` never returns — parent and worker wait on
+each other. Unlike the garbage collector (which closes the queues
+before joining), `join()` closes nothing. Practical rules : call
+`job:close()` before `join()` whenever the worker may be waiting
+for a message ; or use finite timeouts in `worker.recv()` ; and
+`job:poll()` to test without blocking.
 
 ### `code` argument
 
@@ -35,9 +55,9 @@ A Lua source string that runs in the worker. The full `babet`
 namespace is available, plus a `worker` global with :
 
 - `worker.args` — the second argument passed to `spawn`.
-- `worker.cancelled()` — returns `true` if the parent called
-  `job:cancel()`. The worker is expected to check this in long
-  loops.
+- `worker.send(v, timeout?)` / `worker.recv(timeout?)` — the
+  message channel to/from the parent (same timeout conventions as
+  the parent side, see table above).
 
 The worker's last expression value (or `return value`) is what
 `join()` returns as `result`.
@@ -148,10 +168,10 @@ end
     its return value (or `nil` if it didn't return).
   - `(false, err)` — worker crashed with an uncaught error ;
     `err` is the error message + traceback.
-  - `(nil, "timeout")` — `timeout` elapsed without the worker
-    finishing.
-- **`cancel`** never fails. The flag is set ; the worker may take
-  a while to notice (it must call `worker.cancelled()`).
+  - `(false, "workers: join: result already consumed")` — `join`
+    already called on this job.
+  - `join()` has **no** timeout : it blocks until the worker ends
+    (see the deadlock pitfall above).
 - **Wrong argument types** → raises via `luaL_error`.
 
 ## Sharing data
@@ -180,15 +200,18 @@ configure how long to wait on a busy db.
   thread, each `join` closes it. For tight loops, build a pool
   in Lua (see example above). The simpler model wins on
   legibility.
-- **Cooperative cancellation, not preemptive**. There's no way to
-  forcibly stop a Lua thread in the middle of an operation
-  without leaving the runtime in an undefined state.
-  `worker.cancelled()` returns `true` ; the worker is responsible
-  for checking it periodically.
 - **`babet.signal` is not available in workers**. Signals are
   process-wide ; only the main thread can sensibly own them.
 
 ## Not in v1
+
+> Note (v21 audit) : the items below belong to the original design
+> and are **not implemented today** — the previous version of this
+> page wrongly presented them as available : `job:join(timeout)`,
+> `job:done()` (use `job:poll()`), `job:cancel()` /
+> `worker.cancelled()` (cooperative cancellation can be built today
+> with `job:send("stop")` + a periodic `worker.recv(0)`), and
+> `babet.workers.cpu_count()`.
 
 - Channels (FIFO queues between workers). Add later if a use
   case shows the pattern is common.

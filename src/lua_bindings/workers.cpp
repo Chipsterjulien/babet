@@ -12,6 +12,7 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_set>
@@ -88,19 +89,44 @@ namespace
         {
             capacity = cap;
             closed = false;
-            if (pthread_mutex_init(&mu, nullptr) != 0)
+            // CORRECTIF (audit v21) : condvars basées sur CLOCK_MONOTONIC.
+            // Par défaut, pthread_cond_timedwait interprète la deadline
+            // en CLOCK_REALTIME : un saut d'horloge murale (step NTP,
+            // date manuelle, resume) faussait les timeouts de push/pop —
+            // réveil prématuré si l'horloge saute en avant, attente
+            // prolongée (jusqu'à l'amplitude du saut) si elle recule.
+            // Aligné sur la doctrine steady-clock de socket.cpp.
+            // compute_deadline lit désormais CLOCK_MONOTONIC : condvar
+            // et deadline DOIVENT utiliser la même horloge.
+            pthread_condattr_t cattr;
+            if (pthread_condattr_init(&cattr) != 0)
                 return false;
-            if (pthread_cond_init(&not_full, nullptr) != 0)
+            if (pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC) != 0)
             {
+                pthread_condattr_destroy(&cattr);
+                return false;
+            }
+            if (pthread_mutex_init(&mu, nullptr) != 0)
+            {
+                pthread_condattr_destroy(&cattr);
+                return false;
+            }
+            if (pthread_cond_init(&not_full, &cattr) != 0)
+            {
+                pthread_condattr_destroy(&cattr);
                 pthread_mutex_destroy(&mu);
                 return false;
             }
-            if (pthread_cond_init(&not_empty, nullptr) != 0)
+            if (pthread_cond_init(&not_empty, &cattr) != 0)
             {
+                pthread_condattr_destroy(&cattr);
                 pthread_cond_destroy(&not_full);
                 pthread_mutex_destroy(&mu);
                 return false;
             }
+            // L'attr est copiée dans les condvars à l'init : elle peut
+            // (et doit) être détruite tout de suite.
+            pthread_condattr_destroy(&cattr);
             initialized = true;
             return true;
         }
@@ -118,9 +144,13 @@ namespace
         }
 
         // Helper : calcule un timespec absolu à partir de "maintenant + ms".
+        // CORRECTIF (audit v21) : CLOCK_MONOTONIC, en cohérence avec les
+        // condvars créées via pthread_condattr_setclock(CLOCK_MONOTONIC)
+        // dans init(). Les deux DOIVENT utiliser la même horloge, sinon
+        // la deadline est interprétée dans le mauvais référentiel.
         static void compute_deadline(int64_t timeout_ms, struct timespec &ts)
         {
-            clock_gettime(CLOCK_REALTIME, &ts);
+            clock_gettime(CLOCK_MONOTONIC, &ts);
             ts.tv_sec += timeout_ms / 1000;
             ts.tv_nsec += (timeout_ms % 1000) * 1000000LL;
             if (ts.tv_nsec >= 1000000000LL)
@@ -272,6 +302,18 @@ namespace
         // close : ferme la queue. Débloque tous les attendants. Idempotent.
         void close()
         {
+            // CORRECTIF (audit v21) : no-op si init() n'a jamais réussi.
+            // worker_gc appelle close() inconditionnellement ; si
+            // inbox.init() ou outbox.init() a échoué dans spawn (échec
+            // de pthread_mutex_init/cond_init — quasi impossible sur
+            // Linux, mais le chemin existe), on verrouillait ici un
+            // mutex JAMAIS initialisé -> comportement indéfini.
+            // destroy() avait déjà ce garde, close() non. Pas de course
+            // possible sur ce chemin : l'échec d'init précède
+            // pthread_create, donc aucune thread ne touche la queue —
+            // seul le __gc du parent y passe.
+            if (!initialized)
+                return;
             pthread_mutex_lock(&mu);
             closed = true;
             pthread_cond_broadcast(&not_full);
@@ -350,6 +392,12 @@ namespace
     // au-delà, on consomme trop de pile C++ via la récursion, ce qui
     // a déclenché des SIGSEGV sur Linux x86_64 avec pile par défaut
     // 8 MB déjà partiellement consommée par Lua + OpenSSL.
+    // État processus partagé (option A validée) : voir workers.hpp.
+    // Le verrou sérialise « marquer le premier spawn » avec les
+    // mutations setenv/chdir de sys.cpp et chdir.cpp.
+    std::mutex g_process_state_mu;
+    bool g_worker_ever_spawned = false;
+
     constexpr int MAX_SERIALIZATION_DEPTH = 32;
 
     Worker *check_worker(lua_State *L, int idx)
@@ -585,6 +633,17 @@ namespace
             err = "workers: spawn: value too deeply nested";
             return false;
         }
+        // CORRECTIF (revue Gemini post-audit v21, vérifié) : réserver
+        // la pile avant de pousser — même garde que json.cpp (~2-3
+        // slots simultanés par niveau ici : lua_geti, ou lua_next
+        // clé+valeur ; 4 avec marge). Sans lui, MAX_SERIALIZATION_
+        // DEPTH = 32 niveaux x ~2 slots dépassait les ~20 garantis ->
+        // UB. Convention préservée : false = rien poussé, err posé.
+        if (!lua_checkstack(L, 4))
+        {
+            err = "workers: spawn: lua stack overflow during serialization";
+            return false;
+        }
         idx = lua_absindex(L, idx);
         int t = lua_type(L, idx);
         switch (t)
@@ -661,6 +720,15 @@ namespace
         if (depth > MAX_SERIALIZATION_DEPTH)
         {
             err = "workers: result too deeply nested";
+            return false;
+        }
+        // CORRECTIF (revue Gemini post-audit v21, vérifié) : même
+        // garde côté désérialisation (createtable + valeur = ~2
+        // slots par niveau ; 4 avec marge). Convention « pile propre
+        // sur false » préservée : l'échec ici ne pousse rien.
+        if (!lua_checkstack(L, 4))
+        {
+            err = "workers: lua stack overflow during deserialization";
             return false;
         }
         if (j.is_null())
@@ -1162,6 +1230,19 @@ namespace
             lua_pop(L, 1);
         }
 
+        // État processus (option A validée) : marquer « un worker a
+        // été lancé » AVANT toute création effective, sous le MÊME
+        // verrou que les mutations d'environnement/cwd — aucun worker
+        // ne peut naître pendant un setenv/chdir, et réciproquement.
+        // Placé après la validation des arguments (un spawn mal typé
+        // lève sans déclencher la restriction) mais avant tout le
+        // reste ; définitif même si ce spawn échoue ensuite (règle
+        // simple, sans course).
+        {
+            std::lock_guard<std::mutex> lk(g_process_state_mu);
+            g_worker_ever_spawned = true;
+        }
+
         // Sérialiser args -> JSON.
         std::string args_json_str = "null";
         if (lua_istable(L, 2))
@@ -1560,6 +1641,19 @@ namespace
     }
 
 } // namespace
+
+// Voir le contrat détaillé dans workers.hpp. fn ne doit faire aucune
+// opération Lua (longjmp sous verrou interdit).
+bool with_process_env_lock(const std::function<void()> &fn)
+{
+    std::lock_guard<std::mutex> lk(g_process_state_mu);
+    if (g_worker_ever_spawned)
+    {
+        return false;
+    }
+    fn();
+    return true;
+}
 
 void register_workers(lua_State *L)
 {

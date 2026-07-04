@@ -1,4 +1,5 @@
 #include "chdir.hpp"
+#include "workers.hpp"
 #include "lua_utils.hpp"
 #include <filesystem>
 #include <string>
@@ -15,28 +16,33 @@ namespace fs = std::filesystem;
  * @param path The directory path to change to.
  * @return std::optional<std::string> An optional string containing an error message if any, or an empty optional if successful.
  */
-std::optional<std::string> chdir(const fs::path& path) {
+std::optional<std::string> chdir(const fs::path &path)
+{
     std::error_code ec;
 
     // Convert relative path to absolute path and then to canonical path
     fs::path absolute_path = fs::absolute(path, ec);
-    if (ec) {
+    if (ec)
+    {
         return "cannot resolve absolute path for '" + path.string() + "': " + ec.message();
     }
 
     fs::path canonical_path = fs::canonical(absolute_path, ec);
-    if (ec) {
+    if (ec)
+    {
         return "cannot resolve canonical path '" + absolute_path.string() + "': " + ec.message();
     }
 
     // Check if the path is a directory
-    if (!fs::is_directory(canonical_path, ec)) {
+    if (!fs::is_directory(canonical_path, ec))
+    {
         return "Path '" + canonical_path.string() + "' is not a directory or cannot be accessed: " + ec.message();
     }
 
     // Change current working directory
     fs::current_path(canonical_path, ec);
-    if (ec) {
+    if (ec)
+    {
         return "cannot change directory to '" + canonical_path.string() + "': " + ec.message();
     }
     return std::nullopt;
@@ -61,5 +67,20 @@ int lua_chdir(lua_State *L)
 
     fs::path path(std::string_view(path_cstr, len));
 
-    return push_action_result(L, chdir(path));
+    // CORRECTIF (option A validée, revue Gemini triée) : le CWD est
+    // PROCESS-WIDE — un chdir, même depuis le main thread, change la
+    // résolution des chemins relatifs de TOUS les workers en vol.
+    // Même règle que setenv : autorisé avant le premier spawn,
+    // interdit ensuite, sous le même verrou. AUCUNE opération Lua
+    // sous le verrou (résultat capturé dans une locale).
+    std::optional<std::string> res;
+    if (!with_process_env_lock([&]()
+                               { res = chdir(path); }))
+    {
+        return push_fail(L,
+                         "chdir: forbidden after workers.spawn (the working "
+                         "directory is shared across threads; change it "
+                         "before spawning workers)");
+    }
+    return push_action_result(L, res);
 }

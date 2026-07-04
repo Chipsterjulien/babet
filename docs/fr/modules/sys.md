@@ -108,6 +108,18 @@ print("Détaillé :", a, b)
 - **`uname()` renvoie une table, pas plusieurs valeurs**. Reste
   forward-compatible si un champ est ajouté un jour (ex :
   `domainname`).
+- **`setenv` et les workers ne se mélangent pas** (audit v21 ;
+  règle **appliquée par le runtime** depuis la revue croisée).
+  POSIX ne synchronise pas `setenv`/`getenv` entre threads : un
+  `babet.setenv` pendant qu'un worker — ou le runtime lui-même
+  (résolution DNS, locale, `exec`) — lit l'environnement est une
+  course de données. `babet.setenv` (et `babet.chdir`, dont le
+  répertoire courant est lui aussi partagé par tout le processus)
+  rendent donc `(nil, err)` dès qu'un `workers.spawn` a eu lieu —
+  définitivement, même après `join`, même si le spawn a échoué. La
+  transition est sérialisée par le même verrou que les mutations :
+  aucun worker ne peut naître pendant un `setenv`/`chdir`. Fixe
+  environnement et répertoire courant **avant** le premier worker.
 
 ## Hors v1
 
