@@ -123,6 +123,15 @@ namespace
             // rater des événements déjà présents dans la queue.
             int t = remaining_ms(deadline);
             pfd.revents = 0;
+            // CORRECTIF (revue ChatGPT post-release, étendu ici par
+            // cohérence — la revue ne visait que sleep) : même garde
+            // pré-poll que wait_ready_deadline (socket) et sleep. Un
+            // signal géré déjà en attente interrompt immédiatement,
+            // au lieu de laisser le poll aller à son terme.
+            if (signal_any_handled_pending())
+            {
+                return WAIT_INTERRUPTED;
+            }
             int r = ::poll(&pfd, 1, t);
             if (r < 0)
             {

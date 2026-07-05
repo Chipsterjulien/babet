@@ -866,6 +866,18 @@ do
                 return type(x) == "table" and #x == 1
                     and x[1]:find("dd.txt", 1, true) ~= nil
             end)
+
+        -- Régression (revue ChatGPT post-release) : mindepth/maxdepth
+        -- étaient rangés dans des int -> narrowing du lua_Integer,
+        -- comme max_splits de split. maxdepth = 2^32 devenait 0 (tout
+        -- élagué sous la racine) et 2^31 devenait négatif (résultat
+        -- vide). Désormais lua_Integer de bout en bout.
+        local rw, ew = babet.find(P, { maxdepth = 4294967296, type = "f" })
+        ok_val("find maxdepth=2^32 -> tous les fichiers (pas de narrowing)",
+            rw, ew, function(x) return type(x) == "table" and #x == 7 end)
+        local rz, ez = babet.find(P, { maxdepth = 2147483648, type = "f" })
+        ok_val("find maxdepth=2^31 -> tous les fichiers", rz, ez,
+            function(x) return type(x) == "table" and #x == 7 end)
     end
 end
 

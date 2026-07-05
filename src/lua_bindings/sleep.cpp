@@ -143,8 +143,28 @@ int lua_sleep(lua_State *L)
     }
 
     struct timespec rem;
-    while (::nanosleep(&req, &rem) == -1)
+    for (;;)
     {
+        // CORRECTIF (revue ChatGPT post-release, vérifié) : fenêtre
+        // PRÉ-attente, même principe que le garde pré-poll de
+        // wait_ready_deadline (socket). Un signal géré livré juste
+        // AVANT nanosleep posait son flag sans interrompre le sommeil
+        // qui suivait : toute la durée s'écoulait avant le dispatch —
+        // incohérent avec le contrat signal-aware. Testé à CHAQUE
+        // itération (les reprises après un EINTR étranger re-vérifient
+        // aussi). NB : la fenêtre n'est pas réduite à zéro (un signal
+        // peut tomber entre ce test et l'entrée dans nanosleep) — la
+        // fermer totalement demanderait un mécanisme type
+        // ppoll/sigmask ; réduction assumée, comme côté socket.
+        if (signal_any_handled_pending())
+        {
+            signal_dispatch_pending(L);
+            return push_fail(L, "interrupted");
+        }
+        if (::nanosleep(&req, &rem) == 0)
+        {
+            break;
+        }
         if (errno != EINTR)
         {
             // Erreur improbable sur Linux moderne (EINVAL si tv_nsec

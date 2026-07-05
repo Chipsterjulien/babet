@@ -231,7 +231,11 @@ namespace
         for (;;)
         {
             // CORRECTIF (option A validée, revues ChatGPT lots
-            // 13/14) : ferme la race PRÉ-poll. Le chemin EINTR
+            // 13/14) : réduit drastiquement la race PRÉ-poll (sans la
+            // fermer à 100 % : un signal peut encore tomber entre ce
+            // test et l'entrée effective dans poll(2) — une garantie
+            // atomique demanderait ppoll/sigmask ou signalfd, chantier
+            // assumé comme hors de propos). Le chemin EINTR
             // ci-dessous ne couvre que les signaux arrivant PENDANT
             // poll() ; un signal géré livré juste AVANT l'entrée
             // (flag posé, poll non interrompu) laissait l'attente

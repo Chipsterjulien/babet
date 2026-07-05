@@ -19,8 +19,13 @@ namespace
 
     struct FindOptions
     {
-        int mindepth = 0;
-        int maxdepth = std::numeric_limits<int>::max();
+        // CORRECTIF (revue ChatGPT post-release, vérifié) : lua_Integer,
+        // plus int — même narrowing que max_splits de split (déjà
+        // corrigé) : find(dir, { maxdepth = 2^32 }) devenait
+        // silencieusement maxdepth = 0 (tout élagué sous la racine),
+        // et 2^31 donnait un maxdepth NÉGATIF (résultat vide).
+        lua_Integer mindepth = 0;
+        lua_Integer maxdepth = std::numeric_limits<lua_Integer>::max();
         std::string type;
         std::string name;  // ECMAScript regex (e.g. ".*\\.cpp$")
         std::string iname; // idem, case-insensitive
@@ -222,7 +227,10 @@ namespace
             for (auto it = fs::recursive_directory_iterator(root);
                  it != fs::recursive_directory_iterator(); ++it)
             {
-                int depth = it.depth();
+                // lua_Integer pour comparer sans narrowing avec les
+                // bornes (it.depth() rend un int, l'élargissement est
+                // sans perte).
+                lua_Integer depth = it.depth();
 
                 // CORRECTIF (audit v21) : élagage maxdepth par PRÉVENTION
                 // de la descente, plus par pop().
