@@ -18,16 +18,21 @@ to `{}` (object), but if you want `[]` you use the
 
 ## API
 
-| Function | Returns |
-| --- | --- |
-| `babet.json.encode(value, opts?)` | `string` (JSON text) \| `(nil, err)` |
-| `babet.json.decode(text)` | `value` \| `(nil, err)` |
-| `babet.json.empty_array` | sentinel value that encodes to `[]` |
+| Function                          | Returns                                                             |
+| --------------------------------- | ------------------------------------------------------------------- |
+| `babet.json.encode(value, opts?)` | `string` (JSON text) \| `(nil, err)`                                |
+| `babet.json.decode(text)`         | `value` \| `(nil, err)`                                             |
+| `babet.json.null`                 | sentinel — represents JSON `null` (see below)                       |
+| `babet.json.empty_array`          | sentinel that encodes as `[]`                                       |
+| `babet.json.as_array(t)`          | `t`, tagged to encode as a JSON **array** even when ambiguous/empty |
 
 Encoding options (`opts` table) :
 
-- `pretty = true` — pretty-print with indentation (default `false`).
-- `indent = N` — indent width when `pretty=true` (default `2`).
+- `indent = N` (integer `>= 0`) — enables pretty-printing with `N`
+  spaces of indentation (`0` = newlines without spaces). Omitted
+  or negative : **compact** output. (An earlier version of this
+  page documented a `pretty` option that never existed : `indent`
+  alone drives everything.)
 
 ## Quick example
 
@@ -45,13 +50,33 @@ local out = J.encode({ a = 1, b = { 2, 3 } })
 -- out == '{"a":1,"b":[2,3]}'
 
 -- Encode pretty
-local pretty = J.encode({ a = 1 }, { pretty = true, indent = 4 })
+local pretty = J.encode({ a = 1 }, { indent = 4 })
 
 -- Empty array vs empty object
 J.encode({})                    --> "{}"
 J.encode(J.empty_array)         --> "[]"
 J.encode({ items = J.empty_array })  --> '{"items":[]}'
 ```
+
+## `null`, `empty_array`, `as_array`
+
+Lua cannot store `nil` in a table (the key disappears).
+`babet.json.null` fills the gap :
+
+- **Decoding** : a JSON `null` becomes the `babet.json.null`
+  sentinel (test with `==`), not `nil` — so the key stays present
+  and visible to `pairs()`.
+- **Encoding** : `babet.json.null` encodes as `null`.
+
+`babet.json.as_array(t)` tags `t` (via an internal metatable) so
+that `encode` serialises it as a JSON array, even when the
+structure is ambiguous. Sentinels cannot be tagged
+(`as_array(json.null)` raises). Tables produced by decoding an
+empty JSON array already carry the tag : the round-trip
+`decode("[]")` → `encode` gives back `"[]"`.
+
+Maximum nesting depth : **1000 levels** both ways (beyond :
+explicit `(nil, err)`).
 
 ## Error contract
 

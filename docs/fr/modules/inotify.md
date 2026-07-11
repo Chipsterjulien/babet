@@ -24,10 +24,18 @@ c'est de ne pas te le dire).
 | Fonction | Renvoie |
 | --- | --- |
 | `babet.inotify.new()` | `watcher` (userdata) \| `(nil, err)` |
-| `w:add(path, events, opts?)` | `integer` wd (watch descriptor) \| `(nil, err)` |
+| `w:add(path, events)` | `integer` wd (watch descriptor) \| `(nil, err)` |
 | `w:remove(wd)` | `(true, nil)` \| `(nil, err)` |
 | `w:read(timeout?)` | `table` d'événements \| `(nil, "timeout")` \| `(nil, "interrupted")` \| `(nil, err)` |
 | `w:close()` | `(true, nil)` — idempotent |
+
+`read(timeout?)` : omis = **bloque** jusqu'au prochain événement ;
+`0` = **non bloquant** (rend les événements déjà en attente, sinon
+`(nil, "timeout")`) ; `t > 0` = attend au plus `t` secondes.
+Attention : cette convention diverge de celle de `workers` où `0`
+signifie aussi non-bloquant mais de `socket` où `set_timeout(0)`
+signifie infini — ici, « rends-moi ce qu'il y a maintenant » est le
+cas d'usage dominant.
 
 ### Argument `events`
 
@@ -41,9 +49,11 @@ acceptables :
 | `"attrib"` | métadonnées changées (perms, mtime, …) |
 | `"close_write"` | un fichier ouvert en écriture est fermé |
 | `"close_nowrite"` | un fd read-only est fermé |
+| `"close"` | alias combiné : `close_write` **ou** `close_nowrite` |
 | `"open"` | fichier ouvert |
 | `"moved_from"` | fichier déplacé hors du dossier surveillé |
 | `"moved_to"` | fichier déplacé dans le dossier surveillé |
+| `"move"` | alias combiné : `moved_from` **ou** `moved_to` |
 | `"create"` | fichier/dossier créé dans le dossier surveillé |
 | `"delete"` | fichier/dossier supprimé du dossier surveillé |
 | `"delete_self"` | le chemin surveillé lui-même est supprimé |

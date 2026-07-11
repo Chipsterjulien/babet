@@ -16,28 +16,29 @@ default.
 
 ## API
 
-| Function | Returns |
-| --- | --- |
-| `babet.http.request(opts)` | `response` (table) \| `(nil, err)` |
-| `babet.http.get(url, opts?)` | shortcut for `request{ method="GET", url=url, ... }` |
-| `babet.http.post(url, opts?)` | shortcut for `request{ method="POST", url=url, ... }` |
-| `babet.http.put(url, opts?)` | shortcut for `request{ method="PUT", url=url, ... }` |
-| `babet.http.delete(url, opts?)` | shortcut for `request{ method="DELETE", url=url, ... }` |
+| Function                      | Returns                                                                                     |
+| ----------------------------- | ------------------------------------------------------------------------------------------- |
+| `babet.http.request(opts)`    | `response` (table) \| `(nil, err)` — methods : GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE |
+| `babet.http.get(url, opts?)`  | shortcut for `request{ method="GET", url=url, ... }`                                        |
+| `babet.http.post(url, opts?)` | shortcut for `request{ method="POST", url=url, ... }`                                       |
+
+> No `put`/`delete`/`patch` shortcuts in v1 (an earlier version of
+> this page wrongly advertised them) : use
+> `request{ method = "PUT", ... }`. See "Not in v1".
 
 ### `opts` table
 
-| Field | Type | Default |
-| --- | --- | --- |
-| `url` | string (required for `request`) | — |
-| `method` | string | `"GET"` |
-| `headers` | table of `name = value` | `{}` |
-| `body` | string | `""` |
-| `timeout` | number (seconds) | 30 |
-| `verify` | boolean (TLS cert verification) | `true` |
-| `ca_cert` | string (path to CA bundle file) | system default |
-| `ca_path` | string (path to CA dir) | system default |
-| `follow_redirects` | boolean | `true` |
-| `max_redirects` | integer | 5 |
+| Field              | Type                                                                                                              | Default                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `url`              | string (required for `request`)                                                                                   | —                                                                              |
+| `method`           | string — GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE                                                             | `"GET"`                                                                        |
+| `headers`          | table of `name = value`                                                                                           | `{}`                                                                           |
+| `body`             | string (forbidden for GET/HEAD/OPTIONS)                                                                           | `""`                                                                           |
+| `query`            | table `{ key = value }` — URL-encoded and appended to the URL (`?a=b&c=d`), merges cleanly with an existing query | —                                                                              |
+| `timeout`          | number (seconds)                                                                                                  | **none** — without it, cpp-httplib's internal defaults apply ; always pass one |
+| `verify`           | boolean (TLS cert verification)                                                                                   | `true`                                                                         |
+| `ca_cert`          | string (path to CA bundle file)                                                                                   | system default                                                                 |
+| `follow_redirects` | boolean                                                                                                           | **`false`** — following is opt-in ; hop limit internal to cpp-httplib          |
 
 ### `response` table
 
@@ -49,10 +50,14 @@ default.
         ["content-type"] = "application/json",
         ["content-length"] = "42",
     },
-    -- final URL after redirects:
-    url = "https://api.example.com/v1/data",
 }
 ```
+
+> **Duplicate** response headers : the last value wins (one key =
+> one string). Known consequence : if a server sends several
+> `Set-Cookie` headers, only the last one is visible. If that need
+> becomes real, `headers` could carry a table of strings for
+> repeated keys — see "Not in v1".
 
 ## Quick examples
 
@@ -88,6 +93,9 @@ local r = babet.http.get("https://expired.badssl.com/",
 - **Wrong argument types** → raises via `luaL_error`.
 - **Network errors** (DNS, connect, timeout, TLS) →
   `(nil, "http: <description>")`.
+- **`body` on GET/HEAD/OPTIONS** → `(nil, "http: body not allowed
+  for <method>")` — reported, never silently dropped.
+- **Unknown method** → `(nil, "http: unsupported method '...'")`.
 - **HTTP status errors** are **not** errors — a `404` returns a
   normal `response` table with `status = 404`. Status semantics
   are the caller's responsibility.
@@ -100,11 +108,15 @@ mechanisms ensure `verify=true` works out of the box :
 
 1. The vendored OpenSSL is built with `--openssldir=/etc/ssl`,
    covering Arch, Debian, Ubuntu, Alpine, Gentoo.
-2. At TLS init, Babet probes known CA bundle paths for
-   Fedora/RHEL, OpenSUSE, FreeBSD, NetBSD.
+2. `babet.socket.connect_tls` additionally probes the known CA
+   bundle paths (Fedora/RHEL, OpenSUSE, FreeBSD, NetBSD).
+   **`babet.http` relies on the OpenSSL defaults alone**
+   (mechanism 1) : on an exotic layout where point 1 is not
+   enough, `http` may need `ca_cert` where `connect_tls` works.
+   `tools/verif_ca.lua` diagnoses both paths.
 
-You can override per-call with `ca_cert` / `ca_path`, or globally
-via `SSL_CERT_FILE` / `SSL_CERT_DIR` environment variables. See
+You can override per-call with `ca_cert`, or globally via the
+`SSL_CERT_FILE` / `SSL_CERT_DIR` environment variables.
 [`security`](../security.md) and [`tls`](tls.md) for details.
 
 ## Design decisions
@@ -119,11 +131,20 @@ via `SSL_CERT_FILE` / `SSL_CERT_DIR` environment variables. See
 - **Headers are normalised to lowercase keys** in the response,
   to make case-insensitive lookups work directly
   (`r.headers["content-type"]`).
-- **Follow redirects by default**. Bounded to 5 hops, override
-  with `max_redirects` or disable with `follow_redirects=false`.
+- **Redirects are opt-in**. An unfollowed redirect is visible
+  (`status = 301/302` + `location` header) ; following it is the
+  caller's decision (`follow_redirects = true`). The hop limit is
+  cpp-httplib's, not ours.
 
 ## Not in v1
 
+- `put` / `delete` / `patch` shortcuts — covered by
+  `request{ method = ... }` ; trivial sugar to add if the need is
+  confirmed.
+- `opts.ca_path` (per-call CA directory) and `opts.max_redirects`
+  — an earlier version of this page wrongly documented them.
+- Repeated response headers as a table of strings (multiple
+  `Set-Cookie` case).
 - Streaming response body (e.g. for downloading large files).
   Currently `body` is read fully into memory.
 - HTTP/2 / HTTP/3.

@@ -20,60 +20,73 @@ Babet scripts.
 local log = require("logging")
 ```
 
-| Function | Returns |
-| --- | --- |
-| `log.set_level(name)` | `(true, nil)` — `name` is one of `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"` |
-| `log.set_output(path)` | `(true, nil)` \| `(nil, err)` — file path (default stderr) |
-| `log.debug(...)`, `log.info(...)`, `log.warn(...)`, `log.error(...)`, `log.fatal(...)` | each prints if its level is ≥ current threshold |
+| Function                                                                               | Returns                                                                                                                |
+| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `log.trace(...)`, `log.debug(...)`, `log.info(...)`, `log.warn(...)`, `log.error(...)` | nothing — each emits if its level is ≥ the current threshold. **Never raise** (even if the sink breaks)                |
+| `log.set_level(lvl)`                                                                   | `lvl` = name (`"trace"`…`"error"`, case-insensitive) **or** constant (`log.INFO`). Unknown → raises                    |
+| `log.set_output(out)`                                                                  | `out` = **any object answering `:write`** (`io.open` handle, custom table). Default : `io.stderr`. Wrong type → raises |
+| `log.set_color(bool)`                                                                  | enables/disables ANSI colors (default : **off**). Strict non-boolean → raises                                          |
+| `log.TRACE` … `log.ERROR`                                                              | numeric level constants (10, 20, 30, 40, 50)                                                                           |
 
-Messages are timestamped (`YYYY-MM-DD HH:MM:SS`) and tagged with
-the level (`[DEBUG]`, `[INFO]`, etc.). Multiple arguments are
-concatenated with spaces, like `print`.
+> An earlier version of this page documented a `fatal` level that
+> never existed (calling `log.fatal` crashes : nil call) and
+> omitted `trace` and `set_color`. The five real levels :
+> `trace=10`, `debug=20`, `info=30` (default threshold), `warn=40`,
+> `error=50`.
+
+Messages are prefixed `YYYY-MM-DD HH:MM:SS [LEVEL]` (level padded
+to 5 characters : `[INFO ]`, `[ERROR]`). Multiple arguments are
+joined with spaces, like `print`. Colors (opt-in via
+`set_color(true)`) : trace grey, debug cyan, **info uncolored**
+(the nominal case stays neutral), warn yellow, error red.
 
 ## Quick example
 
 ```lua
 local log = require("logging")
-log.set_level("info")   -- debug calls below this become no-ops
+log.set_level("info")   -- trace and debug become no-ops
 
-log.info("startup, pid =", babet.pid())
-log.warn("retry attempt", 3, "of", 5)
+log.info("starting, pid =", babet.pid())
+log.warn("attempt", 3, "of", 5)
 log.error("connection failed:", err)
 
--- Optional: route to a file
-local ok, err = log.set_output("/var/log/myapp.log")
-if not ok then
-    log.fatal("can't open log:", err)
-    os.exit(1)
+-- Optional : route to a file (a :write-able object)
+local f = io.open("/var/log/myapp.log", "a")
+if not f then
+    log.error("cannot open log file; staying on stderr")
+else
+    log.set_output(f)
 end
 ```
 
 Output :
 
 ```
-2026-06-11 14:32:01 [INFO] startup, pid = 12345
-2026-06-11 14:32:05 [WARN] retry attempt 3 of 5
+2026-06-11 14:32:01 [INFO ] starting, pid = 12345
+2026-06-11 14:32:05 [WARN ] attempt 3 of 5
 2026-06-11 14:32:05 [ERROR] connection failed: timeout
 ```
 
 ## Error contract
 
-- **`set_level(name)`** : unknown name raises via `error()`.
-- **`set_output(path)`** : `(nil, err)` if the file can't be
-  opened for append. Logging continues to the previous sink
-  (stderr if none was set).
-- Logging functions themselves never fail — if the file becomes
-  unwritable mid-run, the message is silently dropped (the
-  alternative — crashing the script because the log volume is
-  full — is worse).
+- **`set_level` / `set_output` / `set_color`** : invalid argument
+  (unknown level, object without `:write`, non-boolean) →
+  **raises** via `error()` — that's a programmer bug, not a runtime
+  condition.
+- **The emit functions never raise** : the write is wrapped in a
+  `pcall` — a sink that breaks midway (disk full, closed file)
+  loses the message silently, never crashes the script.
 
 ## Design decisions
 
 - **Pure-Lua module**. No C++ needed, and being in Lua means
   scripts can monkey-patch it (e.g. add JSON-format output) at
   the call site without rebuilding Babet.
-- **Five levels, no `trace`**. Five is enough for almost everyone
-  ; adding more invites everyone to invent their own.
+- **Five levels, `trace` to `error` — no `fatal`**. `error` plus
+  an explicit `os.exit(1)` beats a level that kills the process
+  quietly ; and five levels are enough for almost everyone.
+- **Colors are opt-in, `info` always neutral**. The nominal case
+  shouldn't shout ; only deviations (warn, error) stand out.
 - **Single global sink**. Multiple loggers / hierarchical loggers
   / per-module levels are a feature creep trap. If you need
   multiple destinations, write a wrapper.

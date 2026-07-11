@@ -25,15 +25,19 @@ qui gère la vérification de certs correctement par défaut.
 | `babet.socket.connect_tls(host, port, opts?)` | `tls_socket` \| `(nil, err)` |
 | `s:starttls(opts?)` | `(true, nil)` \| `(nil, err)` — upgrade un socket en clair existant |
 
-`opts` (fusionnés avec les opts socket habituels) :
+`opts` :
 
-| Champ | Type | Défaut |
-| --- | --- | --- |
-| `verify` | boolean | `true` |
-| `ca_cert` | string (chemin) | bundle système |
-| `ca_path` | string (chemin) | bundle système |
-| `server_name` | string | argument host |
-| `alpn` | array de strings | aucun |
+| Champ      | Type                                   | Défaut                                                                                                                                           |
+| ---------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `verify`   | boolean — vérification du certificat   | `true`                                                                                                                                           |
+| `ca_cert`  | string (chemin d'un fichier CA bundle) | trust store système                                                                                                                              |
+| `ca_path`  | string (chemin d'un dossier de CA)     | trust store système                                                                                                                              |
+| `hostname` | string — SNI + vérification du nom     | `connect_tls` : l'argument `host`. `starttls` : **requis** si `verify = true`                                                                    |
+| `timeout`  | number (secondes)                      | infini — budget appliqué à **chaque phase** (connexion TCP, puis handshake TLS), pas une enveloppe unique ; la résolution DNS n'est pas couverte |
+
+> Une ancienne version de cette page nommait l'option `server_name`
+> (le vrai nom est `hostname`) et documentait une option `alpn` qui
+> n'existe pas — voir « Hors v1 ».
 
 Un `tls_socket` a les mêmes méthodes qu'un socket en clair
 (`send`, `recv`, `recv_line`, `recv_all`, `set_timeout`,
@@ -74,7 +78,7 @@ until not line:match("^250%-")                    -- dernière ligne 250
 s:send("STARTTLS\r\n")
 print(s:recv_line())                              -- 220 ready to start TLS
 
-assert(s:starttls({ server_name = "mail.example.com" }))
+assert(s:starttls({ hostname = "mail.example.com" }))
 -- s est maintenant chiffré ; continue avec EHLO + AUTH + …
 ```
 
@@ -103,6 +107,18 @@ local s = assert(babet.socket.connect_tls("self-signed.local", 8443, {
 - **`verify=true` + cert invalide** → `(nil, "tls: certificate
   verify failed: <reason>")`. Raisons courantes : expiré,
   auto-signé, hostname mismatch, CA inconnue.
+- **`starttls` avec `verify = true` sans `opts.hostname`** →
+  `(nil, "tls: starttls with verify=true requires opts.hostname;
+  pass hostname or set verify=false")` — impossible de vérifier un
+  certificat sans savoir quel nom vérifier ; le refus explicite
+  vaut mieux qu'une vérification silencieusement incomplète.
+- **Après un échec de `starttls`** : le socket est rendu **tel
+  quel** — en clair, bloquant, toujours ouvert (tu peux fermer
+  proprement ou réessayer). Cas limite : si la remise en mode
+  bloquant échoue (quasi impossible), le socket est **fermé** et
+  l'erreur porte le suffixe
+  `"(socket closed: could not restore blocking mode)"` — un état
+  sûr et explicite plutôt qu'un socket au comportement altéré.
 - **Timeouts NaN/Inf**, mauvais types → lève via `luaL_error`.
 
 ## Trust store
@@ -134,15 +150,19 @@ le handshake échoue avec une erreur claire. Voir
 - **`verify=true` par défaut, `verify=false` exige un opt-in
   explicite**. Aucun moyen de désactiver accidentellement la
   vérification de cert.
-- **`server_name` défaut sur l'argument host** pour que SNI
-  marche tout seul. Passe-le explicitement si tu te connectes par
-  IP à un serveur TLS qui utilise SNI.
+- **`hostname` défaut sur l'argument host** (pour `connect_tls`),
+  pour que SNI marche tout seul. Passe-le explicitement si tu te
+  connectes par IP à un serveur TLS qui utilise SNI — et il est
+  requis pour `starttls` avec vérification, puisque le socket
+  existant ne connaît pas le nom attendu.
 - **Mêmes méthodes que socket en clair**, donc une fonction qui
   prend un `socket` fonctionne avec les deux de manière
   transparente.
 
 ## Hors v1
 
+- Négociation ALPN (une ancienne version de cette page documentait
+  une option `alpn` qui n'a jamais existé).
 - Authentification client par certificat. Possible à ajouter
   plus tard en option `client_cert` / `client_key`.
 - TLS session resumption / session tickets. Pas courant au niveau

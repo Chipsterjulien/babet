@@ -21,21 +21,22 @@ et des enfants orphelins.
 
 ## API
 
-| Fonction | Renvoie |
-| --- | --- |
+| Fonction                        | Renvoie                                                  |
+| ------------------------------- | -------------------------------------------------------- |
 | `babet.signal.handle(name, fn)` | `(true, nil)` \| `(nil, err)` — installe le callback Lua |
-| `babet.signal.ignore(name)` | `(true, nil)` \| `(nil, err)` — met à `SIG_IGN` |
-| `babet.signal.default(name)` | `(true, nil)` \| `(nil, err)` — retour au défaut OS |
-| `babet.signal.kill(pid, name)` | `(true, nil)` \| `(nil, err)` — envoie le signal au PID |
-| `babet.signal.list()` | `table` de tous les noms de signaux supportés |
-| `babet.signal.is_pending()` | `boolean` — y a-t-il un signal géré en file ? |
+| `babet.signal.ignore(name)`     | `(true, nil)` \| `(nil, err)` — met à `SIG_IGN`          |
+| `babet.signal.default(name)`    | `(true, nil)` \| `(nil, err)` — retour au défaut OS      |
+
+> Une ancienne version de cette page documentait aussi `kill`,
+> `list` et `is_pending` : ils n'existent pas — voir « Hors v1 ».
 
 Noms de signaux acceptés (string, casse sensible) :
 
-`"HUP"`, `"INT"`, `"QUIT"`, `"USR1"`, `"USR2"`, `"PIPE"`,
-`"ALRM"`, `"TERM"`, `"CHLD"`, `"CONT"`, `"TSTP"`, `"TTIN"`,
-`"TTOU"`, `"WINCH"`. Les autres signaux (`KILL`, `STOP`) ne
-peuvent pas être attrapés — POSIX l'interdit.
+`"TERM"`, `"INT"`, `"HUP"`, `"USR1"`, `"USR2"`, `"PIPE"` — les six
+signaux de la v1 (une ancienne version de cette page en listait
+quatorze ; étendre la table est trivial, voir « Hors v1 »).
+`KILL` et `STOP` ne pourront jamais y figurer — POSIX interdit de
+les attraper.
 
 ## Exemple rapide
 
@@ -106,12 +107,17 @@ remplace un hook utilisateur déjà installé. Évite de mélanger
 ## Contrat d'erreur
 
 - **Nom de signal inconnu** → `(nil, "signal: unknown name 'XYZ'")`.
-- **Appels interdits depuis un worker thread** → `(nil, "signal:
-  not available in worker threads")`. Les signaux sont globaux au
-  process ; seul le thread principal les gère.
+- **Appels depuis un worker thread** → **lève** via `luaL_error`
+  (`"signal.handle: signal handlers can only be configured from
+  the main thread, not from a worker"`). C'est un bug de structure
+  du script, pas une condition d'exécution — d'où la levée plutôt
+  qu'un `(nil, err)`. Les signaux sont globaux au process ; seul le
+  thread principal les gère.
 - **Mauvais types d'argument** → lève via `luaL_error`.
-- **`kill(pid, name)`** pour un PID qui n'existe pas ou ne t'appartient
-  pas → `(nil, "kill: …")`.
+- **Le callback ne reçoit aucun argument** (installe un callback
+  par signal si tu dois les distinguer) et **ses erreurs sont
+  avalées en silence** : entoure ton code d'un `pcall` si tu veux
+  les observer.
 
 ## Décisions de design
 
@@ -134,6 +140,13 @@ remplace un hook utilisateur déjà installé. Évite de mélanger
 
 ## Hors v1
 
+- `kill(pid, name)`, `list()` et `is_pending()` — une ancienne
+  version de cette page les présentait à tort comme disponibles.
+  Contournements : envoyer un signal =
+  `babet.exec("kill", { "-TERM", tostring(pid) })` ; la liste des
+  noms supportés est ci-dessus.
+- Étendre la table des signaux (`QUIT`, `ALRM`, `CHLD`, `WINCH`,
+  …) — trivial si un besoin réel se présente.
 - `sigprocmask` / masquage fin de signaux. Pas souvent nécessaire
   au niveau script.
 - Intégration avec `signalfd` pour le polling. Le modèle de

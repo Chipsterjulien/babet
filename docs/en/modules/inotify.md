@@ -22,10 +22,17 @@ worse than dropping events silently is not telling you about it).
 | Function | Returns |
 | --- | --- |
 | `babet.inotify.new()` | `watcher` (userdata) \| `(nil, err)` |
-| `w:add(path, events, opts?)` | `integer` wd (watch descriptor) \| `(nil, err)` |
+| `w:add(path, events)` | `integer` wd (watch descriptor) \| `(nil, err)` |
 | `w:remove(wd)` | `(true, nil)` \| `(nil, err)` |
 | `w:read(timeout?)` | `table` of events \| `(nil, "timeout")` \| `(nil, "interrupted")` \| `(nil, err)` |
 | `w:close()` | `(true, nil)` — idempotent |
+
+`read(timeout?)` : omitted = **blocks** until the next event ;
+`0` = **non-blocking** (returns the already-pending events,
+otherwise `(nil, "timeout")`) ; `t > 0` = waits at most `t`
+seconds. Note : this convention diverges from `socket` where
+`set_timeout(0)` means infinite — here, "give me what's there
+right now" is the dominant use case.
 
 ### `events` argument
 
@@ -38,9 +45,11 @@ A strict 1..N array of event name strings. Acceptable names :
 | `"attrib"` | metadata changed (perms, mtime, …) |
 | `"close_write"` | file opened for writing is closed |
 | `"close_nowrite"` | read-only fd closed |
+| `"close"` | combined alias : `close_write` **or** `close_nowrite` |
 | `"open"` | file opened |
 | `"moved_from"` | file moved out of watched dir |
 | `"moved_to"` | file moved into watched dir |
+| `"move"` | combined alias : `moved_from` **or** `moved_to` |
 | `"create"` | file/dir created in watched dir |
 | `"delete"` | file/dir deleted from watched dir |
 | `"delete_self"` | the watched path itself is deleted |

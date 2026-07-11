@@ -69,7 +69,10 @@ est ce que `join()` renvoie comme `result`.
 Toute valeur qui peut être deep-copiée entre états Lua : `nil`,
 booleans, numbers, strings, tables des mêmes. **Pas** : fonctions,
 userdata, threads, tables avec cycles. Les tables sont
-deep-copiées — pas de partage.
+deep-copiées — pas de partage. Profondeur maximale : **32
+niveaux** d'imbrication (au-delà : `(nil, "workers: spawn: value
+too deeply nested")`). Mêmes règles pour la valeur de retour du
+worker et pour les messages `send`/`recv`.
 
 ## Exemples rapides
 
@@ -105,18 +108,22 @@ end
 
 ### Travail CPU-bound avec cancellation
 
-```lua
-local n = babet.workers.cpu_count()
-print("on tourne sur", n, "cœurs")
+La cancellation est **coopérative**, construite avec le canal de
+messages : le parent envoie `"stop"`, le worker vérifie son inbox
+périodiquement avec `worker.recv(0)` (non bloquant).
 
+```lua
 local jobs = {}
-for i = 1, n do
+for i = 1, 4 do
     jobs[i] = babet.workers.spawn([[
         local chunk = worker.args.chunk
         local total = 0
         for x = chunk.from, chunk.to do
-            if x % 1000 == 0 and worker.cancelled() then
-                return { cancelled = true, partial = total }
+            if x % 1000 == 0 then
+                local got, msg = worker.recv(0) -- non bloquant
+                if got and msg == "stop" then
+                    return { cancelled = true, partial = total }
+                end
             end
             total = total + heavy_compute(x)
         end
@@ -125,14 +132,17 @@ for i = 1, n do
 end
 
 -- ... plus tard, si nécessaire :
--- for _, j in ipairs(jobs) do j:cancel() end
+-- for _, j in ipairs(jobs) do j:send("stop") end
+-- puis join() pour récupérer les résultats partiels.
 ```
 
 ### Pattern pool de workers
 
 ```lua
 local function map_parallel(items, code, max_concurrent)
-    max_concurrent = max_concurrent or babet.workers.cpu_count()
+    -- pas de cpu_count() en v1 : fixe une valeur, ou détecte :
+    -- tonumber(babet.exec("nproc").stdout)
+    max_concurrent = max_concurrent or 4
     local results = {}
     local i = 1
     local active = {}
@@ -149,7 +159,7 @@ local function map_parallel(items, code, max_concurrent)
         -- moissonner les finis
         for k = #active, 1, -1 do
             local entry = active[k]
-            if entry.job:done() then
+            if entry.job:poll() ~= "running" then
                 local ok, result = entry.job:join()
                 results[entry.index] = ok and result or { err = result }
                 table.remove(active, k)
@@ -206,6 +216,11 @@ une db occupée.
   thread OS, chaque `join` le ferme. Pour les boucles serrées,
   construis un pool en Lua (voir l'exemple ci-dessus). Le modèle
   plus simple gagne en lisibilité.
+- **Le premier `spawn` verrouille `setenv` et `chdir`** —
+  définitivement, même après `join`. L'environnement et le
+  répertoire courant sont des états process-wide ; les muter
+  pendant qu'un worker tourne est une course de données. Fixe-les
+  avant le premier worker. Voir la note dans [sys](sys.md).
 - **`babet.signal` n'est pas disponible dans les workers**.
   Les signaux sont process-wide ; seul le thread principal peut
   les gérer sensément.
@@ -221,8 +236,9 @@ une db occupée.
 > `job:send("stop")` + un `worker.recv(0)` périodique), et
 > `babet.workers.cpu_count()`.
 
-- Channels (queues FIFO entre workers). À ajouter plus tard si un
+- Channels **entre workers** (worker↔worker — le canal
+  parent↔worker existe déjà : `send`/`recv`). À ajouter plus tard si un
   cas d'usage montre que le pattern est courant.
 - Mémoire partagée (mmap). Idem.
 - Futures I/O async (style `spawn().then(...)`). Hors scope ;
-  utilise une boucle de polling ou des checks `done()`.
+  utilise une boucle de polling avec `job:poll()`.

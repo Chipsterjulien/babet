@@ -37,6 +37,10 @@ one-liners.
 - `backlog` : integer > 0, optional — default 16. `listen(2)` queue
   size.
 
+> **TLS** : `babet.socket.connect_tls(host, port, opts?)` and
+> `s:starttls(opts?)` also exist — they have their own page, see
+> [`tls`](tls.md).
+
 A `connect` — with or without a timeout — interrupted by a signal
 handled via [`signal`](signal.md) returns `(nil, "interrupted")`
 after dispatching the callback, like `recv`/`accept`.
@@ -45,11 +49,11 @@ after dispatching the callback, like `recv`/`accept`.
 
 | Method | Returns |
 | --- | --- |
-| `s:send(data)` | `integer` bytes sent \| `(nil, err)` |
+| `s:send(data)` | `integer` bytes sent \| `(nil, err)` — sends **everything** (internal loop over partial writes) |
 | `s:recv(n, timeout?)` | `string` \| `(nil, "timeout")` \| `(nil, "interrupted")` \| `(nil, err)` |
 | `s:recv_line(timeout?)` | `string` (without `\n`) \| `(nil, …)` |
 | `s:recv_all(timeout?)` | `string` (read until EOF) \| `(nil, …)` |
-| `s:set_timeout(seconds)` | sets default timeout (`0` = infinite) |
+| `s:set_timeout(seconds)` | sets default timeout (`0` = infinite). NaN/Inf/negative → `(nil, err)` ; internal 1 ms floor for tiny positive values |
 | `s:close()` | idempotent |
 | `s:peer()` | table `{host, port}` \| `(nil, err)` — remote endpoint |
 | `s:sockname()` | table `{host, port}` \| `(nil, err)` — local endpoint |

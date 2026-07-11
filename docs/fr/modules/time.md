@@ -119,6 +119,9 @@ print("cache valide pendant " .. babet.time.format_duration(cache_ttl))
     sleep (voir [`signal`](signal.md)).
 - **NaN / Inf / amount négatif** → lève via `luaL_error`.
 - **String d'unit inconnue** → lève via `luaL_error`.
+- **`iso(ts)` hors bornes int64** (`|ts|` au-delà de ce que le
+  calendrier peut représenter) → lève via `luaL_error`
+  (`"iso: value out of int64 range"`).
 
 ## Décisions de design
 

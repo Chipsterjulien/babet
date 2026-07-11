@@ -26,21 +26,21 @@ with a bounded cap, optional timeout, separate stdout/stderr.
 result, err = babet.exec(cmd, args?, opts?)
 ```
 
-| Argument | Type | Notes |
-| --- | --- | --- |
-| `cmd` | string | Program to run. PATH is searched. |
-| `args` | table (optional) | Array of string arguments — each becomes a separate argv element, no shell parsing. |
-| `opts` | table (optional) | See below. |
+| Argument | Type             | Notes                                                                                |
+| -------- | ---------------- | ------------------------------------------------------------------------------------ |
+| `cmd`    | string           | Program to run. PATH is searched.                                                    |
+| `args`   | table (optional) | Array of string arguments — each one becomes a separate argv slot, no shell parsing. |
+| `opts`   | table (optional) | See below.                                                                           |
 
 `opts` fields :
 
-| Field | Type | Default | Notes |
-| --- | --- | --- | --- |
-| `cwd` | string | inherit | Working directory for the child. |
-| `env` | table `{KEY = value, ...}` | inherit | **Merged** with the parent environment, not replacing it. To unset a variable, omit it from `env`. |
-| `stdin` | string | `""` | Data piped to the child's stdin. |
-| `timeout` | number (s) | none | Kill the child with SIGKILL if it takes longer. |
-| `max_output` | integer (bytes) | 16 MiB | Hard cap **per stream** on captured output. Excess is silently dropped and signalled via `*_truncated`. |
+| Field        | Type                       | Default    | Notes                                                                                                                                                                                     |
+| ------------ | -------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwd`        | string                     | inherit    | Working directory for the child.                                                                                                                                                          |
+| `env`        | table `{KEY = value, ...}` | inherit    | **Merged** with the parent environment, never replacing it. Override : pass the key. Empty : pass `""` (the child sees it empty). Omitting a key = **inherit** ; there is no unset in v1. |
+| `stdin`      | string                     | `""`       | Data sent to the child's stdin.                                                                                                                                                           |
+| `timeout`    | number (s)                 | none       | On expiry : **SIGTERM to the whole process group** (clean shutdown possible), 2 s grace, then **SIGKILL**.                                                                                |
+| `max_output` | integer (bytes)            | **10 MiB** | Hard cap **per stream** on captured output (upper bound : 2 GiB). Excess is silently dropped and signalled via `*_truncated`.                                                             |
 
 Result table on successful launch :
 
@@ -131,7 +131,12 @@ local r = assert(babet.exec("ls", nil, { cwd = "/var/log" }))
   To unset one, pass it as the empty string and the child will
   see it empty (POSIX doesn't have "unset" semantics at exec
   time without extra effort).
-- **`max_output` is per stream, not total**. 16 MiB stdout + 16
+- **SIGTERM first, SIGKILL second**. On timeout, the whole
+  process group (the child creates its own via `setpgid`) gets
+  SIGTERM — well-behaved programs can flush and exit — then
+  SIGKILL after a 2 s grace period. `kill(-pid)` also covers
+  descendants (a forked `sh -c`, for instance).
+- **`max_output` is per stream, not total**. 10 MiB stdout + 10
   MiB stderr is the cap. Large enough to capture most build
   logs, small enough that a runaway subprocess can't OOM the
   Babet process.
@@ -145,6 +150,10 @@ local r = assert(babet.exec("ls", nil, { cwd = "/var/log" }))
 
 ## Not in v1
 
+- **Interruption by `babet.signal` while running**. `exec` is not
+  signal-aware : a handled signal received while a child runs does
+  not return `(nil, "interrupted")` — the callback is dispatched
+  after `exec` returns. Use `opts.timeout` to bound long runs.
 - Streaming stdout / stderr (line-by-line callback during
   execution). Currently the whole capture is returned at once.
 - Stdin streaming (callback that produces input chunks).

@@ -24,20 +24,31 @@ adoptée pour les ajouts récents.
 | `babet.mergeTables(t1, t2, ...)` | nouvelle `table` — clés string mergées (le dernier écrit gagne), clés numériques append en ordre |
 | `babet.deepCopyTable(t)` | nouvelle `table`, copiée récursivement |
 
-`mergeTables` est variadique — passe autant de tables que tu veux.
+`mergeTables` est variadique — **deux tables minimum** (moins :
+lève), autant que tu veux au-delà.
 Les entrées ne sont pas mutées. Le merge a deux règles :
 
 - **Clés string** : les tables suivantes écrasent les précédentes
-  à la même clé (le dernier écrit gagne).
+  à la même clé (le dernier écrit gagne). Le remplacement est
+  **shallow** : une valeur-table écrase la précédente **en bloc**,
+  il n'y a pas de merge récursif des sections imbriquées. Et les
+  valeurs sont **référencées, pas copiées** — le résultat partage
+  ses sous-tables avec les entrées ; combine avec `deepCopyTable`
+  si tu veux un résultat indépendant.
 - **Clés numériques (partie array)** : concaténées dans l'ordre où
   les tables sont passées, puis dans l'ordre 1..n à l'intérieur
   de chaque table. Donc `mergeTables({1, 2}, {3, 4})` donne
   `{1, 2, 3, 4}`, pas `{3, 4}`.
 
 `deepCopyTable` copie les tables imbriquées récursivement. Les
-cycles sont détectés (pas de boucle infinie). Les valeurs non-table
-(nombres, strings, booleans, fonctions, userdata) ne sont pas
-dupliquées — elles sont référencées telles quelles.
+cycles sont détectés (pas de boucle infinie), et les sous-tables
+partagées ne sont copiées qu'une fois (la structure est préservée,
+pas dupliquée). La **métatable** de chaque table copiée est posée
+telle quelle sur la copie (référence partagée — la métatable
+elle-même n'est pas dupliquée). Les valeurs non-table (nombres,
+strings, booleans, fonctions, userdata) sont référencées telles
+quelles. Profondeur maximale : **75 niveaux** (au-delà : lève
+`"Table is too deep to copy (max depth 75 exceeded)"`).
 
 ## Exemple rapide
 

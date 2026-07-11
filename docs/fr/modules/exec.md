@@ -26,21 +26,21 @@ mémoire avec cap borné, timeout optionnel, stdout/stderr séparés.
 result, err = babet.exec(cmd, args?, opts?)
 ```
 
-| Argument | Type | Notes |
-| --- | --- | --- |
-| `cmd` | string | Programme à exécuter. PATH est cherché. |
-| `args` | table (optionnel) | Array d'arguments strings — chacun devient un élément argv séparé, pas de parsing shell. |
-| `opts` | table (optionnel) | Voir ci-dessous. |
+| Argument | Type              | Notes                                                                                    |
+| -------- | ----------------- | ---------------------------------------------------------------------------------------- |
+| `cmd`    | string            | Programme à exécuter. PATH est cherché.                                                  |
+| `args`   | table (optionnel) | Array d'arguments strings — chacun devient un élément argv séparé, pas de parsing shell. |
+| `opts`   | table (optionnel) | Voir ci-dessous.                                                                         |
 
 Champs de `opts` :
 
-| Champ | Type | Défaut | Notes |
-| --- | --- | --- | --- |
-| `cwd` | string | hérité | Dossier de travail pour le child. |
-| `env` | table `{KEY = value, ...}` | hérité | **Fusionné** avec l'environnement parent, ne le remplace pas. Pour désactiver une variable, omet-la de `env`. |
-| `stdin` | string | `""` | Données envoyées au stdin du child. |
-| `timeout` | number (s) | aucun | Tue le child avec SIGKILL si dépassé. |
-| `max_output` | integer (octets) | 16 MiB | Cap dur **par flux** sur la sortie capturée. L'excès est silencieusement perdu et signalé via `*_truncated`. |
+| Champ        | Type                       | Défaut     | Notes                                                                                                                                                                                       |
+| ------------ | -------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cwd`        | string                     | hérité     | Dossier de travail pour le child.                                                                                                                                                           |
+| `env`        | table `{KEY = value, ...}` | hérité     | **Fusionné** avec l'environnement parent, jamais remplacé. Override : passe la clé. Vider : passe `""` (le child la voit vide). Omettre une clé = **hériter** ; il n'y a pas d'unset en v1. |
+| `stdin`      | string                     | `""`       | Données envoyées au stdin du child.                                                                                                                                                         |
+| `timeout`    | number (s)                 | aucun      | Au dépassement : **SIGTERM au groupe de processus entier** (arrêt propre possible), 2 s de grâce, puis **SIGKILL**.                                                                         |
+| `max_output` | integer (octets)           | **10 Mio** | Cap dur **par flux** sur la sortie capturée (plafond : 2 Gio). L'excès est silencieusement perdu et signalé via `*_truncated`.                                                              |
 
 Table de résultat en cas de lancement réussi :
 
@@ -134,8 +134,13 @@ local r = assert(babet.exec("ls", nil, { cwd = "/var/log" }))
   une variable, passe-la. Pour la vider, passe-la en string vide
   et le child la verra vide (POSIX n'a pas de sémantique "unset"
   au moment du exec sans effort supplémentaire).
-- **`max_output` est par flux, pas total**. 16 MiB stdout + 16
-  MiB stderr est le cap. Assez grand pour capturer la plupart
+- **SIGTERM d'abord, SIGKILL ensuite**. Au timeout, le groupe de
+  processus entier (le child crée le sien via `setpgid`) reçoit
+  SIGTERM — les programmes propres peuvent flusher et sortir —
+  puis SIGKILL après 2 s de grâce. `kill(-pid)` couvre aussi les
+  descendants (un `sh -c` qui a forké, par exemple).
+- **`max_output` est par flux, pas total**. 10 Mio stdout + 10
+  Mio stderr est le cap. Assez grand pour capturer la plupart
   des logs de build, assez petit pour qu'un sous-process emballé
   ne puisse pas OOM le process Babet.
 - **Cap dur de 2 GiB sur `max_output`**. À peu près tout ce qui
@@ -148,6 +153,11 @@ local r = assert(babet.exec("ls", nil, { cwd = "/var/log" }))
 
 ## Hors v1
 
+- **Interruption par `babet.signal` pendant l'exécution**. `exec`
+  n'est pas signal-aware : un signal géré reçu pendant qu'un child
+  tourne ne rend pas `(nil, "interrupted")` — le callback est
+  dispatché après le retour d'`exec`. Utilise `opts.timeout` pour
+  borner les exécutions longues.
 - Streaming stdout / stderr (callback ligne-par-ligne pendant
   l'exécution). Actuellement toute la capture est renvoyée d'un
   coup.

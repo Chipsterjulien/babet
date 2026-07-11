@@ -88,6 +88,18 @@ do
     v, e = babet.isfile(sb("absent_file"))
     ok("isfile(absent) == false, err nil", v == false and e == nil,
         "v=" .. tostring(v) .. " e=" .. tostring(e))
+
+    -- Alias camelCase canoniques (décision de nommage post-v2.1.1) :
+    -- isFile/isDir/symlinkAttr sont les noms canoniques, les
+    -- minuscules restent des alias dépréciés de la MÊME fonction C.
+    ok("isFile (canonique) == isfile (alias)",
+        babet.isFile(sb("probe.txt")) == true
+        and babet.isFile(sb("probe.txt")) == babet.isfile(sb("probe.txt"))
+        and babet.isFile(SB) == false)
+    ok("isDir (canonique) == isdir (alias)",
+        babet.isDir(SB) == true
+        and babet.isDir(SB) == babet.isdir(SB)
+        and babet.isDir(sb("probe.txt")) == false)
 end
 
 -- =====================================================================
@@ -520,6 +532,21 @@ do
         ok("  lien de dossier non suivi (ext.txt absent)", not has_ext)
     end
 
+    -- mkdir : le contrat utile, verrouillé (la doc décrivait une
+    -- option opts.parents qui n'a jamais existé — le code fait
+    -- fs::create_directories, donc TOUJOURS récursif).
+    do
+        local r, e = babet.mkdir(sb("mkd/a/b/c"))
+        ok_act("mkdir imbriqué nu (récursif d'office)", r, e)
+        ok("  toute la chaîne existe",
+            babet.isDir(sb("mkd/a/b/c")) == true)
+        r, e = babet.mkdir(sb("mkd/a/b/c"))
+        ok_act("mkdir(dossier existant) -> succès idempotent", r, e)
+        babet.touch(sb("mkd/bloqueur"))
+        local v2, e2 = babet.mkdir(sb("mkd/bloqueur/sous"))
+        ok_fail("mkdir bloqué par un FICHIER -> (nil, err)", v2, e2)
+    end
+
     -- copyTree
     babet.mkdir(sb("treesrc"))
     babet.touch(sb("treesrc/a.txt"))
@@ -701,6 +728,8 @@ do
     if attrs then
         ok_act("symlinkattr(link.txt, self uid/gid)",
             babet.symlinkattr(sb("link.txt"), attrs.owner, attrs.group))
+        ok_act("symlinkAttr (alias camelCase canonique) idem",
+            babet.symlinkAttr(sb("link.txt"), attrs.owner, attrs.group))
     end
 end
 

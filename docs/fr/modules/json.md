@@ -18,16 +18,21 @@ se décode en `{}` et se ré-encode en `{}` (objet), mais si tu veux
 
 ## API
 
-| Fonction | Renvoie |
-| --- | --- |
-| `babet.json.encode(value, opts?)` | `string` (texte JSON) \| `(nil, err)` |
-| `babet.json.decode(text)` | `value` \| `(nil, err)` |
-| `babet.json.empty_array` | sentinelle qui s'encode en `[]` |
+| Fonction                          | Renvoie                                                       |
+| --------------------------------- | ------------------------------------------------------------- |
+| `babet.json.encode(value, opts?)` | `string` (texte JSON) \| `(nil, err)`                         |
+| `babet.json.decode(text)`         | `value` \| `(nil, err)`                                       |
+| `babet.json.null`                 | sentinelle — représente le `null` JSON (voir ci-dessous)      |
+| `babet.json.empty_array`          | sentinelle qui s'encode en `[]`                               |
+| `babet.json.as_array(t)`          | `t`, marqué pour s'encoder en **array** JSON même ambigu/vide |
 
 Options d'encodage (table `opts`) :
 
-- `pretty = true` — pretty-print avec indentation (défaut `false`).
-- `indent = N` — largeur d'indentation quand `pretty=true` (défaut `2`).
+- `indent = N` (entier `>= 0`) — active le pretty-print avec `N`
+  espaces d'indentation (`0` = retours à la ligne sans espaces).
+  Omis ou négatif : sortie **compacte**. (Une ancienne version de
+  cette page documentait une option `pretty` qui n'a jamais
+  existé : `indent` seul pilote tout.)
 
 ## Exemple rapide
 
@@ -45,13 +50,33 @@ local out = J.encode({ a = 1, b = { 2, 3 } })
 -- out == '{"a":1,"b":[2,3]}'
 
 -- Encode pretty
-local pretty = J.encode({ a = 1 }, { pretty = true, indent = 4 })
+local pretty = J.encode({ a = 1 }, { indent = 4 })
 
 -- Tableau vide vs objet vide
 J.encode({})                    --> "{}"
 J.encode(J.empty_array)         --> "[]"
 J.encode({ items = J.empty_array })  --> '{"items":[]}'
 ```
+
+## `null`, `empty_array`, `as_array`
+
+Lua ne peut pas stocker `nil` dans une table (la clé disparaît).
+`babet.json.null` comble le trou :
+
+- **Décodage** : un `null` JSON devient la sentinelle
+  `babet.json.null` (teste avec `==`), et non `nil` — la clé reste
+  donc présente et visible par `pairs()`.
+- **Encodage** : `babet.json.null` s'encode en `null`.
+
+`babet.json.as_array(t)` marque `t` (via une métatable interne)
+pour qu'`encode` la sérialise en array JSON, même quand la
+structure est ambiguë. Les sentinelles ne peuvent pas être
+marquées (`as_array(json.null)` lève). Les tables issues du
+décodage d'un array JSON vide portent déjà cette marque : le
+round-trip `decode("[]")` → `encode` redonne `"[]"`.
+
+Profondeur maximale d'imbrication : **1000 niveaux** dans les deux
+sens (au-delà : `(nil, err)` explicite).
 
 ## Contrat d'erreur
 

@@ -24,15 +24,19 @@ correctly by default.
 | `babet.socket.connect_tls(host, port, opts?)` | `tls_socket` \| `(nil, err)` |
 | `s:starttls(opts?)` | `(true, nil)` \| `(nil, err)` — upgrade an existing plain socket |
 
-`opts` (merged with the usual socket opts) :
+`opts` :
 
-| Field | Type | Default |
-| --- | --- | --- |
-| `verify` | boolean | `true` |
-| `ca_cert` | string (path) | system bundle |
-| `ca_path` | string (path) | system bundle |
-| `server_name` | string | host argument |
-| `alpn` | array of strings | none |
+| Field      | Type                               | Default                                                                                                                              |
+| ---------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `verify`   | boolean — certificate verification | `true`                                                                                                                               |
+| `ca_cert`  | string (path to a CA bundle file)  | system trust store                                                                                                                   |
+| `ca_path`  | string (path to a CA directory)    | system trust store                                                                                                                   |
+| `hostname` | string — SNI + name verification   | `connect_tls` : the `host` argument. `starttls` : **required** if `verify = true`                                                    |
+| `timeout`  | number (seconds)                   | infinite — budget applied to **each phase** (TCP connect, then TLS handshake), not a single envelope ; DNS resolution is not covered |
+
+> An earlier version of this page named the option `server_name`
+> (the real name is `hostname`) and documented an `alpn` option
+> that doesn't exist — see "Not in v1".
 
 A `tls_socket` has the same methods as a plain socket
 (`send`, `recv`, `recv_line`, `recv_all`, `set_timeout`,
@@ -73,7 +77,7 @@ until not line:match("^250%-")                    -- last 250 line
 s:send("STARTTLS\r\n")
 print(s:recv_line())                              -- 220 ready to start TLS
 
-assert(s:starttls({ server_name = "mail.example.com" }))
+assert(s:starttls({ hostname = "mail.example.com" }))
 -- s is now encrypted ; continue with EHLO + AUTH + …
 ```
 
@@ -102,6 +106,18 @@ local s = assert(babet.socket.connect_tls("self-signed.local", 8443, {
 - **`verify=true` + invalid cert** → `(nil, "tls: certificate
   verify failed: <reason>")`. Common reasons : expired,
   self-signed, hostname mismatch, unknown CA.
+- **`starttls` with `verify = true` and no `opts.hostname`** →
+  `(nil, "tls: starttls with verify=true requires opts.hostname;
+  pass hostname or set verify=false")` — a certificate cannot be
+  verified without knowing which name to verify ; the explicit
+  refusal beats a silently incomplete verification.
+- **After a failed `starttls`** : the socket is handed back **as
+  it was** — plaintext, blocking, still open (you can close
+  cleanly or retry). Edge case : if restoring blocking mode fails
+  (nearly impossible), the socket is **closed** and the error
+  carries the suffix
+  `"(socket closed: could not restore blocking mode)"` — a safe,
+  explicit state instead of a socket with altered behaviour.
 - **NaN/Inf timeouts**, wrong types → raises via `luaL_error`.
 
 ## Trust store
@@ -132,14 +148,18 @@ handshake fails with a clear error. See
   available.
 - **`verify=true` by default, `verify=false` requires explicit
   opt-in**. No way to accidentally turn off cert checking.
-- **`server_name` defaults to the host argument** to make SNI
-  Just Work. Pass it explicitly if you're connecting by IP to a
-  TLS server that uses SNI.
+- **`hostname` defaults to the host argument** (for
+  `connect_tls`), so SNI works out of the box. Pass it explicitly
+  when connecting by IP to a TLS server that uses SNI — and it is
+  required for `starttls` with verification, since the existing
+  socket doesn't know which name to expect.
 - **Same methods as plain socket**, so a function that takes a
   `socket` works for both transparently.
 
 ## Not in v1
 
+- ALPN negotiation (an earlier version of this page documented an
+  `alpn` option that never existed).
 - Client certificate authentication. Possible to add as a
   `client_cert` / `client_key` opt later.
 - TLS session resumption / session tickets. Not commonly needed

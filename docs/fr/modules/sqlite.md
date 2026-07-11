@@ -30,47 +30,37 @@ retour d'erreurs Lua-friendly.
 
 `opts` :
 
-| Champ | Type | Défaut |
-| --- | --- | --- |
-| `readonly` | boolean | `false` |
-| `wal` | boolean — active le journal WAL | `false` |
-| `busy_timeout` | number ms (bloque pendant cette durée sur une db verrouillée) | `5000` |
-| `foreign_keys` | boolean | `true` |
+| Champ          | Type                                                                      | Défaut                                 |
+| -------------- | ------------------------------------------------------------------------- | -------------------------------------- |
+| `wal`          | boolean — active le journal WAL                                           | `false`                                |
+| `busy_timeout` | integer ms — retry automatique pendant cette durée sur une db verrouillée | `0` = **aucun** (SQLITE_BUSY immédiat) |
+
+> Une ancienne version de cette page documentait aussi
+> `opts.readonly` et `opts.foreign_keys` : ils n'existent pas —
+> voir « Hors v1 ».
 
 Chemin spécial `":memory:"` ouvre une base en mémoire (perdue à
 la fermeture). À utiliser pour les tests ou le traitement
 transitoire.
 
-### Exec direct (pas de paramètres / instruction one-shot)
+### Exécution et requêtes
 
-| Fonction | Renvoie |
-| --- | --- |
-| `db:exec(sql)` | `(true, nil)` \| `(nil, err)` |
-| `db:exec(sql, params)` | idem, avec paramètres bindés `?` |
-| `db:query(sql, params?)` | `table` de tables-de-row \| `(nil, err)` |
+| Fonction                 | Renvoie                                                            |
+| ------------------------ | ------------------------------------------------------------------ |
+| `db:exec(sql)`           | `(true, nil)` \| `(nil, err)` — multi-statements acceptés         |
+| `db:exec(sql, params)`   | idem, avec paramètres bindés                                       |
+| `db:query(sql, params?)` | `stmt` (itérateur) \| `(nil, err)` — **un seul** statement        |
 
-### Instructions préparées (réutilisation, performance)
+`db:query` renvoie un **itérateur appelable**, pas une table :
+chaque appel rend la row suivante (table dont les clés sont les
+noms de colonnes), puis `nil` une fois épuisé — l'usage idiomatique
+est `for row in db:query(...) do`. Les ressources sont libérées à
+l'épuisement ou au ramasse-miettes ; `stmt:close()` permet de
+libérer plus tôt (itération abandonnée en cours de route).
 
-| Fonction | Renvoie |
-| --- | --- |
-| `db:prepare(sql)` | `stmt` (userdata) \| `(nil, err)` |
-| `stmt(params?)` | iterator sur les rows |
-| `stmt:exec(params?)` | `(true, nil)` \| `(nil, err)` |
-| `stmt:finalize()` | `(true, nil)` — idempotent |
-
-### Transactions
-
-| Fonction | Renvoie |
-| --- | --- |
-| `db:transaction(fn)` | `(true, result)` si `fn` retourne truthy ; rollback + `(false, err)` sinon |
-
-### Utilitaires
-
-| Fonction | Renvoie |
-| --- | --- |
-| `db:last_insert_rowid()` | `integer` |
-| `db:changes()` | `integer` — rows affectés par la dernière écriture |
-| `db:in_transaction()` | `boolean` |
+Un SQL multi-instructions passé à `query` rend
+`(nil, "sqlite: query supports only one statement; …")` — pour du
+multi-statement, c'est `exec`.
 
 ## Mapping de types
 
@@ -80,14 +70,14 @@ transitoire.
 | REAL | number (float) |
 | TEXT | string |
 | BLOB | string (binary-safe) |
-| NULL | `nil` (lecture), `nil` ou sentinelle `db.NULL` (écriture) |
+| NULL | lecture : **clé absente** de la row (`row.col == nil`, mais `pairs()` ne la voit pas) ; écriture : utilise le littéral SQL `NULL` (pas de sentinelle en v1) |
 
 ## Exemples rapides
 
 ```lua
 local db = assert(babet.sqlite.open("state.db", { wal = true }))
 
--- Schéma
+-- Schéma (multi-statements : exec)
 db:exec([[
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,28 +88,29 @@ db:exec([[
 
 -- Insert avec paramètres
 assert(db:exec("INSERT INTO users (name) VALUES (?)", { "alice" }))
-print("inséré avec id", db:last_insert_rowid())
 
--- Requête de rows
-local rows = assert(db:query("SELECT id, name FROM users WHERE active = ?", { 1 }))
-for _, r in ipairs(rows) do
-    print(r.id, r.name)
+-- Dernier rowid : via SQL (pas de méthode dédiée en v1)
+for row in db:query("SELECT last_insert_rowid() AS id") do
+    print("inséré avec id", row.id)
 end
 
--- Instruction préparée réutilisée dans une boucle (chemin rapide)
-local stmt = assert(db:prepare("INSERT INTO users (name) VALUES (?)"))
-for _, name in ipairs({ "bob", "carol", "dave" }) do
-    assert(stmt:exec({ name }))
+-- Requête : query rend un ITÉRATEUR
+for row in db:query("SELECT id, name FROM users WHERE active = ?",
+                    { 1 }) do
+    print(row.id, row.name)
 end
-stmt:finalize()
 
--- Transaction
-local ok, err = db:transaction(function()
-    db:exec("UPDATE users SET active = 0 WHERE name = ?", { "alice" })
-    db:exec("UPDATE users SET active = 1 WHERE name = ?", { "bob" })
-    return true   -- commit
-end)
-if not ok then print("rollback :", err) end
+-- Transaction : via SQL (pas de wrapper en v1)
+db:exec("BEGIN")
+local ok1 = db:exec("UPDATE users SET active = 0 WHERE name = ?",
+                    { "alice" })
+local ok2 = db:exec("UPDATE users SET active = 1 WHERE name = ?",
+                    { "bob" })
+if ok1 and ok2 then
+    db:exec("COMMIT")
+else
+    db:exec("ROLLBACK")
+end
 
 db:close()
 ```
@@ -144,7 +135,7 @@ db:close()
   → `(nil, err)`.
 - **String BLOB vide** → stockée correctement en tant que BLOB
   vide (anciennement buggé en pré-1.5).
-- **Méthodes après `close`** → `(nil, "sqlite: db closed")`.
+- **Méthodes après `close`** → `(nil, "sqlite: connection closed")`.
 - **Mauvais types d'argument** → lève via `luaL_error`.
 
 ## Décisions de design
@@ -154,13 +145,6 @@ db:close()
   sidecar `*-wal` et `*-shm` que certains utilisateurs trouvent
   surprenants. L'opt-in garde le défaut sans surprise, mais tout
   daemon long-running devrait passer `wal=true`.
-- **Clés étrangères ON par défaut**, contrairement au défaut
-  SQLite. La plupart des schémas modernes s'appuient sur des
-  contraintes FK ; les laisser off par défaut est un footgun.
-- **`transaction(fn)` commit si `fn` retourne truthy**.
-  Convention Lua : retourner une valeur pour signaler le succès,
-  ne rien retourner / `nil` / `false` (ou lever) pour rollback.
-  La valeur de retour de la fonction est propagée.
 - **Placeholders sans `params` est une erreur**, pas un bind NULL
   silencieux. Attrape une classe de bugs proches de l'injection
   tôt.
@@ -169,6 +153,19 @@ db:close()
   mais pas catastrophiques.
 
 ## Hors v1
+
+> Les éléments suivants figuraient à tort comme disponibles dans une
+> ancienne version de cette page — ils relèvent du design initial et
+> ne sont **pas implémentés** :
+> `db:prepare` / `stmt:exec` / `stmt:finalize` (statements
+> préparés réutilisables — `query` re-prépare à chaque appel),
+> `db:transaction(fn)` / `db:in_transaction()` (contournement :
+> `exec("BEGIN"/"COMMIT"/"ROLLBACK")`, cf. exemple),
+> `db:last_insert_rowid()` / `db:changes()` (contournement :
+> `SELECT last_insert_rowid()` / `SELECT changes()`),
+> `opts.readonly` / `opts.foreign_keys` (contournement :
+> `PRAGMA foreign_keys = ON` via `exec`), et la sentinelle
+> `db.NULL` en écriture.
 
 - I/O streaming `BLOB` (`sqlite3_blob_open`). Utilise la
   sérialisation en string si tu rentres en mémoire.

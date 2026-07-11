@@ -136,11 +136,21 @@ void register_babet(lua_State *L)
     lua_pushcfunction(L, lua_helloThere);
     lua_setfield(L, -2, "helloThere");
 
+    // Nommage (décision post-v2.1.1) : les composés Babet sont en
+    // camelCase (fileExists, listFiles, currentDir...), les noms
+    // POSIX restent en minuscules (mkdir, chdir, touch...).
+    // isdir/isfile/symlinkattr étaient les trois intrus : le
+    // camelCase devient canonique, les minuscules restent des alias
+    // dépréciés (même fonction C, zéro coût, zéro casse).
     lua_pushcfunction(L, lua_isDir);
-    lua_setfield(L, -2, "isdir");
+    lua_setfield(L, -2, "isDir");
+    lua_pushcfunction(L, lua_isDir);
+    lua_setfield(L, -2, "isdir"); // alias déprécié
 
     lua_pushcfunction(L, lua_isFile);
-    lua_setfield(L, -2, "isfile");
+    lua_setfield(L, -2, "isFile");
+    lua_pushcfunction(L, lua_isFile);
+    lua_setfield(L, -2, "isfile"); // alias déprécié
 
     lua_pushcfunction(L, lua_link);
     lua_setfield(L, -2, "link");
@@ -222,7 +232,9 @@ void register_babet(lua_State *L)
     lua_setfield(L, -2, "split");
 
     lua_pushcfunction(L, lua_symlinkattr);
-    lua_setfield(L, -2, "symlinkattr");
+    lua_setfield(L, -2, "symlinkAttr");
+    lua_pushcfunction(L, lua_symlinkattr);
+    lua_setfield(L, -2, "symlinkattr"); // alias déprécié
 
     lua_pushcfunction(L, lua_touch);
     lua_setfield(L, -2, "touch");

@@ -23,7 +23,7 @@ adoptée pour les ajouts récents.
 | `babet.pid()` | `integer` — PID du processus courant |
 | `babet.hostname()` | `string` \| `(nil, err)` — hostname système |
 | `babet.uname()` | `table` avec `sysname`, `nodename`, `release`, `version`, `machine` |
-| `babet.which(cmd)` | `string` (chemin absolu) \| `(nil, "not found")` |
+| `babet.which(cmd)` | `string` (chemin complet dans PATH) \| `(nil, "which: '<cmd>' not found in PATH")` |
 | `babet.env(name)` | `string` \| `nil` — comme `os.getenv`, en cohérent |
 | `babet.setenv(name, value)` | `(true, nil)` \| `(nil, err)` |
 | `babet.getMemoryUsage()` | `integer` — mémoire de la VM Lua en octets (après un GC complet) |
@@ -38,9 +38,9 @@ sanity-checker le runtime.
 
 | Constante | Type | Exemple |
 | --- | --- | --- |
-| `babet.VERSION` | `string` | `"1.7.1"` |
-| `babet.VERSION_MAJOR` | `integer` | `1` |
-| `babet.VERSION_MINOR` | `integer` | `7` |
+| `babet.VERSION` | `string` | `"2.1.1"` |
+| `babet.VERSION_MAJOR` | `integer` | `2` |
+| `babet.VERSION_MINOR` | `integer` | `1` |
 | `babet.VERSION_PATCH` | `integer` | `1` |
 
 La version string est ce que `babet --version` affiche. Les
@@ -52,10 +52,10 @@ programmatiques sans parser la string.
 print("tourne sous Babet " .. babet.VERSION)
 
 -- Conditionner une feature à une version minimum
-local need_minor = 7
-if babet.VERSION_MAJOR < 1
-   or (babet.VERSION_MAJOR == 1 and babet.VERSION_MINOR < need_minor) then
-    error("ce script nécessite Babet >= 1." .. need_minor)
+local need_minor = 1
+if babet.VERSION_MAJOR < 2
+   or (babet.VERSION_MAJOR == 2 and babet.VERSION_MINOR < need_minor) then
+    error("ce script nécessite Babet >= 2." .. need_minor)
 end
 ```
 
@@ -88,12 +88,14 @@ print("Détaillé :", a, b)
 - **`pid()`** : ne peut pas échouer, retourne toujours un integer.
 - **`hostname()`** / **`which()`** : `(value, nil)` en succès,
   `(nil, err_string)` en échec.
-- **`env(name)`** : `value` si défini, `nil` sinon. Ne lève jamais.
+- **`env(name)`** : `value` si défini, `nil` sinon. Lève seulement
+  sur un argument non convertible en string (`nil`, table…) — un
+  nombre est converti (`env(42)` cherche `"42"`).
 - **`setenv(name, value)`** : `(true, nil)` en succès, `(nil, err)`
   en échec (rare — généralement OOM ou nom invalide).
 - **`uname()`** : ne peut pas échouer sur un système supporté,
   renvoie toujours la table complète.
-- **Mauvais type d'argument** (ex : `which(42)`) → lève via
+- **Mauvais type d'argument** (ex : `which({})`) → lève via
   `luaL_error` après coercion string par convention Lua. Passe une
   table ou booléen pour forcer une vraie erreur.
 
@@ -125,7 +127,11 @@ print("Détaillé :", a, b)
 
 Additif — pourrait être ajouté plus tard :
 
-- `unsetenv` (juste `setenv(name, nil)` pourrait marcher aussi).
+- `unsetenv` — retirer une variable héritée n'est pas possible en
+  v1 (`setenv(name, nil)` **lève** : la valeur doit être une
+  string ; une valeur vide reste une variable définie). Et depuis
+  le verrou workers, toute mutation d'env est de toute façon
+  interdite après le premier `spawn`.
 - `getuid` / `getgid` / `getppid` / `getlogin`.
 - Dump complet de l'environnement en table.
 

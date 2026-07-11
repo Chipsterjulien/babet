@@ -23,55 +23,95 @@ needed. Functions never expand globs ; for glob support, use
 
 ## API — Existence, type, attributes
 
-| Function | Returns |
-| --- | --- |
-| `babet.fileExists(path)` | `boolean` |
-| `babet.isfile(path)` | `boolean` (true only for regular files) |
-| `babet.isdir(path)` | `boolean` |
-| `babet.fileSize(path)` | `integer` bytes \| `(nil, err)` |
-| `babet.getAttributes(path)` | `table` with `mtime`, `mode`, `size`, `uid`, `gid`, `inode`, etc. \| `(nil, err)` |
-| `babet.setAttributes(path, uid, gid, mode?)` | `(true, nil)` \| `(nil, err)` — set owner/group, optionally mode |
-| `babet.symlinkattr(path)` | same shape as `getAttributes`, but `lstat` (does not follow symlinks) \| `(nil, err)` |
-| `babet.getMode(path)` | octal `integer` \| `(nil, err)` |
-| `babet.setMode(path, mode)` | `(true, nil)` \| `(nil, err)` — `mode` is an integer (use `0x1ed` for `0755`, or build it with `tonumber("755", 8)`) |
+| Function                                     | Returns                                                                                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `babet.fileExists(path)`                     | `boolean`                                                                                                                                        |
+| `babet.isFile(path)`                         | `boolean` (true only for regular files)                                                                                                          |
+| `babet.isDir(path)`                          | `boolean`                                                                                                                                        |
+| `babet.fileSize(path)`                       | `integer` bytes \| `(nil, err)`                                                                                                                  |
+| `babet.getAttributes(path)`                  | `table` with `mtime`, `mode`, `size`, `uid`, `gid`, `inode`, etc. \| `(nil, err)`                                                                |
+| `babet.setAttributes(path, uid, gid, mode?)` | `(true, nil)` \| `(nil, err)` — set owner/group, optionally mode                                                                                 |
+| `babet.symlinkAttr(path, uid, gid)`          | `(true, nil)` \| `(nil, err)` — change owner/group of the link **itself** (lchown, does not follow the symlink) ; counterpart of `setAttributes` |
+| `babet.getMode(path)`                        | octal `integer` \| `(nil, err)`                                                                                                                  |
+| `babet.setMode(path, mode)`                  | `(true, nil)` \| `(nil, err)` — `mode` is an integer (use `0x1ed` for `0755`, or build it with `tonumber("755", 8)`)                             |
+
+> Canonical naming : camelCase for Babet compounds (`isFile`,
+> `isDir`, `symlinkAttr`), lowercase for POSIX-inherited names
+> (`mkdir`, `chdir`, `touch`...). The old names `isfile`, `isdir` and
+> `symlinkattr` remain **deprecated** aliases of the same functions.
 
 ## API — Creating, removing, moving
 
-| Function | Returns |
-| --- | --- |
-| `babet.touch(path)` | `(true, nil)` \| `(nil, err)` — create file or update mtime |
-| `babet.mkdir(path, opts?)` | `(true, nil)` \| `(nil, err)` — `opts.parents = true` for `mkdir -p` |
-| `babet.rmdir(path)` | `(true, nil)` \| `(nil, err)` — only empty dirs |
-| `babet.rmdirAll(path)` | `(true, nil)` \| `(nil, err)` — recursive |
-| `babet.remove(path)` | `(true, nil)` \| `(nil, err)` — file or symlink |
-| `babet.rename(old, new)` | `(true, nil)` \| `(nil, err)` |
-| `babet.chdir(path)` | `(true, nil)` \| `(nil, err)` |
+| Function                 | Returns                                                                             |
+| ------------------------ | ----------------------------------------------------------------------------------- |
+| `babet.touch(path)`      | `(true, nil)` \| `(nil, err)` — create file or update mtime                         |
+| `babet.mkdir(path)`      | `(true, nil)` \| `(nil, err)` — **always recursive** (native `mkdir -p`), see below |
+| `babet.rmdir(path)`      | `(true, nil)` \| `(nil, err)` — empty directories only                              |
+| `babet.rmdirAll(path)`   | `(true, nil)` \| `(nil, err)` — recursive                                           |
+| `babet.remove(path)`     | `(true, nil)` \| `(nil, err)` — file or symlink                                     |
+| `babet.rename(old, new)` | `(true, nil)` \| `(nil, err)`                                                       |
+| `babet.chdir(path)`      | `(true, nil)` \| `(nil, err)`                                                       |
 
 > `chdir` mutates the working directory of the WHOLE process : it is
 > forbidden once a `workers.spawn` has happened (`(nil, err)`,
 > permanent). See the note in [sys](sys.md).
-| `babet.currentDir()` | `string` (absolute) |
-| `babet.joinPath(a, b, ...)` | `string` — like `path/a/b/c` ; also accepts a single table of segments |
-| `babet.link(target, link, opts?)` | `(true, nil)` \| `(nil, err)` — `opts.symbolic = true` for symlinks |
+
+| Function                       | Returns                                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------ |
+| `babet.currentDir()`           | `string` (absolute)                                                                        |
+| `babet.link(target, linkpath)` | `(true, nil)` \| `(nil, err)` — creates a **symbolic** link (always ; no hard links in v1) |
+
+### `mkdir` in detail
+
+`babet.mkdir(path)` guarantees the directory exists when the call
+returns :
+
+- **Always recursive** : missing parents are created in one go
+  (native `mkdir -p` — there is **no** option to pass, contrary to
+  what an earlier version of this page claimed).
+- **Idempotent** : if the directory (or a symlink to a directory)
+  already exists, silent success.
+- **Clear error** when a non-directory blocks the path — a file at
+  the target path or in the middle of it : `(nil, err)` containing
+  "Not a directory".
+
+```lua
+-- creates data/, data/cache/ and data/cache/img/ in one call
+assert(babet.mkdir("data/cache/img"))
+
+-- calling it again costs nothing : already there, success
+assert(babet.mkdir("data/cache/img"))
+
+-- a file blocks the path -> clean error
+babet.touch("blocker")
+local r, err = babet.mkdir("blocker/sub")
+-- r == nil, err contains "Not a directory"
+```
+
+> Legacy signature : a second boolean parameter still exists
+> (`mkdir(path, ignore_if_exists)`) but it is **discouraged** : on
+> Linux its only observable effect is turning the "a dangling symlink
+> occupies the path" error into silent success… without creating
+> anything. Don't use it.
 
 ## API — Path manipulation
 
 These operate on path *strings* — they don't touch the filesystem.
 
-| Function | Returns | Example |
-| --- | --- | --- |
-| `babet.getBasename(path)` | `string` \| `(nil, err)` — last component | `"/etc/hostname"` → `"hostname"` |
-| `babet.getPath(path)` | `string` \| `(nil, err)` — parent dir (dirname) | `"/etc/hostname"` → `"/etc"` |
-| `babet.getFilename(path)` | `string` \| `(nil, err)` — basename without extension | `"report.tar.gz"` → `"report.tar"` |
-| `babet.getExtension(path)` | `string` \| `(nil, err)` — final extension | `"report.tar.gz"` → `".gz"` |
+| Function                   | Returns                                               | Example                            |
+| -------------------------- | ----------------------------------------------------- | ---------------------------------- |
+| `babet.getBasename(path)`  | `string` \| `(nil, err)` — last component             | `"/etc/hostname"` → `"hostname"`   |
+| `babet.getPath(path)`      | `string` \| `(nil, err)` — parent dir (dirname)       | `"/etc/hostname"` → `"/etc"`       |
+| `babet.getFilename(path)`  | `string` \| `(nil, err)` — basename without extension | `"report.tar.gz"` → `"report.tar"` |
+| `babet.getExtension(path)` | `string` \| `(nil, err)` — final extension            | `"report.tar.gz"` → `".gz"`        |
 
 ## API — Listing and finding
 
-| Function | Returns |
-| --- | --- |
-| `babet.listFiles(path)` | `table` (regular files in `path`) \| `(nil, err)` |
-| `babet.find(path, opts)` | iterator function, see below |
-| `babet.createFileIterator(path)` | iterator function over directory entries |
+| Function                         | Returns                                           |
+| -------------------------------- | ------------------------------------------------- |
+| `babet.listFiles(path)`          | `table` (regular files in `path`) \| `(nil, err)` |
+| `babet.find(path, opts)`         | iterator function, see below                      |
+| `babet.createFileIterator(path)` | iterator function over directory entries          |
 
 `find` accepts `opts` :
 
@@ -82,11 +122,11 @@ These operate on path *strings* — they don't touch the filesystem.
 
 ## API — Copy
 
-| Function | Returns |
-| --- | --- |
-| `babet.copy(src, dst, opts?)` | `(true, nil)` \| `(nil, err)` |
+| Function                          | Returns                                   |
+| --------------------------------- | ----------------------------------------- |
+| `babet.copy(src, dst, opts?)`     | `(true, nil)` \| `(nil, err)`             |
 | `babet.copyTree(src, dst, opts?)` | `(true, nil)` \| `(nil, err)` — recursive |
-| `babet.moveTree(src, dst)` | `(true, nil)` \| `(nil, err)` |
+| `babet.moveTree(src, dst)`        | `(true, nil)` \| `(nil, err)`             |
 
 `copy` options :
 
@@ -99,18 +139,18 @@ Hash digests of file contents. Result is **lowercase hex string**
 unless noted. Note the `sum` suffix — these are the registered
 names in `babet.*`.
 
-| Function | Algorithm | Notes |
-| --- | --- | --- |
-| `babet.crc32sum(path)` | CRC-32 (IEEE 802.3) | **Not cryptographic**. For integrity / accidental-error detection only. |
-| `babet.md5sum(path)` | MD5 | Legacy. Don't use for security. |
-| `babet.sha1sum(path)` | SHA-1 | Legacy. Don't use for security. |
-| `babet.sha256sum(path)` | SHA-256 | |
-| `babet.sha384sum(path)` | SHA-384 | |
-| `babet.sha512sum(path)` | SHA-512 | |
-| `babet.sha3_256sum(path)` | SHA3-256 | |
-| `babet.sha3_384sum(path)` | SHA3-384 | |
-| `babet.sha3_512sum(path)` | SHA3-512 | |
-| `babet.blake2b512sum(path)` | BLAKE2b-512 | |
+| Function                    | Algorithm           | Notes                                                                   |
+| --------------------------- | ------------------- | ----------------------------------------------------------------------- |
+| `babet.crc32sum(path)`      | CRC-32 (IEEE 802.3) | **Not cryptographic**. For integrity / accidental-error detection only. |
+| `babet.md5sum(path)`        | MD5                 | Legacy. Don't use for security.                                         |
+| `babet.sha1sum(path)`       | SHA-1               | Legacy. Don't use for security.                                         |
+| `babet.sha256sum(path)`     | SHA-256             |                                                                         |
+| `babet.sha384sum(path)`     | SHA-384             |                                                                         |
+| `babet.sha512sum(path)`     | SHA-512             |                                                                         |
+| `babet.sha3_256sum(path)`   | SHA3-256            |                                                                         |
+| `babet.sha3_384sum(path)`   | SHA3-384            |                                                                         |
+| `babet.sha3_512sum(path)`   | SHA3-512            |                                                                         |
+| `babet.blake2b512sum(path)` | BLAKE2b-512         |                                                                         |
 
 Each returns `string` (hex) or `(nil, err)`. The file is streamed,
 not loaded entirely into RAM. Non-regular files (directories,
@@ -127,8 +167,8 @@ authentication.
 Compute a hash of bytes already in memory, without round-tripping
 through a temporary file. Binary-safe (embedded NULs are allowed).
 
-| Function | Returns |
-| --- | --- |
+| Function            | Returns                         |
+| ------------------- | ------------------------------- |
 | `babet.crc32(data)` | `string` — 8-char lowercase hex |
 
 Cannot fail at runtime (pure computation). Wrong argument types
@@ -138,7 +178,7 @@ raise via `luaL_error`. As with `crc32sum`, **not cryptographic**.
 
 ```lua
 -- Predicates
-if babet.isdir("/etc") and babet.fileExists("/etc/hostname") then
+if babet.isDir("/etc") and babet.fileExists("/etc/hostname") then
     print("size:", babet.fileSize("/etc/hostname"))
 end
 

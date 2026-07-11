@@ -39,6 +39,10 @@ ligne.
 - `backlog` : entier > 0, optionnel — défaut 16. Taille de la file
   d'attente `listen(2)`.
 
+> **TLS** : `babet.socket.connect_tls(host, port, opts?)` et
+> `s:starttls(opts?)` existent aussi — ils ont leur page dédiée,
+> voir [`tls`](tls.md).
+
 Un `connect` — avec ou sans timeout — interrompu par un signal géré
 via [`signal`](signal.md) renvoie `(nil, "interrupted")` après avoir
 dispatché le callback, comme `recv`/`accept`.
@@ -47,11 +51,11 @@ dispatché le callback, comme `recv`/`accept`.
 
 | Méthode | Renvoie |
 | --- | --- |
-| `s:send(data)` | `integer` octets envoyés \| `(nil, err)` |
+| `s:send(data)` | `integer` octets envoyés \| `(nil, err)` — envoie **tout** (boucle interne sur les écritures partielles) |
 | `s:recv(n, timeout?)` | `string` \| `(nil, "timeout")` \| `(nil, "interrupted")` \| `(nil, err)` |
 | `s:recv_line(timeout?)` | `string` (sans `\n`) \| `(nil, …)` |
 | `s:recv_all(timeout?)` | `string` (lit jusqu'à EOF) \| `(nil, …)` |
-| `s:set_timeout(seconds)` | positionne le timeout par défaut (`0` = infini) |
+| `s:set_timeout(seconds)` | positionne le timeout par défaut (`0` = infini). NaN/Inf/négatif → `(nil, err)` ; plancher interne 1 ms pour les valeurs positives minuscules |
 | `s:close()` | idempotent |
 | `s:peer()` | table `{host, port}` \| `(nil, err)` — endpoint distant |
 | `s:sockname()` | table `{host, port}` \| `(nil, err)` — endpoint local |

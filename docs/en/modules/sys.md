@@ -23,7 +23,7 @@ additions.
 | `babet.pid()` | `integer` — current process ID |
 | `babet.hostname()` | `string` \| `(nil, err)` — system hostname |
 | `babet.uname()` | `table` with `sysname`, `nodename`, `release`, `version`, `machine` |
-| `babet.which(cmd)` | `string` (absolute path) \| `(nil, "not found")` |
+| `babet.which(cmd)` | `string` (full path from PATH) \| `(nil, "which: '<cmd>' not found in PATH")` |
 | `babet.env(name)` | `string` \| `nil` — like `os.getenv`, but consistent |
 | `babet.setenv(name, value)` | `(true, nil)` \| `(nil, err)` |
 | `babet.getMemoryUsage()` | `integer` — Lua VM memory in bytes (after a full GC) |
@@ -38,9 +38,9 @@ runtime.
 
 | Constant | Type | Example |
 | --- | --- | --- |
-| `babet.VERSION` | `string` | `"1.7.1"` |
-| `babet.VERSION_MAJOR` | `integer` | `1` |
-| `babet.VERSION_MINOR` | `integer` | `7` |
+| `babet.VERSION` | `string` | `"2.1.1"` |
+| `babet.VERSION_MAJOR` | `integer` | `2` |
+| `babet.VERSION_MINOR` | `integer` | `1` |
 | `babet.VERSION_PATCH` | `integer` | `1` |
 
 The string version is what `babet --version` prints. The
@@ -52,10 +52,10 @@ parsing the string.
 print("running under Babet " .. babet.VERSION)
 
 -- Gate a feature behind a minimum version
-local need_minor = 7
-if babet.VERSION_MAJOR < 1
-   or (babet.VERSION_MAJOR == 1 and babet.VERSION_MINOR < need_minor) then
-    error("this script needs Babet >= 1." .. need_minor)
+local need_minor = 1
+if babet.VERSION_MAJOR < 2
+   or (babet.VERSION_MAJOR == 2 and babet.VERSION_MINOR < need_minor) then
+    error("this script needs Babet >= 2." .. need_minor)
 end
 ```
 
@@ -88,12 +88,14 @@ print("Detailed:", a, b)
 - **`pid()`** : never fails, always returns an integer.
 - **`hostname()`** / **`which()`** : `(value, nil)` on success,
   `(nil, err_string)` on failure.
-- **`env(name)`** : `value` if set, `nil` if unset. Never raises.
+- **`env(name)`** : `value` if set, `nil` if unset. Only raises on
+  an argument not convertible to a string (`nil`, table…) — a
+  number is converted (`env(42)` looks up `"42"`).
 - **`setenv(name, value)`** : `(true, nil)` on success,
   `(nil, err)` on failure (rare — usually OOM or invalid name).
 - **`uname()`** : never fails on any supported system, always
   returns the full table.
-- **Wrong argument types** (e.g. `which(42)`) → raises via
+- **Wrong argument types** (e.g. `which({})`) → raises via
   `luaL_error` after string coercion as per Lua convention. Pass a
   table or boolean to force a real error.
 
@@ -124,7 +126,11 @@ print("Detailed:", a, b)
 
 Additive — could be added later :
 
-- `unsetenv` (just `setenv(name, nil)` could work too).
+- `unsetenv` — removing an inherited variable is not possible in
+  v1 (`setenv(name, nil)` **raises** : the value must be a string ;
+  an empty value is still a defined variable). And since the
+  workers lock, any env mutation is forbidden after the first
+  `spawn` anyway.
 - `getuid` / `getgid` / `getppid` / `getlogin`.
 - Full environment dump as a table.
 

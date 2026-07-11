@@ -24,20 +24,30 @@ by recent additions.
 | `babet.mergeTables(t1, t2, ...)` | new `table` — string keys merged (last writer wins), numeric keys appended in order |
 | `babet.deepCopyTable(t)` | new `table`, recursively copied |
 
-`mergeTables` is variadic — pass any number of tables. The inputs
+`mergeTables` is variadic — **two tables minimum** (fewer :
+raises), as many as you want beyond that. The inputs
 are not mutated. The merge has two rules :
 
 - **String keys** : later tables overwrite earlier ones at the
-  same key (last writer wins).
+  same key (last writer wins). Replacement is **shallow** : a
+  table value overwrites the previous one **wholesale**, nested
+  sections are not merged recursively. And values are
+  **referenced, not copied** — the result shares its subtables
+  with the inputs ; combine with `deepCopyTable` if you need an
+  independent result.
 - **Numeric keys (array part)** : concatenated in the order tables
   are passed, then in 1..n order within each table. So
   `mergeTables({1, 2}, {3, 4})` gives `{1, 2, 3, 4}`, not
   `{3, 4}`.
 
 `deepCopyTable` copies nested tables recursively. Cycles are
-detected (no infinite loop). Non-table values (numbers, strings,
-booleans, functions, userdata) are not duplicated — they're
-referenced as-is.
+detected (no infinite loop), and shared subtables are copied only
+once (the structure is preserved, not duplicated). The
+**metatable** of each copied table is set as-is on the copy
+(shared reference — the metatable itself is not duplicated).
+Non-table values (numbers, strings, booleans, functions, userdata)
+are referenced as-is. Maximum depth : **75 levels** (beyond :
+raises `"Table is too deep to copy (max depth 75 exceeded)"`).
 
 ## Quick example
 
