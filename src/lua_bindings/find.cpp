@@ -127,28 +127,34 @@ namespace
     bool parse_options(lua_State *L, int index, FindOptions &out,
                        const char *&err)
     {
+        // CORRECTIF (revue ChatGPT post-v2.2.0, vérifié) :
+        // lua_isinteger, plus lua_isnumber. find(".", {maxdepth=1.5})
+        // passait le test isnumber puis lua_tointeger rendait 0 —
+        // la demande devenait silencieusement maxdepth = 0 (élagage
+        // total). Un nombre non entier est désormais une erreur
+        // explicite, pas une troncature muette. (Idem mindepth.)
         lua_getfield(L, index, "mindepth");
-        if (lua_isnumber(L, -1))
+        if (lua_isinteger(L, -1))
         {
             out.mindepth = lua_tointeger(L, -1);
         }
         else if (!lua_isnil(L, -1))
         {
             lua_pop(L, 1);
-            err = "find: 'mindepth' must be a number";
+            err = "find: 'mindepth' must be an integer";
             return false;
         }
         lua_pop(L, 1);
 
         lua_getfield(L, index, "maxdepth");
-        if (lua_isnumber(L, -1))
+        if (lua_isinteger(L, -1))
         {
             out.maxdepth = lua_tointeger(L, -1);
         }
         else if (!lua_isnil(L, -1))
         {
             lua_pop(L, 1);
-            err = "find: 'maxdepth' must be a number";
+            err = "find: 'maxdepth' must be an integer";
             return false;
         }
         lua_pop(L, 1);
@@ -165,6 +171,18 @@ namespace
             return false;
         }
         lua_pop(L, 1);
+
+        // CORRECTIF (revue ChatGPT post-v2.2.0) : valider la VALEUR
+        // de type, pas seulement son genre. Toute string autre que
+        // "f"/"d" était acceptée et revenait à ne poser aucun
+        // filtre : find(".", { type = "file" }) rendait tout, en
+        // silence. (Nota : lua_isstring accepte aussi les nombres
+        // par coercition — type = 42 devient "42" et tombe ici.)
+        if (!out.type.empty() && out.type != "f" && out.type != "d")
+        {
+            err = "find: 'type' must be \"f\" or \"d\"";
+            return false;
+        }
 
         lua_getfield(L, index, "name");
         if (lua_isstring(L, -1))
@@ -212,12 +230,13 @@ namespace
                                     std::function<void(const fs::path &)> callback,
                                     RegexCache &cache)
     {
-        if (!fs::exists(root))
+        std::error_code check_ec;
+        if (!fs::exists(root, check_ec))
         {
             return "path does not exist: " + root.string();
         }
 
-        if (!fs::is_directory(root))
+        if (!fs::is_directory(root, check_ec))
         {
             return "path is not a directory: " + root.string();
         }

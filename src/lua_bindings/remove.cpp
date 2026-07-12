@@ -19,7 +19,8 @@ std::string remove_file(const std::string& path) {
     std::error_code ec;
 
     // Check if the file exists
-    if (!fs::exists(path)) {
+    std::error_code exist_ec;
+    if (!fs::exists(path, exist_ec)) {
         return "File does not exist: " + path;
     }
 

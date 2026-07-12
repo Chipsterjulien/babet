@@ -115,7 +115,17 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
     // suppression quel que soit le chemin de sortie.
     TempFileGuard tempZipGuard(zipFileName);
 
-    if (!createZipFromDirectory(dir, zipFileName))
+    // CORRECTIF (revue ChatGPT post-v2.2.0, vérifié) : chemin absolu
+    // de l'output transmis au zippage pour exclusion — un output de
+    // build précédent situé DANS le dossier empaqueté était
+    // réembarqué (voir zip_utils.cpp). weakly_canonical tolère une
+    // feuille absente (premier build) ; en cas d'échec de résolution
+    // (rarissime), exclude reste vide et on retombe sur l'ancien
+    // comportement, jamais sur un crash.
+    std::error_code xc;
+    fs::path exclude_abs = fs::weakly_canonical(fs::absolute(output, xc), xc);
+
+    if (!createZipFromDirectory(dir, zipFileName, exclude_abs.string()))
     {
         std::cerr << "Error: failed to create ZIP file." << std::endl;
         return false;
@@ -129,7 +139,7 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
     try
     {
         std::string exe = getExecutablePath();
-        // CORRECTIF (revue post-audit v21, vérifié) : refuser
+        // CORRECTIF (revue ChatGPT post-audit v21, vérifié) : refuser
         // une sortie ÉQUIVALENTE au binaire en cours d'exécution.
         // mergeFiles ouvre la sortie en ofstream (troncature) pendant
         // qu'il LIT le binaire courant : si output désigne le même

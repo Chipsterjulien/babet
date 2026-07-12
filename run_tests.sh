@@ -251,6 +251,33 @@ LUA
         test4_ok=0
     fi
 
+    # --- 4d : reconstruction stable (revue ChatGPT post-v2.2.0) ----
+    # L'output d'un build précédent situé DANS le dossier empaqueté
+    # était réembarqué dans le ZIP : app(N+1) = Babet + projet +
+    # app(N), croissance à chaque reconstruction. On construit DEUX
+    # fois le même output dans le projet : la taille doit rester
+    # stable (tolérance 4 Kio : horodatages du zip) et le binaire
+    # doit fonctionner. C'est le test qui manquait au lot 16.
+    BIN_ABS=$(readlink -f "${BINARY}")
+    STAB_DIR=$(mktemp -d)
+    printf 'print("stab ok")\n' > "${STAB_DIR}/main.lua"
+    ( cd "${STAB_DIR}" && "${BIN_ABS}" --create-exe . app ) > /dev/null 2>&1
+    size1=$(stat -c %s "${STAB_DIR}/app" 2>/dev/null || echo 0)
+    ( cd "${STAB_DIR}" && "${BIN_ABS}" --create-exe . app ) > /dev/null 2>&1
+    size2=$(stat -c %s "${STAB_DIR}/app" 2>/dev/null || echo 999999999)
+    delta=$(( size2 - size1 ))
+    [ "${delta}" -lt 0 ] && delta=$(( -delta ))
+    out_stab=$("${STAB_DIR}/app" 2>/dev/null)
+    if [ "${size1}" -gt 0 ] && [ "${delta}" -lt 4096 ] \
+        && [ "${out_stab}" = "stab ok" ]; then
+        echo "  -> reconstruction stable (output exclu du zip) : OK"
+    else
+        echo "  -> ÉCHEC (reconstruction : ${size1} -> ${size2} octets," \
+             "delta=${delta}, sortie='${out_stab}')"
+        test4_ok=0
+    fi
+    rm -rf "${STAB_DIR}"
+
     rm -rf "${SYMLINK_ROOT}"
 fi
 

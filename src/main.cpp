@@ -582,7 +582,9 @@ int main(int argc, char *argv[])
     // le message trompeur « main.lua introuvable dans le répertoire
     // script.lua ».
     std::string path = argv[1];
-    fs::path target = fs::absolute(path);
+    std::error_code abs_ec;
+    fs::path target = fs::absolute(path, abs_ec);
+    if (abs_ec) target = fs::path(path);
     std::error_code ec;
 
     if (fs::is_regular_file(target, ec))

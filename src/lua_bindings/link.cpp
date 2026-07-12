@@ -39,7 +39,8 @@ std::optional<std::string> create_symlink(const std::string &target, const std::
 
     std::error_code ec;
 
-    if (fs::exists(linkpath))
+    std::error_code exist_ec;
+    if (fs::exists(linkpath, exist_ec))
     {
         return "Link path already exists";
     }

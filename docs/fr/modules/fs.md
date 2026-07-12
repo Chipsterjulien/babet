@@ -20,8 +20,8 @@ cohérente (chemins en string, erreurs en `(nil, "...")`).
 Tous les chemins sont acceptés en string. L'expansion du tilde
 (`~/x`) n'est **pas** automatique — l'appelant doit résoudre
 `$HOME` lui-même si besoin. Les fonctions n'expansent jamais les
-globs ; pour le support glob, utilise `babet.find` avec un
-pattern explicite.
+globs ; pour filtrer, utilise `babet.find` avec une regex
+`name`/`iname`/`path`.
 
 ## API — Existence, type, attributs
 
@@ -31,7 +31,7 @@ pattern explicite.
 | `babet.isFile(path)`                         | `boolean` (true seulement pour fichiers réguliers)                                                                                    |
 | `babet.isDir(path)`                          | `boolean`                                                                                                                             |
 | `babet.fileSize(path)`                       | `integer` octets \| `(nil, err)`                                                                                                      |
-| `babet.getAttributes(path)`                  | `table` avec `mtime`, `mode`, `size`, `uid`, `gid`, `inode`, etc. \| `(nil, err)`                                                     |
+| `babet.getAttributes(path)`                  | `table` avec **`mode`, `owner`, `group`** (uniquement) \| `(nil, err)`                                                     |
 | `babet.setAttributes(path, uid, gid, mode?)` | `(true, nil)` \| `(nil, err)` — set owner/group, optionnellement le mode                                                              |
 | `babet.symlinkAttr(path, uid, gid)`          | `(true, nil)` \| `(nil, err)` — change owner/group du lien **lui-même** (lchown, ne suit pas le symlink) ; pendant de `setAttributes` |
 | `babet.getMode(path)`                        | `integer` octal \| `(nil, err)`                                                                                                       |
@@ -112,29 +112,52 @@ touchent pas le système de fichiers.
 
 | Fonction                         | Renvoie                                                  |
 | -------------------------------- | -------------------------------------------------------- |
-| `babet.listFiles(path)`          | `table` (fichiers réguliers dans `path`) \| `(nil, err)` |
-| `babet.find(path, opts)`         | fonction iterator, voir ci-dessous                       |
-| `babet.createFileIterator(path)` | fonction iterator sur les entrées du dossier             |
+| `babet.listFiles(path, recursive?)` | `(table, nil)` \| `(nil, err)` — fichiers réguliers ; `recursive` (booléen, défaut `false`) descend dans les sous-dossiers |
+| `babet.find(path, opts?)`           | **`(table, nil)`** \| `(nil, err)` — table des chemins correspondants (voir opts ci-dessous)                              |
+| `babet.createFileIterator(path)`    | **`(iterator, nil)`** \| `(nil, err)` — userdata avec `:next()` et `:close()`                                             |
 
-`find` accepte `opts` :
+**`find` renvoie une table de chemins**, pas une fonction : on
+l'itère avec `ipairs`, pas avec `for x in ...`. Toujours **récursif**
+(borne la profondeur avec `mindepth`/`maxdepth`). `opts` accepte :
 
-- `pattern = "*.lua"` — glob shell appliqué au nom de fichier seul.
-- `recursive = true` — descend dans les sous-dossiers.
-- `type = "f"` / `"d"` — restreint aux fichiers ou dossiers.
-- `max_depth = N` — limite la profondeur de récursion.
+- `name = "..."` — **regex ECMAScript** (pas un glob shell) testée
+  sur le nom de fichier seul. Ex. `name = ".*%.lua$"` en Lua
+  s'écrit `name = ".*\\.lua$"`.
+- `iname = "..."` — comme `name`, insensible à la casse.
+- `path = "..."` — regex ECMAScript testée sur le chemin complet.
+- `type = "f"` / `"d"` — restreint aux fichiers ou aux dossiers.
+- `mindepth = N` / `maxdepth = N` — bornes de profondeur
+  (entiers ; un non-entier lève, cf. contrat).
+
+`createFileIterator` rend un **userdata** à piloter à la main :
+
+```lua
+local it = assert(babet.createFileIterator("/etc"))
+while true do
+    local entry = it:next()   -- chemin suivant, ou nil à la fin
+    if not entry then break end
+    print(entry)
+end
+it:close()                    -- libère (sinon au GC)
+```
 
 ## API — Copie
 
 | Fonction                          | Renvoie                                  |
 | --------------------------------- | ---------------------------------------- |
-| `babet.copy(src, dst, opts?)`     | `(true, nil)` \| `(nil, err)`            |
-| `babet.copyTree(src, dst, opts?)` | `(true, nil)` \| `(nil, err)` — récursif |
+| `babet.copy(src, dst)`            | `(true, nil)` \| `(nil, err)` — écrase si dst existe |
+| `babet.copyTree(src, dst, continue_on_error?)` | `(true, nil)` \| `(nil, err)` — récursif |
 | `babet.moveTree(src, dst)`        | `(true, nil)` \| `(nil, err)`            |
 
-Options de `copy` :
+`copy(src, dst)` prend **exactement deux arguments**, aucune
+option (une ancienne version de cette page annonçait `preserve` /
+`overwrite` : ils n'existent pas ; `copy` écrase la destination si
+elle existe).
 
-- `preserve = true` — garde mtime, mode, owner si possible.
-- `overwrite = true` — remplace la destination si elle existe.
+`copyTree(src, dst, continue_on_error?)` : le troisième argument
+est un **booléen** (défaut `false`). À `true`, les erreurs par
+entrée sont journalisées sur stderr et la copie continue au lieu
+de s'arrêter à la première.
 
 ## API — Hashes et checksums
 
@@ -194,14 +217,13 @@ local dir  = babet.getPath("/var/log/syslog.1")      -- "/var/log"
 local ext  = babet.getExtension("/var/log/syslog.1") -- ".1"
 
 -- Listing récursif
-for entry in babet.find("/var/log",
-        { pattern = "*.log", type = "f", recursive = true }) do
+for _, entry in ipairs(assert(babet.find("/var/log",
+        { name = ".*\\.log$", type = "f" }))) do
     print(entry)
 end
 
 -- Copie avec attributs
-babet.copyTree("./src", "/tmp/backup",
-                  { preserve = true, overwrite = true })
+babet.copyTree("./src", "/tmp/backup")
 
 -- Hash d'une tarball de release
 local sha, err = babet.sha256sum("/tmp/babet-1.7.0.tar.gz")
@@ -263,7 +285,7 @@ assert(babet.setMode("/srv/myapp/run.sh", mode_755))
 ## Hors v1
 
 - Glob matching en fonction standalone (`babet.glob`). Utilise
-  `find` avec `pattern = "*.lua"` pour le cas courant.
+  `find` avec `name = ".*\\.lua$"` (regex) pour le cas courant.
 - I/O asynchrone. Utilise plutôt [`workers`](workers.md) pour le
   traitement parallèle de fichiers.
 - BLAKE2s (seul BLAKE2b-512 est exposé via OpenSSL EVP).

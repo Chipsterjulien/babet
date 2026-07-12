@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# build-docs.sh — generate the Babet manual PDFs from per-language
+# build_doc.sh — generate the Babet manual PDFs from per-language
 # Markdown sources, auto-detecting which languages are present.
 #
 # Discovery is driven by docs/manual_order_<lang>.txt files :
@@ -9,12 +9,12 @@
 # will pick it up automatically.
 #
 # Usage :
-#   ./build-docs.sh                  # build every detected language
-#   ./build-docs.sh en               # build only EN
-#   ./build-docs.sh en fr            # build EN and FR explicitly
-#   ./build-docs.sh --clean          # remove all generated PDFs
-#   ./build-docs.sh --list           # list detected languages, build nothing
-#   ./build-docs.sh -h | --help      # show help
+#   ./build_doc.sh                  # build every detected language
+#   ./build_doc.sh en               # build only EN
+#   ./build_doc.sh en fr            # build EN and FR explicitly
+#   ./build_doc.sh --clean          # remove all generated PDFs
+#   ./build_doc.sh --list           # list detected languages, build nothing
+#   ./build_doc.sh -h | --help      # show help
 #
 # Requirements : pandoc + a LaTeX engine (xelatex, lualatex, or pdflatex).
 # xelatex is recommended for proper UTF-8 / accent handling.
@@ -37,7 +37,7 @@ PDF_ENGINE="${PDF_ENGINE:-$PDF_ENGINE_DEFAULT}"
 
 # ---- Helpers ---------------------------------------------------------
 die() {
-    echo "build-docs: $1" >&2
+    echo "build_doc: $1" >&2
     exit "${2:-1}"
 }
 
@@ -77,7 +77,7 @@ discover_languages() {
         lang="$(basename "$order" .txt)"
         lang="${lang#manual_order_}"
         if [ ! -d "$SCRIPT_DIR/$lang" ]; then
-            echo "build-docs: warning: $order exists but $SCRIPT_DIR/$lang/ does not, skipping '$lang'" >&2
+            echo "build_doc: warning: $order exists but $SCRIPT_DIR/$lang/ does not, skipping '$lang'" >&2
             continue
         fi
         echo "$lang"
@@ -99,7 +99,7 @@ build_one() {
     local out="$SCRIPT_DIR/manual-$lang.pdf"
 
     if [ ! -f "$order" ]; then
-        echo "build-docs: no order file for '$lang' ($order), skipping" >&2
+        echo "build_doc: no order file for '$lang' ($order), skipping" >&2
         return 1
     fi
 
@@ -113,7 +113,7 @@ build_one() {
     done < <(read_order_file "$order")
 
     if [ ${#files[@]} -eq 0 ]; then
-        echo "build-docs: $order has no active files, skipping '$lang'" >&2
+        echo "build_doc: $order has no active files, skipping '$lang'" >&2
         return 1
     fi
 
@@ -132,13 +132,13 @@ build_one() {
     local preprocess="$SCRIPT_DIR/preprocess_pdf.py"
 
     if [ ! -x "$preprocess" ]; then
-        echo "build-docs: preprocess script not found or not executable: $preprocess" >&2
+        echo "build_doc: preprocess script not found or not executable: $preprocess" >&2
         return 1
     fi
 
     echo "Preprocessing docs/$lang/ -> docs/build_$lang/"
     python3 "$preprocess" "$SCRIPT_DIR/$lang" "$build_dir" || {
-        echo "build-docs: preprocess failed for '$lang'" >&2
+        echo "build_doc: preprocess failed for '$lang'" >&2
         return 1
     }
 
@@ -175,7 +175,7 @@ build_one() {
     if [ "$rc" -eq 0 ]; then
         rm -rf "$build_dir"
     else
-        echo "build-docs: pandoc failed; preprocessed sources kept in $build_dir for inspection" >&2
+        echo "build_doc: pandoc failed; preprocessed sources kept in $build_dir for inspection" >&2
     fi
 
     return "$rc"

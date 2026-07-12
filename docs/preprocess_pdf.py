@@ -19,8 +19,6 @@ Les transformations appliquées :
   5. Conversion des liens [xxx](../security.md) → [xxx](#ch-security)
      et autres références relatives entre modules.
   6. Reformulation des références à manual_order_*.txt (lien mort dans PDF).
-  7. Correction du compteur obsolète "827 PASS" → "890 PASS".
-  8. Correction de la version obsolète "babet 1.7.1" → "babet 2.0.2"
      dans les exemples de sortie CLI.
 
 Les fichiers sources NE SONT JAMAIS modifiés. Tout est écrit dans
@@ -184,24 +182,6 @@ def transform_internal_links(content):
     return pattern.sub(replace, content)
 
 
-def fix_obsolete_strings(content):
-    """Corrige les valeurs obsolètes encore présentes dans la doc.
-
-    - "827 PASS" / "827 PASS" → "890 PASS"
-    - "babet 1.7.1" (dans les exemples de sortie CLI) → "babet 2.0.2"
-    """
-    content = content.replace("827 PASS", "890 PASS")
-    # On ne touche au "1.7.1" que s'il est précédé de "babet " (cas du
-    # bloc d'exemple `babet --version # babet 1.7.1`). Évite de toucher
-    # à d'autres versions d'autres outils.
-    content = re.sub(
-        r'\bbabet (\d+\.\d+\.\d+)\b',
-        lambda m: f"babet 2.0.2" if m.group(1) in ("1.7.0", "1.7.1", "1.8.0", "1.8.1", "2.0.0", "2.0.1") else m.group(0),
-        content
-    )
-    return content
-
-
 def fix_manual_order_reference(content):
     """Reformule les références au fichier manual_order_*.txt.
 
@@ -235,8 +215,9 @@ def process_file(src_path, dst_path):
     # Étape 3 : transformer les liens internes
     content = transform_internal_links(content)
 
-    # Étape 4 : corriger les valeurs obsolètes
-    content = fix_obsolete_strings(content)
+    # (L'étape « corriger les valeurs obsolètes » a été retirée : le
+    # Markdown source est la seule source de vérité ; on ne masque
+    # plus de valeurs périmées à la génération PDF.)
 
     # Étape 5 : reformuler références à manual_order_*.txt
     content = fix_manual_order_reference(content)

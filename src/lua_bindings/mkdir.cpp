@@ -17,7 +17,9 @@ namespace fs = std::filesystem;
  */
 std::optional<std::string> create_directory(const std::string& path, bool ignore_if_exists) {
     std::error_code ec;
-    fs::path dir_path = fs::absolute(path);
+    std::error_code abs_ec;
+    fs::path dir_path = fs::absolute(path, abs_ec);
+    if (abs_ec) dir_path = fs::path(path);
 
     // Attempt to create the directory
     if (!fs::create_directories(dir_path, ec)) {

@@ -23,7 +23,7 @@ git clone https://github.com/Chipsterjulien/babet.git
 cd babet
 ./build_local.sh        # downloads deps and compiles
                         # (~5 min on first run, faster afterwards)
-./run_tests.sh          # offline harness — should print 827 PASS / 0 FAIL
+./run_tests.sh          # offline harness — should print 974 PASS / 0 FAIL
 ```
 
 The build script downloads each dependency from its upstream source,
@@ -99,7 +99,7 @@ directory name. Folders whose name legitimately starts with `-`
 can still be passed via `./-dirname` (POSIX convention).
 
 ```sh
-babet --version    # babet 1.7.1
+babet --version    # babet 2.2.1
 babet --help       # full usage
 babet --bogus      # Unknown option: --bogus
                       # Try 'babet --help' for more information.

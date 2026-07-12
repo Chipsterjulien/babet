@@ -15,7 +15,7 @@
  * @param ignore_if_exists If true, does not return an error if the directory already exists.
  * @return std::optional<std::string> An error message if present, or std::nullopt if successful.
  */
-std::optional<std::string> create_directory(const std::string& path, bool ignore_if_exists);
+std::optional<std::string> create_directory(const std::string &path, bool ignore_if_exists);
 
 /**
  * @brief Lua binding for creating a directory path.
@@ -28,6 +28,6 @@ std::optional<std::string> create_directory(const std::string& path, bool ignore
  * @param L The Lua state.
  * @return int Number of return values (1: error message or nil).
  */
-int lua_mkdir(lua_State* L);
+int lua_mkdir(lua_State *L);
 
 #endif // MKDIR_HPP

@@ -18,7 +18,7 @@ Can be used in three modes:
 
 1. **As a Lua interpreter** : `babet script.lua` or `babet folder/`
    (looks for `main.lua` inside).
-2. **As a packager** : `babet --create-exe script.lua app` produces a
+2. **As a packager** : `babet --create-exe ./myproject app` produces a
    self-contained executable with the script and its `require`d modules
    embedded as a ZIP appended to the binary.
 3. **As a library of bindings** : Lua scripts get
@@ -32,20 +32,9 @@ Can be used in three modes:
 git clone https://github.com/Chipsterjulien/babet.git
 cd babet
 ./build_local.sh        # downloads deps and compiles (~5 min first time)
-./run_tests.sh          # offline harness — should print 939 PASS / 0 FAIL
+./run_tests.sh          # offline harness — should print 974 PASS / 0 FAIL
 ./test/babet --help
 ```
-
-Run a single script, or a project directory :
-
-```sh
-./test/babet hello.lua greetings   # file mode — arg[1] == "greetings"
-./test/babet my_project/           # folder mode — runs my_project/main.lua
-```
-
-File mode accepts any extension and skips a leading `#!` line, so
-`#!/usr/bin/env babet` shebang scripts work. In both modes,
-`require()` resolves modules next to the script (or project).
 
 The build script vendors and compiles all its dependencies. The only
 prerequisites on your system are a C++23 compiler, CMake, `wget`, and
@@ -60,7 +49,7 @@ The docs are split per module under `docs/en/modules/` (and `docs/fr/`).
 You can generate a single PDF manual with:
 
 ```sh
-cd docs && make manual-en.pdf   # or manual-fr.pdf
+cd docs && ./build_doc.sh en   # or: ./build_doc.sh fr
 ```
 
 Requires `pandoc` and a LaTeX engine (`texlive-xetex` is fine).
@@ -85,7 +74,7 @@ to test, not a fix to apply blindly.
 The pine cone illustrations in `docs/assets/` were generated with
 ChatGPT (image model gpt-image-1).
 
-All architectural decisions, the test harness (890 PASS / 0 FAIL
+All architectural decisions, the test harness (974 PASS / 0 FAIL
 across 3 modes), and the validation of every change before tagging
 are the author's responsibility. The AI tools accelerated drafting
 and exploration; they did not replace human judgement.

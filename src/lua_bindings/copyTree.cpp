@@ -93,11 +93,12 @@ std::optional<std::string> copy_directory(const fs::path &source, const fs::path
     bool has_warnings = false;
 
     // Validations préalables.
-    if (!fs::exists(source))
+    std::error_code src_ec;
+    if (!fs::exists(source, src_ec))
     {
         return "source directory does not exist: " + source.string();
     }
-    if (!fs::is_directory(source))
+    if (!fs::is_directory(source, src_ec))
     {
         return "source is not a directory: " + source.string();
     }

@@ -907,6 +907,66 @@ do
         local rz, ez = babet.find(P, { maxdepth = 2147483648, type = "f" })
         ok_val("find maxdepth=2^31 -> tous les fichiers", rz, ez,
             function(x) return type(x) == "table" and #x == 7 end)
+
+        -- Validation durcie (revue ChatGPT post-v2.2.0) : un nombre
+        -- non entier était tronqué en silence par lua_tointeger
+        -- (1.5 -> 0 : élagage total), et toute string passait pour
+        -- 'type' (= aucun filtre). Désormais : erreurs explicites.
+        local rv, ev = babet.find(P, { maxdepth = 1.5 })
+        ok_fail("find maxdepth=1.5 -> (nil, err)", rv, ev)
+        ok("  message mentionne 'integer'",
+            tostring(ev):find("integer", 1, true) ~= nil,
+            "err=" .. tostring(ev))
+        rv, ev = babet.find(P, { mindepth = 1.5 })
+        ok_fail("find mindepth=1.5 -> (nil, err)", rv, ev)
+        rv, ev = babet.find(P, { type = "file" })
+        ok_fail("find type='file' -> (nil, err)", rv, ev)
+        ok("  message mentionne f/d",
+            tostring(ev):find('"f" or "d"', 1, true) ~= nil,
+            "err=" .. tostring(ev))
+        rv, ev = babet.find(P, { type = 42 })
+        ok_fail("find type=42 (coercé '42') -> (nil, err)", rv, ev)
+    end
+
+    -- Régression fs:: jetants (revue ChatGPT post-v2.2.0) : sur un
+    -- parent EACCES, les variantes sans error_code de fs::exists /
+    -- fs::is_directory lèvent (fs::exists n'avale que not-found,
+    -- pas les permissions) ; l'exception traversait la frontière
+    -- lua_CFunction -> abort au lieu de (nil, err). Le lot 21 passe
+    -- tous les sites en variantes error_code. On vérifie ici que le
+    -- contrat (nil, err) tient face à un parent inaccessible, dans
+    -- plusieurs bindings à la fois.
+    --
+    -- Restauration des droits en pcall obligatoire : si un test
+    -- lève, la ligne setMode(755) ne s'exécute pas et le sandbox
+    -- devient impossible à nettoyer (chmod 000 hérité entre runs).
+    do
+        local roleaks = sb("roleaks")
+        assert(babet.mkdir(roleaks))
+        babet.touch(roleaks .. "/inside.txt")
+        assert(babet.setMode(roleaks, tonumber("000", 8)))
+
+        local function body()
+            local v, e
+            v, e = babet.find(roleaks .. "/x", { type = "f" })
+            ok_fail("find sous parent EACCES -> (nil, err) sans crash", v, e)
+            v, e = babet.remove(roleaks .. "/inside.txt")
+            ok_fail("remove sous parent EACCES -> (nil, err) sans crash", v, e)
+            v, e = babet.rename(roleaks .. "/a", roleaks .. "/b")
+            ok_fail("rename sous parent EACCES -> (nil, err) sans crash", v, e)
+            v, e = babet.link(roleaks .. "/inside.txt", roleaks .. "/ln")
+            ok_fail("link sous parent EACCES -> (nil, err) sans crash", v, e)
+        end
+        local ok_body, err_body = pcall(body)
+
+        -- Restauration inconditionnelle (try/finally maison) avant
+        -- toute propagation d'erreur potentielle
+        babet.setMode(roleaks, tonumber("755", 8))
+        pcall(babet.rmdirAll, roleaks)
+
+        if not ok_body then
+            error(err_body)
+        end
     end
 end
 
@@ -1200,9 +1260,7 @@ do
         for _ = 1, 69 do t = { c = t } end
         local copy = babet.deepCopyTable(t)
         local n, d = copy, 0
-        while type(n) == "table" and n.c do
-            n = n.c; d = d + 1
-        end
+        while type(n) == "table" and n.c do n = n.c; d = d + 1 end
         ok("deepCopyTable : 70 niveaux copiés (checkstack)",
             d == 69 and type(n) == "table" and n.v == 42,
             "d=" .. tostring(d))
@@ -4810,9 +4868,7 @@ do
     if job then
         local okj, result = job:join()
         local n, d = result, 0
-        while type(n) == "table" and n.c do
-            n = n.c; d = d + 1
-        end
+        while type(n) == "table" and n.c do n = n.c; d = d + 1 end
         ok("workers : aller-retour 30 niveaux (checkstack)",
             okj == true and d == 29
             and type(n) == "table" and n.v == 42,

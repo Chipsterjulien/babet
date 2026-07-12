@@ -10,7 +10,8 @@
 
 namespace fs = std::filesystem;
 
-bool createZipFromDirectory(const std::string &dir, const std::string &zipFileName)
+bool createZipFromDirectory(const std::string &dir, const std::string &zipFileName,
+                            const std::string &excludePath)
 {
     mz_zip_archive zip = {};
 
@@ -42,6 +43,26 @@ bool createZipFromDirectory(const std::string &dir, const std::string &zipFileNa
         {
             if (!fs::is_regular_file(entry))
                 continue;
+
+            // CORRECTIF (revue ChatGPT post-v2.2.0, vérifié) : ne
+            // jamais réembarquer l'output d'un --create-exe
+            // PRÉCÉDENT. `--create-exe . app` lancé deux fois :
+            // l'ancien `app` (binaire complet !) vivait dans le
+            // dossier parcouru et finissait dans le ZIP du nouveau —
+            // app(N+1) = Babet + projet + app(N), croissance à
+            // chaque reconstruction. fs::equivalent compare les
+            // inodes (symlinks résolus : un lien vers l'output est
+            // exclu aussi) ; au premier build l'output n'existe pas
+            // encore -> equivalent pose eq_ec et rend false, aucun
+            // skip. Variante error_code : jamais d'exception ici.
+            if (!excludePath.empty())
+            {
+                std::error_code eq_ec;
+                if (fs::equivalent(entry.path(), excludePath, eq_ec))
+                {
+                    continue;
+                }
+            }
 
             // CORRECTIF (audit v21) : PURE lexical, surtout PAS
             // fs::relative — même bug (et même fix) que copyTree.cpp /

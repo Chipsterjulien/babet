@@ -31,7 +31,8 @@ std::string rename_file(std::string_view old_path, std::string_view new_path) {
     }
 
     // Check if the old path exists
-    if (!fs::exists(old_path)) {
+    std::error_code exist_ec;
+    if (!fs::exists(old_path, exist_ec)) {
         return "Source path does not exist: " + std::string(old_path);
     }
 

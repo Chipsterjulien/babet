@@ -67,11 +67,12 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
     std::error_code ec;
 
     // Validations préalables.
-    if (!fs::exists(source))
+    std::error_code src_ec;
+    if (!fs::exists(source, src_ec))
     {
         return "source path does not exist: " + source.string();
     }
-    if (!fs::is_directory(source))
+    if (!fs::is_directory(source, src_ec))
     {
         return "source path is not a directory: " + source.string();
     }
@@ -116,7 +117,8 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
     // On ne le tente que si la destination n'existe PAS : sinon le fallback
     // ci-dessous implémente une fusion entrée par entrée, comportement que
     // fs::rename ne sait pas faire.
-    if (!fs::exists(destination))
+    std::error_code dst_ec;
+    if (!fs::exists(destination, dst_ec))
     {
         fs::rename(source, destination, ec);
         if (!ec)

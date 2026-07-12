@@ -23,7 +23,7 @@ git clone https://github.com/Chipsterjulien/babet.git
 cd babet
 ./build_local.sh        # télécharge les deps et compile
                         # (~5 min au premier lancement, plus vite après)
-./run_tests.sh          # harness offline — doit afficher 827 PASS / 0 FAIL
+./run_tests.sh          # harness offline — doit afficher 974 PASS / 0 FAIL
 ```
 
 Le script de build télécharge chaque dépendance depuis sa source
@@ -102,7 +102,7 @@ dont le nom commence légitimement par `-` peuvent toujours être
 passés via `./-dirname` (convention POSIX).
 
 ```sh
-babet --version    # babet 1.7.1
+babet --version    # babet 2.2.1
 babet --help       # usage complet
 babet --bogus      # Unknown option: --bogus
                       # Try 'babet --help' for more information.
