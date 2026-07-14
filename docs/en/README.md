@@ -36,7 +36,7 @@ Current documented development version: **2.4.0** (latest audited release: **2.3
 | parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversions |
 | run an external program | [`Exec — processes`](modules/exec.md) | shell-free argv, `exec` capture, `spawn` streaming, environment, cwd, and process control |
 | manage the environment, identify the process, or measure Lua memory | [`SYS - process and host`](modules/sys.md) | runtime version, PID, hostname, `uname`, `PATH`, `env`, `setenv`, and Lua-state memory |
-| send a web request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, redirects, TLS, timeout, and response-size limits |
+| send a web request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic file downloads, redirects, TLS, timeout, and size limits |
 | open a TCP connection | [`Socket — TCP`](modules/socket.md) | clients, servers, accept, binary streams, lines, reads through EOF, timeouts, buffering, and limits |
 | secure TCP or perform STARTTLS | [`TLS — secure sockets`](modules/tls.md) | direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, timeout, and failure state |
 | store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | open options, execution, parameters, queries, iterators, and transactions |
@@ -61,7 +61,7 @@ titles below let readers understand scope without opening every file.
 | [`Argparse — command-line arguments`](modules/argparse.md) | Declare flags, options, and positionals; generate help; validate choices; convert values. |
 | [`Exec — external programs and processes`](modules/exec.md) | Run without a shell using `exec`, or progressively control stdin/stdout/stderr with `spawn`. |
 | [`FS — files, directories, paths, and attributes`](modules/fs.md) | Existence and types, creation/removal, paths, listing, search, iteration, tree copy/move, symlinks, Unix modes, and checksums. |
-| [`HTTP — web requests`](modules/http.md) | URLs, methods, query, validated headers, binary bodies/responses, redirects, TLS verification, timeout, and maximum size. |
+| [`HTTP — web requests`](modules/http.md) | URLs, methods, query, validated headers, binary bodies/responses, atomic file downloads, redirects, TLS verification, timeout, and size limits. |
 | [`Inotify — filesystem monitoring`](modules/inotify.md) | Add/remove watches, read events, handle timeouts, moves, cookies, and closing. |
 | [`JSON — encoding and decoding`](modules/json.md) | Lua/JSON types, `null`, empty arrays, array marking, indentation, UTF-8, cycles, and limits. |
 | [`Logging — application logs`](modules/logging.md) | Levels, filtering, destination, colors, and variadic calls. |

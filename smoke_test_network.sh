@@ -244,7 +244,31 @@ run_case "HTTPS certificat local accepté avec ca_cert" \
 if r then print(\"STATUS=\" .. r.status) else print(\"ERR=\" .. tostring(e)) end" \
 '^STATUS=200$' required 1
 
-# 4. Le bypass explicite verify=false doit également permettre la connexion.
+# 4. Le téléchargement vers fichier emprunte le même chemin TLS, mais avec un
+# receiver de corps différent. Vérifie le CA, le contenu binaire, le nombre
+# d'octets et le commit atomique sur le binaire normal final.
+run_case "HTTPS download local accepté avec ca_cert" \
+"local path = \"$TMPDIR/tls-download.bin\"
+local r, e = babet.http.download(\"$TLS_URL\", path, {
+    ca_cert = \"$TLS_CA_CERT\", timeout = 5, max_file_size = 1024
+})
+if not r then
+    print(\"ERR=\" .. tostring(e))
+elseif not r.saved then
+    print(\"NOT_SAVED=\" .. tostring(r.status))
+else
+    local f = io.open(path, \"rb\")
+    local body = f and f:read(\"*a\") or nil
+    if f then f:close() end
+    if body == \"babet local TLS smoke test\\n\" then
+        print(\"DOWNLOADED=\" .. r.bytes .. \" STATUS=\" .. r.status)
+    else
+        print(\"BAD_BODY=\" .. tostring(body))
+    end
+end" \
+'^DOWNLOADED=27 STATUS=200$' required 1
+
+# 5. Le bypass explicite verify=false doit également permettre la connexion.
 run_case "HTTPS certificat local accepté avec verify=false" \
 "local r, e = babet.http.request{
     url = \"$TLS_URL\", verify = false, timeout = 5
@@ -252,7 +276,7 @@ run_case "HTTPS certificat local accepté avec verify=false" \
 if r then print(\"STATUS=\" .. r.status) else print(\"ERR=\" .. tostring(e)) end" \
 '^STATUS=200$' required 1
 
-# 5. Sondes publiques utiles, mais dépendantes du réseau, du proxy et des
+# 6. Sondes publiques utiles, mais dépendantes du réseau, du proxy et des
 # services tiers. Elles sont relancées une fois et restent informatives par
 # défaut. BABET_SMOKE_STRICT_EXTERNAL=1 les rend bloquantes.
 run_case "HTTPS certificat public valide sans ca_cert" \

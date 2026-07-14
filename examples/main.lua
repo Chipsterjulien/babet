@@ -3376,6 +3376,68 @@ do
             return H.post("http://127.0.0.1/", 42)
         end) == false)
 
+    -- --- download(): signature and pre-network validation -----------
+    ok("HTTP download is exposed",
+        type(H.download) == "function")
+    ok("HTTP download requires URL and destination",
+        pcall(function() return H.download() end) == false)
+    ok("HTTP download rejects a missing destination",
+        pcall(function() return H.download("http://127.0.0.1/") end) == false)
+    ok("HTTP download URL is a strict string",
+        pcall(function() return H.download(42, "out.bin") end) == false)
+    ok("HTTP download destination is a strict string",
+        pcall(function()
+            return H.download("http://127.0.0.1/", 42)
+        end) == false)
+    ok("HTTP download opts must be a table",
+        pcall(function()
+            return H.download("http://127.0.0.1/", "out.bin", "bad")
+        end) == false)
+    ok("HTTP download rejects extra arguments",
+        pcall(function()
+            return H.download("http://127.0.0.1/", "out.bin", {}, true)
+        end) == false)
+    ok("HTTP download rejects NUL in destination",
+        pcall(function()
+            return H.download("http://127.0.0.1/", "out\0ignored")
+        end) == false)
+
+    do
+        local validation_path = "_babet_http_download_validation.tmp"
+        babet.remove(validation_path)
+
+        local v, e = H.download("http://127.0.0.1:1/", validation_path, {
+            max_file_size = "1024",
+        })
+        ok_fail("HTTP download max_file_size is a strict integer", v, e)
+
+        v, e = H.download("http://127.0.0.1:1/", validation_path, {
+            max_file_size = 0,
+        })
+        ok_fail("HTTP download rejects max_file_size <= 0", v, e)
+
+        v, e = H.download("http://127.0.0.1:1/", validation_path, {
+            max_file_size = 1.5,
+        })
+        ok_fail("HTTP download rejects fractional max_file_size", v, e)
+
+        v, e = H.download("http://127.0.0.1:1/", validation_path, {
+            body = "not allowed on GET",
+        })
+        ok_fail("HTTP download rejects a request body", v, e)
+
+        v, e = H.download("http://127.0.0.1:1/",
+            "_babet_missing_download_parent/out.bin", { timeout = 1 })
+        ok_fail("HTTP download requires an existing parent directory", v, e)
+
+        v, e = H.download("http://127.0.0.1:1/",
+            "_babet_http_test/../out.bin", { timeout = 1 })
+        ok_fail("HTTP download rejects '..' in destination", v, e)
+
+        ok("HTTP download validation leaves no destination",
+            not babet.fileExists(validation_path))
+    end
+
     -- Chantier longjmp : ces erreurs runtime de http_perform passent
     -- maintenant en (nil, err) au lieu de luaL_error (cohérent avec
     -- le commentaire d'intention du fichier + évite les fuites C++).
@@ -3624,11 +3686,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/large":
             self._send(200, b"x" * 4096,
                        [("Content-Type", "application/octet-stream")])
+        elif path == "/empty":
+            self._send(204, b"",
+                       [("Content-Type", "application/octet-stream")])
         elif path == "/query":
             self._send(200, self.path.encode("ascii"),
                        [("Content-Type", "text/plain")])
         elif path == "/redirect":
-            self._send(302, b"", [("Location", "/probe.bin")])
+            self._send(302, b"redirect-body",
+                       [("Location", "/probe.bin")])
         elif path == "/slow":
             time.sleep(0.5)
             self._send(200, b"slow", [("Content-Type", "text/plain")])
@@ -3721,6 +3787,213 @@ server.serve_forever()
         else
             local base = "http://127.0.0.1:" .. port
             print("[INFO] http: server ready, running 2xx success tests...")
+
+            local download_dir = SBH .. "/downloads"
+            assert(babet.mkdir(download_dir))
+
+            local function read_binary(path)
+                local file = assert(io.open(path, "rb"))
+                local data = file:read("*a")
+                file:close()
+                return data
+            end
+
+            local function write_binary(path, data)
+                local file = assert(io.open(path, "wb"))
+                file:write(data)
+                file:close()
+            end
+
+            local function count_download_temps(path)
+                local files = babet.listFiles(path) or {}
+                local count = 0
+                for _, item in ipairs(files) do
+                    local name = babet.getBasename(item)
+                    if type(name) == "string"
+                        and name:find(".babet-download.", 1, true) == 1 then
+                        count = count + 1
+                    end
+                end
+                return count
+            end
+
+            local download_path = download_dir .. "/probe.bin"
+            local downloaded, download_err = H.download(
+                base .. "/probe.bin", download_path, { timeout = 5 })
+            ok("HTTP download 200 -> (table, nil)",
+                type(downloaded) == "table" and download_err == nil,
+                "err=" .. tostring(download_err))
+            ok("HTTP download status == 200",
+                type(downloaded) == "table" and downloaded.status == 200)
+            ok("HTTP download reports saved=true",
+                type(downloaded) == "table" and downloaded.saved == true)
+            ok("HTTP download reports exact byte count",
+                type(downloaded) == "table" and downloaded.bytes == 5,
+                "bytes=" .. tostring(downloaded and downloaded.bytes))
+            ok("HTTP download returns the destination path",
+                type(downloaded) == "table"
+                and downloaded.path == download_path)
+            ok("HTTP download result does not expose an in-memory body",
+                type(downloaded) == "table" and downloaded.body == nil)
+            ok("HTTP download returns response headers",
+                type(downloaded) == "table"
+                and type(downloaded.headers) == "table"
+                and downloaded.headers["content-type"]
+                    == "application/octet-stream")
+            ok("HTTP download returns headers_multi",
+                type(downloaded) == "table"
+                and type(downloaded.headers_multi) == "table"
+                and type(downloaded.headers_multi["content-type"])
+                    == "table")
+            ok("HTTP download writes binary-safe content",
+                read_binary(download_path) == "AB\0CD")
+
+            write_binary(download_path, "OLD")
+            local replaced, replace_err = H.download(
+                base .. "/probe.bin", download_path, { timeout = 5 })
+            ok("HTTP download atomically replaces an existing file",
+                type(replaced) == "table" and replace_err == nil
+                and replaced.saved == true
+                and read_binary(download_path) == "AB\0CD",
+                "err=" .. tostring(replace_err))
+
+            local error_path = download_dir .. "/preserved.bin"
+            write_binary(error_path, "KEEP")
+            local not_found, not_found_err = H.download(
+                base .. "/missing", error_path, { timeout = 5 })
+            ok("HTTP download 404 returns response metadata",
+                type(not_found) == "table" and not_found_err == nil
+                and not_found.status == 404,
+                "err=" .. tostring(not_found_err))
+            ok("HTTP download 404 reports saved=false",
+                type(not_found) == "table" and not_found.saved == false)
+            ok("HTTP download 404 reports received bytes",
+                type(not_found) == "table" and not_found.bytes == 9,
+                "bytes=" .. tostring(not_found and not_found.bytes))
+            ok("HTTP download 404 exposes no destination path",
+                type(not_found) == "table" and not_found.path == nil)
+            ok("HTTP download 404 preserves the existing destination",
+                read_binary(error_path) == "KEEP")
+            ok("HTTP download 404 leaves no temporary file",
+                count_download_temps(download_dir) == 0)
+
+            local limited_path = download_dir .. "/limited.bin"
+            write_binary(limited_path, "ORIGINAL")
+            local limited, limited_err = H.download(
+                base .. "/large", limited_path, {
+                    timeout = 5,
+                    max_file_size = 1024,
+                })
+            ok_fail("HTTP download enforces max_file_size",
+                limited, limited_err)
+            ok("HTTP download max_file_size error is explicit",
+                limited == nil
+                and tostring(limited_err):find(
+                    "max_file_size", 1, true) ~= nil,
+                "err=" .. tostring(limited_err))
+            ok("HTTP download size failure preserves destination",
+                read_binary(limited_path) == "ORIGINAL")
+            ok("HTTP download size failure removes temporary file",
+                count_download_temps(download_dir) == 0)
+
+            local redirect_path = download_dir .. "/redirect.bin"
+            write_binary(redirect_path, "REDIRECT-OLD")
+            local redirect_result, redirect_err = H.download(
+                base .. "/redirect", redirect_path, { timeout = 5 })
+            ok("HTTP download does not follow redirects by default",
+                type(redirect_result) == "table" and redirect_err == nil
+                and redirect_result.status == 302
+                and redirect_result.saved == false,
+                "err=" .. tostring(redirect_err))
+            ok("HTTP download unfollowed redirect preserves destination",
+                read_binary(redirect_path) == "REDIRECT-OLD")
+
+            local followed_download, followed_download_err = H.download(
+                base .. "/redirect", redirect_path, {
+                    timeout = 5,
+                    follow_redirects = true,
+                })
+            ok("HTTP download follows redirects when requested",
+                type(followed_download) == "table"
+                and followed_download_err == nil
+                and followed_download.status == 200
+                and followed_download.saved == true
+                and read_binary(redirect_path) == "AB\0CD",
+                "err=" .. tostring(followed_download_err))
+
+            local empty_path = download_dir .. "/empty.bin"
+            local empty_result, empty_err = H.download(
+                base .. "/empty", empty_path, { timeout = 5 })
+            ok("HTTP download saves an empty 204 response",
+                type(empty_result) == "table" and empty_err == nil
+                and empty_result.status == 204
+                and empty_result.saved == true
+                and empty_result.bytes == 0,
+                "err=" .. tostring(empty_err))
+            ok("HTTP download creates an empty destination file",
+                babet.fileExists(empty_path)
+                and babet.fileSize(empty_path) == 0)
+
+            local query_path = download_dir .. "/query.txt"
+            local query_download, query_download_err = H.download(
+                base .. "/query", query_path, {
+                    timeout = 5,
+                    query = { a = "x y" },
+                })
+            ok("HTTP download supports query options",
+                type(query_download) == "table"
+                and query_download_err == nil
+                and read_binary(query_path):find("a=x+y", 1, true) ~= nil,
+                "err=" .. tostring(query_download_err))
+
+            local real_parent = SBH .. "/download-real-parent"
+            local linked_parent = SBH .. "/download-linked-parent"
+            assert(babet.mkdir(real_parent))
+            assert(babet.link(real_parent, linked_parent))
+            local through_link, through_link_err = H.download(
+                base .. "/probe.bin", linked_parent .. "/blocked.bin", {
+                    timeout = 5,
+                })
+            ok_fail("HTTP download rejects a symlink parent component",
+                through_link, through_link_err)
+            ok("HTTP download symlink-parent error is explicit",
+                through_link == nil
+                and tostring(through_link_err):find(
+                    "symlink", 1, true) ~= nil,
+                "err=" .. tostring(through_link_err))
+            ok("HTTP download never writes through a symlink parent",
+                not babet.fileExists(real_parent .. "/blocked.bin"))
+
+            local symlink_target = download_dir .. "/target.bin"
+            local symlink_destination = download_dir .. "/destination.bin"
+            write_binary(symlink_target, "TARGET")
+            assert(babet.link(symlink_target, symlink_destination))
+            local symlink_result, symlink_err = H.download(
+                base .. "/probe.bin", symlink_destination, { timeout = 5 })
+            local no_longer_link = babet.exec("test", {
+                "!", "-L", symlink_destination,
+            })
+            ok("HTTP download safely replaces a destination symlink",
+                type(symlink_result) == "table" and symlink_err == nil
+                and symlink_result.saved == true,
+                "err=" .. tostring(symlink_err))
+            ok("HTTP download leaves the symlink target untouched",
+                read_binary(symlink_target) == "TARGET")
+            ok("HTTP download destination now contains response data",
+                read_binary(symlink_destination) == "AB\0CD")
+            ok("HTTP download replaces the symlink inode itself",
+                type(no_longer_link) == "table" and no_longer_link.code == 0)
+
+            local transport_path = download_dir .. "/transport.bin"
+            write_binary(transport_path, "STILL-HERE")
+            local transport, transport_err = H.download(
+                "http://127.0.0.1:1/", transport_path, { timeout = 1 })
+            ok_fail("HTTP download transport failure -> (nil, err)",
+                transport, transport_err)
+            ok("HTTP download transport failure preserves destination",
+                read_binary(transport_path) == "STILL-HERE")
+            ok("HTTP download transport failure removes temporary file",
+                count_download_temps(download_dir) == 0)
 
             local res, err = babet.http.get(base .. "/probe.bin",
                 { timeout = 5 })

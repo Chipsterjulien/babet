@@ -5,6 +5,7 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include "http_download_file.hpp"
 #include "http.hpp"
 #include "lua_utils.hpp"
 
@@ -26,6 +27,8 @@ namespace
         64ull * 1024ull * 1024ull;
     constexpr lua_Integer MAX_CONFIGURABLE_BODY_SIZE =
         2ll * 1024ll * 1024ll * 1024ll;
+    constexpr std::uint64_t DEFAULT_MAX_FILE_SIZE =
+        8ull * 1024ull * 1024ull * 1024ull;
 
     bool is_ascii_alpha(unsigned char c)
     {
@@ -308,17 +311,10 @@ namespace
         return true;
     }
 
-    // Empile (result, nil). Pile inchangée par ailleurs.
-    int push_response(lua_State *L, const httplib::Result &res)
+    void push_status_and_headers(lua_State *L, const httplib::Result &res)
     {
-        lua_newtable(L);
-
         lua_pushinteger(L, res->status);
         lua_setfield(L, -2, "status");
-
-        // Binaire-safe : le corps peut contenir des octets nuls.
-        lua_pushlstring(L, res->body.data(), res->body.size());
-        lua_setfield(L, -2, "body");
 
         // Table rétrocompatible : une chaîne par nom, dernière valeur
         // rencontrée gagnante.
@@ -356,13 +352,50 @@ namespace
 
         lua_setfield(L, -3, "headers_multi");
         lua_setfield(L, -2, "headers");
+    }
+
+    // Empile (result, nil). Pile inchangée par ailleurs.
+    int push_response(lua_State *L, const httplib::Result &res)
+    {
+        lua_newtable(L);
+        push_status_and_headers(L, res);
+
+        // Binaire-safe : le corps peut contenir des octets nuls.
+        lua_pushlstring(L, res->body.data(), res->body.size());
+        lua_setfield(L, -2, "body");
+
+        lua_pushnil(L);
+        return 2;
+    }
+
+    int push_download_response(lua_State *L, const httplib::Result &res,
+                               const std::string &destination,
+                               std::uint64_t bytes, bool saved)
+    {
+        lua_newtable(L);
+        push_status_and_headers(L, res);
+
+        lua_pushboolean(L, saved);
+        lua_setfield(L, -2, "saved");
+
+        lua_pushinteger(L, static_cast<lua_Integer>(bytes));
+        lua_setfield(L, -2, "bytes");
+
+        if (saved)
+        {
+            lua_pushlstring(L, destination.data(), destination.size());
+            lua_setfield(L, -2, "path");
+        }
 
         lua_pushnil(L);
         return 2;
     }
 
     // Cœur partagé. `opts_idx` = table d'options sur la pile.
-    int http_perform(lua_State *L, int opts_idx)
+    // Lorsque download_destination != nullptr, le corps est écrit dans un
+    // temporaire adjacent puis remplacé atomiquement pour une réponse 2xx.
+    int http_perform(lua_State *L, int opts_idx,
+                     const std::string *download_destination = nullptr)
     {
         opts_idx = lua_absindex(L, opts_idx);
 
@@ -522,35 +555,47 @@ namespace
         }
         lua_pop(L, 1);
 
-        // --- max_body_size (optionnel, octets) -------------------------
-        // Défaut : 64 Mio. Le plafond configurable de 2 Gio reste
-        // cohérent avec exec.max_output et empêche les conversions ou
-        // allocations déraisonnables. `nil` signifie le défaut ; toutes
-        // les autres valeurs doivent être des entiers strictement positifs.
+        // --- limite de réponse -----------------------------------------
+        // request/get/post gardent leur corps en mémoire et utilisent
+        // max_body_size (64 Mio par défaut, 2 Gio maximum).
+        // download écrit en streaming et utilise max_file_size (8 Gio par
+        // défaut, configurable jusqu'à math.maxinteger).
         std::size_t max_body_size = DEFAULT_MAX_BODY_SIZE;
-        lua_getfield(L, opts_idx, "max_body_size");
+        std::uint64_t max_file_size = DEFAULT_MAX_FILE_SIZE;
+        const char *limit_field = download_destination != nullptr
+                                      ? "max_file_size"
+                                      : "max_body_size";
+        lua_getfield(L, opts_idx, limit_field);
         if (!lua_isnil(L, -1))
         {
             if (!lua_isinteger(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(
-                    L, "http: 'max_body_size' must be an integer");
+                return push_fail(L, std::string("http: '") + limit_field +
+                                        "' must be an integer");
             }
             lua_Integer raw_limit = lua_tointeger(L, -1);
             if (raw_limit <= 0)
             {
                 lua_pop(L, 1);
-                return push_fail(
-                    L, "http: 'max_body_size' must be > 0");
+                return push_fail(L, std::string("http: '") + limit_field +
+                                        "' must be > 0");
             }
-            if (raw_limit > MAX_CONFIGURABLE_BODY_SIZE)
+            if (download_destination == nullptr &&
+                raw_limit > MAX_CONFIGURABLE_BODY_SIZE)
             {
                 lua_pop(L, 1);
                 return push_fail(
                     L, "http: 'max_body_size' too large (maximum is 2 GiB)");
             }
-            max_body_size = static_cast<std::size_t>(raw_limit);
+            if (download_destination != nullptr)
+            {
+                max_file_size = static_cast<std::uint64_t>(raw_limit);
+            }
+            else
+            {
+                max_body_size = static_cast<std::size_t>(raw_limit);
+            }
         }
         lua_pop(L, 1);
 
@@ -674,6 +719,17 @@ namespace
         // appels réseau aussi selon les cas.
         try
         {
+            HttpDownloadFile download_file;
+            if (download_destination != nullptr)
+            {
+                std::string open_error;
+                if (!download_file.open(*download_destination, max_file_size,
+                                        open_error))
+                {
+                    return push_fail(L, open_error);
+                }
+            }
+
             httplib::Client cli(parts.origin);
             cli.set_follow_location(follow);
             cli.enable_server_certificate_verification(verify);
@@ -769,26 +825,58 @@ namespace
                 request.set_header("Content-Type", content_type);
             }
 
-            request.content_receiver =
-                [&](const char *data, std::size_t data_length,
-                    std::size_t /*offset*/,
-                    std::size_t /*total_length*/) -> bool
-                {
-                    // Forme soustractive : aucune addition ne peut
-                    // déborder avant le contrôle.
-                    if (response_body.size() > max_body_size ||
-                        data_length > max_body_size - response_body.size())
+            if (download_destination != nullptr)
+            {
+                request.content_receiver =
+                    [&](const char *data, std::size_t data_length,
+                        std::size_t /*offset*/,
+                        std::size_t /*total_length*/) -> bool
                     {
-                        body_too_large = true;
-                        return false;
-                    }
-                    response_body.append(data, data_length);
-                    return true;
-                };
+                        return download_file.write(data, data_length);
+                    };
+            }
+            else
+            {
+                request.content_receiver =
+                    [&](const char *data, std::size_t data_length,
+                        std::size_t /*offset*/,
+                        std::size_t /*total_length*/) -> bool
+                    {
+                        // Forme soustractive : aucune addition ne peut
+                        // déborder avant le contrôle.
+                        if (response_body.size() > max_body_size ||
+                            data_length >
+                                max_body_size - response_body.size())
+                        {
+                            body_too_large = true;
+                            return false;
+                        }
+                        response_body.append(data, data_length);
+                        return true;
+                    };
+            }
 
             httplib::Result res = cli.send(request);
             if (!res)
             {
+                if (download_destination != nullptr)
+                {
+                    std::string download_error;
+                    if (download_file.limit_exceeded())
+                    {
+                        download_error =
+                            "http: response body exceeds max_file_size";
+                    }
+                    else if (!download_file.write_error().empty())
+                    {
+                        download_error = download_file.write_error();
+                    }
+                    download_file.discard();
+                    if (!download_error.empty())
+                    {
+                        return push_fail(L, download_error);
+                    }
+                }
                 if (body_too_large)
                 {
                     return push_fail(
@@ -796,6 +884,28 @@ namespace
                 }
                 return push_fail(L, std::string("http: ") +
                                         httplib::to_string(res.error()));
+            }
+
+            if (download_destination != nullptr)
+            {
+                const bool save = res->status >= 200 && res->status < 300;
+                const std::uint64_t downloaded_bytes =
+                    download_file.bytes_written();
+                if (save)
+                {
+                    std::string commit_error;
+                    if (!download_file.commit(commit_error))
+                    {
+                        download_file.discard();
+                        return push_fail(L, commit_error);
+                    }
+                }
+                else
+                {
+                    download_file.discard();
+                }
+                return push_download_response(
+                    L, res, *download_destination, downloaded_bytes, save);
             }
 
             // Avec un ContentReceiver, cpp-httplib ne remplit pas
@@ -896,6 +1006,39 @@ int lua_http_post(lua_State *L)
     return http_perform(L, dst);
 }
 
+int lua_http_download(lua_State *L)
+{
+    const int argc = lua_gettop(L);
+    luaL_argcheck(L, argc == 2 || argc == 3, 1,
+                  "Expected two or three arguments");
+    luaL_checktype(L, 1, LUA_TSTRING);
+    luaL_checktype(L, 2, LUA_TSTRING);
+    if (argc == 3)
+    {
+        luaL_checktype(L, 3, LUA_TTABLE);
+    }
+
+    const std::string_view url_view =
+        luaL_checkstring_view_without_nul(L, 1, "url");
+    const std::string_view destination_view =
+        luaL_checkstring_view_without_nul(L, 2, "destination");
+    const std::string destination(destination_view);
+
+    lua_newtable(L);
+    const int dst = lua_gettop(L);
+    if (argc == 3)
+    {
+        shallow_merge(L, 3, dst);
+    }
+
+    lua_pushlstring(L, url_view.data(), url_view.size());
+    lua_setfield(L, dst, "url");
+    lua_pushstring(L, "GET");
+    lua_setfield(L, dst, "method");
+
+    return http_perform(L, dst, &destination);
+}
+
 void register_http(lua_State *L)
 {
     // Précondition : table babet au sommet (-1), comme register_json.
@@ -909,6 +1052,9 @@ void register_http(lua_State *L)
 
     lua_pushcfunction(L, lua_http_post);
     lua_setfield(L, -2, "post");
+
+    lua_pushcfunction(L, lua_http_download);
+    lua_setfield(L, -2, "download");
 
     lua_setfield(L, -2, "http");
 }

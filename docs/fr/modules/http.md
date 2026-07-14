@@ -3,8 +3,8 @@
 # HTTP — requêtes web synchrones, headers, corps, TLS et limites
 
 `babet.http` est un client HTTP/HTTPS synchrone construit sur cpp-httplib et
-OpenSSL. Il convient aux APIs web, webhooks, téléchargements de taille bornée
-et appels REST simples.
+OpenSSL. Il convient aux APIs web, webhooks, appels REST simples, réponses en
+mémoire bornées et téléchargements directs vers un fichier.
 
 Le module couvre :
 
@@ -18,11 +18,12 @@ Le module couvre :
 - redirections optionnelles ;
 - vérification TLS activée par défaut ;
 - timeout de connexion et budget global ;
-- taille maximale de réponse.
+- taille maximale de réponse en mémoire ;
+- téléchargement GET en streaming avec remplacement atomique du fichier final.
 
-Il ne fournit pas de streaming, de session persistante exposée, de cookies,
-de multipart/form-data, de helper de formulaire URL-encoded, de proxy, de
-serveur HTTP, de WebSocket, ni d'HTTP/2 ou HTTP/3.
+Il ne fournit pas d'upload en streaming, de callbacks de réception, de session
+persistante exposée, de cookies, de multipart/form-data, de helper de formulaire
+URL-encoded, de proxy, de serveur HTTP, de WebSocket, ni d'HTTP/2 ou HTTP/3.
 
 ## Table des matières du module
 
@@ -30,6 +31,7 @@ serveur HTTP, de WebSocket, ni d'HTTP/2 ou HTTP/3.
 - [Vue d'ensemble de l'API](#http-api-summary)
 - [`request(opts)`](#http-request)
 - [`get(url, opts?)`](#http-get)
+- [`download(url, destination, opts?)`](#http-download)
 - [`post` et ses formes d'appel](#http-post)
 - [URL, fragments et query](#http-url-query)
 - [Méthodes HTTP](#http-methods)
@@ -39,7 +41,8 @@ serveur HTTP, de WebSocket, ni d'HTTP/2 ou HTTP/3.
 - [TLS et CA](#http-tls)
 - [Redirections](#http-redirects)
 - [Taille maximale de réponse](#http-max-body)
-- [Table de réponse](#http-response)
+- [Taille et sécurité du téléchargement](#http-max-file)
+- [Tables de réponse](#http-response)
 - [Exemples complets](#http-examples)
 - [Contrat d'erreur](#http-errors)
 - [Sécurité et limites](#http-design)
@@ -104,6 +107,7 @@ construction des options dans ton application.
 ```lua
 local response, err = babet.http.request(opts)
 local response, err = babet.http.get(url, opts?)
+local result, err = babet.http.download(url, destination, opts?)
 local response, err = babet.http.post(url)
 local response, err = babet.http.post(url, body)
 local response, err = babet.http.post(url, opts)
@@ -124,7 +128,8 @@ local response, err = babet.http.post(url, nil, opts)
 | `verify` | booléen strict | `true` | vérification du certificat HTTPS |
 | `ca_cert` | string | trust store OpenSSL | fichier CA supplémentaire/configuré |
 | `follow_redirects` | booléen strict | `false` | suit les redirections |
-| `max_body_size` | entier `1..2 Gio` | `64 MiB` | cap de la réponse en mémoire |
+| `max_body_size` | entier `1..2 Gio` | `64 MiB` | cap mémoire pour `request`/`get`/`post` |
+| `max_file_size` | entier positif | `8 Gio` | cap du fichier reçu par `download` |
 
 Les wrappers `get` et `post` remplacent toujours `url` et `method`, même si la
 table fournie contient d'autres valeurs.
@@ -174,6 +179,65 @@ Un corps est interdit pour GET, y compris via `opts.body` :
 local response, err = babet.http.get(url, { body = "x" })
 -- nil, "http: body not allowed for GET"
 ```
+
+
+<a id="http-download"></a>
+## `babet.http.download(url, destination, opts?)`
+
+Télécharge une réponse GET directement dans un fichier, sans accumuler le corps
+dans Lua ni dans une chaîne C++ :
+
+```lua
+local result, err = babet.http.download(
+    "https://example.com/archive.tar.gz",
+    "downloads/archive.tar.gz",
+    {
+        timeout = 120,
+        follow_redirects = true,
+        max_file_size = 4 * 1024 * 1024 * 1024,
+    }
+)
+assert(result, err)
+assert(result.saved, "HTTP " .. result.status)
+print(result.path, result.bytes)
+```
+
+L'appel reste synchrone, mais les chunks reçus sont écrits progressivement dans
+un fichier temporaire placé dans le même dossier. La destination finale est
+remplacée par un unique `renameat` seulement après réception complète de la
+réponse finale, synchronisation et fermeture du temporaire.
+
+Le wrapper impose toujours GET. Il accepte les options communes `headers`,
+`query`, `timeout`, `verify`, `ca_cert` et `follow_redirects`. `body` est refusé.
+`max_file_size` remplace `max_body_size` pour cet appel :
+
+- entier Lua strictement positif ;
+- défaut : 8 Gio ;
+- configurable jusqu'à `math.maxinteger` ;
+- appliqué aux octets réellement transmis au receiver fichier.
+
+Seule une réponse finale 2xx est validée. Une réponse 1xx, 3xx non suivie, 4xx
+ou 5xx reçue n'est pas une erreur de transport : `download` renvoie une table
+avec `saved = false`, supprime le temporaire et laisse une éventuelle
+destination existante strictement inchangée.
+
+Le contrat du chemin est volontairement strict :
+
+- le dossier parent doit déjà exister ;
+- Babet ne crée pas les dossiers parents ;
+- les composants `..` sont refusés ;
+- les composants parents qui sont des symlinks sont refusés ;
+- un symlink exactement à la destination est remplacé comme inode, sans suivre
+  ni modifier sa cible ;
+- le temporaire est créé dans le même dossier avec `O_EXCL` et supprimé après
+  toute erreur ;
+- une destination existante reste intacte après erreur DNS, TCP, TLS, timeout,
+  limite de taille, statut HTTP non-2xx ou écriture disque.
+
+Le renommage atomique empêche les lecteurs d'observer un fichier final partiel.
+L'API ne fournit pas de reprise, callback de progression, durabilité garantie du
+dossier parent après crash, ni préservation des métadonnées de l'ancien fichier.
+Le nouveau fichier est créé avec le mode `0666` filtré par l'umask du processus.
 
 <a id="http-post"></a>
 ## `babet.http.post` et ses formes d'appel
@@ -560,12 +624,32 @@ Aucun corps partiel n'est exposé. Le header `Content-Length` n'est pas la seule
 protection : la limite s'applique aux chunks réellement reçus, y compris avec
 un transfert chunked ou une longueur absente/trompeuse.
 
-Pour télécharger un gros fichier, utilise une solution de streaming externe ;
-augmenter la limite jusqu'à 2 GiB implique potentiellement une allocation de
-plusieurs gigaoctets.
+Pour un gros payload GET, utilise
+[`babet.http.download`](#http-download) au lieu d'augmenter cette limite en
+mémoire.
+
+<a id="http-max-file"></a>
+## `max_file_size` et sécurité du fichier
+
+`max_file_size` s'applique uniquement à `download`. La limite porte sur les
+octets du corps reçus, pas seulement sur le `Content-Length` annoncé. Si le
+flux dépasserait le plafond, Babet annule, supprime le temporaire, préserve la
+destination existante et renvoie :
+
+```lua
+nil, "http: response body exceeds max_file_size"
+```
+
+Le défaut de 8 Gio est un garde-fou, pas une recommandation d'accepter tout
+fichier de cette taille. Choisis la plus petite limite compatible avec
+l'artefact attendu. Un manque d'espace ou une erreur du système de fichiers
+renvoie aussi `(nil, err)` avec la même garantie de nettoyage.
 
 <a id="http-response"></a>
-## Table de réponse
+## Tables de réponse
+
+### Réponse en mémoire
+
 
 ```lua
 {
@@ -610,6 +694,26 @@ end
 
 L'ordre des occurrences suit celui fourni par cpp-httplib. L'ordre des noms
 dans `pairs()` n'est pas garanti.
+
+### Résultat d'un téléchargement
+
+```lua
+{
+    status = 200,
+    saved = true,
+    bytes = 123456,
+    path = "downloads/archive.tar.gz",
+    headers = { ... },
+    headers_multi = { ... },
+}
+```
+
+- `status`, `headers` et `headers_multi` gardent le sens décrit ci-dessus ;
+- `saved` vaut vrai uniquement si le statut final est 2xx et si le commit
+  atomique a réussi ;
+- `bytes` indique le nombre d'octets de corps reçus, y compris pour un non-2xx ;
+- `path` existe uniquement lorsque `saved` vaut vrai ;
+- aucun champ `body` n'est créé volontairement.
 
 <a id="http-examples"></a>
 ## Exemples complets
@@ -673,6 +777,26 @@ local response = assert(babet.http.request({
 Le fichier est lu entièrement en mémoire avant l'appel. Cette recette ne
 convient pas à un très gros fichier.
 
+### Télécharger un artefact de release
+
+```lua
+assert(babet.mkdir("downloads"))
+local result, err = babet.http.download(
+    "https://example.com/releases/tool.tar.gz",
+    "downloads/tool.tar.gz",
+    {
+        timeout = 120,
+        follow_redirects = true,
+        max_file_size = 512 * 1024 * 1024,
+    }
+)
+assert(result, err)
+if not result.saved then
+    error("statut HTTP inattendu " .. result.status)
+end
+print(result.bytes, "octets enregistrés dans", result.path)
+```
+
 ### Gérer 404 séparément des erreurs réseau
 
 ```lua
@@ -726,6 +850,8 @@ babet.http.request("not a table")
 babet.http.get(42)
 babet.http.get(url, "not a table")
 babet.http.post(url, 42)
+babet.http.download(url, 42)
+babet.http.download(url, "fichier", "pas une table")
 ```
 
 ### Erreurs `(nil, err)`
@@ -738,13 +864,15 @@ babet.http.post(url, 42)
 - query invalide ;
 - nom ou valeur de header invalide ;
 - DNS, connexion, TLS, envoi, lecture ou timeout ;
-- corps de réponse dépassant `max_body_size` ;
+- corps de réponse dépassant `max_body_size` ou `max_file_size` ;
+- chemin de destination ou erreur du système de fichiers ;
 - exception interne convertie en message `http: …`.
 
 ### Pas une erreur Babet
 
-Un statut 1xx, 3xx, 4xx ou 5xx reçu produit une table normale. L'application
-définit sa propre politique.
+Un statut 1xx, 3xx, 4xx ou 5xx reçu produit une table normale. Pour `download`,
+seul un 2xx est enregistré ; les autres statuts renvoient `saved = false`.
+L'application définit sa propre politique.
 
 <a id="http-design"></a>
 ## Sécurité et limites
@@ -756,11 +884,16 @@ définit sa propre politique.
   comportement en cas de redirection inter-domaines.
 - **TLS.** Garde `verify = true`. Une CA privée est préférable à
   `verify = false`.
-- **Taille mémoire.** Réduis `max_body_size` au minimum attendu.
+- **Limites.** Réduis `max_body_size` ou `max_file_size` au minimum attendu.
 - **Compression.** Selon les capacités compilées de cpp-httplib et les headers,
   le corps peut être traité par la bibliothèque ; la limite Babet porte sur les
   octets livrés au receiver.
-- **Pas de streaming.** Requête et réponse sont en mémoire.
+- **Streaming ciblé.** `request`, `get` et `post` gardent la réponse en mémoire.
+  `download` streame uniquement une réponse GET vers un fichier ; les uploads
+  restent en mémoire.
+- **Validation de l'artefact.** Le remplacement atomique évite un fichier final
+  partiel, mais l'appelant doit encore valider statut, taille attendue et somme
+  cryptographique.
 - **Pas de session exposée.** Chaque appel construit un nouveau client ; aucun
   cookie jar ou pool de connexions n'est garanti à travers les appels.
 - **Pas de formulaire/multipart automatique.** Encode explicitement ou utilise

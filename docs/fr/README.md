@@ -38,7 +38,7 @@ Version documentée en cours : **2.4.0** (dernière release auditée : **2.3.0**
 | lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |
 | lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, capture avec `exec`, streaming avec `spawn`, environnement, cwd et contrôle du processus |
 | manipuler l’environnement, identifier le processus ou mesurer la VM Lua | [`SYS - processus et machine`](modules/sys.md) | version du runtime, PID, hostname, `uname`, `PATH`, `env`, `setenv` et mémoire de l’état Lua |
-| envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, redirections, TLS, timeout et taille maximale |
+| envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, téléchargement atomique vers fichier, redirections, TLS, timeout et limites de taille |
 | ouvrir une connexion TCP | [`Socket — TCP`](modules/socket.md) | client, serveur, acceptation, flux binaires, lignes, lecture jusqu’à EOF, timeouts, buffers et limites |
 | chiffrer une connexion TCP ou faire STARTTLS | [`TLS — sockets sécurisées`](modules/tls.md) | TLS direct, STARTTLS, vérification, CA, hostname, SNI, versions, timeout et état après échec |
 | stocker des données SQL localement | [`SQLite — base embarquée`](modules/sqlite.md) | ouverture, options, exécution, paramètres, requêtes, itérateurs et transactions |
@@ -64,7 +64,7 @@ avoir à ouvrir chaque fichier.
 | [`Argparse — arguments de ligne de commande`](modules/argparse.md) | Déclarer des flags, options et positionnels ; générer l’aide ; valider les choix ; convertir les valeurs. |
 | [`Exec — programmes externes et processus`](modules/exec.md) | Exécuter sans shell avec `exec`, ou piloter stdin/stdout/stderr progressivement avec `spawn`. |
 | [`FS — fichiers, dossiers, chemins et attributs`](modules/fs.md) | Existence et types, création/suppression, chemins, listings, recherche, itérateur, copie/déplacement d’arbres, symlinks, modes Unix et checksums. |
-| [`HTTP — requêtes web`](modules/http.md) | URL, méthodes, query, headers validés, corps binaires, réponses, redirections, vérification TLS, timeout et taille maximale. |
+| [`HTTP — requêtes web`](modules/http.md) | URL, méthodes, query, headers validés, corps binaires, réponses, téléchargement atomique vers fichier, redirections, vérification TLS, timeout et limites de taille. |
 | [`Inotify — surveillance du système de fichiers`](modules/inotify.md) | Ajouter/retirer des watches, lire les événements, gérer timeouts, moves, cookies et fermeture. |
 | [`JSON — encodage et décodage`](modules/json.md) | Types Lua/JSON, `null`, tableaux vides, marquage de tableaux, indentation, UTF-8, cycles et limites. |
 | [`Logging — journalisation`](modules/logging.md) | Niveaux, filtrage, destination, couleurs et appels variadiques. |

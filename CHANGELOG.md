@@ -8,6 +8,26 @@ from 2.2.x should read the migration notes below.
 
 ## [2.4.0] - Unreleased
 
+### HTTP file downloads
+
+- Added `babet.http.download(url, destination [, opts])` for synchronous GET
+  downloads streamed directly to disk without buffering the complete body.
+- Added `max_file_size` with an 8 GiB default and strict positive-integer
+  validation; the limit applies to bytes actually delivered by the HTTP client.
+- Downloads use an exclusive same-directory temporary file and atomically
+  replace the final path only for a complete final 2xx response.
+- Existing destinations are preserved after DNS, TCP, TLS, timeout, size,
+  disk-write, non-2xx, and redirect-not-followed outcomes; unfinished temporary
+  files are removed.
+- Hardened destination traversal: parent directories must exist, `..` and
+  parent symlink components are rejected, while a final destination symlink is
+  safely replaced without modifying its target.
+- Added compact result metadata (`status`, `saved`, `bytes`, `path`, `headers`,
+  `headers_multi`) with no in-memory `body` field.
+- Added local deterministic regression coverage for binary files, empty files,
+  replacement, redirects, HTTP errors, size limits, transport failures, and
+  symlink protections, plus a blocking local HTTPS download smoke test.
+
 ### Process streaming
 
 - Added `babet.spawn(command [, args] [, opts])`, returning a process userdata

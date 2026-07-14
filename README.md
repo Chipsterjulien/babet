@@ -30,7 +30,8 @@ Can be used in three modes:
 3. **As a library of bindings** : Lua scripts get
    `babet.json`, `babet.http`, `babet.sqlite`,
    `babet.socket`, `babet.inotify`, `babet.workers`,
-   `babet.user`, `babet.exec`, the streaming `babet.spawn`, and more.
+   `babet.user`, `babet.exec`, the streaming `babet.spawn`, direct-to-file
+   `babet.http.download`, and more.
 
 ## Quick start
 
@@ -45,6 +46,27 @@ cd babet
 The build script vendors and compiles all its dependencies. The only
 prerequisites on your system are a C++23 compiler, CMake, `wget`, and
 `unzip`.
+
+### Download a large HTTP response without buffering it
+
+```lua
+assert(babet.mkdir("downloads"))
+local result, err = babet.http.download(
+    "https://example.com/archive.tar.gz",
+    "downloads/archive.tar.gz",
+    {
+        timeout = 120,
+        follow_redirects = true,
+        max_file_size = 512 * 1024 * 1024,
+    }
+)
+assert(result, err)
+assert(result.saved, "HTTP " .. result.status)
+```
+
+The response is written to a same-directory temporary file and atomically
+committed only for a final 2xx status. Existing destinations are preserved on
+network, TLS, size, disk, and non-2xx failures.
 
 ## Pre-release validation
 

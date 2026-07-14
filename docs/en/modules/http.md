@@ -3,8 +3,8 @@
 # HTTP — synchronous web requests, headers, bodies, TLS, and limits
 
 `babet.http` is a synchronous HTTP/HTTPS client built on cpp-httplib and
-OpenSSL. It is intended for APIs, webhooks, bounded downloads, and simple REST
-calls.
+OpenSSL. It is intended for APIs, webhooks, simple REST calls, bounded
+in-memory responses, and direct-to-file downloads.
 
 It supports:
 
@@ -18,11 +18,12 @@ It supports:
 - optional redirects;
 - TLS verification by default;
 - connection and global request timeouts;
-- a maximum in-memory response size.
+- a maximum in-memory response size;
+- streamed GET downloads committed atomically to a destination file.
 
-It does not expose streaming, persistent sessions, a cookie jar,
-multipart/form-data, form helpers, proxies, an HTTP server, WebSockets, HTTP/2,
-or HTTP/3.
+It does not expose streaming uploads, response callbacks, persistent sessions,
+a cookie jar, multipart/form-data, form helpers, proxies, an HTTP server,
+WebSockets, HTTP/2, or HTTP/3.
 
 ## Module contents
 
@@ -30,6 +31,7 @@ or HTTP/3.
 - [API overview](#http-api-summary)
 - [`request(opts)`](#http-request)
 - [`get(url, opts?)`](#http-get)
+- [`download(url, destination, opts?)`](#http-download)
 - [`post` call forms](#http-post)
 - [URLs, fragments, and query](#http-url-query)
 - [HTTP methods](#http-methods)
@@ -39,7 +41,8 @@ or HTTP/3.
 - [TLS and CA](#http-tls)
 - [Redirects](#http-redirects)
 - [Maximum response size](#http-max-body)
-- [Response table](#http-response)
+- [Download size and file safety](#http-max-file)
+- [Response tables](#http-response)
 - [Complete examples](#http-examples)
 - [Error contract](#http-errors)
 - [Security and limitations](#http-design)
@@ -93,6 +96,7 @@ activate a timeout and does not fail. Use the documented names exactly.
 ```lua
 local response, err = babet.http.request(opts)
 local response, err = babet.http.get(url, opts?)
+local result, err = babet.http.download(url, destination, opts?)
 local response, err = babet.http.post(url)
 local response, err = babet.http.post(url, body)
 local response, err = babet.http.post(url, opts)
@@ -111,7 +115,8 @@ local response, err = babet.http.post(url, nil, opts)
 | `verify` | strict boolean | `true` | HTTPS certificate verification |
 | `ca_cert` | string | OpenSSL trust store | CA file path |
 | `follow_redirects` | strict boolean | `false` | follow redirects automatically |
-| `max_body_size` | integer `1..2 GiB` | `64 MiB` | in-memory response cap |
+| `max_body_size` | integer `1..2 GiB` | `64 MiB` | in-memory cap for `request`/`get`/`post` |
+| `max_file_size` | positive integer | `8 GiB` | received-file cap for `download` |
 
 `get` and `post` always overwrite `url` and `method` after shallow-copying
 options.
@@ -154,6 +159,65 @@ local response, err = babet.http.get(
 
 The second argument must be absent, `nil`, or a table. GET rejects `opts.body`
 instead of silently dropping it.
+
+
+<a id="http-download"></a>
+## `babet.http.download(url, destination, opts?)`
+
+Downloads a GET response directly to a file without accumulating the body in
+Lua or in a C++ response string:
+
+```lua
+local result, err = babet.http.download(
+    "https://example.com/archive.tar.gz",
+    "downloads/archive.tar.gz",
+    {
+        timeout = 120,
+        follow_redirects = true,
+        max_file_size = 4 * 1024 * 1024 * 1024,
+    }
+)
+assert(result, err)
+assert(result.saved, "HTTP " .. result.status)
+print(result.path, result.bytes)
+```
+
+The call is synchronous, but received chunks are written progressively to a
+same-directory temporary file. The final destination is replaced with one
+`renameat` only after the complete final response has been received and the
+temporary file has been synced and closed.
+
+The wrapper always forces GET. It accepts the common `headers`, `query`,
+`timeout`, `verify`, `ca_cert`, and `follow_redirects` options. `body` is
+rejected. `max_file_size` replaces `max_body_size` for this call:
+
+- strict positive Lua integer;
+- default: 8 GiB;
+- configurable up to `math.maxinteger`;
+- enforced on the actual bytes delivered to the file receiver.
+
+Only a final 2xx response is committed. A received 1xx, unfollowed 3xx, 4xx,
+or 5xx response is not a transport failure: `download` returns a result table
+with `saved = false`, removes the temporary file, and leaves any existing
+destination unchanged.
+
+The destination contract is intentionally strict:
+
+- the parent directory must already exist;
+- Babet does not create parent directories;
+- `..` path components are rejected;
+- parent-directory symlink components are rejected;
+- a symlink at the final destination is replaced as an inode; its target is
+  never followed or modified;
+- a temporary file is created in the same directory with `O_EXCL` and is
+  removed on every failure;
+- a pre-existing destination remains untouched on DNS, TCP, TLS, timeout,
+  size-limit, HTTP non-2xx, or disk-write failure.
+
+The atomic rename prevents readers from observing a partially downloaded final
+path. It does not provide resume support, progress callbacks, crash-proof
+parent-directory durability, or preservation of metadata from an older file.
+The new file is created with mode `0666` filtered by the process umask.
 
 <a id="http-post"></a>
 ## `babet.http.post` call forms
@@ -428,11 +492,31 @@ nil, "http: response body exceeds max_body_size"
 No partial body is exposed. The guard applies to actual received bytes, not
 only Content-Length, including chunked or misleading responses.
 
-Use an external streaming tool for large downloads; a 2 GiB cap can imply a
-multi-gigabyte allocation.
+For large GET payloads, use [`babet.http.download`](#http-download) instead of
+raising this in-memory limit.
+
+<a id="http-max-file"></a>
+## `max_file_size` and file safety
+
+`max_file_size` applies only to `download`. It limits received body bytes, not
+the value advertised by `Content-Length`. If the stream would exceed the cap,
+Babet aborts, removes the temporary file, preserves an existing destination,
+and returns:
+
+```lua
+nil, "http: response body exceeds max_file_size"
+```
+
+The default 8 GiB is a safety guard, not a recommendation to accept every file
+of that size. Set the smallest limit compatible with the expected artifact.
+Free-space exhaustion and filesystem errors are reported as `(nil, err)` with
+the same cleanup guarantee.
 
 <a id="http-response"></a>
-## Response table
+## Response tables
+
+### In-memory response
+
 
 ```lua
 {
@@ -461,6 +545,26 @@ for _, cookie in ipairs(response.headers_multi["set-cookie"] or {}) do
     print(cookie)
 end
 ```
+
+### Download result
+
+```lua
+{
+    status = 200,
+    saved = true,
+    bytes = 123456,
+    path = "downloads/archive.tar.gz",
+    headers = { ... },
+    headers_multi = { ... },
+}
+```
+
+- `status`, `headers`, and `headers_multi` have the same meaning as above;
+- `saved` is true only when the final status is 2xx and the atomic commit
+  succeeded;
+- `bytes` is the number of received body bytes, including for a non-2xx result;
+- `path` exists only when `saved` is true;
+- there is deliberately no `body` field.
 
 <a id="http-examples"></a>
 ## Complete examples
@@ -517,6 +621,26 @@ local response = assert(babet.http.request({
 
 This loads the file into memory and is not suitable for very large uploads.
 
+### Download a release artifact
+
+```lua
+assert(babet.mkdir("downloads"))
+local result, err = babet.http.download(
+    "https://example.com/releases/tool.tar.gz",
+    "downloads/tool.tar.gz",
+    {
+        timeout = 120,
+        follow_redirects = true,
+        max_file_size = 512 * 1024 * 1024,
+    }
+)
+assert(result, err)
+if not result.saved then
+    error("unexpected HTTP status " .. result.status)
+end
+print("saved", result.bytes, "bytes to", result.path)
+```
+
 ### Separate network and HTTP failures
 
 ```lua
@@ -567,13 +691,17 @@ babet.http.request("not a table")
 babet.http.get(42)
 babet.http.get(url, "not a table")
 babet.http.post(url, 42)
+babet.http.download(url, 42)
+babet.http.download(url, "file", "not a table")
 ```
 
 Invalid values and runtime failures return `(nil, err)`: missing/bad URL,
 unsupported method, forbidden body, invalid options/query/headers, DNS/TCP/TLS,
-timeout, response limit, and converted internal exceptions.
+timeout, response/file limit, destination-path or filesystem failure, and
+converted internal exceptions.
 
 Any received HTTP status, including 3xx/4xx/5xx, returns a normal response.
+For `download`, only 2xx is saved; all other statuses return `saved = false`.
 
 <a id="http-design"></a>
 ## Security and limitations
@@ -582,8 +710,12 @@ Any received HTTP status, including 3xx/4xx/5xx, returns a normal response.
   administrative services.
 - Treat redirects as new destinations and protect sensitive headers.
 - Keep TLS verification enabled; use private CA trust instead of disabling it.
-- Set the smallest practical `max_body_size`.
-- Request and response bodies are in memory; no streaming.
+- Set the smallest practical `max_body_size` or `max_file_size`.
+- `request`, `get`, and `post` keep response bodies in memory. `download`
+  streams only GET responses to a file; uploads are still in memory.
+- Atomic replacement protects the final path from partial content, but callers
+  remain responsible for validating expected status, size, and cryptographic
+  checksum.
 - Every call constructs a client; no exposed cookie jar or connection pool.
 - No form/multipart helper, proxy configuration, HTTP/2/3, WebSocket, or server.
 - DNS is synchronous and may exceed the requested timeout.
