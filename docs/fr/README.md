@@ -41,7 +41,7 @@ Version documentée en cours : **2.4.0** (dernière release auditée : **2.3.0**
 | envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, téléchargement atomique vers fichier, redirections, TLS, timeout et limites de taille |
 | ouvrir une connexion TCP | [`Socket — TCP`](modules/socket.md) | client, serveur, acceptation, flux binaires, lignes, lecture jusqu’à EOF, timeouts, buffers et limites |
 | chiffrer une connexion TCP ou faire STARTTLS | [`TLS — sockets sécurisées`](modules/tls.md) | TLS direct, STARTTLS, vérification, CA, hostname, SNI, versions, timeout et état après échec |
-| stocker des données SQL localement | [`SQLite — base embarquée`](modules/sqlite.md) | ouverture, options, exécution, paramètres, requêtes, itérateurs et transactions |
+| stocker des données SQL localement | [`SQLite — base embarquée`](modules/sqlite.md) | ouverture, exécution, statements préparés, BLOB explicites et transactions assistées |
 | encoder ou décoder du JSON | [`JSON — données structurées`](modules/json.md) | scalaires, tableaux, objets, `null`, tableaux vides, pretty-print et erreurs |
 | lire un fichier de configuration TOML | [`TOML — configuration`](modules/toml.md) | décodage, types TOML, tableaux, sections, dates et erreurs de parsing |
 | surveiller un dossier | [`Inotify — événements fichiers`](modules/inotify.md) | watchers, événements, lectures avec timeout, moves, cookies et fermeture |
@@ -70,7 +70,7 @@ avoir à ouvrir chaque fichier.
 | [`Logging — journalisation`](modules/logging.md) | Niveaux, filtrage, destination, couleurs et appels variadiques. |
 | [`SIGNAL — signaux POSIX et arrêt propre`](modules/signal.md) | Installer, remplacer ou retirer un callback ; ignorer/restaurer ; ordre de dispatch, coalescence, interruptions et restrictions multithread. |
 | [`Socket — TCP client et serveur`](modules/socket.md) | Connexion, écoute, acceptation, flux binaires, lectures par bloc/ligne/EOF, buffer partagé, adresses, fermeture et timeouts. |
-| [`SQLite — base de données embarquée`](modules/sqlite.md) | Connexions, options WAL/timeout, SQL, paramètres positionnels/nommés, itération des lignes, types et transactions. |
+| [`SQLite — base de données embarquée`](modules/sqlite.md) | Connexions, WAL/timeout, SQL direct, statements préparés réutilisables, BLOB explicites, itération et transactions assistées. |
 | [`Strings — manipulation de chaînes`](modules/strings.md) | Découpage, mode caractères, séparateurs, limite de splits et contenu binaire. |
 | [`SYS - processus, machine, environnement et mémoire Lua`](modules/sys.md) | Constantes de version, PID, hostname, `uname`, recherche d’exécutables, lecture/modification de l’environnement, interaction avec les workers et mémoire de l’état Lua. |
 | [`Tables — manipulation de tables Lua`](modules/tables.md) | Fusion déterministe, clés listes/maps, copie profonde, cycles et partage de sous-tables. |

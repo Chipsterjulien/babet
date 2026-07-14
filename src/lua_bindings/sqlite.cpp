@@ -44,8 +44,9 @@ namespace
     struct Db
     {
         sqlite3 *handle;
+        bool transaction_helper_active;
 
-        Db() : handle(nullptr) {}
+        Db() : handle(nullptr), transaction_helper_active(false) {}
         ~Db()
         {
             if (handle)
@@ -80,29 +81,6 @@ namespace
         std::string full = "sqlite: ";
         full += msg;
         return push_fail(L, full);
-    }
-
-    // Pose (nil, "sqlite: <msg from sqlite3>") d'après l'erreur la
-    // plus récente du handle. Si handle est nullptr, fallback sur un
-    // message générique.
-    int push_sqlite_db_error(lua_State *L, sqlite3 *handle,
-                             const char *context)
-    {
-        std::string msg;
-        if (context)
-        {
-            msg += context;
-            msg += ": ";
-        }
-        if (handle)
-        {
-            msg += sqlite3_errmsg(handle);
-        }
-        else
-        {
-            msg += "no database handle";
-        }
-        return push_sqlite_fail(L, msg);
     }
 
     // SQLite's prepare APIs take an int byte count and still treat the first
@@ -271,6 +249,70 @@ namespace
     }
 
     // ============================================================
+    // Wrapper explicite BLOB
+    // ============================================================
+    //
+    // Une chaîne Lua ordinaire reste bindée comme TEXT afin de préserver
+    // le contrat historique. `babet.sqlite.blob(data)` crée un userdata
+    // immuable qui demande explicitement sqlite3_bind_blob64().
+
+    struct Blob
+    {
+        std::string data;
+
+        Blob(const char *bytes, size_t len) : data(bytes, len) {}
+        ~Blob() = default;
+    };
+
+    const char *BLOB_MT = "babet.sqlite.blob";
+
+    Blob *test_blob(lua_State *L, int idx)
+    {
+        return static_cast<Blob *>(luaL_testudata(L, idx, BLOB_MT));
+    }
+
+    Blob *check_blob(lua_State *L, int idx)
+    {
+        return static_cast<Blob *>(luaL_checkudata(L, idx, BLOB_MT));
+    }
+
+    int sqlite_blob(lua_State *L)
+    {
+        if (lua_gettop(L) != 1)
+        {
+            return luaL_error(L, "sqlite.blob: expected exactly one argument");
+        }
+        luaL_checktype(L, 1, LUA_TSTRING);
+
+        size_t len = 0;
+        const char *bytes = lua_tolstring(L, 1, &len);
+        Blob *blob = static_cast<Blob *>(lua_newuserdata(L, sizeof(Blob)));
+        new (blob) Blob(bytes ? bytes : "", len);
+
+        luaL_getmetatable(L, BLOB_MT);
+        lua_setmetatable(L, -2);
+        return 1;
+    }
+
+    int blob_gc(lua_State *L)
+    {
+        Blob *blob = check_blob(L, 1);
+        blob->~Blob();
+        return 0;
+    }
+
+    int blob_tostring(lua_State *L)
+    {
+        Blob *blob = check_blob(L, 1);
+        char text[96];
+        std::snprintf(text, sizeof(text),
+                      "babet.sqlite.blob (%llu bytes)",
+                      static_cast<unsigned long long>(blob->data.size()));
+        lua_pushstring(L, text);
+        return 1;
+    }
+
+    // ============================================================
     // Helpers de bind
     // ============================================================
     //
@@ -356,7 +398,22 @@ namespace
             break;
         }
         default:
-            // function / table / userdata / thread / lightuserdata.
+            if (t == LUA_TUSERDATA)
+            {
+                if (Blob *blob = test_blob(L, idx))
+                {
+                    const char *data = blob->data.empty()
+                                           ? ""
+                                           : blob->data.data();
+                    rc = sqlite3_bind_blob64(
+                        stmt, slot, data,
+                        static_cast<sqlite3_uint64>(blob->data.size()),
+                        SQLITE_TRANSIENT);
+                    break;
+                }
+            }
+
+            // function / table / unrelated userdata / thread / lightuserdata.
             err = "cannot bind value of type '";
             err += lua_typename(L, t);
             err += "' at slot " + std::to_string(slot);
@@ -535,6 +592,11 @@ namespace
     int db_close(lua_State *L)
     {
         Db *db = check_db(L, 1);
+        if (db->transaction_helper_active)
+        {
+            return push_sqlite_fail(
+                L, "cannot close connection during transaction callback");
+        }
         if (db->handle)
         {
             int rc = sqlite3_close_v2(db->handle);
@@ -1154,6 +1216,560 @@ namespace
         return 1;
     }
 
+
+    // ============================================================
+    // Statements préparés réutilisables
+    // ============================================================
+
+    struct Prepared
+    {
+        sqlite3_stmt *handle;
+        bool query_active;
+
+        Prepared() : handle(nullptr), query_active(false) {}
+        ~Prepared()
+        {
+            if (handle)
+            {
+                sqlite3_finalize(handle);
+                handle = nullptr;
+            }
+        }
+    };
+
+    const char *PREPARED_MT = "babet.sqlite.prepared";
+
+    Prepared *check_prepared(lua_State *L, int idx)
+    {
+        return static_cast<Prepared *>(
+            luaL_checkudata(L, idx, PREPARED_MT));
+    }
+
+    int push_prepared_closed(lua_State *L)
+    {
+        return push_sqlite_fail(L, "statement closed");
+    }
+
+    // Replace all prior execution state with a clean statement ready for a
+    // new bind. sqlite3_reset() returns the previous step error even though
+    // it still resets the statement, so automatic reuse intentionally ignores
+    // that return code and reports errors at the step that caused them.
+    bool prepared_clear_for_reuse(sqlite3_stmt *stmt, std::string &err)
+    {
+        sqlite3_reset(stmt);
+        int rc = sqlite3_clear_bindings(stmt);
+        if (rc != SQLITE_OK)
+        {
+            err = "clear bindings failed: ";
+            err += sqlite3_errstr(rc);
+            return false;
+        }
+        return true;
+    }
+
+    enum class PreparedBindStatus
+    {
+        Ok,
+        OperationalError,
+        ProgrammerError,
+    };
+
+    // Bind params for prepared:exec/query without raising. This matters because
+    // Lua is built as C and luaL_error uses longjmp: every owning C++ object
+    // must leave scope normally before the caller raises a programmer error.
+    PreparedBindStatus prepared_bind_for_use(lua_State *L,
+                                               sqlite3_stmt *stmt,
+                                               int params_idx,
+                                               bool has_params,
+                                               std::string &error)
+    {
+        if (!has_params)
+        {
+            if (sqlite3_bind_parameter_count(stmt) > 0)
+            {
+                error =
+                    "SQL contains placeholders but no params table provided; "
+                    "pass params to bind, or remove placeholders from SQL";
+                return PreparedBindStatus::OperationalError;
+            }
+            return PreparedBindStatus::Ok;
+        }
+
+        if (!bind_params_from_table(L, stmt, params_idx, error))
+        {
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+            return PreparedBindStatus::ProgrammerError;
+        }
+        return PreparedBindStatus::Ok;
+    }
+
+    // db:prepare(sql) -> prepared | (nil, err)
+    int db_prepare(lua_State *L)
+    {
+        if (lua_gettop(L) != 2)
+        {
+            return luaL_error(L,
+                              "sqlite.prepare: expected db and one SQL string");
+        }
+
+        Db *db = check_db(L, 1);
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+
+        luaL_checktype(L, 2, LUA_TSTRING);
+        size_t sql_len = 0;
+        const char *sql = nullptr;
+        {
+            std::string sql_error;
+            if (!get_checked_sql(L, 2, sql, sql_len, sql_error))
+            {
+                return push_sqlite_fail(L, sql_error);
+            }
+        }
+
+        sqlite3_stmt *stmt = nullptr;
+        const char *tail = nullptr;
+        int rc = sqlite3_prepare_v2(db->handle, sql,
+                                    static_cast<int>(sql_len),
+                                    &stmt, &tail);
+        if (rc != SQLITE_OK)
+        {
+            std::string msg = sqlite3_errmsg(db->handle);
+            if (stmt)
+            {
+                sqlite3_finalize(stmt);
+            }
+            return push_sqlite_fail(L, msg);
+        }
+
+        if (!sql_tail_is_empty(tail))
+        {
+            sqlite3_finalize(stmt);
+            return push_sqlite_fail(
+                L, "prepare supports only one statement");
+        }
+        if (!stmt)
+        {
+            return push_sqlite_fail(
+                L, "prepare requires one non-empty SQL statement");
+        }
+
+        Prepared *prepared = static_cast<Prepared *>(
+            lua_newuserdata(L, sizeof(Prepared)));
+        new (prepared) Prepared();
+        prepared->handle = stmt;
+
+        luaL_getmetatable(L, PREPARED_MT);
+        lua_setmetatable(L, -2);
+        return 1;
+    }
+
+    // prepared:exec(params?) -> (true, nil) | (nil, err)
+    int prepared_exec(lua_State *L)
+    {
+        int top = lua_gettop(L);
+        if (top < 1 || top > 2)
+        {
+            return luaL_error(
+                L, "sqlite prepared exec: expected self and optional params");
+        }
+
+        Prepared *prepared = check_prepared(L, 1);
+        if (!prepared->handle)
+        {
+            return push_prepared_closed(L);
+        }
+        prepared->query_active = false;
+
+        bool has_params = top == 2 && !lua_isnil(L, 2);
+        if (has_params)
+        {
+            luaL_checktype(L, 2, LUA_TTABLE);
+        }
+
+        char programmer_error[512] = {};
+        {
+            std::string error;
+            if (!prepared_clear_for_reuse(prepared->handle, error))
+            {
+                return push_sqlite_fail(L, error);
+            }
+
+            PreparedBindStatus status = prepared_bind_for_use(
+                L, prepared->handle, 2, has_params, error);
+            if (status == PreparedBindStatus::OperationalError)
+            {
+                return push_sqlite_fail(L, error);
+            }
+            if (status == PreparedBindStatus::ProgrammerError)
+            {
+                std::snprintf(programmer_error,
+                              sizeof(programmer_error),
+                              "sqlite prepared exec: %s",
+                              error.c_str());
+            }
+        }
+        if (programmer_error[0] != '\0')
+        {
+            return luaL_error(L, "%s", programmer_error);
+        }
+
+        int rc = sqlite3_step(prepared->handle);
+        while (rc == SQLITE_ROW)
+        {
+            rc = sqlite3_step(prepared->handle);
+        }
+
+        if (rc != SQLITE_DONE)
+        {
+            std::string msg = sqlite3_errmsg(
+                sqlite3_db_handle(prepared->handle));
+            sqlite3_reset(prepared->handle);
+            sqlite3_clear_bindings(prepared->handle);
+            return push_sqlite_fail(L, msg);
+        }
+
+        sqlite3_reset(prepared->handle);
+        sqlite3_clear_bindings(prepared->handle);
+        return push_ok(L);
+    }
+
+    // prepared:query(params?) -> self | (nil, err)
+    // The returned userdata is callable and remains reusable after exhaustion.
+    int prepared_query(lua_State *L)
+    {
+        int top = lua_gettop(L);
+        if (top < 1 || top > 2)
+        {
+            return luaL_error(
+                L, "sqlite prepared query: expected self and optional params");
+        }
+
+        Prepared *prepared = check_prepared(L, 1);
+        if (!prepared->handle)
+        {
+            return push_prepared_closed(L);
+        }
+        prepared->query_active = false;
+
+        bool has_params = top == 2 && !lua_isnil(L, 2);
+        if (has_params)
+        {
+            luaL_checktype(L, 2, LUA_TTABLE);
+        }
+
+        char programmer_error[512] = {};
+        {
+            std::string error;
+            if (!prepared_clear_for_reuse(prepared->handle, error))
+            {
+                return push_sqlite_fail(L, error);
+            }
+
+            PreparedBindStatus status = prepared_bind_for_use(
+                L, prepared->handle, 2, has_params, error);
+            if (status == PreparedBindStatus::OperationalError)
+            {
+                return push_sqlite_fail(L, error);
+            }
+            if (status == PreparedBindStatus::ProgrammerError)
+            {
+                std::snprintf(programmer_error,
+                              sizeof(programmer_error),
+                              "sqlite prepared query: %s",
+                              error.c_str());
+            }
+        }
+        if (programmer_error[0] != '\0')
+        {
+            return luaL_error(L, "%s", programmer_error);
+        }
+
+        prepared->query_active = true;
+        lua_settop(L, 1);
+        return 1;
+    }
+
+    // __call used by `for row in prepared:query(params) do ... end`.
+    int prepared_call(lua_State *L)
+    {
+        Prepared *prepared = check_prepared(L, 1);
+        if (!prepared->handle || !prepared->query_active)
+        {
+            lua_pushnil(L);
+            return 1;
+        }
+
+        int rc = sqlite3_step(prepared->handle);
+        if (rc == SQLITE_ROW)
+        {
+            extract_row(L, prepared->handle);
+            return 1;
+        }
+        if (rc == SQLITE_DONE)
+        {
+            sqlite3_reset(prepared->handle);
+            sqlite3_clear_bindings(prepared->handle);
+            prepared->query_active = false;
+            lua_pushnil(L);
+            return 1;
+        }
+
+        char err_msg[512];
+        {
+            std::string msg = sqlite3_errmsg(
+                sqlite3_db_handle(prepared->handle));
+            sqlite3_reset(prepared->handle);
+            sqlite3_clear_bindings(prepared->handle);
+            prepared->query_active = false;
+            std::snprintf(err_msg, sizeof(err_msg),
+                          "sqlite prepared query: step failed: %s",
+                          msg.c_str());
+        }
+        luaL_error(L, "%s", err_msg);
+        return 0;
+    }
+
+    // prepared:reset() -> (true, nil) | (nil, err)
+    int prepared_reset(lua_State *L)
+    {
+        if (lua_gettop(L) != 1)
+        {
+            return luaL_error(L,
+                              "sqlite prepared reset: expected only self");
+        }
+        Prepared *prepared = check_prepared(L, 1);
+        if (!prepared->handle)
+        {
+            return push_prepared_closed(L);
+        }
+        prepared->query_active = false;
+
+        int reset_rc = sqlite3_reset(prepared->handle);
+        int clear_rc = sqlite3_clear_bindings(prepared->handle);
+        if (clear_rc != SQLITE_OK)
+        {
+            return push_sqlite_fail(
+                L, std::string("clear bindings failed: ") +
+                       sqlite3_errstr(clear_rc));
+        }
+        if (reset_rc != SQLITE_OK)
+        {
+            return push_sqlite_fail(
+                L, std::string("reset reported previous step error: ") +
+                       sqlite3_errstr(reset_rc));
+        }
+        return push_ok(L);
+    }
+
+    // prepared:close()/finalize() -> (true, nil), idempotent.
+    int prepared_close(lua_State *L)
+    {
+        if (lua_gettop(L) != 1)
+        {
+            return luaL_error(L,
+                              "sqlite prepared close: expected only self");
+        }
+        Prepared *prepared = check_prepared(L, 1);
+        prepared->query_active = false;
+        if (prepared->handle)
+        {
+            int rc = sqlite3_finalize(prepared->handle);
+            prepared->handle = nullptr;
+            if (rc != SQLITE_OK)
+            {
+                return push_sqlite_fail(L, sqlite3_errstr(rc));
+            }
+        }
+        return push_ok(L);
+    }
+
+    int prepared_gc(lua_State *L)
+    {
+        Prepared *prepared = check_prepared(L, 1);
+        prepared->~Prepared();
+        return 0;
+    }
+
+    int prepared_tostring(lua_State *L)
+    {
+        Prepared *prepared = check_prepared(L, 1);
+        if (!prepared->handle)
+        {
+            lua_pushliteral(L, "babet.sqlite.prepared (closed)");
+            return 1;
+        }
+        lua_pushfstring(L, "babet.sqlite.prepared (%s, %p)",
+                        prepared->query_active ? "iterating" : "ready",
+                        prepared->handle);
+        return 1;
+    }
+
+    // ============================================================
+    // Transaction helper
+    // ============================================================
+
+    bool exec_transaction_control(sqlite3 *db, const char *sql,
+                                  const char *context,
+                                  std::string &error)
+    {
+        char *sqlite_error = nullptr;
+        int rc = sqlite3_exec(db, sql, nullptr, nullptr, &sqlite_error);
+        if (rc == SQLITE_OK)
+        {
+            sqlite3_free(sqlite_error);
+            return true;
+        }
+
+        error = context;
+        error += ": ";
+        error += sqlite_error ? sqlite_error : sqlite3_errmsg(db);
+        sqlite3_free(sqlite_error);
+        return false;
+    }
+
+    // db:in_transaction() -> boolean | (nil, err)
+    int db_in_transaction(lua_State *L)
+    {
+        if (lua_gettop(L) != 1)
+        {
+            return luaL_error(L,
+                              "sqlite.in_transaction: expected only self");
+        }
+        Db *db = check_db(L, 1);
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+        lua_pushboolean(L, sqlite3_get_autocommit(db->handle) == 0);
+        return 1;
+    }
+
+    // db:transaction(fn, mode?) -> true, ...callback_results | (nil, err)
+    // Only a Lua error rolls back. Normal callback returns, including nil or
+    // false values, are committed and forwarded after the leading true.
+    int db_transaction(lua_State *L)
+    {
+        int top = lua_gettop(L);
+        if (top < 2 || top > 3)
+        {
+            return luaL_error(
+                L, "sqlite.transaction: expected db, callback and optional mode");
+        }
+
+        Db *db = check_db(L, 1);
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+        luaL_checktype(L, 2, LUA_TFUNCTION);
+
+        if (db->transaction_helper_active)
+        {
+            return push_sqlite_fail(
+                L, "nested transaction helper is not supported");
+        }
+        if (sqlite3_get_autocommit(db->handle) == 0)
+        {
+            return push_sqlite_fail(
+                L, "connection is already inside a transaction");
+        }
+
+        const char *begin_sql = "BEGIN DEFERRED";
+        if (top == 3 && !lua_isnil(L, 3))
+        {
+            luaL_checktype(L, 3, LUA_TSTRING);
+            std::string mode;
+            std::string mode_error;
+            if (!lua_string_without_nul(L, 3, mode,
+                                        "sqlite.transaction: mode",
+                                        mode_error))
+            {
+                return push_fail(L, mode_error);
+            }
+
+            if (mode == "deferred")
+            {
+                begin_sql = "BEGIN DEFERRED";
+            }
+            else if (mode == "immediate")
+            {
+                begin_sql = "BEGIN IMMEDIATE";
+            }
+            else if (mode == "exclusive")
+            {
+                begin_sql = "BEGIN EXCLUSIVE";
+            }
+            else
+            {
+                return push_sqlite_fail(
+                    L, "transaction mode must be 'deferred', 'immediate' "
+                       "or 'exclusive'");
+            }
+        }
+
+        std::string begin_error;
+        if (!exec_transaction_control(db->handle, begin_sql, "begin",
+                                      begin_error))
+        {
+            return push_sqlite_fail(L, begin_error);
+        }
+
+        // Keep only db and callback below the callback results.
+        lua_settop(L, 2);
+        lua_pushvalue(L, 2);
+        lua_pushvalue(L, 1);
+
+        db->transaction_helper_active = true;
+        int call_status = lua_pcall(L, 1, LUA_MULTRET, 0);
+        db->transaction_helper_active = false;
+
+        if (call_status != LUA_OK)
+        {
+            std::string callback_error =
+                lua_value_to_display_string(L, -1);
+            std::string rollback_error;
+            bool rollback_ok = exec_transaction_control(
+                db->handle, "ROLLBACK", "rollback", rollback_error);
+
+            std::string message = "transaction callback failed: ";
+            message += callback_error;
+            if (!rollback_ok)
+            {
+                message += "; ";
+                message += rollback_error;
+            }
+            lua_settop(L, 0);
+            return push_sqlite_fail(L, message);
+        }
+
+        int callback_results = lua_gettop(L) - 2;
+        std::string commit_error;
+        if (!exec_transaction_control(db->handle, "COMMIT", "commit",
+                                      commit_error))
+        {
+            std::string rollback_error;
+            bool rollback_ok = exec_transaction_control(
+                db->handle, "ROLLBACK", "rollback", rollback_error);
+            if (!rollback_ok)
+            {
+                commit_error += "; ";
+                commit_error += rollback_error;
+            }
+            lua_settop(L, 0);
+            return push_sqlite_fail(L, commit_error);
+        }
+
+        lua_pushboolean(L, 1);
+        lua_insert(L, 3);
+        lua_remove(L, 1);
+        lua_remove(L, 1);
+        return callback_results + 1;
+    }
+
     // ============================================================
     // API du module : babet.sqlite.open
     // ============================================================
@@ -1270,7 +1886,7 @@ namespace
         lua_pushcfunction(L, db_tostring);
         lua_setfield(L, -2, "__tostring");
 
-        // Méthodes : close, exec, query.
+        // Méthodes : close, exec, query, prepare et transactions.
         lua_pushcfunction(L, db_close);
         lua_setfield(L, -2, "close");
 
@@ -1280,7 +1896,64 @@ namespace
         lua_pushcfunction(L, db_query);
         lua_setfield(L, -2, "query");
 
+        lua_pushcfunction(L, db_prepare);
+        lua_setfield(L, -2, "prepare");
+
+        lua_pushcfunction(L, db_transaction);
+        lua_setfield(L, -2, "transaction");
+
+        lua_pushcfunction(L, db_in_transaction);
+        lua_setfield(L, -2, "in_transaction");
+
         // On dépile la métatable, elle reste en registry.
+        lua_pop(L, 1);
+    }
+
+    void create_blob_metatable(lua_State *L)
+    {
+        luaL_newmetatable(L, BLOB_MT);
+
+        lua_pushcfunction(L, blob_gc);
+        lua_setfield(L, -2, "__gc");
+
+        lua_pushcfunction(L, blob_tostring);
+        lua_setfield(L, -2, "__tostring");
+
+        // Opaque and immutable: no __index table and no exposed payload.
+        lua_pop(L, 1);
+    }
+
+    void create_prepared_metatable(lua_State *L)
+    {
+        luaL_newmetatable(L, PREPARED_MT);
+
+        lua_pushvalue(L, -1);
+        lua_setfield(L, -2, "__index");
+
+        lua_pushcfunction(L, prepared_call);
+        lua_setfield(L, -2, "__call");
+
+        lua_pushcfunction(L, prepared_gc);
+        lua_setfield(L, -2, "__gc");
+
+        lua_pushcfunction(L, prepared_tostring);
+        lua_setfield(L, -2, "__tostring");
+
+        lua_pushcfunction(L, prepared_exec);
+        lua_setfield(L, -2, "exec");
+
+        lua_pushcfunction(L, prepared_query);
+        lua_setfield(L, -2, "query");
+
+        lua_pushcfunction(L, prepared_reset);
+        lua_setfield(L, -2, "reset");
+
+        lua_pushcfunction(L, prepared_close);
+        lua_setfield(L, -2, "close");
+
+        lua_pushcfunction(L, prepared_close);
+        lua_setfield(L, -2, "finalize");
+
         lua_pop(L, 1);
     }
 
@@ -1324,12 +1997,17 @@ void register_sqlite(lua_State *L)
     // Créer les métatables des userdatas (en registry).
     create_db_metatable(L);
     create_stmt_metatable(L);
+    create_prepared_metatable(L);
+    create_blob_metatable(L);
 
-    // Sous-table babet.sqlite avec la fonction open.
+    // Sous-table babet.sqlite.
     lua_newtable(L);
 
     lua_pushcfunction(L, sqlite_open);
     lua_setfield(L, -2, "open");
+
+    lua_pushcfunction(L, sqlite_blob);
+    lua_setfield(L, -2, "blob");
 
     lua_setfield(L, -2, "sqlite");
 }

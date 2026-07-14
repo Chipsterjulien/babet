@@ -39,7 +39,7 @@ Current documented development version: **2.4.0** (latest audited release: **2.3
 | send a web request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic file downloads, redirects, TLS, timeout, and size limits |
 | open a TCP connection | [`Socket — TCP`](modules/socket.md) | clients, servers, accept, binary streams, lines, reads through EOF, timeouts, buffering, and limits |
 | secure TCP or perform STARTTLS | [`TLS — secure sockets`](modules/tls.md) | direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, timeout, and failure state |
-| store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | open options, execution, parameters, queries, iterators, and transactions |
+| store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | opening, reusable prepared statements, explicit BLOB values, iterators, and managed transactions |
 | encode or decode JSON | [`JSON — structured data`](modules/json.md) | scalars, arrays, objects, `null`, empty arrays, pretty printing, and errors |
 | read TOML configuration | [`TOML — configuration`](modules/toml.md) | decoding, TOML types, arrays, sections, dates, and parse errors |
 | watch a directory | [`Inotify — filesystem events`](modules/inotify.md) | watches, events, timeout reads, moves, cookies, and closing |
@@ -67,7 +67,7 @@ titles below let readers understand scope without opening every file.
 | [`Logging — application logs`](modules/logging.md) | Levels, filtering, destination, colors, and variadic calls. |
 | [`SIGNAL — POSIX signals and graceful shutdown`](modules/signal.md) | Install, replace, or remove callbacks; ignore/restore; dispatch order, coalescing, interruptions, and multithread restrictions. |
 | [`Socket — TCP client and server`](modules/socket.md) | Connect, listen, accept, binary streams, chunk/line/EOF reads, shared buffering, addresses, closing, and timeouts. |
-| [`SQLite — embedded database`](modules/sqlite.md) | Connections, WAL/timeout options, SQL, positional/named parameters, row iteration, types, and transactions. |
+| [`SQLite — embedded database`](modules/sqlite.md) | Connections, WAL/timeout, direct SQL, reusable prepared statements, explicit BLOB values, row iteration, and managed transactions. |
 | [`Strings — string manipulation`](modules/strings.md) | Splitting, character mode, separators, split limits, and binary content. |
 | [`SYS - process, host, environment, and Lua memory`](modules/sys.md) | Version constants, PID, hostname, `uname`, executable lookup, environment access/mutation, worker interaction, and current Lua-state memory. |
 | [`Tables — Lua table manipulation`](modules/tables.md) | Deterministic merge, list/map keys, deep copy, cycles, and shared subtables. |

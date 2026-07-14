@@ -8,6 +8,29 @@ venant de 2.2.x doivent donc lire les notes de migration ci-dessous.
 
 ## [2.4.0] - En développement
 
+### Statements SQLite, BLOB explicites et transactions
+
+- Ajout de `db:prepare(sql)` pour créer un statement mono-instruction
+  réutilisable avec `exec`, `query` appelable, `reset`, `close` et `finalize`.
+- Les statements préparés sont automatiquement réinitialisés et débarrassés de
+  leurs bindings entre deux exécutions ; une itération interrompue peut être
+  réinitialisée explicitement ou remplacée par l'exécution suivante.
+- Ajout de `babet.sqlite.blob(data)` pour binder une chaîne Lua binary-safe avec
+  la classe de stockage SQLite BLOB, sans modifier le bind TEXT historique des
+  chaînes ordinaires.
+- Ajout de `db:transaction(callback [, mode])` avec les modes deferred,
+  immediate et exclusive, rollback automatique sur erreur Lua du callback et
+  restitution de ses valeurs après un booléen de succès.
+- Ajout de `db:in_transaction()` et de protections contre les helpers imbriqués,
+  leur utilisation dans une transaction manuelle existante et la fermeture de
+  la connexion depuis le callback.
+- Conservation du cycle de vie `sqlite3_close_v2` : un statement préparé avant
+  `db:close()` reste utilisable jusqu'à sa finalisation.
+- Ajout de 66 contrôles de non-régression couvrant réutilisation, rebinding,
+  reset après break, erreurs de step, classes BLOB/TEXT, modes de transaction,
+  rollback, erreurs du callback, imbrication, transaction manuelle et handles
+  fermés.
+
 ### Téléchargements HTTP vers fichier
 
 - Ajout de `babet.http.download(url, destination [, opts])` pour télécharger une

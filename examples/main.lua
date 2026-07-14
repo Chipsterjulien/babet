@@ -6529,6 +6529,357 @@ do
     end
 end
 
+-- =====================================================================
+print("")
+print("=== sqlite (session 4: prepared/blob/transactions) ===")
+
+do
+    local DB = babet.sqlite
+
+    -- ----- explicit BLOB wrapper ------------------------------------
+    ok("sqlite.blob is a function", type(DB.blob) == "function")
+
+    do
+        local pok0 = pcall(DB.blob)
+        ok("sqlite.blob requires exactly one argument", not pok0)
+
+        local pok1 = pcall(DB.blob, 42)
+        ok("sqlite.blob requires a strict string", not pok1)
+
+        local pok2 = pcall(DB.blob, "x", "extra")
+        ok("sqlite.blob rejects extra arguments", not pok2)
+
+        local blob = DB.blob("a\0b")
+        ok("sqlite.blob returns userdata", type(blob) == "userdata")
+        ok("sqlite.blob tostring is informative",
+            tostring(blob):find("sqlite.blob") ~= nil
+            and tostring(blob):find("3 bytes") ~= nil)
+    end
+
+    -- ----- prepare contract and reusable exec/query ----------------
+    do
+        local db = assert(DB.open(":memory:"))
+        ok("db.prepare is a function", type(db.prepare) == "function")
+        ok("db.transaction is a function", type(db.transaction) == "function")
+        ok("db.in_transaction is a function",
+            type(db.in_transaction) == "function")
+
+        local pok0 = pcall(db.prepare, db)
+        ok("db:prepare requires SQL", not pok0)
+
+        local pok1 = pcall(db.prepare, db, 42)
+        ok("db:prepare SQL is a strict string", not pok1)
+
+        local pok2 = pcall(db.prepare, db, "SELECT 1", "extra")
+        ok("db:prepare rejects extra arguments", not pok2)
+
+        local nul_stmt, nul_err = db:prepare("SELECT 1\0; SELECT 2")
+        ok("db:prepare rejects NUL in SQL",
+            nul_stmt == nil and type(nul_err) == "string"
+            and nul_err:find("NUL"))
+
+        local empty_stmt, empty_err = db:prepare(" -- comment only")
+        ok("db:prepare rejects empty/comment-only SQL",
+            empty_stmt == nil and type(empty_err) == "string")
+
+        local multi_stmt, multi_err = db:prepare("SELECT 1; SELECT 2")
+        ok("db:prepare rejects multiple statements",
+            multi_stmt == nil and type(multi_err) == "string"
+            and multi_err:find("one statement"))
+
+        local invalid_stmt, invalid_err = db:prepare("SELECT * FROM absent")
+        ok("db:prepare invalid SQL -> (nil, err)",
+            invalid_stmt == nil and type(invalid_err) == "string"
+            and invalid_err:find("^sqlite: "))
+
+        assert(db:exec([[
+            CREATE TABLE items (
+                id INTEGER PRIMARY KEY,
+                payload BLOB NOT NULL,
+                label TEXT NOT NULL UNIQUE
+            )
+        ]]))
+
+        local ins = assert(db:prepare(
+            "INSERT INTO items(id, payload, label) VALUES(?, ?, ?)"))
+        ok("prepare returns reusable userdata", type(ins) == "userdata")
+        ok("prepared tostring mentions ready",
+            tostring(ins):find("sqlite.prepared") ~= nil
+            and tostring(ins):find("ready") ~= nil)
+        ok("prepared methods are exposed",
+            type(ins.exec) == "function"
+            and type(ins.query) == "function"
+            and type(ins.reset) == "function"
+            and type(ins.close) == "function"
+            and type(ins.finalize) == "function")
+        ok("prepared userdata is inert before query()", ins() == nil)
+
+        assert(ins:exec({ 1, DB.blob("\0A"), "one" }))
+        assert(ins:exec({ 2, DB.blob("B\0C"), "two" }))
+        assert(ins:exec({ 3, DB.blob(""), "three" }))
+        ok("prepared:exec can be reused", true)
+
+        local no_params, no_params_err = ins:exec()
+        ok("prepared:exec detects omitted params",
+            no_params == nil and type(no_params_err) == "string"
+            and no_params_err:find("placeholders"))
+
+        local pok3 = pcall(ins.exec, ins, "bad")
+        ok("prepared:exec params must be a table", not pok3)
+
+        local pok4, perr4 = pcall(ins.exec, ins,
+            { 4, DB.blob("x"), "four", "extra" })
+        ok("prepared:exec rejects extra params",
+            not pok4 and type(perr4) == "string"
+            and perr4:find("too many"))
+
+        local dup_ok, dup_err = ins:exec({ 4, DB.blob("x"), "one" })
+        ok("prepared:exec reports SQLite constraint errors",
+            dup_ok == nil and type(dup_err) == "string")
+        assert(ins:exec({ 4, DB.blob("x"), "four" }))
+        ok("prepared statement remains reusable after step error", true)
+
+        local q = assert(db:prepare([[
+            SELECT id, payload, label, typeof(payload) AS payload_type
+            FROM items
+            WHERE id >= ?
+            ORDER BY id
+        ]]))
+
+        local iterator = assert(q:query({ 2 }))
+        ok("prepared:query returns the same userdata", iterator == q)
+
+        local ids = {}
+        local storage_ok = true
+        for row in iterator do
+            ids[#ids + 1] = row.id
+            storage_ok = storage_ok and row.payload_type == "blob"
+        end
+        ok("prepared query streams rows", #ids == 3
+            and ids[1] == 2 and ids[3] == 4)
+        ok("explicit blob values use SQLite BLOB storage", storage_ok)
+        ok("prepared userdata is inert after query exhaustion", q() == nil)
+
+        local only_four
+        for row in q:query({ 4 }) do only_four = row end
+        ok("prepared query can be rebound and reused",
+            only_four and only_four.id == 4 and only_four.label == "four")
+
+        -- Break early, then reset explicitly before the next execution.
+        for _ in q:query({ 1 }) do break end
+        local reset_ok, reset_err = q:reset()
+        ok("prepared:reset aborts an active iteration",
+            reset_ok == true and reset_err == nil)
+
+        local count = 0
+        for _ in q:query({ 1 }) do count = count + 1 end
+        ok("prepared query works after reset", count == 4)
+
+        -- Starting a new query also resets any previous partial iteration.
+        local first = q:query({ 1 })()
+        local last = q:query({ 4 })()
+        ok("prepared:query automatically resets previous state",
+            first and first.id == 1 and last and last.id == 4)
+        q:reset()
+
+        local q_missing, q_missing_err = q:query()
+        ok("prepared:query detects omitted params",
+            q_missing == nil and type(q_missing_err) == "string"
+            and q_missing_err:find("placeholders"))
+
+        assert(q:exec({ 1 }))
+        ok("prepared:exec exhausts SELECT rows and remains reusable", true)
+
+        -- A prepared statement survives db:close() through close_v2.
+        local zombie = assert(db:prepare(
+            "SELECT label FROM items WHERE id = ?"))
+        assert(db:close())
+        local zombie_row = zombie:query({ 2 })()
+        ok("prepared statement remains usable after db:close()",
+            zombie_row and zombie_row.label == "two")
+        zombie:reset()
+        assert(zombie:finalize())
+
+        assert(ins:close())
+        assert(ins:close())
+        ok("prepared close is idempotent", true)
+        ok("prepared tostring mentions closed",
+            tostring(ins):find("closed") ~= nil)
+
+        local closed_exec, closed_exec_err = ins:exec({})
+        ok("prepared:exec after close -> (nil, err)",
+            closed_exec == nil and type(closed_exec_err) == "string"
+            and closed_exec_err:find("closed"))
+        ok("calling a closed prepared iterator returns nil", ins() == nil)
+    end
+
+    -- ----- TEXT remains TEXT; sqlite.blob forces BLOB ---------------
+    do
+        local db = assert(DB.open(":memory:"))
+        assert(db:exec("CREATE TABLE values_test(v)"))
+        local stmt = assert(db:prepare("INSERT INTO values_test VALUES(?)"))
+        assert(stmt:exec({ "a\0b" }))
+        assert(stmt:exec({ DB.blob("a\0b") }))
+        assert(stmt:exec({ DB.blob("") }))
+
+        local types = {}
+        local lengths = {}
+        for row in db:query([[
+            SELECT rowid, typeof(v) AS storage,
+                   length(CAST(v AS BLOB)) AS len
+            FROM values_test ORDER BY rowid
+        ]]) do
+            types[#types + 1] = row.storage
+            lengths[#lengths + 1] = row.len
+        end
+        ok("plain Lua strings still bind as TEXT",
+            types[1] == "text" and lengths[1] == 3)
+        ok("sqlite.blob binds the same bytes as BLOB",
+            types[2] == "blob" and lengths[2] == 3)
+        ok("sqlite.blob preserves an empty BLOB storage class",
+            types[3] == "blob" and lengths[3] == 0)
+
+        stmt:finalize()
+        db:close()
+    end
+
+    -- ----- transaction helper ---------------------------------------
+    do
+        local db = assert(DB.open(":memory:"))
+        assert(db:exec([[
+            CREATE TABLE tx_log (
+                id INTEGER PRIMARY KEY,
+                value TEXT UNIQUE NOT NULL
+            )
+        ]]))
+
+        ok("in_transaction is false outside a transaction",
+            db:in_transaction() == false)
+
+        local tx_ok, a, b, c = db:transaction(function(tx)
+            ok("in_transaction is true inside callback",
+                tx:in_transaction() == true)
+            assert(tx:exec(
+                "INSERT INTO tx_log(id, value) VALUES(?, ?)",
+                { 1, "committed" }))
+            return "result", nil, false
+        end, "immediate")
+        ok("transaction commits and forwards callback values",
+            tx_ok == true and a == "result" and b == nil and c == false)
+        ok("in_transaction is false after commit",
+            db:in_transaction() == false)
+
+        local false_ok, false_value = db:transaction(function(tx)
+            assert(tx:exec(
+                "INSERT INTO tx_log(id, value) VALUES(?, ?)",
+                { 2, "false-return" }))
+            return false
+        end)
+        ok("normal false callback return still commits",
+            false_ok == true and false_value == false)
+
+        local rollback_ok, rollback_err = db:transaction(function(tx)
+            assert(tx:exec(
+                "INSERT INTO tx_log(id, value) VALUES(?, ?)",
+                { 3, "rolled-back" }))
+            error({ code = 99 })
+        end, "exclusive")
+        ok("transaction callback error returns (nil, err)",
+            rollback_ok == nil and type(rollback_err) == "string"
+            and rollback_err:find("callback failed"))
+
+        local present = {}
+        for row in db:query("SELECT id FROM tx_log ORDER BY id") do
+            present[#present + 1] = row.id
+        end
+        ok("callback error rolls back all writes",
+            #present == 2 and present[1] == 1 and present[2] == 2)
+
+        local constraint_ok, constraint_err = db:transaction(function(tx)
+            assert(tx:exec(
+                "INSERT INTO tx_log(id, value) VALUES(?, ?)",
+                { 4, "committed" })) -- duplicate UNIQUE value
+        end)
+        ok("asserted SQLite failure rolls transaction back",
+            constraint_ok == nil and type(constraint_err) == "string")
+
+        local row4
+        for row in db:query("SELECT id FROM tx_log WHERE id = 4") do
+            row4 = row
+        end
+        ok("failed transaction inserted no partial row", row4 == nil)
+
+        -- Every documented transaction mode is accepted.
+        for i, mode in ipairs({ "deferred", "immediate", "exclusive" }) do
+            local mode_ok = db:transaction(function(tx)
+                assert(tx:exec(
+                    "INSERT INTO tx_log(id, value) VALUES(?, ?)",
+                    { 10 + i, mode }))
+            end, mode)
+            ok("transaction mode " .. mode .. " succeeds", mode_ok == true)
+        end
+
+        local bad_mode_ok, bad_mode_err = db:transaction(function() end, "bad")
+        ok("transaction rejects unknown mode",
+            bad_mode_ok == nil and type(bad_mode_err) == "string"
+            and bad_mode_err:find("mode"))
+
+        local nul_mode_ok, nul_mode_err = db:transaction(
+            function() end, "immediate\0ignored")
+        ok("transaction rejects NUL in mode",
+            nul_mode_ok == nil and type(nul_mode_err) == "string"
+            and nul_mode_err:find("NUL"))
+
+        local pok_cb = pcall(db.transaction, db, "not a function")
+        ok("transaction callback must be a function", not pok_cb)
+
+        local pok_mode = pcall(db.transaction, db, function() end, 42)
+        ok("transaction mode must be a strict string", not pok_mode)
+
+        local pok_extra = pcall(db.transaction, db,
+            function() end, "deferred", "extra")
+        ok("transaction rejects extra arguments", not pok_extra)
+
+        -- Nested helper is refused without corrupting the outer helper.
+        local outer_ok, nested_ok, nested_err = db:transaction(function(tx)
+            return tx:transaction(function() end)
+        end)
+        ok("nested transaction helper is refused",
+            outer_ok == true and nested_ok == nil
+            and type(nested_err) == "string"
+            and nested_err:find("nested"))
+
+        assert(db:exec("BEGIN"))
+        local manual_ok, manual_err = db:transaction(function() end)
+        ok("transaction helper refuses an existing manual transaction",
+            manual_ok == nil and type(manual_err) == "string"
+            and manual_err:find("already"))
+        assert(db:exec("ROLLBACK"))
+
+        local close_result, close_error
+        local close_tx_ok = db:transaction(function(tx)
+            close_result, close_error = tx:close()
+            assert(tx:exec(
+                "INSERT INTO tx_log(id, value) VALUES(?, ?)",
+                { 30, "close-refused" }))
+        end)
+        ok("db:close is refused inside transaction callback",
+            close_tx_ok == true and close_result == nil
+            and type(close_error) == "string"
+            and close_error:find("transaction callback"))
+
+        assert(db:close())
+        local closed_tx, closed_tx_err = db:transaction(function() end)
+        ok("transaction after db close -> (nil, err)",
+            closed_tx == nil and type(closed_tx_err) == "string"
+            and closed_tx_err:find("closed"))
+        local closed_state, closed_state_err = db:in_transaction()
+        ok("in_transaction after db close -> (nil, err)",
+            closed_state == nil and type(closed_state_err) == "string"
+            and closed_state_err:find("closed"))
+    end
+end
+
 do
     local T = babet.toml
 
