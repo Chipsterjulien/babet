@@ -1,10 +1,14 @@
 > **English** | [Français](../../fr/modules/exec.md)
 
-# EXEC - external programs, arguments, environment, capture, and timeouts
+# EXEC - external programs, capture, and streaming
 
-`babet.exec` starts an external program without an implicit shell, passes its
-arguments and standard input, captures `stdout` and `stderr` separately, and
-returns its exit status in a structured table.
+Babet provides two complementary APIs for starting an external program without
+an implicit shell:
+
+- `babet.exec` optionally sends complete input, captures `stdout` and `stderr`
+  in memory, then waits for completion;
+- `babet.spawn` immediately returns a controllable process object so streams can
+  be read and written progressively without automatic RAM accumulation.
 
 EXEC covers:
 
@@ -18,8 +22,9 @@ EXEC covers:
 - enforcing a separate memory limit for each output stream;
 - terminating the child's process group after a timeout.
 
-It does not provide streaming, direct file redirection, implicit pipelines, or
-an implicit command interpreter.
+It does not provide direct file redirection, implicit pipelines, or an implicit
+command interpreter. Redirection and pipelines must be built explicitly by the
+script or through a deliberately launched shell.
 
 ## Module contents
 
@@ -51,6 +56,14 @@ an implicit command interpreter.
   - [Bounding execution time](#exec-example-timeout)
   - [Bounding captured output](#exec-example-output)
   - [Building an application helper](#exec-example-helper)
+- [Streaming processes with `babet.spawn`](#spawn-overview)
+  - [Signature and options](#spawn-signature)
+  - [Process methods](#spawn-methods)
+  - [Reading stdout and stderr](#spawn-reading)
+  - [Writing stdin](#spawn-writing)
+  - [Waiting, terminating, and closing](#spawn-lifecycle)
+  - [Streaming loop example](#spawn-example)
+  - [Limits and deadlock prevention](#spawn-limits)
 - [Error contract](#exec-errors)
 - [Processes, signals, and security](#exec-process-security)
 - [Design and limitations](#exec-design)
@@ -672,6 +685,231 @@ local result, err = run_checked("git", { "status", "--short" }, {
 assert(result, err)
 print(result.stdout)
 ```
+
+<a id="spawn-overview"></a>
+## Streaming processes with `babet.spawn`
+
+`babet.spawn` uses the same secure launch engine as `babet.exec`, but it does
+not capture streams automatically and does not wait for completion. It returns
+a userdata representing the child process:
+
+```lua
+local process, err = babet.spawn("yt-dlp", {
+    "--newline",
+    "https://example.invalid/video",
+})
+assert(process, err)
+```
+
+The process owns three non-blocking pipes for stdin, stdout, and stderr. The
+script decides when to read, write, wait, or terminate the process group. This
+API is intended for long-running programs, large outputs, and real-time
+progress display.
+
+<a id="spawn-signature"></a>
+### Signature and options
+
+```lua
+local process, err = babet.spawn(command, args?, opts?)
+```
+
+| Element | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `command` | strict string | required | program name or path |
+| `args` | dense string array | no arguments | `argv[1]..argv[n]` |
+| `opts.cwd` | string | inherited directory | child working directory |
+| `opts.env` | string-to-string table | inherited environment | variables to add/replace |
+| `opts.launch_timeout` | finite number > 0 | unlimited wait | bounds `chdir` + `exec` launch |
+
+Unlike `babet.exec`, unknown options are rejected. `spawn` does not accept
+`stdin`, `timeout`, or `max_output`: stdin is sent through `process:write()`,
+lifetime is controlled with `wait()`/`terminate()`, and outputs are read
+progressively.
+
+`launch_timeout` only covers the launch phase before the new executable is
+established. It is not a total process-lifetime limit.
+
+`PATH` lookup, paths containing `/`, environment merging, and shell-free
+execution follow the same rules as `exec`.
+
+<a id="spawn-methods"></a>
+### Process methods
+
+| Method | Return | Purpose |
+| --- | --- | --- |
+| `process:read_stdout([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read at most `max_bytes` from stdout |
+| `process:read_stderr([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read at most `max_bytes` from stderr |
+| `process:write(data [, timeout])` | `(bytes_written, nil)` or `(nil, reason)` | write part of `data` to stdin |
+| `process:close_stdin()` | `(true, nil)` | close stdin idempotently |
+| `process:is_running()` | `boolean` or `(nil, err)` | check state without blocking |
+| `process:pid()` | integer | return the assigned PID |
+| `process:wait([timeout])` | `(result, nil)` or `(nil, reason)` | wait without killing on timeout |
+| `process:terminate([grace_period])` | `(result, nil)` or `(nil, err)` | SIGTERM, then SIGKILL if needed |
+| `process:kill()` | `(result, nil)` or `(nil, err)` | SIGKILL the process group |
+| `process:close()` | `(true, nil)` | clean pipes and any active child |
+
+Short reasons `"timeout"`, `"closed"`, and `"interrupted"` are typed, like
+socket errors. Other diagnostics use a `process:` or `spawn:` prefix.
+
+The table returned by `wait`, `terminate`, and `kill` contains:
+
+```lua
+{
+    code = 0,          -- normal code, or 128 + signal
+    exited = true,     -- normal exit/_exit termination
+    signaled = false,  -- terminated by a signal
+    signal = nil,      -- signal number when signaled == true
+}
+```
+
+Calling `wait()` again after completion returns the same result because the
+status is cached after the first `waitpid`.
+
+<a id="spawn-reading"></a>
+### Reading stdout and stderr
+
+Reads are binary-safe. By default they read at most 64 KiB and are
+non-blocking (`timeout = 0`). The maximum size per call is 16 MiB.
+
+```lua
+local chunk, err = process:read_stdout(64 * 1024, 0.25)
+
+if chunk then
+    io.write(chunk)
+elseif err == "timeout" then
+    -- nothing became available for 250 ms
+elseif err == "closed" then
+    -- final EOF on stdout
+else
+    error(err)
+end
+```
+
+`"closed"` is EOF for that stream, not necessarily process completion. A child
+may close stdout and keep working.
+
+Drain both stdout **and** stderr. Reading only one while the other fills can
+block the child when the kernel pipe becomes full.
+
+<a id="spawn-writing"></a>
+### Writing stdin
+
+`write` accepts a binary Lua string, including NUL bytes. The pipe is
+non-blocking, so the call may write only part of the string even after it
+became writable. Use the returned byte count to resume at the next byte.
+
+```lua
+local function write_all(process, data)
+    local offset = 1
+    while offset <= #data do
+        local written, err = process:write(data:sub(offset), 1)
+        assert(written, err)
+        offset = offset + written
+    end
+end
+
+write_all(process, payload)
+assert(process:close_stdin())
+```
+
+An empty string returns `(0, nil)`. After `close_stdin`, `write` returns
+`(nil, "closed")`. Closing stdin is often required for tools such as `cat`,
+`sort`, or `ffmpeg` to know the input is complete.
+
+<a id="spawn-lifecycle"></a>
+### Waiting, terminating, and closing
+
+`wait()` without an argument waits for process completion. `wait(timeout)`
+returns `(nil, "timeout")` when the budget expires without sending a signal or
+invalidating the object.
+
+```lua
+local result, err = process:wait(0)
+if not result and err == "timeout" then
+    -- process is still running
+end
+```
+
+`terminate(grace_period)` sends SIGTERM to the whole group. If the group does
+not exit before the grace period ends, Babet sends SIGKILL. The default grace
+period is two seconds. `kill()` sends SIGKILL directly.
+
+`close()` is idempotent. If the child is still running, it is terminated and
+reaped with bounded waits, then all three pipes are closed. The garbage
+collector and Lua `__close` metamethod perform the same cleanup:
+
+```lua
+local process <close> = assert(babet.spawn("long-job"))
+-- automatic cleanup when leaving the scope
+```
+
+Explicit close is still recommended because garbage-collection timing is not
+deterministic.
+
+<a id="spawn-example"></a>
+### Streaming loop example
+
+```lua
+local process, err = babet.spawn("yt-dlp", {
+    "--newline",
+    "-f", "bestvideo+bestaudio/best",
+    url,
+})
+assert(process, err)
+
+local stdout_open, stderr_open = true, true
+
+while stdout_open or stderr_open do
+    if stdout_open then
+        local data, read_err = process:read_stdout(64 * 1024, 0.1)
+        if data then
+            io.write(data)
+            io.flush()
+        elseif read_err == "closed" then
+            stdout_open = false
+        elseif read_err ~= "timeout" then
+            error(read_err)
+        end
+    end
+
+    if stderr_open then
+        local data, read_err = process:read_stderr(64 * 1024, 0)
+        if data then
+            io.stderr:write(data)
+            io.stderr:flush()
+        elseif read_err == "closed" then
+            stderr_open = false
+        elseif read_err ~= "timeout" then
+            error(read_err)
+        end
+    end
+end
+
+local result, wait_err = process:wait(5)
+assert(result, wait_err)
+process:close()
+
+if result.code ~= 0 then
+    error("yt-dlp exited with code " .. result.code)
+end
+```
+
+<a id="spawn-limits"></a>
+### Limits and deadlock prevention
+
+- `wait()` does not drain output. Calling it immediately on a very verbose child
+  can block when its pipes fill. Drain both streams while it runs, or use
+  `babet.exec` for small automatically captured output.
+- Sending large input to a program that simultaneously emits large output
+  requires alternating writes and reads. A single `write_all` before any read
+  can fill pipes in both directions.
+- There is no multi-process wait or C++-driven Lua callback yet. Control remains
+  explicit and reentrant by design.
+- stdout and stderr remain separate. Babet does not merge them or create a
+  pipeline between two process objects.
+- `close()` and `terminate()` target the process group created at launch. A
+  descendant that deliberately changes process group or session may escape,
+  just as with `babet.exec`.
 
 <a id="exec-errors"></a>
 ## Error contract

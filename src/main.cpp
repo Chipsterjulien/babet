@@ -8,6 +8,7 @@
 #include "lua_bindings/currentDir.hpp"
 #include "lua_bindings/deepCopyTable.hpp"
 #include "lua_bindings/exec.hpp"
+#include "lua_bindings/process.hpp"
 #include "lua_bindings/fileExists.hpp"
 #include "lua_bindings/fileSize.hpp"
 #include "lua_bindings/fileUtils.hpp"
@@ -106,6 +107,10 @@ void register_babet(lua_State *L)
 
     lua_pushcfunction(L, lua_exec);
     lua_setfield(L, -2, "exec");
+
+    // Processus pilotables en streaming (2.4.0). Enregistre babet.spawn
+    // ainsi que la métatable du userdata babet.process.
+    register_process(L);
 
     lua_pushcfunction(L, lua_fileExists);
     lua_setfield(L, -2, "fileExists");

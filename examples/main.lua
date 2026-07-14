@@ -2199,6 +2199,241 @@ end
 
 -- =====================================================================
 print("")
+print("=== process streaming ===")
+
+do
+    local function read_both(process, timeout)
+        local stdout_chunks, stderr_chunks = {}, {}
+        local stdout_closed, stderr_closed = false, false
+        local deadline = babet.monotonic() + (timeout or 5)
+
+        while not stdout_closed or not stderr_closed do
+            if not stdout_closed then
+                local data, err = process:read_stdout(65536, 0.05)
+                if data then
+                    stdout_chunks[#stdout_chunks + 1] = data
+                elseif err == "closed" then
+                    stdout_closed = true
+                elseif err ~= "timeout" then
+                    return nil, nil, err
+                end
+            end
+
+            if not stderr_closed then
+                local data, err = process:read_stderr(65536, 0.05)
+                if data then
+                    stderr_chunks[#stderr_chunks + 1] = data
+                elseif err == "closed" then
+                    stderr_closed = true
+                elseif err ~= "timeout" then
+                    return nil, nil, err
+                end
+            end
+
+            if babet.monotonic() >= deadline then
+                return nil, nil, "test timeout"
+            end
+        end
+
+        return table.concat(stdout_chunks), table.concat(stderr_chunks), nil
+    end
+
+    local function write_all(process, data)
+        local offset = 1
+        while offset <= #data do
+            local written, err = process:write(data:sub(offset), 1)
+            if not written then
+                return nil, err
+            end
+            if written == 0 then
+                return nil, "zero-byte write"
+            end
+            offset = offset + written
+        end
+        return true
+    end
+
+    ok("babet.spawn is a function", type(babet.spawn) == "function")
+    ok("spawn() without command raises",
+        pcall(function() babet.spawn() end) == false)
+    ok("spawn command is a strict string",
+        pcall(function() babet.spawn(42) end) == false)
+
+    local p, e = babet.spawn("echo", "bad")
+    ok_fail("spawn args must be a table", p, e)
+    p, e = babet.spawn("echo", { [2] = "bad" })
+    ok_fail("spawn args must be a dense array", p, e)
+    p, e = babet.spawn("echo", { true })
+    ok_fail("spawn args contain strings only", p, e)
+    p, e = babet.spawn("echo", {}, "bad")
+    ok_fail("spawn opts must be a table", p, e)
+    p, e = babet.spawn("echo", {}, { unknown = true })
+    ok_fail("spawn rejects unknown options", p, e)
+    p, e = babet.spawn("echo", {}, { launch_timeout = 0 })
+    ok_fail("spawn launch_timeout must be > 0", p, e)
+    p, e = babet.spawn("echo", {}, { launch_timeout = "1" })
+    ok_fail("spawn launch_timeout is a strict number", p, e)
+    p, e = babet.spawn("__babet_missing_command__")
+    ok_fail("spawn missing command -> (nil, err)", p, e)
+
+    p, e = babet.spawn("sh", {
+        "-c",
+        "printf 'OUT'; printf 'ERR' >&2; sleep 0.2",
+    })
+    ok("spawn basic process returns userdata", p ~= nil and e == nil,
+        tostring(e))
+    ok("process tostring is informative",
+        tostring(p):find("babet.process", 1, true) ~= nil)
+    ok("process pid() returns an integer",
+        math.type(p:pid()) == "integer" and p:pid() > 0)
+    ok("process is_running() initially true", p:is_running() == true)
+
+    local out, errout, stream_err = read_both(p, 3)
+    ok("stream stdout is captured progressively",
+        out == "OUT" and stream_err == nil, tostring(stream_err))
+    ok("stream stderr is captured separately",
+        errout == "ERR" and stream_err == nil, tostring(stream_err))
+
+    local result, wait_err = p:wait(2)
+    ok("process wait returns a result table",
+        type(result) == "table" and wait_err == nil)
+    ok("process normal exit code == 0",
+        result and result.code == 0 and result.exited == true
+        and result.signaled == false)
+    ok("process is_running() false after wait", p:is_running() == false)
+    local result2, wait_err2 = p:wait(0)
+    ok("process wait is idempotent",
+        result2 and result2.code == 0 and wait_err2 == nil)
+    ok_act("process close() succeeds", p:close())
+    ok_act("process close() is idempotent", p:close())
+    local closed_data, closed_err = p:read_stdout(1, 0)
+    ok("read_stdout after close -> closed",
+        closed_data == nil and closed_err == "closed")
+
+    -- cwd + env overlay.
+    p, e = babet.spawn("sh", {
+        "-c", "printf '%s|%s' \"$PWD\" \"$BABET_SPAWN_ENV\"",
+    }, {
+        cwd = "/tmp",
+        env = { BABET_SPAWN_ENV = "ok" },
+    })
+    ok("spawn accepts cwd and env", p ~= nil and e == nil, tostring(e))
+    out, errout, stream_err = read_both(p, 3)
+    result = p:wait(2)
+    ok("spawn cwd/env reach the child",
+        out == "/tmp|ok" and errout == "" and result.code == 0,
+        tostring(out))
+    p:close()
+
+    -- Lecture non bloquante et wait borné ne tuent pas le processus.
+    p, e = babet.spawn("sh", { "-c", "sleep 0.4; printf done" })
+    ok("spawn delayed-output fixture", p ~= nil and e == nil, tostring(e))
+    local t0 = babet.monotonic()
+    local no_data, timeout_err = p:read_stdout(16, 0.05)
+    local dt = babet.monotonic() - t0
+    ok("read_stdout timeout is typed and bounded",
+        no_data == nil and timeout_err == "timeout" and dt < 0.5,
+        "err=" .. tostring(timeout_err) .. " dt=" .. tostring(dt))
+    local no_wait, no_wait_err = p:wait(0)
+    ok("wait(0) is non-blocking",
+        no_wait == nil and no_wait_err == "timeout")
+    ok("wait timeout does not terminate the process", p:is_running() == true)
+    out, errout, stream_err = read_both(p, 3)
+    result = p:wait(2)
+    ok("process remains usable after timeouts",
+        out == "done" and errout == "" and result.code == 0,
+        tostring(stream_err))
+    p:close()
+
+    -- stdin binary-safe et écriture progressive.
+    p, e = babet.spawn("cat")
+    ok("spawn cat for streaming stdin", p ~= nil and e == nil, tostring(e))
+    local binary = "alpha\0beta\n"
+    local wrote, write_err = write_all(p, binary)
+    ok("process write_all accepts binary data", wrote == true,
+        tostring(write_err))
+    local zero_written, zero_err = p:write("", 0)
+    ok("process write empty string returns 0",
+        zero_written == 0 and zero_err == nil)
+    ok_act("process close_stdin succeeds", p:close_stdin())
+    ok_act("process close_stdin is idempotent", p:close_stdin())
+    out, errout, stream_err = read_both(p, 3)
+    result = p:wait(2)
+    ok("process stdin/stdout round-trip is binary-safe",
+        out == binary and errout == "" and result.code == 0,
+        tostring(stream_err))
+    local write_closed, write_closed_err = p:write("x", 0)
+    ok("write after close_stdin -> closed",
+        write_closed == nil and write_closed_err == "closed")
+    p:close()
+
+    -- Gros flux sur stdout ET stderr : les deux doivent être drainés.
+    p, e = babet.spawn("sh", {
+        "-c",
+        "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2",
+    })
+    ok("spawn large dual-stream fixture", p ~= nil and e == nil, tostring(e))
+    out, errout, stream_err = read_both(p, 5)
+    result = p:wait(2)
+    ok("large stdout streaming does not deadlock",
+        out and #out == 262144 and result.code == 0,
+        "size=" .. tostring(out and #out) .. " err=" .. tostring(stream_err))
+    ok("large stderr streaming does not deadlock",
+        errout and #errout == 262144,
+        "size=" .. tostring(errout and #errout))
+    p:close()
+
+    -- terminate / kill ciblent le groupe et rendent un code 128+signal.
+    p, e = babet.spawn("sh", { "-c", "sleep 10" })
+    ok("spawn terminate fixture", p ~= nil and e == nil, tostring(e))
+    result, wait_err = p:terminate(0.2)
+    ok("process terminate returns a signaled result",
+        result and wait_err == nil and result.signaled == true
+        and (result.code == 143 or result.code == 137),
+        tostring(wait_err))
+    p:close()
+
+    p, e = babet.spawn("sh", { "-c", "sleep 10" })
+    ok("spawn kill fixture", p ~= nil and e == nil, tostring(e))
+    result, wait_err = p:kill()
+    ok("process kill returns code 137",
+        result and wait_err == nil and result.code == 137
+        and result.signal == 9)
+    p:close()
+
+    -- close() nettoie automatiquement un processus encore actif.
+    p, e = babet.spawn("sh", { "-c", "sleep 10" })
+    ok("spawn close cleanup fixture", p ~= nil and e == nil, tostring(e))
+    local cleanup_pid = p:pid()
+    ok_act("process close terminates an active child", p:close())
+    ok("closed process reports not running", p:is_running() == false)
+    local probe = babet.exec("sh", {
+        "-c", "kill -0 " .. tostring(cleanup_pid) .. " 2>/dev/null",
+    })
+    ok("closed child is no longer alive",
+        type(probe) == "table" and probe.code ~= 0)
+
+    -- Arity / value guards on methods.
+    p, e = babet.spawn("cat")
+    ok("spawn validation-method fixture", p ~= nil and e == nil, tostring(e))
+    ok("read_stdout rejects max_bytes <= 0",
+        pcall(function() p:read_stdout(0) end) == false)
+    ok("read_stdout rejects max_bytes > 16 MiB",
+        pcall(function() p:read_stdout(16 * 1024 * 1024 + 1) end) == false)
+    local bad_timeout, bad_timeout_err = p:read_stdout(1, -1)
+    ok("read_stdout rejects negative timeout cleanly",
+        bad_timeout == nil and type(bad_timeout_err) == "string")
+    ok("write requires a string",
+        pcall(function() p:write(42) end) == false)
+    ok("pid rejects extra arguments",
+        pcall(function() p:pid(true) end) == false)
+    ok("wait rejects extra arguments",
+        pcall(function() p:wait(0, 1) end) == false)
+    p:close()
+end
+
+-- =====================================================================
+print("")
 print("=== deepCopyTable ===")
 
 do
@@ -3419,39 +3654,55 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         self._echo()
 
-ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+with open(sys.argv[1], "w", encoding="ascii") as port_file:
+    port_file.write(str(server.server_port))
+    port_file.flush()
+server.serve_forever()
 ]])
         server_file:close()
 
         print("[INFO] http: starting local test server...")
-        local port = 8000 + (os.time() % 1000)
-        -- Bootstrap borné par timeout ; setsid détache le serveur dans
-        -- une session distincte, avec les trois flux redirigés.
-        local boot = babet.exec("sh", { "-c",
-            "cd " .. SBH .. " && { setsid python3 server.py "
-            .. port .. " >/dev/null 2>&1 </dev/null & } ; echo $!"
-        }, { timeout = 5 })
+        local port_file = SBH .. "/port.txt"
 
-        local srv_pid
-        if type(boot) == "table" and boot.stdout then
-            srv_pid = boot.stdout:gsub("%s+$", "")
-        end
+        -- Port éphémère attribué par le noyau : les trois exécutions
+        -- successives du harnais ne peuvent plus se disputer un port
+        -- calculé à partir de os.time(). Le userdata process garantit
+        -- aussi que le serveur est réellement terminé avant la relance.
+        local server_proc, server_err = babet.spawn("python3", {
+            "server.py", "port.txt",
+        }, {
+            cwd = SBH,
+            launch_timeout = 5,
+        })
 
         -- Budget d'attente DUR et COURT : 15 sondes x ~200 ms ≈ 3 s
         -- max, AVEC progression visible (jamais "aucun avancement").
         -- Not ready within budget -> skip: the subsection is
         -- optionnelle (décision actée), on ne grind jamais en muet.
+        local port
         local up = false
-        if srv_pid and srv_pid ~= "" then
+        if server_proc then
             for i = 1, 15 do
                 babet.sleep(200, "ms")
-                local probe = babet.http.get(
-                    "http://127.0.0.1:" .. port .. "/probe.bin",
-                    { timeout = 1 })
-                if type(probe) == "table" and probe.status == 200 then
-                    up = true
-                    break
+
+                local pf = io.open(port_file, "rb")
+                if pf then
+                    local raw_port = pf:read("*a")
+                    pf:close()
+                    port = tonumber(raw_port)
                 end
+
+                if port and port >= 1 and port <= 65535 then
+                    local probe = babet.http.get(
+                        "http://127.0.0.1:" .. port .. "/probe.bin",
+                        { timeout = 1 })
+                    if type(probe) == "table" and probe.status == 200 then
+                        up = true
+                        break
+                    end
+                end
+
                 if i % 5 == 0 then
                     print("[INFO] http: attente serveur ("
                         .. i .. "/15)...")
@@ -3461,9 +3712,10 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
 
         if not up then
             print("[INFO] http: local server unavailable in "
-                .. "budget, 2xx success subsection ignorée (optionnelle)")
-            if srv_pid and srv_pid ~= "" then
-                babet.exec("kill", { "-9", srv_pid })
+                .. "budget, 2xx success subsection ignorée (optionnelle)"
+                .. "; err=" .. tostring(server_err))
+            if server_proc then
+                server_proc:close()
             end
             babet.rmdirAll(SBH)
         else
@@ -3610,12 +3862,16 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
             ok("DOC 4 redirects are not followed by default",
                 type(redir) == "table" and redir.status == 302
                 and redir.headers.location == "/probe.bin")
-            local followed = babet.http.get(base .. "/redirect", {
-                timeout = 5, follow_redirects = true,
-            })
+            local followed, followed_err = babet.http.get(
+                base .. "/redirect", {
+                    timeout = 5, follow_redirects = true,
+                })
             ok("DOC 4 follow_redirects=true follows redirect",
                 type(followed) == "table" and followed.status == 200
-                and followed.body == "AB\0CD")
+                and followed.body == "AB\0CD",
+                "status=" .. tostring(followed and followed.status)
+                .. " body=" .. tostring(followed and followed.body)
+                .. " err=" .. tostring(followed_err))
 
             local head = babet.http.request({
                 url = base .. "/anything", method = "HEAD", timeout = 5,
@@ -3634,9 +3890,10 @@ ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
                 "elapsed=" .. tostring(slow_elapsed)
                 .. " err=" .. tostring(slow_err))
 
-            babet.exec("kill", { srv_pid })
-            babet.sleep(100, "ms")
-            babet.exec("kill", { "-9", srv_pid })
+            -- close() termine et reap le groupe de processus avant de
+            -- supprimer les fichiers du serveur. Aucun serveur résiduel
+            -- ne peut donc perturber l'exécution embarquée via PATH.
+            server_proc:close()
             babet.rmdirAll(SBH)
         end
     end

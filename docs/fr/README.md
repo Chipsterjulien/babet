@@ -17,6 +17,8 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
+Version documentée en cours : **2.4.0** (dernière release auditée : **2.3.0**).
+
 ## Pour démarrer
 
 - [`Premiers pas`](getting-started.md) — installation, premier script,
@@ -25,6 +27,8 @@ fonctionnalités qu’il contient.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
+- [`Notes de version 2.3.0`](../../CHANGELOG.fr.md) — changements
+  complets, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 
@@ -32,7 +36,7 @@ fonctionnalités qu’il contient.
 | --- | --- | --- |
 | créer, supprimer, lister, rechercher, copier ou déplacer des fichiers | [`FS — système de fichiers`](modules/fs.md) | fichiers, dossiers, chemins, symlinks, `listFiles`, `find`, `copyTree`, permissions et checksums |
 | lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |
-| lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, stdin, stdout/stderr, environnement, cwd, timeout et limite de sortie |
+| lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, capture avec `exec`, streaming avec `spawn`, environnement, cwd et contrôle du processus |
 | manipuler l’environnement, identifier le processus ou mesurer la VM Lua | [`SYS - processus et machine`](modules/sys.md) | version du runtime, PID, hostname, `uname`, `PATH`, `env`, `setenv` et mémoire de l’état Lua |
 | envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, redirections, TLS, timeout et taille maximale |
 | ouvrir une connexion TCP | [`Socket — TCP`](modules/socket.md) | client, serveur, acceptation, flux binaires, lignes, lecture jusqu’à EOF, timeouts, buffers et limites |
@@ -58,7 +62,7 @@ avoir à ouvrir chaque fichier.
 | Module | Périmètre détaillé |
 | --- | --- |
 | [`Argparse — arguments de ligne de commande`](modules/argparse.md) | Déclarer des flags, options et positionnels ; générer l’aide ; valider les choix ; convertir les valeurs. |
-| [`Exec — programmes externes et processus`](modules/exec.md) | Exécuter sans shell, transmettre argv/stdin/env/cwd, capturer stdout/stderr, limiter le temps et la sortie. |
+| [`Exec — programmes externes et processus`](modules/exec.md) | Exécuter sans shell avec `exec`, ou piloter stdin/stdout/stderr progressivement avec `spawn`. |
 | [`FS — fichiers, dossiers, chemins et attributs`](modules/fs.md) | Existence et types, création/suppression, chemins, listings, recherche, itérateur, copie/déplacement d’arbres, symlinks, modes Unix et checksums. |
 | [`HTTP — requêtes web`](modules/http.md) | URL, méthodes, query, headers validés, corps binaires, réponses, redirections, vérification TLS, timeout et taille maximale. |
 | [`Inotify — surveillance du système de fichiers`](modules/inotify.md) | Ajouter/retirer des watches, lire les événements, gérer timeouts, moves, cookies et fermeture. |

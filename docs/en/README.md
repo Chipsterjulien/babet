@@ -15,6 +15,8 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organized by need and by module: the contents below describe not
 only each technical module name, but also the features it contains.
 
+Current documented development version: **2.4.0** (latest audited release: **2.3.0**).
+
 ## Getting started
 
 - [`Getting started`](getting-started.md) — installation, first script,
@@ -23,6 +25,8 @@ only each technical module name, but also the features it contains.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
+- [`2.3.0 release notes`](../../CHANGELOG.md) — complete changes,
+  migration notes, validation results, and known limitations.
 
 ## Find a feature
 
@@ -30,7 +34,7 @@ only each technical module name, but also the features it contains.
 | --- | --- | --- |
 | create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find`, `copyTree`, permissions, and checksums |
 | parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversions |
-| run an external program | [`Exec — processes`](modules/exec.md) | shell-free argv, stdin, stdout/stderr, environment, cwd, timeout, and output limits |
+| run an external program | [`Exec — processes`](modules/exec.md) | shell-free argv, `exec` capture, `spawn` streaming, environment, cwd, and process control |
 | manage the environment, identify the process, or measure Lua memory | [`SYS - process and host`](modules/sys.md) | runtime version, PID, hostname, `uname`, `PATH`, `env`, `setenv`, and Lua-state memory |
 | send a web request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, redirects, TLS, timeout, and response-size limits |
 | open a TCP connection | [`Socket — TCP`](modules/socket.md) | clients, servers, accept, binary streams, lines, reads through EOF, timeouts, buffering, and limits |
@@ -55,7 +59,7 @@ titles below let readers understand scope without opening every file.
 | Module | Detailed scope |
 | --- | --- |
 | [`Argparse — command-line arguments`](modules/argparse.md) | Declare flags, options, and positionals; generate help; validate choices; convert values. |
-| [`Exec — external programs and processes`](modules/exec.md) | Run without a shell, pass argv/stdin/env/cwd, capture stdout/stderr, limit time and output. |
+| [`Exec — external programs and processes`](modules/exec.md) | Run without a shell using `exec`, or progressively control stdin/stdout/stderr with `spawn`. |
 | [`FS — files, directories, paths, and attributes`](modules/fs.md) | Existence and types, creation/removal, paths, listing, search, iteration, tree copy/move, symlinks, Unix modes, and checksums. |
 | [`HTTP — web requests`](modules/http.md) | URLs, methods, query, validated headers, binary bodies/responses, redirects, TLS verification, timeout, and maximum size. |
 | [`Inotify — filesystem monitoring`](modules/inotify.md) | Add/remove watches, read events, handle timeouts, moves, cookies, and closing. |

@@ -1,3 +1,5 @@
+> **English** | [Français](README.fr.md)
+
 <p align="center">
   <img src="docs/assets/babet-closed.png" alt="Babet — pine cone" width="200">
 </p>
@@ -14,6 +16,10 @@ in C++23. Embeds OpenSSL, SQLite, miniz, nlohmann/json, cpp-httplib,
 and tomlplusplus statically — one binary, no system dependencies
 beyond glibc.
 
+Current development version: **2.4.0**. Latest audited release: **2.3.0**. See the
+[English changelog](CHANGELOG.md) or the
+[French changelog](CHANGELOG.fr.md).
+
 Can be used in three modes:
 
 1. **As a Lua interpreter** : `babet script.lua` or `babet folder/`
@@ -24,7 +30,7 @@ Can be used in three modes:
 3. **As a library of bindings** : Lua scripts get
    `babet.json`, `babet.http`, `babet.sqlite`,
    `babet.socket`, `babet.inotify`, `babet.workers`,
-   `babet.user`, and more.
+   `babet.user`, `babet.exec`, the streaming `babet.spawn`, and more.
 
 ## Quick start
 
@@ -48,13 +54,22 @@ Before tagging a release, run the complete validation with one command:
 ./run_tests.sh --release
 ```
 
-Network checks that validate Babet itself are blocking. Google and AUR are advisory by default, so a third-party outage, proxy, or DNS filter does not invalidate a release. To make those probes blocking too:
+Babet's blocking TLS checks use a local HTTPS fixture generated at runtime.
+Public HTTPS probes are advisory by default, so a third-party outage, proxy,
+DNS filter, or TLS interception does not invalidate a release. To make those
+probes blocking too:
 
 ```sh
 BABET_SMOKE_STRICT_EXTERNAL=1 ./run_tests.sh --release
 ```
 
-It automatically runs the ASan/UBSan suite, restores and revalidates the normal build, then runs the network smoke tests against that final binary. The normal build step is still attempted when the sanitizer stage fails, so `test/babet` is not deliberately left instrumented. Internet access is required only for the network stage.
+It automatically runs the ASan/UBSan suite, restores and revalidates the
+normal build, then runs the network smoke tests against that final binary.
+The normal build step is still attempted when the sanitizer stage fails, so
+`test/babet` is not deliberately left instrumented. Internet access is
+optional: without it, only the advisory public probes warn. The blocking TLS
+checks use a local fixture; the bounded TCP check uses a reserved TEST-NET
+address. The network stage requires the `python3` and `openssl` commands.
 
 The individual commands remain available for diagnosis:
 
@@ -82,6 +97,9 @@ cd docs && ./build_doc.sh en   # or: ./build_doc.sh fr
 Requires `pandoc` and a LaTeX engine (`texlive-xetex` is fine).
 
 ## Releases
+
+The maintainer release checklist is documented in
+[`RELEASING.md`](RELEASING.md).
 
 Download prebuilt binaries from the
 [releases page](https://github.com/Chipsterjulien/babet/releases).

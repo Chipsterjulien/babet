@@ -14,6 +14,7 @@
 
 #include "exec.hpp"
 #include "lua_utils.hpp"
+#include "process_common.hpp"
 
 #include <string>
 #include <unordered_set>
@@ -466,18 +467,6 @@ namespace
                ChildWaitResult::reaped;
     }
 
-    bool set_nonblocking(int fd, const char *label, std::string &err)
-    {
-        int flags = ::fcntl(fd, F_GETFL, 0);
-        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-        {
-            err = std::string("exec: cannot make ") + label +
-                  " non-blocking: " + std::strerror(errno);
-            return false;
-        }
-        return true;
-    }
-
     int push_exec_result(lua_State *L, const std::string &out_buf,
                          const std::string &err_buf, int status,
                          bool status_valid, bool timed_out,
@@ -557,378 +546,41 @@ int lua_exec(lua_State *L)
                                                     timeout_sec * 1000.0)
                                    : 0;
 
-    // Tableau argv terminé par NULL pour exec.
-    std::vector<char *> argv;
-    argv.reserve(args.size() + 1);
-    for (auto &a : args)
-    {
-        argv.push_back(const_cast<char *>(a.c_str()));
-    }
-    argv.push_back(nullptr);
+    // Le lancement (pipes CLOEXEC, fork, groupe de processus, chdir,
+    // environnement et détection d'échec exec) est partagé avec
+    // babet.spawn(). L'API historique exec conserve toutefois sa propre
+    // boucle d'I/O et son contrat de résultat capturé.
+    babet_process::LaunchSpec launch_spec;
+    launch_spec.command = cmd;
+    launch_spec.argv_strings = args;
+    launch_spec.cwd = cwd;
+    launch_spec.has_cwd = has_cwd;
+    launch_spec.env_overrides = env;
+    launch_spec.has_deadline = has_timeout;
+    launch_spec.deadline_ms = deadline;
+    launch_spec.error_prefix = "exec";
 
-    // CORRECTIF (post-revue Gemini, chantier 10-B) : préparer envp
-    // ENTIÈREMENT CÔTÉ PARENT avant fork().
-    //
-    // Pourquoi : faire setenv() dans l'enfant après fork() est
-    // dangereux en multi-thread. fork() ne copie qu'un seul thread,
-    // mais hérite des locks tenus par les autres threads au moment
-    // du fork — typiquement le lock global du tas (malloc). Si on
-    // appelle setenv() dans l'enfant et qu'il tente malloc() pour
-    // étendre `environ`, il bloque à jamais sur ce lock orphelin
-    // -> deadlock infini, zombie permanent.
-    //
-    // Solution : construire le tableau envp dans le parent (où
-    // malloc fonctionne normalement) et le passer à execvpe() dans
-    // l'enfant. execvpe() n'est PAS formellement async-signal-safe
-    // selon POSIX (résolution $PATH), mais en pratique sur glibc le
-    // risque concret est très faible (cf. notes.md).
-    //
-    // Construction :
-    //   1. Recopier l'environnement actuel (variable globale
-    //      `environ`), en sautant les clés qui seront override.
-    //   2. Ajouter les overrides depuis env (KEY=VALUE).
-    //   3. Construire le char *[] terminé par NULL.
-    //
-    // env_strings garde le storage durable des std::string ;
-    // envp_ptrs pointe dedans. Les deux restent vivants jusqu'après
-    // l'exec : le fork copie tout, l'enfant lit envp_ptrs en
-    // copy-on-write, c'est valide.
-    std::vector<std::string> env_strings;
-    std::vector<char *> envp_ptrs;
-
-    // Set des clés à override pour skipper rapidement.
-    std::unordered_set<std::string> override_keys;
-    for (auto &kv : env)
+    babet_process::LaunchResult launch_result =
+        babet_process::launch(launch_spec);
+    if (!launch_result.success)
     {
-        override_keys.insert(kv.first);
-    }
-
-    // 1. Copier l'environnement courant, sauf clés override.
-    if (environ != nullptr)
-    {
-        for (char **e = environ; *e != nullptr; ++e)
+        if (launch_result.timed_out)
         {
-            std::string entry(*e);
-            // Chaque entrée est "KEY=VALUE" ; on extrait la clé pour
-            // tester l'override. Si pas de '=' (cas pathologique),
-            // on garde tel quel (un setenv normal ne produirait pas
-            // ça).
-            auto eq = entry.find('=');
-            if (eq != std::string::npos)
-            {
-                std::string key = entry.substr(0, eq);
-                if (override_keys.count(key) > 0)
-                {
-                    continue; // sera réécrite plus bas
-                }
-            }
-            env_strings.push_back(std::move(entry));
+            return push_exec_result(L, "", "", launch_result.status,
+                                    launch_result.status_valid, true, false,
+                                    false);
         }
+        return push_fail(L, launch_result.error);
     }
 
-    // 2. Ajouter les overrides (KEY=VALUE).
-    for (auto &kv : env)
-    {
-        std::string entry = kv.first;
-        entry.push_back('=');
-        entry.append(kv.second);
-        env_strings.push_back(std::move(entry));
-    }
-
-    // 3. Construire le tableau de pointeurs terminé par NULL.
-    // Important : on remplit envp_ptrs APRÈS avoir terminé tous les
-    // push_back sur env_strings, pour éviter qu'un realloc invalide
-    // les pointeurs (data() devient invalide après realloc).
-    envp_ptrs.reserve(env_strings.size() + 1);
-    for (auto &s : env_strings)
-    {
-        envp_ptrs.push_back(s.data());
-    }
-    envp_ptrs.push_back(nullptr);
-
-    // --- création des pipes -----------------------------------------
-    int pipe_in[2], pipe_out[2], pipe_err[2], pipe_exec[2];
-
-    auto close_pair = [](int p[2])
-    { close(p[0]); close(p[1]); };
-
-    // CORRECTIF (post-revue Gemini) : créer les pipes en O_CLOEXEC
-    // ATOMIQUEMENT. Avec l'arrivée des workers (Chantier 8), une
-    // séquence pipe() puis fcntl(FD_CLOEXEC) laisse une fenêtre
-    // microscopique pendant laquelle un autre worker qui fait
-    // fork+exec hérite des fd. Avec pipe2() la création + le flag
-    // sont une seule opération atomique du noyau.
-    //
-    // Note : les pipes seront re-affectés à stdin/stdout/stderr du
-    // child via dup2(). dup2() crée systématiquement un fd SANS
-    // FD_CLOEXEC, donc nos fd 0/1/2 dans le child seront bien
-    // hérités par l'exec final, comme avant. Seul le fd "source"
-    // (par exemple pipe_in[0] avant dup2 dans le child, ou
-    // pipe_in[1] dans le parent) bénéficie de la protection.
-    auto make_pipe = [](int p[2]) -> int
-    {
-#ifdef O_CLOEXEC
-        return pipe2(p, O_CLOEXEC);
-#else
-        // Fallback portable : pipe() + fcntl(F_SETFD). Non atomique
-        // (fenêtre de race), mais maintient le comportement sur des
-        // systèmes sans pipe2. Babet vise Linux où pipe2 est
-        // toujours disponible (glibc 2.9+, Linux 2.6.27+).
-        if (pipe(p) != 0)
-            return -1;
-        fcntl(p[0], F_SETFD, fcntl(p[0], F_GETFD) | FD_CLOEXEC);
-        fcntl(p[1], F_SETFD, fcntl(p[1], F_GETFD) | FD_CLOEXEC);
-        return 0;
-#endif
-    };
-
-    if (make_pipe(pipe_in) != 0)
-    {
-        return push_fail(L, std::string("pipe2() failed: ") + std::strerror(errno));
-    }
-    if (make_pipe(pipe_out) != 0)
-    {
-        close_pair(pipe_in);
-        return push_fail(L, std::string("pipe2() failed: ") + std::strerror(errno));
-    }
-    if (make_pipe(pipe_err) != 0)
-    {
-        close_pair(pipe_in);
-        close_pair(pipe_out);
-        return push_fail(L, std::string("pipe2() failed: ") + std::strerror(errno));
-    }
-    if (make_pipe(pipe_exec) != 0)
-    {
-        close_pair(pipe_in);
-        close_pair(pipe_out);
-        close_pair(pipe_err);
-        return push_fail(L, std::string("pipe2() failed: ") + std::strerror(errno));
-    }
-    // pipe_exec a déjà FD_CLOEXEC posé via pipe2 ci-dessus, donc
-    // l'ancien fcntl explicite n'est plus nécessaire (idempotent
-    // de toute façon, mais inutile).
-
-    // --- fork -------------------------------------------------------
-    pid_t pid = fork();
-    if (pid < 0)
-    {
-        std::string msg = std::string("fork() failed: ") + std::strerror(errno);
-        close_pair(pipe_in);
-        close_pair(pipe_out);
-        close_pair(pipe_err);
-        close_pair(pipe_exec);
-        return push_fail(L, msg);
-    }
-
-    if (pid == 0)
-    {
-        // ===== processus enfant =====
-        // Propre groupe de processus (pgid == pid) : permettra de tuer
-        // tout l'arbre (enfant + descendants) via kill(-pid) au timeout.
-        // Échec non fatal — on exécute quand même.
-        setpgid(0, 0);
-
-        dup2(pipe_in[0], STDIN_FILENO);
-        dup2(pipe_out[1], STDOUT_FILENO);
-        dup2(pipe_err[1], STDERR_FILENO);
-
-        close_pair(pipe_in);
-        close_pair(pipe_out);
-        close_pair(pipe_err);
-        close(pipe_exec[0]);
-
-        if (has_cwd)
-        {
-            if (chdir(cwd.c_str()) != 0)
-            {
-                int e = errno;
-                ssize_t wr = write(pipe_exec[1], &e, sizeof(e));
-                (void)wr;
-                _exit(127);
-            }
-        }
-
-        // CORRECTIF Gemini : on N'APPELLE PAS setenv() dans
-        // l'enfant. L'envp a été préparé dans le parent (voir
-        // ci-dessus, avant fork). execvpe utilise notre envp
-        // custom sans toucher à `environ`.
-        //
-        // Note de rigueur (post-revue ChatGPT) : execvpe() N'EST PAS
-        // formellement async-signal-safe selon POSIX, car il fait
-        // une résolution via $PATH (impliquant getenv("PATH"), non
-        // listé en async-signal-safe). En pratique sur glibc, cette
-        // résolution n'utilise que strchr/strncmp/access/stat (tous
-        // async-signal-safe) et une lecture passive de `environ`
-        // sans allocation, donc le risque concret est très faible.
-        // Le fix "propre" serait de résoudre PATH côté parent et
-        // d'appeler execve() avec un chemin absolu. C'est dans
-        // notes.md comme dette technique reportée — pas bloquant
-        // pour l'usage normal.
-        //
-        // execvpe est une extension GNU (Linux/glibc), comme pipe2.
-        // Babet vise Linux ; sur un système qui ne fournit pas
-        // execvpe, on retombe sur execvp en remplaçant `environ`
-        // dans le child (sûr car mono-thread post-fork).
-#ifdef __GLIBC__
-        execvpe(cmd.c_str(), argv.data(), envp_ptrs.data());
-#else
-        // Fallback : pour les systèmes sans execvpe, on remplace
-        // temporairement `environ` puis on appelle execvp. Sûr car
-        // un seul thread après fork. Mêmes caveats async-signal
-        // qu'execvpe (résolution PATH).
-        environ = envp_ptrs.data();
-        execvp(cmd.c_str(), argv.data());
-#endif
-
-        int e = errno;
-        ssize_t wr = write(pipe_exec[1], &e, sizeof(e));
-        (void)wr;
-        _exit(127);
-    }
-
-    // ===== processus parent =====
-    // Refait setpgid côté parent : idempotent avec celui de l'enfant,
-    // ferme la course (selon l'ordonnancement, l'un des deux l'établit
-    // en premier). Erreurs (ESRCH si l'enfant a déjà exec/terminé,
-    // EACCES) volontairement ignorées.
-    setpgid(pid, pid);
-
-    close(pipe_in[0]);
-    close(pipe_out[1]);
-    close(pipe_err[1]);
-    close(pipe_exec[1]);
-
-    // --- détection d'un échec de lancement --------------------------
-    // pipe_exec se ferme automatiquement au succès d'exec (CLOEXEC), ou
-    // reçoit errno si chdir/exec échoue. L'attente est non bloquante et
-    // utilise la même deadline absolue que le reste de l'appel.
-    std::string nonblock_error;
-    if (!set_nonblocking(pipe_exec[0], "launch pipe", nonblock_error))
-    {
-        close(pipe_in[1]);
-        close(pipe_out[0]);
-        close(pipe_err[0]);
-        close(pipe_exec[0]);
-        int ignored_status = 0;
-        terminate_and_reap(pid, ignored_status);
-        return push_fail(L, nonblock_error);
-    }
-
-    int launch_errno = 0;
-    ssize_t launch_bytes = 0;
-    bool launch_timed_out = false;
-    std::string launch_internal_error;
-
-    for (;;)
-    {
-        int timeout_ms = -1;
-        if (has_timeout)
-        {
-            long long remaining = deadline - now_ms();
-            timeout_ms = remaining <= 0
-                             ? 0
-                             : (remaining > INT_MAX
-                                    ? INT_MAX
-                                    : static_cast<int>(remaining));
-        }
-
-        struct pollfd launch_poll{};
-        launch_poll.fd = pipe_exec[0];
-        launch_poll.events = POLLIN;
-        int pr = ::poll(&launch_poll, 1, timeout_ms);
-        if (pr < 0)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-            launch_internal_error =
-                std::string("exec: launch poll failed: ") +
-                std::strerror(errno);
-            break;
-        }
-        if (pr == 0)
-        {
-            launch_timed_out = true;
-            break;
-        }
-
-        launch_bytes =
-            ::read(pipe_exec[0], &launch_errno, sizeof(launch_errno));
-        if (launch_bytes > 0)
-        {
-            if (launch_bytes != static_cast<ssize_t>(sizeof(launch_errno)))
-            {
-                launch_internal_error =
-                    "exec: incomplete launch error received from child";
-            }
-            break;
-        }
-        if (launch_bytes == 0)
-        {
-            break; // CLOEXEC : lancement réussi
-        }
-        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
-        {
-            continue;
-        }
-        launch_internal_error =
-            std::string("exec: cannot read launch status: ") +
-            std::strerror(errno);
-        break;
-    }
-    close(pipe_exec[0]);
-
-    if (launch_timed_out || !launch_internal_error.empty())
-    {
-        close(pipe_in[1]);
-        close(pipe_out[0]);
-        close(pipe_err[0]);
-        int status = 0;
-        bool reaped = terminate_and_reap(pid, status);
-        if (!launch_internal_error.empty())
-        {
-            if (!reaped)
-            {
-                launch_internal_error +=
-                    " (child could not be reaped within cleanup deadline)";
-            }
-            return push_fail(L, launch_internal_error);
-        }
-        return push_exec_result(L, "", "", status, reaped, true, false,
-                                false);
-    }
-
-    if (launch_bytes > 0)
-    {
-        close(pipe_in[1]);
-        close(pipe_out[0]);
-        close(pipe_err[0]);
-        int status = 0;
-        if (wait_child_until(pid, status, now_ms() + 2000) !=
-            ChildWaitResult::reaped)
-        {
-            terminate_and_reap(pid, status);
-        }
-        return push_fail(L, std::string("cannot launch '") + cmd + "': " +
-                                std::strerror(launch_errno));
-    }
+    const pid_t pid = launch_result.process.pid;
+    int pipe_in[2] = {-1, launch_result.process.stdin_fd};
+    int pipe_out[2] = {launch_result.process.stdout_fd, -1};
+    int pipe_err[2] = {launch_result.process.stderr_fd, -1};
 
     // --- I/O concurrente, avec deadline éventuelle ------------------
     std::string out_buf, err_buf;
     bool out_truncated = false, err_truncated = false;
-
-    if (!set_nonblocking(pipe_out[0], "stdout pipe", nonblock_error) ||
-        !set_nonblocking(pipe_err[0], "stderr pipe", nonblock_error) ||
-        !set_nonblocking(pipe_in[1], "stdin pipe", nonblock_error))
-    {
-        close(pipe_in[1]);
-        close(pipe_out[0]);
-        close(pipe_err[0]);
-        int ignored_status = 0;
-        terminate_and_reap(pid, ignored_status);
-        return push_fail(L, nonblock_error);
-    }
 
     size_t stdin_off = 0;
     bool in_open = has_stdin;
