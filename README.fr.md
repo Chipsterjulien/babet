@@ -14,7 +14,7 @@ sous Linux, écrit en C++23. OpenSSL, SQLite, miniz, nlohmann/json,
 cpp-httplib et tomlplusplus sont liés statiquement : un seul binaire, sans
 dépendance système autre que glibc.
 
-Version de développement actuelle : **2.4.0**. Dernière version auditée : **2.3.0**. Voir le
+Version stable et auditée actuelle : **2.4.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 

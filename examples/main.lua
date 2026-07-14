@@ -3659,9 +3659,12 @@ class Handler(BaseHTTPRequestHandler):
         for name, value in headers:
             self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.end_headers()
         if self.command != "HEAD" and body:
             self.wfile.write(body)
+        self.wfile.flush()
+        self.close_connection = True
 
     def _echo(self):
         body = self._read_body()

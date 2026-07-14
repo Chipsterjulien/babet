@@ -2,11 +2,62 @@
 
 All notable changes to Babet are documented in this file.
 
-The project follows semantic versioning for public releases. Because 2.3.0
-hardens several API contracts that were previously permissive, users upgrading
-from 2.2.x should read the migration notes below.
+The project follows semantic versioning for public releases. Migration and
+usage notes are kept with each release when a new contract or operational rule
+may affect existing scripts.
 
-## [2.4.0] - Unreleased
+## [2.4.0] - 2026-07-14
+
+### Release summary
+
+Babet 2.4.0 removes three practical limits of the 2.3 series without weakening
+the safety guarantees established by the previous audit:
+
+- external programs can now be driven progressively through `babet.spawn`,
+  without buffering all stdin, stdout, or stderr in memory;
+- HTTP and HTTPS responses can be downloaded directly to a file with bounded,
+  atomic, symlink-aware destination handling;
+- SQLite now supports reusable prepared statements, explicit BLOB values, and
+  assisted transactions with automatic rollback on Lua errors.
+
+The existing `babet.exec`, `babet.http.request`, `db:exec`, and `db:query`
+contracts remain available. The new APIs are additive, while the shared process
+engine and release smoke tests were refactored and revalidated.
+
+Final validation for this release:
+
+- 1810 PASS / 0 FAIL in folder mode;
+- 1797 PASS / 0 FAIL in embedded mode;
+- 1797 PASS / 0 FAIL in embedded mode through `PATH`;
+- 9/9 runtime modes passed under ASan + UBSan;
+- 9/9 runtime modes passed again with the final normal build;
+- network smoke tests: 6 blocking checks passed, 0 failed, and 2 public probes
+  reported advisory warnings.
+
+### Upgrade and usage notes
+
+Babet 2.4.0 is primarily additive, but the following operational rules are
+important when adopting the new APIs:
+
+- `process:wait()` does not drain stdout or stderr. A child that produces enough
+  output can block until both streams are read; long-running scripts should
+  drain them while the process is active.
+- `process:write()` may write only part of the supplied string. Continue from
+  the returned byte count or use the documented write-all pattern.
+- `babet.http.download()` commits a destination only for a complete final 2xx
+  response. Non-2xx responses return metadata with `saved=false`; transport,
+  TLS, timeout, size, or disk failures return `(nil, err)` and preserve an
+  existing destination.
+- Download destinations reject `..` and symlinked parent-directory components.
+  A symlink exactly at the final destination is replaced as an inode; its target
+  is not modified.
+- `db:transaction()` commits every normal callback return, including `nil` and
+  `false`. Use `assert` or explicitly raise an error when an operation returning
+  `(nil, err)` must trigger rollback.
+- Only one prepared-query iteration can be active per prepared statement. A
+  reset or a new execution invalidates the previous iteration.
+- Plain Lua strings continue to bind as SQLite TEXT. Use
+  `babet.sqlite.blob(data)` when the SQLite storage class must be BLOB.
 
 ### SQLite prepared statements, BLOB values, and transactions
 

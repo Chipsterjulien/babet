@@ -16,7 +16,7 @@ in C++23. Embeds OpenSSL, SQLite, miniz, nlohmann/json, cpp-httplib,
 and tomlplusplus statically — one binary, no system dependencies
 beyond glibc.
 
-Current development version: **2.4.0**. Latest audited release: **2.3.0**. See the
+Current stable and audited release: **2.4.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 

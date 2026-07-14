@@ -1,118 +1,121 @@
-> **English** | [Français](../fr/README.md)
+> [English](../en/README.md) | **Français**
 
 <p align="center">
-  <img src="../assets/babet-closed.png" alt="Babet — pine cone" width="160">
+  <img src="../assets/babet-closed.png" alt="Babet — pomme de pin" width="160">
 </p>
 
-# Babet — User manual
+# Babet — Manuel utilisateur
 
-> *Babet*, n. — a regional word from south-eastern France
-> (Lyonnais, Forez, Dauphiné, Savoie, and nearby French-speaking
-> Switzerland) meaning a pine cone. Small, light, full of seeds,
-> and able to start a fire — like this binary.
+> *Babet*, n.m. — mot régional du sud-est de la France
+> (Lyonnais, Forez, Dauphiné, Savoie, ainsi que la Suisse
+> romande voisine) désignant une pomme de pin. Petit, léger,
+> plein de graines, et capable d’allumer un feu — comme ce
+> binaire.
 
-Babet is a standalone Lua binary for Linux scripting and automation. This
-manual is organized by need and by module: the contents below describe not
-only each technical module name, but also the features it contains.
+Babet est un binaire Lua standalone pour le scripting et l’automatisation sous
+Linux. Ce manuel est organisé par besoin et par module : la table des matières
+ci-dessous indique non seulement le nom technique du module, mais aussi les
+fonctionnalités qu’il contient.
 
-Current documented development version: **2.4.0** (latest audited release: **2.3.0**).
+Version documentée et auditée actuelle : **2.4.0**.
 
-## Getting started
+## Pour démarrer
 
-- [`Getting started`](getting-started.md) — installation, first script,
-  running a file or directory, creating an embedded executable, and using
-  Babet through `PATH`.
-- [`Security`](security.md) — threat model, actual protections, limitations,
-  and least-privilege rules.
-- [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`2.3.0 release notes`](../../CHANGELOG.md) — complete changes,
-  migration notes, validation results, and known limitations.
+- [`Premiers pas`](getting-started.md) — installation, premier script,
+  exécution d’un fichier ou d’un dossier, création d’un exécutable embarqué et
+  utilisation via le `PATH`.
+- [`Sécurité`](security.md) — modèle de menace, protections réellement
+  fournies, limites et règles de moindre privilège.
+- [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
+- [`Notes de version 2.4.0`](../../CHANGELOG.fr.md) — changements
+  complets, migration, validation et limites connues.
 
-## Find a feature
+## Trouver une fonctionnalité
 
-| I need to… | Read | What it covers |
+| Je cherche à… | Chapitre à consulter | Ce que j’y trouverai |
 | --- | --- | --- |
-| create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find`, `copyTree`, permissions, and checksums |
-| parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversions |
-| run an external program | [`Exec — processes`](modules/exec.md) | shell-free argv, `exec` capture, `spawn` streaming, environment, cwd, and process control |
-| manage the environment, identify the process, or measure Lua memory | [`SYS - process and host`](modules/sys.md) | runtime version, PID, hostname, `uname`, `PATH`, `env`, `setenv`, and Lua-state memory |
-| send a web request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic file downloads, redirects, TLS, timeout, and size limits |
-| open a TCP connection | [`Socket — TCP`](modules/socket.md) | clients, servers, accept, binary streams, lines, reads through EOF, timeouts, buffering, and limits |
-| secure TCP or perform STARTTLS | [`TLS — secure sockets`](modules/tls.md) | direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, timeout, and failure state |
-| store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | opening, reusable prepared statements, explicit BLOB values, iterators, and managed transactions |
-| encode or decode JSON | [`JSON — structured data`](modules/json.md) | scalars, arrays, objects, `null`, empty arrays, pretty printing, and errors |
-| read TOML configuration | [`TOML — configuration`](modules/toml.md) | decoding, TOML types, arrays, sections, dates, and parse errors |
-| watch a directory | [`Inotify — filesystem events`](modules/inotify.md) | watches, events, timeout reads, moves, cookies, and closing |
-| handle Unix signals | [`SIGNAL — graceful shutdown and reloads`](modules/signal.md) | `TERM`/`INT`/`HUP`/`USR1`/`USR2`/`PIPE`, deferred callbacks, fixed order, coalescing, interruptible calls, and workers |
-| run Lua in parallel | [`WORKERS — OS threads and messages`](modules/workers.md) | isolated Lua states, `spawn`, `join`, `poll`, inbox/outbox, timeouts, closing, serialization, and deadlocks |
-| obtain or format time | [`Time — clocks and durations`](modules/time.md) | realtime, monotonic time, sleep, ISO-8601, duration parsing, and formatting |
-| look up a system account by name or UID | [`USER - system accounts`](modules/user.md) | NSS, `get`, `exists`, UID, primary GID, GECOS, home, shell, and resolver errors |
-| split or transform strings | [`Strings — string helpers`](modules/strings.md) | `split`, separators, limits, and binary strings |
-| copy or merge tables | [`Tables — Lua tables`](modules/tables.md) | `mergeTables`, `deepCopyTable`, cycles, and shared structures |
-| produce logs | [`Logging — logging`](modules/logging.md) | levels, threshold, output, colors, and sink failures |
+| créer, supprimer, lister, rechercher, copier ou déplacer des fichiers | [`FS — système de fichiers`](modules/fs.md) | fichiers, dossiers, chemins, symlinks, `listFiles`, `find`, `copyTree`, permissions et checksums |
+| lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |
+| lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, capture avec `exec`, streaming avec `spawn`, environnement, cwd et contrôle du processus |
+| manipuler l’environnement, identifier le processus ou mesurer la VM Lua | [`SYS - processus et machine`](modules/sys.md) | version du runtime, PID, hostname, `uname`, `PATH`, `env`, `setenv` et mémoire de l’état Lua |
+| envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, téléchargement atomique vers fichier, redirections, TLS, timeout et limites de taille |
+| ouvrir une connexion TCP | [`Socket — TCP`](modules/socket.md) | client, serveur, acceptation, flux binaires, lignes, lecture jusqu’à EOF, timeouts, buffers et limites |
+| chiffrer une connexion TCP ou faire STARTTLS | [`TLS — sockets sécurisées`](modules/tls.md) | TLS direct, STARTTLS, vérification, CA, hostname, SNI, versions, timeout et état après échec |
+| stocker des données SQL localement | [`SQLite — base embarquée`](modules/sqlite.md) | ouverture, exécution, statements préparés, BLOB explicites et transactions assistées |
+| encoder ou décoder du JSON | [`JSON — données structurées`](modules/json.md) | scalaires, tableaux, objets, `null`, tableaux vides, pretty-print et erreurs |
+| lire un fichier de configuration TOML | [`TOML — configuration`](modules/toml.md) | décodage, types TOML, tableaux, sections, dates et erreurs de parsing |
+| surveiller un dossier | [`Inotify — événements fichiers`](modules/inotify.md) | watchers, événements, lectures avec timeout, moves, cookies et fermeture |
+| gérer les signaux Unix | [`SIGNAL — arrêt propre et rechargement`](modules/signal.md) | `TERM`/`INT`/`HUP`/`USR1`/`USR2`/`PIPE`, callbacks différés, ordre fixe, coalescence, appels interruptibles et workers |
+| paralléliser du Lua | [`WORKERS — threads OS et messages`](modules/workers.md) | états Lua isolés, `spawn`, `join`, `poll`, inbox/outbox, timeouts, fermeture, sérialisation et interblocages |
+| obtenir ou formater le temps | [`Time — horloges et durées`](modules/time.md) | temps réel, monotone, sleep, ISO-8601, parsing et formatage de durées |
+| rechercher un compte système par nom ou UID | [`USER - comptes système`](modules/user.md) | NSS, `get`, `exists`, UID, GID principal, GECOS, home, shell et erreurs de résolution |
+| découper ou transformer des chaînes | [`Strings — chaînes`](modules/strings.md) | `split`, séparateurs, limites et chaînes binaires |
+| copier, fusionner ou marquer des tables | [`Tables — tables Lua`](modules/tables.md) | `mergeTables`, `deepCopyTable`, cycles et structures partagées |
+| produire des logs | [`Logging — journalisation`](modules/logging.md) | niveaux, seuil, sortie, couleurs et comportement en cas d’erreur du sink |
 
-## Reference modules
+## Modules de référence
 
-Each module has a standalone page under [`modules/`](modules/). The expanded
-titles below let readers understand scope without opening every file.
+Chaque module possède une page autonome sous [`modules/`](modules/). Les
+intitulés développés ci-dessous permettent de comprendre leur périmètre sans
+avoir à ouvrir chaque fichier.
 
-| Module | Detailed scope |
+| Module | Périmètre détaillé |
 | --- | --- |
-| [`Argparse — command-line arguments`](modules/argparse.md) | Declare flags, options, and positionals; generate help; validate choices; convert values. |
-| [`Exec — external programs and processes`](modules/exec.md) | Run without a shell using `exec`, or progressively control stdin/stdout/stderr with `spawn`. |
-| [`FS — files, directories, paths, and attributes`](modules/fs.md) | Existence and types, creation/removal, paths, listing, search, iteration, tree copy/move, symlinks, Unix modes, and checksums. |
-| [`HTTP — web requests`](modules/http.md) | URLs, methods, query, validated headers, binary bodies/responses, atomic file downloads, redirects, TLS verification, timeout, and size limits. |
-| [`Inotify — filesystem monitoring`](modules/inotify.md) | Add/remove watches, read events, handle timeouts, moves, cookies, and closing. |
-| [`JSON — encoding and decoding`](modules/json.md) | Lua/JSON types, `null`, empty arrays, array marking, indentation, UTF-8, cycles, and limits. |
-| [`Logging — application logs`](modules/logging.md) | Levels, filtering, destination, colors, and variadic calls. |
-| [`SIGNAL — POSIX signals and graceful shutdown`](modules/signal.md) | Install, replace, or remove callbacks; ignore/restore; dispatch order, coalescing, interruptions, and multithread restrictions. |
-| [`Socket — TCP client and server`](modules/socket.md) | Connect, listen, accept, binary streams, chunk/line/EOF reads, shared buffering, addresses, closing, and timeouts. |
-| [`SQLite — embedded database`](modules/sqlite.md) | Connections, WAL/timeout, direct SQL, reusable prepared statements, explicit BLOB values, row iteration, and managed transactions. |
-| [`Strings — string manipulation`](modules/strings.md) | Splitting, character mode, separators, split limits, and binary content. |
-| [`SYS - process, host, environment, and Lua memory`](modules/sys.md) | Version constants, PID, hostname, `uname`, executable lookup, environment access/mutation, worker interaction, and current Lua-state memory. |
-| [`Tables — Lua table manipulation`](modules/tables.md) | Deterministic merge, list/map keys, deep copy, cycles, and shared subtables. |
-| [`Time — clocks, ISO, and durations`](modules/time.md) | Realtime and monotonic clocks, sleep, ISO-8601 parse/format, duration parse/format. |
-| [`TLS — encrypted connections`](modules/tls.md) | Direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, deadlines, and fail-closed behavior. |
-| [`TOML — configuration files`](modules/toml.md) | TOML decoding, scalars, arrays, tables, arrays of tables, dates/times, and diagnostics. |
-| [`USER - system users through NSS`](modules/user.md) | Name/UID lookup, existence checks, missing-vs-NSS-error handling, passwd fields, workers, and security limits. |
-| [`WORKERS — OS threads and message queues`](modules/workers.md) | Isolated Lua states, JSON transport, consumable results, `poll`/`join`, inbox/outbox, timeouts, closing, GC, and deadlock traps. |
+| [`Argparse — arguments de ligne de commande`](modules/argparse.md) | Déclarer des flags, options et positionnels ; générer l’aide ; valider les choix ; convertir les valeurs. |
+| [`Exec — programmes externes et processus`](modules/exec.md) | Exécuter sans shell avec `exec`, ou piloter stdin/stdout/stderr progressivement avec `spawn`. |
+| [`FS — fichiers, dossiers, chemins et attributs`](modules/fs.md) | Existence et types, création/suppression, chemins, listings, recherche, itérateur, copie/déplacement d’arbres, symlinks, modes Unix et checksums. |
+| [`HTTP — requêtes web`](modules/http.md) | URL, méthodes, query, headers validés, corps binaires, réponses, téléchargement atomique vers fichier, redirections, vérification TLS, timeout et limites de taille. |
+| [`Inotify — surveillance du système de fichiers`](modules/inotify.md) | Ajouter/retirer des watches, lire les événements, gérer timeouts, moves, cookies et fermeture. |
+| [`JSON — encodage et décodage`](modules/json.md) | Types Lua/JSON, `null`, tableaux vides, marquage de tableaux, indentation, UTF-8, cycles et limites. |
+| [`Logging — journalisation`](modules/logging.md) | Niveaux, filtrage, destination, couleurs et appels variadiques. |
+| [`SIGNAL — signaux POSIX et arrêt propre`](modules/signal.md) | Installer, remplacer ou retirer un callback ; ignorer/restaurer ; ordre de dispatch, coalescence, interruptions et restrictions multithread. |
+| [`Socket — TCP client et serveur`](modules/socket.md) | Connexion, écoute, acceptation, flux binaires, lectures par bloc/ligne/EOF, buffer partagé, adresses, fermeture et timeouts. |
+| [`SQLite — base de données embarquée`](modules/sqlite.md) | Connexions, WAL/timeout, SQL direct, statements préparés réutilisables, BLOB explicites, itération et transactions assistées. |
+| [`Strings — manipulation de chaînes`](modules/strings.md) | Découpage, mode caractères, séparateurs, limite de splits et contenu binaire. |
+| [`SYS - processus, machine, environnement et mémoire Lua`](modules/sys.md) | Constantes de version, PID, hostname, `uname`, recherche d’exécutables, lecture/modification de l’environnement, interaction avec les workers et mémoire de l’état Lua. |
+| [`Tables — manipulation de tables Lua`](modules/tables.md) | Fusion déterministe, clés listes/maps, copie profonde, cycles et partage de sous-tables. |
+| [`Time — horloges, ISO et durées`](modules/time.md) | Temps réel et monotone, sommeil, formatage/parsing ISO-8601, parsing et rendu de durées. |
+| [`TLS — connexions chiffrées`](modules/tls.md) | Connexion TLS directe, STARTTLS, vérification, CA, hostname, SNI, versions, deadlines et comportement fail-closed. |
+| [`TOML — fichiers de configuration`](modules/toml.md) | Décodage TOML, scalaires, tableaux, tables, tableaux de tables, dates/heures et diagnostics. |
+| [`USER - utilisateurs système via NSS`](modules/user.md) | Recherche par nom ou UID, existence, distinction absence/erreur NSS, champs passwd, workers et limites de sécurité. |
+| [`WORKERS — threads OS et files de messages`](modules/workers.md) | États Lua isolés, transport JSON, résultat consommable, `poll`/`join`, inbox/outbox, timeouts, fermeture, GC et pièges d'interblocage. |
 
-## Module page structure
+## Organisation d’une page de module
 
-Detailed pages are progressively aligned to this structure:
+Les pages détaillées sont progressivement alignées sur la structure suivante :
 
-1. **Scope** — what the module does and does not cover;
-2. **Internal contents** — direct links to each function group;
-3. **API overview** — signatures and results;
-4. **Detailed behavior** — defaults, symlinks, recursion, limits, and side
-   effects;
-5. **Examples** — one example for each important mode or option;
-6. **Error contract** — raised and returned errors;
-7. **Design and limitations** — API choices and intentionally absent features.
+1. **Périmètre** — ce que couvre le module et ce qu’il ne couvre pas ;
+2. **Table des matières interne** — accès direct à chaque groupe et fonction ;
+3. **Vue d’ensemble de l’API** — signatures et résultats ;
+4. **Comportement détaillé** — valeurs par défaut, symlinks, récursivité,
+   limites et effets de bord ;
+5. **Exemples** — un exemple par mode ou option importante ;
+6. **Contrat d’erreur** — erreurs levées et erreurs renvoyées ;
+7. **Décisions et limites** — choix d’API et éléments volontairement absents.
 
-The goal is to make every function usable without reading its source code and
-without guessing its defaults.
+L’objectif est qu’une fonction puisse être utilisée sans lire son code source
+et sans devoir deviner ses valeurs par défaut.
 
-## Building the PDF
+## Génération du PDF
 
-The manual can be exported as one PDF:
+Le manuel peut être exporté en un seul PDF :
 
 ```sh
 cd docs
 ./build_doc.sh
 ```
 
-English chapter order is defined in
-[`manual_order_en.txt`](../manual_order_en.txt). The build script then creates
-the PDF table of contents from headings and subheadings.
+L’ordre des chapitres français est défini dans
+[`manual_order_fr.txt`](../manual_order_fr.txt). Le script de génération ajoute
+ensuite la table des matières du PDF à partir des titres et sous-titres.
 
-## Verification methodology
+## Méthodologie de vérification
 
-Documentation is checked module by module against three sources:
+La documentation est vérifiée module par module selon trois sources :
 
-- the C/C++ implementation actually registered in `babet`;
-- regression tests in `examples/main.lua` and `run_tests.sh`;
-- French and English pages, which must describe the same contract.
+- l’implémentation C/C++ réellement enregistrée dans `babet` ;
+- les tests de non-régression de `examples/main.lua` et `run_tests.sh` ;
+- les pages française et anglaise, qui doivent décrire le même contrat.
 
-A mismatch found during this work is treated as something to fix, not a
-wording detail to hide.
+Une divergence découverte pendant cette vérification est traitée comme une
+incohérence à corriger, et non comme un détail rédactionnel à masquer.

@@ -2,11 +2,65 @@
 
 Ce fichier décrit les changements notables de Babet.
 
-Le projet suit le versionnage sémantique pour ses publications. La version
-2.3.0 durcit plusieurs contrats d’API auparavant permissifs : les utilisateurs
-venant de 2.2.x doivent donc lire les notes de migration ci-dessous.
+Le projet suit le versionnage sémantique pour ses publications. Les notes de
+migration et d’utilisation sont conservées avec chaque version lorsqu’un
+nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
-## [2.4.0] - En développement
+## [2.4.0] - 2026-07-14
+
+### Résumé de la release
+
+Babet 2.4.0 supprime trois limites pratiques de la série 2.3 sans affaiblir les
+garanties de sécurité établies par l’audit précédent :
+
+- les programmes externes peuvent désormais être pilotés progressivement avec
+  `babet.spawn`, sans conserver tout stdin, stdout ou stderr en mémoire ;
+- les réponses HTTP et HTTPS peuvent être téléchargées directement vers un
+  fichier avec une destination bornée, atomique et protégée contre les symlinks ;
+- SQLite dispose maintenant de statements préparés réutilisables, de BLOB
+  explicites et de transactions assistées avec rollback automatique sur erreur
+  Lua.
+
+Les contrats existants de `babet.exec`, `babet.http.request`, `db:exec` et
+`db:query` restent disponibles. Les nouvelles API sont additives ; le moteur de
+processus partagé et les smoke tests de release ont néanmoins été refactorisés
+puis entièrement revalidés.
+
+Validation finale de cette version :
+
+- 1810 PASS / 0 FAIL en mode dossier ;
+- 1797 PASS / 0 FAIL en mode embarqué ;
+- 1797 PASS / 0 FAIL en mode embarqué via le `PATH` ;
+- 9/9 modes d’exécution validés sous ASan + UBSan ;
+- 9/9 modes de nouveau validés avec le build normal final ;
+- smoke tests réseau : 6 contrôles bloquants réussis, 0 échec et 2 sondes
+  publiques en avertissement informatif.
+
+### Notes de mise à niveau et d’utilisation
+
+Babet 2.4.0 est principalement additif, mais les règles suivantes sont
+importantes lors de l’adoption des nouvelles API :
+
+- `process:wait()` ne draine ni stdout ni stderr. Un enfant produisant beaucoup
+  de sortie peut se bloquer tant que les deux flux ne sont pas lus ; les scripts
+  longs doivent donc les drainer pendant l’exécution.
+- `process:write()` peut n’écrire qu’une partie de la chaîne fournie. Il faut
+  reprendre à partir du nombre d’octets renvoyé ou appliquer le motif write-all
+  documenté.
+- `babet.http.download()` ne valide la destination qu’après une réponse finale
+  2xx complète. Un statut non-2xx renvoie des métadonnées avec `saved=false` ;
+  une erreur transport, TLS, timeout, taille ou disque renvoie `(nil, err)` et
+  préserve une destination existante.
+- Les destinations de téléchargement refusent `..` et les composants de dossier
+  parents symlinkés. Un symlink exactement à la destination finale est remplacé
+  comme inode ; sa cible n’est pas modifiée.
+- `db:transaction()` committe tout retour normal du callback, y compris `nil` et
+  `false`. Il faut utiliser `assert` ou lever explicitement une erreur lorsqu’une
+  opération renvoyant `(nil, err)` doit provoquer un rollback.
+- Une seule itération de requête préparée peut être active par statement. Un
+  reset ou une nouvelle exécution invalide l’itération précédente.
+- Les chaînes Lua ordinaires restent bindées comme SQLite TEXT. Utiliser
+  `babet.sqlite.blob(data)` lorsque la classe de stockage doit être BLOB.
 
 ### Statements SQLite, BLOB explicites et transactions
 

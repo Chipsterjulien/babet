@@ -1,135 +1,89 @@
-# Notes — points reportés / dette technique connue
+# Notes - known deferred work
 
-Liste des sujets identifiés mais volontairement non traités dans la
-version courante. Chacun est documenté pour qu'un futur chantier
-puisse repartir avec le contexte complet, ou pour qu'un contributeur
-externe sache que c'est connu.
+This file lists known topics intentionally left outside Babet 2.4.0. They are
+not hidden defects: each item records the current behavior, the remaining risk,
+and the reason it was not included in the release.
 
-## 1. `execve` pur dans `exec.cpp` (hardening++)
+## 1. Resolve PATH in the parent and use only `execve`
 
-**Statut actuel** : `exec.cpp` utilise `execvpe()` (extension glibc)
-après `fork()` dans l'enfant, avec un envp préparé côté parent
-(chantier 10-B post-revue Gemini).
+**Current state**: `exec.cpp` uses glibc `execvpe()` after `fork()`. Arguments,
+environment storage, pipes, and most launch preparation are built in the parent.
 
-**Risque résiduel théorique** : `execvpe()` parcourt `$PATH` pour
-résoudre le binaire. Cela implique des appels à `strchr`, `strncmp`,
-`access()`, `stat()` — tous async-signal-safe — mais aussi une
-lecture de `getenv("PATH")` qui n'est pas formellement listée comme
-async-signal-safe par POSIX.
+**Remaining theoretical risk**: `execvpe()` resolves `$PATH` in the child and
+reads the process environment. On glibc this is a simple lookup and no concrete
+failure has been observed, but `getenv` is not formally listed as
+async-signal-safe by POSIX.
 
-En pratique sur glibc, `getenv` est une simple lecture du tableau
-`environ` sans allocation. Le risque concret est très faible.
+**Possible hardening**: resolve the executable path in the parent, then call
+`execve(path, argv, envp)` in the child.
 
-**Fix propre** : résoudre le chemin du binaire côté parent
-(reimplementer la recherche `$PATH`) puis appeler `execve(path,
-argv, envp)` dans l'enfant. Estimation : ~30-50 lignes.
+**Why deferred**: the demonstrated multithreaded hazards were removed. The
+remaining concern is theoretical on the supported Linux/glibc target and does
+not justify another path-resolution implementation without a real use case.
 
-**Pourquoi reporté** : on est passés de « `setenv()` qui peut
-deadlocker à coup sûr en multi-thread » (vrai risque démontrable) à
-« `execvpe` qui appelle `getenv` » (risque théorique non observable).
-Le delta restant ne justifie pas la complexité supplémentaire pour
-l'instant. À reconsidérer si LuaPilot vise jamais des systèmes
-non-glibc ou si un cas d'usage révèle un problème concret.
+## 2. Independent worker-to-worker channels
 
-**Référence revue** : ChatGPT, post-chantier 10-A.
+**Current state**: workers expose parent-to-worker and worker-to-parent queues.
+Two workers communicate through the parent.
 
-## 2. `SSL_CTX` par connexion quand `ca_cert`/`ca_path` est fourni
+**Limitation**: parent-mediated routing can become a bottleneck for complex
+pipelines or pub/sub topologies.
 
-**Statut actuel** : `socket.cpp` utilise un `SSL_CTX` global unique
-(initialisé via `std::call_once` depuis le chantier 10-A). Quand
-l'utilisateur passe `opts.ca_cert` ou `opts.ca_path` à
-`connect_tls`, on appelle `SSL_CTX_load_verify_locations(g_tls_ctx,
-...)`, ce qui **modifie** ce contexte global.
+**Possible extension**: add `workers.channel()` and pass channel handles to
+multiple workers.
 
-**Risque résiduel** : si deux workers font du TLS avec des CA
-*différents* exactement en même temps, la modification du `SSL_CTX`
-global est une vraie race. Le résultat est imprévisible : un worker
-pourrait voir le CA de l'autre, deux modifications concurrentes
-pourraient produire un état corrompu.
+**Why deferred**: the current design covers the intended scripting, bot, and
+parallel-job use cases. A new synchronization primitive should be driven by a
+concrete application rather than speculative API growth.
 
-**Cas d'usage non bloquant** : l'usage standard `connect_tls(host,
-port)` sans `ca_cert`/`ca_path` n'est pas concerné — le verify
-utilise le store système posé une seule fois à l'init.
+## 3. Forced worker termination
 
-**Fix propre** : créer un `SSL_CTX` dédié par connexion quand
-`ca_cert` ou `ca_path` est fourni, partager le global sinon.
-Estimation : ~40-60 lignes + revue de la libération propre du CTX
-local au close.
+**Current state**: there is no `worker:kill()`. A worker stops cooperatively,
+usually after `close()` wakes its inbox or after an operation with a timeout
+returns.
 
-**Pourquoi reporté** : sans cas d'usage concret avec CA custom dans
-les workers, c'est un fix spéculatif. À traiter dès qu'un cas réel
-émerge (par exemple, un bot qui se connecte à plusieurs services
-internes avec leur propre PKI).
+**Limitation**: a worker blocked forever in an external operation without a
+timeout cannot be safely stopped from another thread. Garbage collection or a
+join can then wait for it.
 
-**Référence revue** : ChatGPT, post-chantier 10-A.
+**Why no `pthread_cancel`**: asynchronous thread cancellation can strand
+mutexes, file descriptors, Lua state, and OpenSSL objects in inconsistent
+states. A safe design would require explicit cancellation points throughout the
+runtime.
 
-## 3. `workers.channel()` — channels indépendants pour
-   communication worker-à-worker
+**Mitigation**: use bounded socket/process operations and make worker loops poll
+or receive with timeouts when they must remain externally stoppable.
 
-**Statut actuel** : la v1.2.0 des workers offre `w:send` / `w:recv`
-parent↔worker uniquement. Pour faire communiquer deux workers, il
-faut router via le parent : `worker A → parent → worker B`.
+## 4. macOS and BSD portability
 
-**Limitation** : crée un goulet d'étranglement au niveau du parent
-pour des architectures pub/sub ou pipeline. Acceptable pour 95% des
-cas (bot IRC, scripts d'admin, jobs parallèles), mais limitant pour
-des flux complexes.
+**Current state**: Babet targets Linux/glibc. It uses Linux facilities such as
+inotify, `/proc/self/exe`, `accept4`, and `SOCK_CLOEXEC`.
 
-**Fix propre** : ajouter `workers.channel()` qui crée un handle
-indépendant passable au `spawn` d'un worker, partageable entre
-plusieurs workers.
+**Impact**: compilation or runtime behavior is not supported on macOS or BSD.
 
-**Pourquoi reporté** : décision prise au cadrage du chantier 9 (cf.
-échanges ChatGPT + Claude). Risque de sur-design avant d'avoir un
-vrai cas d'usage. À reconsidérer si l'écriture du bot IRC ou d'un
-autre projet révèle un manque concret.
+**Possible work**: provide portability helpers for close-on-exec sockets,
+replace inotify, abstract executable-path discovery, and add tested CI targets.
 
-## 4. `:kill()` pour workers — force-terminer une thread
+**Why deferred**: no supported user or contributor currently requires those
+platforms. A portability patch should be tested on the target OS rather than
+written blind.
 
-**Statut actuel** : pas de `:kill()`. Le seul moyen d'arrêter un
-worker est `w:close()` + collaboration du worker (qui doit poll
-régulièrement sa inbox).
+## 5. Archive convenience bindings
 
-**Limitation documentée** : un worker bloqué dans une opération
-système longue (un `recv()` socket sans timeout, par exemple) ne
-peut pas être interrompu de l'extérieur. Le `__gc` du handle parent
-attend la fin de la thread, ce qui peut bloquer tout le processus.
+**Current state**: Babet internally reads and writes ZIP data for embedded
+executables, but does not expose general-purpose Lua `zip`, `unzip`, `tar`, or
+`untar` helpers.
 
-**Pourquoi pas en v1** : `pthread_cancel()` est dangereux —
-verrouille les mutex, laisse les fichiers/sockets dans des états
-indéterminés, peut corrompre les contextes OpenSSL. La seule
-implémentation safe demanderait un système de points d'annulation
-explicites, ce qui est l'opposé de la simplicité visée.
+**Why deferred**: archive extraction has a large security surface (path
+traversal, symlinks, permissions, resource limits). A public API needs its own
+threat model and test campaign instead of reusing the embedded-package code
+without review.
 
-**Mitigation actuelle** : documentation explicite dans le README
-(section « `__gc` will block if the worker is busy »).
+## Validation note
 
-## 5. Portabilité macOS / BSD (sockets)
+Valgrind is not a release requirement. Babet 2.4.0 is validated with ASan and
+UBSan, followed by a clean normal rebuild and network smoke tests through:
 
-**Statut actuel** : LuaPilot vise uniquement Linux/glibc en v1.x.
-`socket.cpp` utilise directement `accept4(..., SOCK_CLOEXEC)` et
-`socket(..., SOCK_CLOEXEC, ...)` — extensions Linux 2.6.27+. Sur
-macOS et BSD historiques, ces flags ne sont pas disponibles dans
-les appels système (ils existent en partie sur FreeBSD récent
-mais pas universellement).
-
-**Risque résiduel** : compilation impossible sur macOS / BSD
-historique en l'état. Aucun impact sur la cible Linux.
-
-**Fix propre** : créer des helpers
-`create_socket_cloexec()` et `accept_cloexec()` qui :
-- utilisent les flags `SOCK_CLOEXEC` / `accept4` si dispo
-  (détection via `#ifdef SOCK_CLOEXEC` à la compilation),
-- retombent sur `socket()` / `accept()` suivi d'un
-  `fcntl(F_SETFD, FD_CLOEXEC)` sinon.
-
-Le seul vrai risque du fallback est la fenêtre de race entre la
-création du fd et le fcntl, qui peut faire fuiter le fd dans un
-fork+exec concurrent. Sur un système où on n'a pas mieux, c'est
-accepté.
-
-**Pourquoi reporté** : décision explicite de l'auteur — pas
-d'utilisateur macOS en vue. À reconsidérer si un contributeur
-ouvre une PR avec un patch macOS testé.
-
-**Référence revue** : ChatGPT, post-chantier longjmp.
+```sh
+./run_tests.sh --release
+```
