@@ -105,6 +105,37 @@ def inject_h1_id(content, anchor_id):
     return content
 
 
+
+
+def convert_html_anchors_to_heading_ids(content):
+    """Convert source-friendly HTML anchors into Pandoc heading IDs.
+
+    The Markdown sources use ``<a id="..."></a>`` so GitHub and other
+    renderers expose stable anchors without displaying Pandoc attributes.
+    Raw HTML anchors do not create LaTeX labels, however, so the transient PDF
+    copy rewrites:
+
+        <a id="mkdir"></a>
+        ### `babet.mkdir(path)`
+
+    into:
+
+        ### `babet.mkdir(path)` {#mkdir}
+    """
+    pattern = re.compile(
+        r'^<a id="([A-Za-z0-9_.:-]+)"></a>\n(#{1,6}) (.+)$',
+        re.MULTILINE,
+    )
+
+    def replace(match):
+        anchor, hashes, title = match.groups()
+        if re.search(r'\{#[^}]+\}\s*$', title):
+            return f"{hashes} {title}"
+        return f"{hashes} {title} {{#{anchor}}}"
+
+    return pattern.sub(replace, content)
+
+
 def strip_language_toggle(content):
     """Supprime la ligne de toggle linguistique en haut des fichiers.
 
@@ -140,6 +171,7 @@ def transform_internal_links(content):
       - `[security](../security.md)`            (depuis un module vers security)
       - `[signal](signal.md)`                   (entre modules, même dossier)
       - `[signal](modules/signal.md)`           (depuis README vers module)
+      - `[cwd](modules/fs.md#fs-cwd)`            (vers une ancre d'un autre chapitre)
       - `[modules/](modules/)`                  (lien vers le dossier)
       - `[manual_order_fr.txt](../manual_order_fr.txt)` (lien mort en PDF)
     """
@@ -155,12 +187,20 @@ def transform_internal_links(content):
         if re.match(r'^[a-z]+://', target) or target.startswith('mailto:'):
             return match.group(0)
 
-        # Cas spécial 1 : `modules/` (lien vers le dossier modules)
+        # Cas spécial 1 : lien vers une ancre explicite d'un autre
+        # fichier Markdown. Dans le PDF fusionné, tous les chapitres
+        # partagent le même document : seule l'ancre finale est utile.
+        if "#" in target:
+            path_part, fragment = target.split("#", 1)
+            if path_part.endswith(".md") and fragment:
+                return f"[{text}](#{fragment})"
+
+        # Cas spécial 2 : `modules/` (lien vers le dossier modules)
         # → pas d'équivalent dans le PDF, on garde le texte sans lien
         if target.rstrip("/") == "modules":
             return f"`{text}`" if not text.startswith("`") else text
 
-        # Cas spécial 2 : manual_order_*.txt (manifeste, lien mort en PDF)
+        # Cas spécial 3 : manual_order_*.txt (manifeste, lien mort en PDF)
         # → on garde le texte sans lien
         if "manual_order_" in target and target.endswith(".txt"):
             return f"`{text}`" if not text.startswith("`") else text
@@ -212,7 +252,11 @@ def process_file(src_path, dst_path):
     if anchor:
         content = inject_h1_id(content, anchor)
 
-    # Étape 3 : transformer les liens internes
+    # Étape 3 : convertir les ancres HTML stables des sources en attributs
+    # de titre Pandoc, afin qu'elles deviennent aussi des labels LaTeX.
+    content = convert_html_anchors_to_heading_ids(content)
+
+    # Étape 4 : transformer les liens internes
     content = transform_internal_links(content)
 
     # (L'étape « corriger les valeurs obsolètes » a été retirée : le

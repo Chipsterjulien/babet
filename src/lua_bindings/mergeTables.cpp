@@ -1,81 +1,107 @@
 #include "mergeTables.hpp"
 
+#include <limits>
+
 /**
  * Lua binding for merging multiple tables.
- * @param L The Lua state.
- * @return Number of return values (1: merged table).
- * Lua usage: mergedTable = lua_mergeTables(table1, table2, ...)
+ *
+ * Stable numeric-key contract:
+ *   - every positive integer key is treated as a list element;
+ *   - sparse keys are visited in ascending numeric order and compacted into
+ *     the result;
+ *   - all other keys (strings, floats, zero and negative integers) keep their
+ *     key, with later tables overwriting earlier ones.
+ *
+ * This avoids luaL_len's undefined-border behaviour on sparse tables, which
+ * previously made the result depend on Lua's internal table layout.
+ *
+ * The ascending traversal deliberately uses repeated lua_next scans instead
+ * of a C++ vector. Lua allocation failures use longjmp; keeping a heap-owning
+ * C++ container alive across lua_rawseti could therefore skip its destructor.
+ * The O(n²) scan is acceptable for a small table helper and keeps the binding
+ * longjmp-safe.
  */
-int lua_mergeTables(lua_State* L) {
-    // Verify that there are at least two arguments and that they are tables
-    int n = lua_gettop(L);
-    if (n < 2) {
+int lua_mergeTables(lua_State *L)
+{
+    const int argument_count = lua_gettop(L);
+    if (argument_count < 2)
+    {
         return luaL_error(L, "Expected at least two tables as arguments");
     }
 
-    for (int i = 1; i <= n; ++i) {
-        if (!lua_istable(L, i)) {
+    for (int i = 1; i <= argument_count; ++i)
+    {
+        if (!lua_istable(L, i))
+        {
             return luaL_error(L, "Expected all arguments to be tables");
         }
     }
 
-    // Create a new table for the result
     lua_newtable(L);
-    int resultTableIndex = lua_gettop(L);
+    const int result_index = lua_absindex(L, -1);
+    lua_Integer next_index = 1;
 
-    // Function to copy elements from a source table to a destination table.
-    //
-    // Two-pass strategy :
-    //   1) Partie array : itération ordonnée 1..n via lua_rawgeti, pour
-    //      garantir que mergeTables({1,2}, {3,4}) donne {1,2,3,4} et
-    //      pas une permutation. lua_next sur la partie array d'une
-    //      table ne garantit PAS l'ordre.
-    //   2) Partie hash : lua_next pour les clés non-array (string ou
-    //      number hors de [1, n]). Les clés integer dans [1, n] sont
-    //      déjà traitées par la passe 1, on les saute.
-    auto copyTable = [](lua_State *L, int srcIndex, int destIndex, int &nextIndex) {
-        // --- Passe 1 : partie array, ordonnée ---
-        lua_Integer n = luaL_len(L, srcIndex);
-        for (lua_Integer i = 1; i <= n; ++i)
-        {
-            lua_rawgeti(L, srcIndex, i);             // pousse t[i]
-            lua_rawseti(L, destIndex, nextIndex++);  // dest[next] = t[i], pop
-        }
+    for (int argument = 1; argument <= argument_count; ++argument)
+    {
+        const int source_index = lua_absindex(L, argument);
+        lua_Integer previous_key = 0;
 
-        // --- Passe 2 : partie hash ---
-        lua_pushnil(L); // first key
-        while (lua_next(L, srcIndex) != 0)
+        // Append positive integer keys in a deterministic ascending order.
+        for (;;)
         {
-            // Pile : ..., key, value
-            // On saute les clés integer dans [1, n] (déjà copiées
-            // par la passe 1).
-            if (lua_type(L, -2) == LUA_TNUMBER && lua_isinteger(L, -2))
+            bool found = false;
+            lua_Integer selected_key =
+                std::numeric_limits<lua_Integer>::max();
+
+            lua_pushnil(L);
+            while (lua_next(L, source_index) != 0)
             {
-                lua_Integer k = lua_tointeger(L, -2);
-                if (k >= 1 && k <= n)
+                if (lua_isinteger(L, -2))
                 {
-                    lua_pop(L, 1); // pop value, keep key for lua_next
-                    continue;
+                    const lua_Integer key = lua_tointeger(L, -2);
+                    if (key >= 1 && key > previous_key &&
+                        (!found || key < selected_key))
+                    {
+                        selected_key = key;
+                        found = true;
+                    }
                 }
+                lua_pop(L, 1); // value; keep key for lua_next
             }
-            // Clé non-array (string, float, integer hors range) :
-            // on copie key+value et on settable. lua_settable
-            // pop key+value, donc on dup les deux avant.
-            lua_pushvalue(L, -2);       // dup key
-            lua_pushvalue(L, -2);       // dup value
-            lua_settable(L, destIndex); // dest[key] = value, pop 2
-            lua_pop(L, 1);              // pop original value, keep key
-        }
-    };
 
-    int nextIndex = 1; // Index for numeric keys
-    // Copy each table passed as argument into the new table
-    for (int i = 1; i <= n; ++i) {
-        lua_pushvalue(L, i);                                      // Copy current table
-        copyTable(L, lua_gettop(L), resultTableIndex, nextIndex); // Copy elements from the table at the top of the stack to the table being constructed
-        lua_pop(L, 1);                                            // Remove the copy of the table from the stack
+            if (!found)
+            {
+                break;
+            }
+
+            lua_rawgeti(L, source_index, selected_key);
+            lua_rawseti(L, result_index, next_index++);
+            previous_key = selected_key;
+        }
+
+        // Map-like keys: all non-positive-integer keys retain their key and
+        // normal last-writer-wins semantics.
+        lua_pushnil(L);
+        while (lua_next(L, source_index) != 0)
+        {
+            bool appended_numeric_key = false;
+            if (lua_isinteger(L, -2))
+            {
+                appended_numeric_key = lua_tointeger(L, -2) >= 1;
+            }
+
+            if (appended_numeric_key)
+            {
+                lua_pop(L, 1); // value; keep key
+                continue;
+            }
+
+            lua_pushvalue(L, -2);       // duplicate key
+            lua_pushvalue(L, -2);       // duplicate value
+            lua_settable(L, result_index);
+            lua_pop(L, 1);              // original value; keep key
+        }
     }
 
-    // The new merged table is now at the top of the stack
-    return 1; // Return merged table
+    return 1;
 }

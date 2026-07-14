@@ -1,114 +1,229 @@
 > [English](../../en/modules/tables.md) | **Français**
 
-# `babet` tables — helpers de manipulation de tables
+# `babet` tables — fusion et copie de tables Lua
 
-Deux helpers qui comblent des manques évidents de la bibliothèque
-standard Lua : une vraie deep copy, et un merge multi-sources.
+Deux helpers historiques vivent directement dans la table `babet` :
 
-## Pourquoi
+- `babet.mergeTables(...)` construit une nouvelle table à partir de plusieurs
+  sources ;
+- `babet.deepCopyTable(t)` copie récursivement les **valeurs** qui sont des
+  tables.
 
-La stdlib Lua n'a pas de deep copy intégrée ni de merge multi-tables.
-Les deux sont des besoins courants : merger une config defaults +
-overrides, snapshotter une table avant mutation, copier une
-arborescence d'options. Les écrire à chaque script est répétitif et
-source d'erreurs (oublier la metatable, les cycles, etc.).
+Ils travaillent sur les entrées réellement stockées dans les tables Lua. Les
+métaméthodes `__pairs` et `__index` ne fournissent donc pas de champs virtuels à
+copier ou à fusionner.
 
-Ces deux fonctions vivent directement sur la table `babet` (pas
-de sous-namespace) parce qu'elles précèdent la convention par module
-adoptée pour les ajouts récents.
+## Table des matières du module
 
+- [API](#tables-api)
+- [`babet.mergeTables(t1, t2, ...)`](#tables-merge)
+  - [Clés entières positives : concaténation](#tables-positive-keys)
+  - [Toutes les autres clés : dernier écrivain gagnant](#tables-other-keys)
+  - [Fusion superficielle](#tables-shallow)
+- [`babet.deepCopyTable(t)`](#tables-deep-copy)
+  - [Valeurs et graphe partagé](#tables-values)
+  - [Les clés ne sont pas copiées](#tables-keys)
+  - [Métatables et accès brut](#tables-metatables)
+  - [Profondeur maximale](#tables-depth)
+- [Contrat d'erreur](#tables-errors)
+- [Limites et choix de conception](#tables-limits)
+- [Hors v1](#tables-not-exposed)
+
+<a id="tables-api"></a>
 ## API
 
 | Fonction | Renvoie |
 | --- | --- |
-| `babet.mergeTables(t1, t2, ...)` | nouvelle `table` — clés string mergées (le dernier écrit gagne), clés numériques append en ordre |
-| `babet.deepCopyTable(t)` | nouvelle `table`, copiée récursivement |
+| `babet.mergeTables(t1, t2, ...)` | une nouvelle table |
+| `babet.deepCopyTable(t)` | une nouvelle table |
 
-`mergeTables` est variadique — **deux tables minimum** (moins :
-lève), autant que tu veux au-delà.
-Les entrées ne sont pas mutées. Le merge a deux règles :
+Les deux fonctions renvoient exactement une valeur en cas de succès. Elles ne
+renvoient jamais `(nil, err)` : une erreur d'appel ou de profondeur est levée.
 
-- **Clés string** : les tables suivantes écrasent les précédentes
-  à la même clé (le dernier écrit gagne). Le remplacement est
-  **shallow** : une valeur-table écrase la précédente **en bloc**,
-  il n'y a pas de merge récursif des sections imbriquées. Et les
-  valeurs sont **référencées, pas copiées** — le résultat partage
-  ses sous-tables avec les entrées ; combine avec `deepCopyTable`
-  si tu veux un résultat indépendant.
-- **Clés numériques (partie array)** : concaténées dans l'ordre où
-  les tables sont passées, puis dans l'ordre 1..n à l'intérieur
-  de chaque table. Donc `mergeTables({1, 2}, {3, 4})` donne
-  `{1, 2, 3, 4}`, pas `{3, 4}`.
+<a id="tables-merge"></a>
+## `babet.mergeTables(t1, t2, ...)`
 
-`deepCopyTable` copie les tables imbriquées récursivement. Les
-cycles sont détectés (pas de boucle infinie), et les sous-tables
-partagées ne sont copiées qu'une fois (la structure est préservée,
-pas dupliquée). La **métatable** de chaque table copiée est posée
-telle quelle sur la copie (référence partagée — la métatable
-elle-même n'est pas dupliquée). Les valeurs non-table (nombres,
-strings, booleans, fonctions, userdata) sont référencées telles
-quelles. Profondeur maximale : **75 niveaux** (au-delà : lève
-`"Table is too deep to copy (max depth 75 exceeded)"`).
+Au moins deux arguments sont obligatoires et chacun doit être une table. Il
+n'existe pas de limite d'arité propre à l'API au-delà des limites générales de
+Lua.
 
-## Exemple rapide
+Les sources ne sont pas modifiées. Le résultat est une table ordinaire sans
+métatable, même si les sources en possèdent une.
+
+<a id="tables-positive-keys"></a>
+### Clés entières positives : concaténation
+
+Toute clé que Lua représente comme un entier `>= 1` est traitée comme une
+position de liste. Cela inclut une clé écrite `2.0`, que Lua canonicalise en
+entier.
+
+Pour chaque source, ces clés sont parcourues par ordre numérique croissant,
+puis leurs valeurs sont ajoutées à la suite du résultat. Les trous et les
+indices d'origine sont donc compactés :
 
 ```lua
--- Clés string : le dernier écrit gagne
-local defaults = { port = 8080, host = "localhost", debug = false }
-local user_cfg = { port = 9000, debug = true }
-local cfg = babet.mergeTables(defaults, user_cfg)
--- cfg.port  == 9000      (user_cfg a override)
--- cfg.host  == "localhost"
--- cfg.debug == true
+local r = babet.mergeTables(
+    { [4] = "d", [2] = "b" },
+    { [7] = "g", [1] = "a" }
+)
 
--- Clés numériques : append en ordre
-local a = { 1, 2 }
-local b = { 3, 4 }
-local merged = babet.mergeTables(a, b)
--- merged == { 1, 2, 3, 4 }   (PAS { 3, 4 })
-
--- Deep copy : snapshot avant mutation
-local snapshot = babet.deepCopyTable(cfg)
-cfg.port = 9999             -- N'AFFECTE PAS snapshot
-print(snapshot.port)        -- toujours 9000
+-- r == { "b", "d", "a", "g" }
 ```
 
+Une même position présente dans plusieurs sources n'est pas écrasée : chaque
+valeur est ajoutée.
+
+<a id="tables-other-keys"></a>
+### Toutes les autres clés : dernier écrivain gagnant
+
+Les clés chaînes, booléennes, tables, fonctions, threads, userdata, light userdata ainsi que
+les clés numériques flottantes, nulles ou négatives conservent leur identité.
+Une source ultérieure écrase la valeur précédente pour la même clé :
+
+```lua
+local key = {}
+local r = babet.mergeTables(
+    { mode = "safe", [key] = 1, [0] = "a" },
+    { mode = "fast", [key] = 2, [0] = "b" }
+)
+
+-- r.mode == "fast"
+-- r[key]  == 2
+-- r[0]    == "b"
+```
+
+<a id="tables-shallow"></a>
+### Fusion superficielle
+
+Les valeurs ne sont jamais copiées. Une sous-table placée dans le résultat est
+la même table que dans la source :
+
+```lua
+local nested = { enabled = false }
+local r = babet.mergeTables({ nested = nested }, {})
+
+r.nested.enabled = true
+-- nested.enabled == true
+```
+
+Pour obtenir ensuite un graphe indépendant pour les valeurs-table, utilise :
+
+```lua
+local isolated = babet.deepCopyTable(
+    babet.mergeTables(defaults, overrides)
+)
+```
+
+<a id="tables-deep-copy"></a>
+## `babet.deepCopyTable(t)`
+
+La fonction exige exactement une table. Elle crée une nouvelle table pour la
+racine et pour chaque **valeur** qui est elle-même une table.
+
+<a id="tables-values"></a>
+### Valeurs et graphe partagé
+
+Les cycles parcourus par les valeurs sont pris en charge et l'identité du
+graphe est préservée :
+
+```lua
+local shared = { value = 42 }
+local source = { a = shared, b = shared }
+source.self = source
+
+local copy = babet.deepCopyTable(source)
+
+-- copy ~= source
+-- copy.a ~= shared
+-- copy.a == copy.b
+-- copy.self == copy
+```
+
+Les valeurs non-table — nombres, chaînes, booléens, fonctions, threads,
+userdata et light userdata — sont réutilisées telles quelles.
+
+<a id="tables-keys"></a>
+### Les clés ne sont pas copiées
+
+Toutes les clés conservent leur valeur et leur identité d'origine. En
+particulier, une table utilisée comme clé reste la table source :
+
+```lua
+local key = { id = 1 }
+local source = {
+    [key] = "value",
+    key_as_value = key,
+}
+local copy = babet.deepCopyTable(source)
+
+-- copy[key] == "value"          -- clé originale conservée
+-- copy.key_as_value ~= key      -- valeur-table copiée
+-- copy[copy.key_as_value] == nil
+```
+
+La fonction est donc une copie profonde des **valeurs-table**, pas une copie
+structurelle des clés-table.
+
+<a id="tables-metatables"></a>
+### Métatables et accès brut
+
+La métatable réelle de chaque table copiée est attachée à la copie **par
+référence**. Elle n'est pas dupliquée. Modifier cette métatable affecte donc la
+source et la copie.
+
+Seules les paires réellement stockées sont parcourues. Un champ obtenu par
+`__index` ou inventé par `__pairs` n'est pas matérialisé dans la copie. Une fois
+la métatable partagée attachée, ses comportements restent naturellement actifs
+sur la copie.
+
+<a id="tables-depth"></a>
+### Profondeur maximale
+
+La racine est à la profondeur `0`. Jusqu'à **75 descentes vers de nouvelles
+valeurs-table** sont acceptées, soit au maximum 76 tables sur un chemin racine
+comprise. Une 76e descente vers une table encore inconnue lève :
+
+```text
+Table is too deep to copy (max depth 75 exceeded)
+```
+
+Une référence vers une table déjà copiée ne crée pas un nouveau niveau : un
+cycle peut donc se refermer exactement à la limite.
+
+<a id="tables-errors"></a>
 ## Contrat d'erreur
 
-- **Mauvais type d'argument** (passer une non-table à l'une ou
-  l'autre des fonctions) → lève via `luaL_error`.
-- Aucune des deux fonctions ne renvoie d'erreur via `(nil, err)`.
-  Elles réussissent ou lèvent.
+Les erreurs sont levées via l'API Lua :
 
-## Décisions de design
+- `mergeTables` avec moins de deux arguments ;
+- tout argument non-table de `mergeTables` ;
+- nombre d'arguments différent de un pour `deepCopyTable` ;
+- argument non-table de `deepCopyTable` ;
+- profondeur maximale dépassée.
 
-- **Les valeurs shallow sont référencées, pas deep-copiées**, dans
-  `deepCopyTable`. Copier des fonctions ou des userdata n'a pas de
-  sens, et copier des valeurs immuables (nombres, strings, booleans)
-  ne change rien. Seules les tables sont dupliquées récursivement.
-- **Les metatables ne sont pas copiées** dans `deepCopyTable`. C'est
-  un choix conscient : préserver une metatable à travers une copie
-  peut surprendre l'appelant (la copie déclenche encore des
-  callbacks `__index` qui mutent l'original). Si tu dois copier
-  avec metatable, fais-le explicitement avec
-  `setmetatable(babet.deepCopyTable(t), getmetatable(t))`.
-- **`mergeTables` est shallow**. Si deux tables sources partagent
-  une sous-table à la même clé string, le résultat référence la
-  dernière telle quelle — il ne récurse pas dedans. Combine avec
-  `deepCopyTable` si tu veux une sémantique merge-puis-isole.
-- **Les clés numériques sont append, pas écrasées**. Ce choix
-  vient du cas d'usage Lua le plus courant : combiner des tables
-  type liste (`{1, 2}` + `{3, 4}` → `{1, 2, 3, 4}`). Si tu voulais
-  une sémantique d'écrasement sur les clés numériques, construis
-  une table de destination et assigne explicitement.
+```lua
+local ok, err = pcall(babet.deepCopyTable, 42)
+-- ok == false ; err contient "Argument must be a table"
+```
 
+<a id="tables-limits"></a>
+## Limites et choix de conception
+
+- `mergeTables` n'est pas un deep merge : une sous-table ultérieure remplace la
+  référence précédente en bloc.
+- Les métatables des sources sont ignorées par `mergeTables` ; son résultat
+  n'en possède aucune.
+- `deepCopyTable` partage les métatables et les clés-table avec la source.
+- Une métatable faible (`__mode`) reste faible sur la copie puisqu'elle est
+  partagée.
+- L'ordre des clés de map n'est pas défini. Seul l'ordre des clés entières
+  positives de `mergeTables` est garanti.
+- La sélection ordonnée des clés-listes de `mergeTables` privilégie un code sûr
+  face aux erreurs Lua ; son coût est quadratique par source en nombre de clés
+  entières positives. Ce helper vise donc surtout des tables de taille modérée.
+
+<a id="tables-not-exposed"></a>
 ## Hors v1
 
-Additif — pourrait être ajouté plus tard sans casser le SemVer :
-
-- Un `deepMergeTables` qui récurse dans les tables imbriquées quand
-  les deux sources ont une table à la même clé. Demande courante,
-  mais la sémantique autour des listes vs maps devient ambiguë,
-  d'où pas dans v1.
-- Un `equalsTables` pour comparaison structurelle profonde. Facile
-  à écrire en Lua pur, n'a pas émergé comme besoin réel.
+Des fonctions comme `deepMergeTables` ou une comparaison structurelle profonde
+pourraient être ajoutées séparément. Elles ne font pas partie de l'API actuelle.

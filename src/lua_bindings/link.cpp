@@ -40,7 +40,12 @@ std::optional<std::string> create_symlink(const std::string &target, const std::
     std::error_code ec;
 
     std::error_code exist_ec;
-    if (fs::exists(linkpath, exist_ec))
+    const bool link_exists = fs::exists(linkpath, exist_ec);
+    if (exist_ec)
+    {
+        return "Failed to inspect link path: " + exist_ec.message();
+    }
+    if (link_exists)
     {
         return "Link path already exists";
     }
@@ -68,8 +73,11 @@ int lua_link(lua_State *L)
 {
     luaL_argcheck(L, lua_gettop(L) == 2, 1, "Expected two arguments");
 
-    const char *target = luaL_checkstring(L, 1);
-    const char *linkpath = luaL_checkstring(L, 2);
+    const std::string_view target =
+        luaL_checkstring_view_without_nul(L, 1, "target");
+    const std::string_view linkpath =
+        luaL_checkstring_view_without_nul(L, 2, "link path");
 
-    return push_action_result(L, create_symlink(target, linkpath));
+    return push_action_result(
+        L, create_symlink(std::string(target), std::string(linkpath)));
 }

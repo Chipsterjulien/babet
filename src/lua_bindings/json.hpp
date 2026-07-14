@@ -18,13 +18,15 @@
  *   - table clés string             -> object JSON
  *   - table vide {}                 -> object JSON {}
  *
- * Erreurs renvoyées en (nil, "json: ...") — JAMAIS d'exception Lua :
- *   clés mixtes, array à trous, clé non représentable, NaN/Infinity,
- *   type non encodable (function/userdata/thread), imbrication trop
- *   profonde (capte aussi les cycles).
+ * Erreurs de conversion renvoyées en (nil, "json: ...") : clés mixtes,
+ * array à trous, clé non représentable, UTF-8 invalide, NaN/Infinity,
+ * type non encodable (function/userdata/thread), imbrication trop
+ * profonde (capte aussi les cycles). Les erreurs d'appel (mauvaise
+ * arité, opts non-table, indent non entier ou > 256) lèvent une erreur
+ * Lua via luaL_error.
  *
- * opts.indent (entier) : si présent et >= 0, pretty-print avec cette
- * indentation. Absent / nil / négatif : sortie compacte.
+ * opts.indent (entier) : 0..256 active le pretty-print. Absent / nil /
+ * négatif : sortie compacte. Les autres champs de opts sont ignorés.
  *
  * @return 2 valeurs : la chaîne JSON ou nil, et un message d'erreur ou nil.
  */
@@ -32,6 +34,9 @@ int lua_json_encode(lua_State *L);
 
 /**
  * @brief Lua binding: value, err = babet.json.decode(str)
+ *
+ * Exige exactement une chaîne Lua. Les nombres ne sont pas convertis
+ * implicitement en texte.
  *
  * Mapping JSON -> Lua :
  *   - null    -> babet.json.null (sentinel, PAS nil : sinon collision

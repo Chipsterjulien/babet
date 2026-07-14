@@ -5,12 +5,12 @@
 #include <system_error>
 #include <algorithm>
 #include <filesystem>
+#include <cstring>
 #include <string>
 #include <vector>
 #include <iostream>
 #include <optional>
 #include <functional>
-#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -32,44 +32,47 @@ namespace
         std::string path;  // ECMAScript regex, searched on the full path
     };
 
-    struct RegexCache
+    struct CompiledRegexes
     {
-        std::unordered_map<std::string, std::regex> name_regex;
-        std::unordered_map<std::string, std::regex> iname_regex;
+        std::optional<std::regex> name;
+        std::optional<std::regex> iname;
+        std::optional<std::regex> path;
     };
 
-    // CORRECTIF (post-revue Gemini) : depuis l'arrivée des workers
-    // (Chantier 8), plusieurs threads peuvent appeler babet.find
-    // simultanément. Un cache global non protégé corromprait la map
-    // sur un try_emplace concurrent. La solution thread_local donne
-    // à chaque worker son propre cache, sans surcoût de mutex.
-    thread_local RegexCache cache;
-
-    // Les patterns sont passés tels quels à std::regex, en syntaxe ECMAScript
-    // (équivalent à la regex PCRE habituelle : \d, \w, [a-zA-Z], etc.).
-    // Pas de pré-traitement type "Lua pattern" : la pseudo-traduction des `%`
-    // était un faux-ami qui produisait silencieusement des regex incorrectes
-    // (`%a` devenait `\a` = caractère BEL, pas une classe de lettres).
-    const std::regex &get_or_compile_regex(RegexCache &cache, const std::string &pattern,
-                                           bool case_insensitive = false)
+    std::optional<std::string>
+    compile_regexes(const FindOptions &options, CompiledRegexes &compiled)
     {
-        auto &regex_map = case_insensitive ? cache.iname_regex : cache.name_regex;
-        auto it = regex_map.find(pattern);
-        if (it == regex_map.end())
+        try
         {
-            std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
-            if (case_insensitive)
+            if (!options.name.empty())
             {
-                flags |= std::regex_constants::icase;
+                compiled.name.emplace(options.name,
+                                      std::regex_constants::ECMAScript);
             }
-            auto [new_it, _] = regex_map.try_emplace(pattern, std::regex(pattern, flags));
-            return new_it->second;
+            if (!options.iname.empty())
+            {
+                compiled.iname.emplace(
+                    options.iname,
+                    std::regex_constants::ECMAScript |
+                        std::regex_constants::icase);
+            }
+            if (!options.path.empty())
+            {
+                compiled.path.emplace(options.path,
+                                      std::regex_constants::ECMAScript);
+            }
         }
-        return it->second;
+        catch (const std::regex_error &error)
+        {
+            return "find: invalid regular expression: " +
+                   std::string(error.what());
+        }
+        return std::nullopt;
     }
 
-    bool matches_options(const fs::directory_entry &entry, const FindOptions &options,
-                         RegexCache &cache)
+    bool matches_options(const fs::directory_entry &entry,
+                         const FindOptions &options,
+                         const CompiledRegexes &compiled)
     {
         if (!options.type.empty())
         {
@@ -80,35 +83,23 @@ namespace
             }
         }
 
-        if (!options.name.empty())
+        if (compiled.name &&
+            !std::regex_match(entry.path().filename().string(),
+                              *compiled.name))
         {
-            const auto &name_regex = get_or_compile_regex(cache, options.name);
-            if (!std::regex_match(entry.path().filename().string(), name_regex))
-            {
-                return false;
-            }
+            return false;
         }
-
-        if (!options.iname.empty())
+        if (compiled.iname &&
+            !std::regex_match(entry.path().filename().string(),
+                              *compiled.iname))
         {
-            const auto &iname_regex = get_or_compile_regex(cache, options.iname, true);
-            if (!std::regex_match(entry.path().filename().string(), iname_regex))
-            {
-                return false;
-            }
+            return false;
         }
-
-        if (!options.path.empty())
+        if (compiled.path &&
+            !std::regex_search(entry.path().string(), *compiled.path))
         {
-            // Note : pas de cache pour `path` (peu de répétition attendue,
-            // contrairement à `name` qui filtre des milliers d'entrées).
-            const std::regex path_regex(options.path, std::regex_constants::ECMAScript);
-            if (!std::regex_search(entry.path().string(), path_regex))
-            {
-                return false;
-            }
+            return false;
         }
-
         return true;
     }
 
@@ -127,6 +118,20 @@ namespace
     bool parse_options(lua_State *L, int index, FindOptions &out,
                        const char *&err)
     {
+        auto assign_string = [&](int stack_index, std::string &dest,
+                                 const char *nul_error) -> bool
+        {
+            size_t len = 0;
+            const char *data = lua_tolstring(L, stack_index, &len);
+            if (std::memchr(data, '\0', len) != nullptr)
+            {
+                err = nul_error;
+                return false;
+            }
+            dest.assign(data, len);
+            return true;
+        };
+
         // CORRECTIF (revue ChatGPT post-v2.2.0, vérifié) :
         // lua_isinteger, plus lua_isnumber. find(".", {maxdepth=1.5})
         // passait le test isnumber puis lua_tointeger rendait 0 —
@@ -162,7 +167,12 @@ namespace
         lua_getfield(L, index, "type");
         if (lua_isstring(L, -1))
         {
-            out.type = lua_tostring(L, -1);
+            if (!assign_string(-1, out.type,
+                               "find: 'type' must not contain NUL byte"))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
         }
         else if (!lua_isnil(L, -1))
         {
@@ -187,7 +197,12 @@ namespace
         lua_getfield(L, index, "name");
         if (lua_isstring(L, -1))
         {
-            out.name = lua_tostring(L, -1);
+            if (!assign_string(-1, out.name,
+                               "find: 'name' must not contain NUL byte"))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
         }
         else if (!lua_isnil(L, -1))
         {
@@ -200,7 +215,12 @@ namespace
         lua_getfield(L, index, "iname");
         if (lua_isstring(L, -1))
         {
-            out.iname = lua_tostring(L, -1);
+            if (!assign_string(-1, out.iname,
+                               "find: 'iname' must not contain NUL byte"))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
         }
         else if (!lua_isnil(L, -1))
         {
@@ -213,7 +233,12 @@ namespace
         lua_getfield(L, index, "path");
         if (lua_isstring(L, -1))
         {
-            out.path = lua_tostring(L, -1);
+            if (!assign_string(-1, out.path,
+                               "find: 'path' must not contain NUL byte"))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
         }
         else if (!lua_isnil(L, -1))
         {
@@ -226,19 +251,37 @@ namespace
         return true;
     }
 
-    std::optional<std::string> find(const fs::path &root, const FindOptions &options,
-                                    std::function<void(const fs::path &)> callback,
-                                    RegexCache &cache)
+    std::optional<std::string> find(
+        const fs::path &root, const FindOptions &options,
+        const std::function<void(const fs::path &)> &callback)
     {
         std::error_code check_ec;
-        if (!fs::exists(root, check_ec))
+        bool root_exists = fs::exists(root, check_ec);
+        if (check_ec)
+        {
+            return "cannot inspect path '" + root.string() +
+                   "': " + check_ec.message();
+        }
+        if (!root_exists)
         {
             return "path does not exist: " + root.string();
         }
 
-        if (!fs::is_directory(root, check_ec))
+        bool root_is_directory = fs::is_directory(root, check_ec);
+        if (check_ec)
+        {
+            return "cannot inspect path '" + root.string() +
+                   "': " + check_ec.message();
+        }
+        if (!root_is_directory)
         {
             return "path is not a directory: " + root.string();
+        }
+
+        CompiledRegexes compiled;
+        if (auto regex_error = compile_regexes(options, compiled); regex_error)
+        {
+            return regex_error;
         }
 
         try
@@ -295,7 +338,7 @@ namespace
                     continue;
                 }
 
-                if (matches_options(*it, options, cache))
+                if (matches_options(*it, options, compiled))
                 {
                     callback(it->path());
                 }
@@ -317,10 +360,10 @@ namespace
 
 int lua_find(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc < 2)
+    const int argc = lua_gettop(L);
+    if (argc < 1)
     {
-        return luaL_error(L, "Expected at least two arguments");
+        return luaL_error(L, "Expected at least one argument");
     }
 
     if (!lua_isstring(L, 1))
@@ -328,22 +371,28 @@ int lua_find(lua_State *L)
         return luaL_error(L, "Expected a string as the first argument");
     }
 
-    if (!lua_istable(L, 2))
+    if (argc >= 2 && !lua_isnoneornil(L, 2) && !lua_istable(L, 2))
     {
-        return luaL_error(L, "Expected a table as the second argument");
+        return luaL_error(
+            L, "Expected a table or nil as the second argument");
     }
 
-    const char *root = luaL_checkstring(L, 1);
+    std::string root = luaL_checkstring_without_nul(L, 1, "root");
 
-    // CORRECTIF Gemini (longjmp/C++) : parse_options ne fait plus de
-    // luaL_error. On reçoit (ok, err_msg) et on remonte l'erreur via
-    // push_fail() qui ne fait PAS de longjmp — donc FindOptions se
-    // détruira proprement à la sortie de cette fonction.
+    // opts est réellement facultatif : find(path) et find(path, nil)
+    // utilisent les valeurs par défaut documentées.
     FindOptions options;
-    const char *parse_err = nullptr;
-    if (!parse_options(L, 2, options, parse_err))
+    if (argc >= 2 && lua_istable(L, 2))
     {
-        return push_fail(L, parse_err);
+        // CORRECTIF Gemini (longjmp/C++) : parse_options ne fait plus de
+        // luaL_error. On reçoit (ok, err_msg) et on remonte l'erreur via
+        // push_fail() qui ne fait PAS de longjmp — donc FindOptions se
+        // détruira proprement à la sortie de cette fonction.
+        const char *parse_err = nullptr;
+        if (!parse_options(L, 2, options, parse_err))
+        {
+            return push_fail(L, parse_err);
+        }
     }
 
     lua_newtable(L);
@@ -357,7 +406,7 @@ int lua_find(lua_State *L)
         lua_rawseti(L, result_index, file_index++);
     };
 
-    if (auto error_message = find(root, options, callback, cache))
+    if (auto error_message = find(root, options, callback))
     {
         lua_pushnil(L);
         lua_pushstring(L, error_message->c_str());

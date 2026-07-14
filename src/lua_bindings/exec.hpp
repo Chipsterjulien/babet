@@ -4,27 +4,42 @@
 #include <lua.hpp>
 
 /**
- * @brief Lua binding: runs an external program and captures its output.
+ * @brief Exécute un programme externe sans shell implicite.
  *
- * Lua usage:
+ * API Lua :
+ *
  *   result, err = babet.exec(cmd [, args] [, opts])
- *     cmd  : string  — program to run (PATH is searched)
- *     args : table   — array of string arguments (optional)
- *     opts : table   — { cwd = string, env = { KEY = VALUE, ... } } (optional)
  *
- *   On successful launch:
- *     result = { stdout = string, stderr = string, code = integer }
- *     err    = nil
- *   On launch failure (program not found, cwd invalid, ...):
- *     result = nil
- *     err    = string
+ *   cmd  : chaîne stricte, programme recherché dans PATH ou chemin direct.
+ *   args : table séquence de chaînes, facultative ; aucun parsing shell.
+ *   opts : table facultative :
+ *          - cwd        : chaîne, répertoire de travail de l'enfant ;
+ *          - env        : table string -> string fusionnée avec environ ;
+ *          - stdin      : chaîne binaire envoyée puis pipe fermé ;
+ *          - timeout    : nombre fini strictement positif, secondes ;
+ *          - max_output : entier 1..2 Gio, plafond distinct pour stdout
+ *                         et stderr (défaut 10 Mio par flux).
  *
- *   A program that runs but exits non-zero is NOT an error here — that is
- *   reported via result.code. The env table is merged with the current
- *   environment, it does not replace it.
+ * En lancement réussi, même si le programme sort non-zéro ou expire :
  *
- * @param L Lua state.
- * @return int Number of return values on the Lua stack (2).
+ *   result = {
+ *       stdout = string,             // binary-safe, éventuellement tronquée
+ *       stderr = string,             // binary-safe, éventuellement tronquée
+ *       code = integer,              // exit code ou 128 + signal ; parfois -1
+ *       timed_out = boolean,
+ *       stdout_truncated = boolean,
+ *       stderr_truncated = boolean,
+ *   }
+ *   err = nil
+ *
+ * Une erreur avant exec effectif (programme absent, cwd invalide, validation
+ * des options, erreur de poll interne, etc.) renvoie (nil, err). Seul cmd
+ * absent ou non string relève de luaL_error. Le timeout couvre préparation,
+ * lancement, E/S et attente finale ; à expiration, le groupe enfant reçoit
+ * SIGTERM, puis SIGKILL après le délai de grâce interne.
+ *
+ * @param L État Lua.
+ * @return Nombre de valeurs laissées sur la pile (toujours 2 sauf erreur Lua).
  */
 int lua_exec(lua_State *L);
 

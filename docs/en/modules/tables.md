@@ -1,112 +1,220 @@
 > **English** | [Français](../../fr/modules/tables.md)
 
-# `babet` tables — table manipulation helpers
+# `babet` tables — merging and copying Lua tables
 
-Two helpers that fill obvious gaps in the Lua standard library : a
-proper deep copy, and a multi-source merge.
+Two historical helpers live directly on the `babet` table:
 
-## Why
+- `babet.mergeTables(...)` builds a new table from several sources;
+- `babet.deepCopyTable(t)` recursively copies **values** that are tables.
 
-Lua's standard library has no built-in deep copy and no multi-source
-table merge. Both are routine needs : merging config from defaults +
-overrides, snapshotting a table before mutation, copying a tree of
-options. Writing them per-script is repetitive and error-prone
-(missing the metatable, cycles, etc.).
+They operate on entries actually stored in Lua tables. The `__pairs` and
+`__index` metamethods therefore do not provide virtual fields to merge or copy.
 
-These two functions live directly on the `babet` table (no
-sub-namespace) because they predate the per-module convention used
-by recent additions.
+## Module contents
 
+- [API](#tables-api)
+- [`babet.mergeTables(t1, t2, ...)`](#tables-merge)
+  - [Positive integer keys: concatenation](#tables-positive-keys)
+  - [Every other key: last writer wins](#tables-other-keys)
+  - [Shallow merge](#tables-shallow)
+- [`babet.deepCopyTable(t)`](#tables-deep-copy)
+  - [Values and shared graph structure](#tables-values)
+  - [Keys are not copied](#tables-keys)
+  - [Metatables and raw traversal](#tables-metatables)
+  - [Maximum depth](#tables-depth)
+- [Error contract](#tables-errors)
+- [Limits and design choices](#tables-limits)
+- [Not in v1](#tables-not-exposed)
+
+<a id="tables-api"></a>
 ## API
 
 | Function | Returns |
 | --- | --- |
-| `babet.mergeTables(t1, t2, ...)` | new `table` — string keys merged (last writer wins), numeric keys appended in order |
-| `babet.deepCopyTable(t)` | new `table`, recursively copied |
+| `babet.mergeTables(t1, t2, ...)` | one new table |
+| `babet.deepCopyTable(t)` | one new table |
 
-`mergeTables` is variadic — **two tables minimum** (fewer :
-raises), as many as you want beyond that. The inputs
-are not mutated. The merge has two rules :
+Both functions return exactly one value on success. They never return
+`(nil, err)`: call errors and depth errors are raised.
 
-- **String keys** : later tables overwrite earlier ones at the
-  same key (last writer wins). Replacement is **shallow** : a
-  table value overwrites the previous one **wholesale**, nested
-  sections are not merged recursively. And values are
-  **referenced, not copied** — the result shares its subtables
-  with the inputs ; combine with `deepCopyTable` if you need an
-  independent result.
-- **Numeric keys (array part)** : concatenated in the order tables
-  are passed, then in 1..n order within each table. So
-  `mergeTables({1, 2}, {3, 4})` gives `{1, 2, 3, 4}`, not
-  `{3, 4}`.
+<a id="tables-merge"></a>
+## `babet.mergeTables(t1, t2, ...)`
 
-`deepCopyTable` copies nested tables recursively. Cycles are
-detected (no infinite loop), and shared subtables are copied only
-once (the structure is preserved, not duplicated). The
-**metatable** of each copied table is set as-is on the copy
-(shared reference — the metatable itself is not duplicated).
-Non-table values (numbers, strings, booleans, functions, userdata)
-are referenced as-is. Maximum depth : **75 levels** (beyond :
-raises `"Table is too deep to copy (max depth 75 exceeded)"`).
+At least two arguments are required and every argument must be a table. The API
+sets no additional arity limit beyond Lua's general limits.
 
-## Quick example
+Sources are not mutated. The result is a plain table without a metatable, even
+when source tables have one.
+
+<a id="tables-positive-keys"></a>
+### Positive integer keys: concatenation
+
+Every key represented by Lua as an integer `>= 1` is treated as a list
+position. This includes a key written as `2.0`, which Lua canonicalizes to an
+integer.
+
+Within each source, such keys are visited in ascending numeric order, then their
+values are appended to the result. Holes and original indices are compacted:
 
 ```lua
--- String keys : last writer wins
-local defaults = { port = 8080, host = "localhost", debug = false }
-local user_cfg = { port = 9000, debug = true }
-local cfg = babet.mergeTables(defaults, user_cfg)
--- cfg.port  == 9000      (user_cfg overrode)
--- cfg.host  == "localhost"
--- cfg.debug == true
+local r = babet.mergeTables(
+    { [4] = "d", [2] = "b" },
+    { [7] = "g", [1] = "a" }
+)
 
--- Numeric keys : append in order
-local a = { 1, 2 }
-local b = { 3, 4 }
-local merged = babet.mergeTables(a, b)
--- merged == { 1, 2, 3, 4 }   (NOT { 3, 4 })
-
--- Deep copy : snapshot before mutation
-local snapshot = babet.deepCopyTable(cfg)
-cfg.port = 9999             -- does NOT affect snapshot
-print(snapshot.port)        -- still 9000
+-- r == { "b", "d", "a", "g" }
 ```
 
+The same list position appearing in several sources is not overwritten: every
+value is appended.
+
+<a id="tables-other-keys"></a>
+### Every other key: last writer wins
+
+String, boolean, table, function, thread, userdata and light userdata keys, along with floating,
+zero and negative numeric keys, keep their original identity. A later source
+overwrites an earlier value for the same key:
+
+```lua
+local key = {}
+local r = babet.mergeTables(
+    { mode = "safe", [key] = 1, [0] = "a" },
+    { mode = "fast", [key] = 2, [0] = "b" }
+)
+
+-- r.mode == "fast"
+-- r[key]  == 2
+-- r[0]    == "b"
+```
+
+<a id="tables-shallow"></a>
+### Shallow merge
+
+Values are never copied. A subtable placed in the result is the same table as
+in the source:
+
+```lua
+local nested = { enabled = false }
+local r = babet.mergeTables({ nested = nested }, {})
+
+r.nested.enabled = true
+-- nested.enabled == true
+```
+
+To obtain an independent graph for table values afterwards, use:
+
+```lua
+local isolated = babet.deepCopyTable(
+    babet.mergeTables(defaults, overrides)
+)
+```
+
+<a id="tables-deep-copy"></a>
+## `babet.deepCopyTable(t)`
+
+The function requires exactly one table. It creates a new table for the root and
+for every **value** that is itself a table.
+
+<a id="tables-values"></a>
+### Values and shared graph structure
+
+Cycles reached through values are supported and graph identity is preserved:
+
+```lua
+local shared = { value = 42 }
+local source = { a = shared, b = shared }
+source.self = source
+
+local copy = babet.deepCopyTable(source)
+
+-- copy ~= source
+-- copy.a ~= shared
+-- copy.a == copy.b
+-- copy.self == copy
+```
+
+Non-table values — numbers, strings, booleans, functions, threads, userdata and
+light userdata — are reused as-is.
+
+<a id="tables-keys"></a>
+### Keys are not copied
+
+Every key keeps its original value and identity. In particular, a table used as
+a key remains the source table:
+
+```lua
+local key = { id = 1 }
+local source = {
+    [key] = "value",
+    key_as_value = key,
+}
+local copy = babet.deepCopyTable(source)
+
+-- copy[key] == "value"          -- original key retained
+-- copy.key_as_value ~= key      -- table value copied
+-- copy[copy.key_as_value] == nil
+```
+
+The function is therefore a deep copy of **table values**, not a structural copy
+of table keys.
+
+<a id="tables-metatables"></a>
+### Metatables and raw traversal
+
+The actual metatable of every copied table is attached to its copy **by
+reference**. It is not duplicated. Mutating that metatable therefore affects
+both source and copy.
+
+Only actually stored pairs are traversed. A field returned through `__index` or
+invented by `__pairs` is not materialized in the copy. Once the shared
+metatable is attached, its behavior naturally remains active on the copy.
+
+<a id="tables-depth"></a>
+### Maximum depth
+
+The root is at depth `0`. Up to **75 descents into new table values** are
+accepted, for at most 76 tables along one root-inclusive path. A 76th descent
+into a previously unseen table raises:
+
+```text
+Table is too deep to copy (max depth 75 exceeded)
+```
+
+A reference to an already copied table does not create a new level, so a cycle
+may close exactly at the boundary.
+
+<a id="tables-errors"></a>
 ## Error contract
 
-- **Wrong argument types** (passing a non-table to either function)
-  → raises via `luaL_error`.
-- Neither function returns errors via `(nil, err)`. They either
-  succeed or raise.
+Errors are raised through the Lua API for:
 
-## Design decisions
+- fewer than two arguments to `mergeTables`;
+- any non-table argument to `mergeTables`;
+- an argument count other than one for `deepCopyTable`;
+- a non-table argument to `deepCopyTable`;
+- exceeding the maximum depth.
 
-- **Shallow values are referenced, not deep-copied**, in
-  `deepCopyTable`. Copying functions or userdata makes no sense,
-  and copying immutable values (numbers, strings, booleans)
-  changes nothing. Only tables are recursively duplicated.
-- **Metatables are not copied** in `deepCopyTable`. This is a
-  conscious choice : preserving a metatable across a copy can
-  surprise callers (the copy still triggers `__index` callbacks
-  that mutate the original). If you need to copy with metatable,
-  do it explicitly with `setmetatable(babet.deepCopyTable(t),
-  getmetatable(t))`.
-- **`mergeTables` is shallow**. If two source tables share a sub-
-  table at the same string key, the result references the last
-  one unchanged — it does not recurse into it. Combine with
-  `deepCopyTable` if you need merge-then-isolate semantics.
-- **Numeric keys are appended, not overwritten**. The choice
-  comes from the most common Lua use case : combining
-  list-shaped tables (`{1, 2}` + `{3, 4}` → `{1, 2, 3, 4}`).
-  If you wanted overwriting semantics on numeric keys, build a
-  destination table and assign explicitly.
+```lua
+local ok, err = pcall(babet.deepCopyTable, 42)
+-- ok == false; err contains "Argument must be a table"
+```
 
+<a id="tables-limits"></a>
+## Limits and design choices
+
+- `mergeTables` is not a deep merge: a later subtable replaces the earlier
+  reference wholesale.
+- Source metatables are ignored by `mergeTables`; its result has none.
+- `deepCopyTable` shares metatables and table keys with the source.
+- A weak metatable (`__mode`) remains weak on the copy because it is shared.
+- Map-key order is undefined. Only the positive-integer ordering of
+  `mergeTables` is guaranteed.
+- The ordered list-key selection in `mergeTables` favors safety across Lua
+  errors; its cost is quadratic per source in the number of positive integer
+  keys. This helper is therefore intended mainly for moderately sized tables.
+
+<a id="tables-not-exposed"></a>
 ## Not in v1
 
-Additive — could be added later without breaking SemVer :
-
-- A `deepMergeTables` that recurses into nested tables when both
-  sources have a table at the same key. Common request, but the
-  semantics around lists vs maps gets ambiguous, hence not in v1.
-- An `equalsTables` for deep structural comparison. Easy to write
-  in pure Lua, hasn't surfaced as a real need yet.
+Features such as `deepMergeTables` or deep structural comparison could be added
+separately. They are not part of the current API.

@@ -1,167 +1,346 @@
 > **English** | [Français](../../fr/modules/tls.md)
 
-# `babet.socket` TLS — `connect_tls` and `starttls`
+# TLS — direct encryption, STARTTLS, certificates, and SNI
 
-The TLS half of [`socket`](socket.md) : encrypted TCP for IRC over
-TLS, IMAPS, custom secure protocols. Two entry points :
-`connect_tls` for protocols that go TLS from the start (port
-6697 IRC, 993 IMAPS, etc.) and `starttls` for protocols that
-upgrade an existing plain connection (SMTP, IMAP, IRC `STARTTLS`).
+Babet TLS uses the same userdata as [`babet.socket`](socket.md). After the
+handshake, `send`, `recv`, `recv_line`, `recv_all`, `set_timeout`, `peer`,
+`sockname`, and `close` behave like their plain-TCP versions.
 
-## Why
+Two modes are available:
 
-Talking encrypted TCP without [`http`](http.md) is a real need :
-IRC bots over `+6697`, SMTP submission, custom internal services
-behind TLS. Doing it manually with `openssl s_client` via `exec`
-is unreliable ; `openssl` the C++ library + `cpp-httplib` chosen
-abstractions give a clean Lua API that handles cert verification
-correctly by default.
+- `babet.socket.connect_tls()` starts TLS on the first application byte;
+- `sock:starttls()` upgrades an existing TCP connection after a plaintext
+  protocol negotiation.
 
-## API
+The implementation provides TLS 1.2 minimum, certificate verification by
+default, hostname checks, SNI independent from verification, system and
+per-call CA trust, shared TCP+handshake deadlines, and fail-closed STARTTLS.
+It does not expose TLS servers, client certificates, ALPN, public-key pinning,
+or peer-certificate inspection.
 
-| Function | Returns |
-| --- | --- |
-| `babet.socket.connect_tls(host, port, opts?)` | `tls_socket` \| `(nil, err)` |
-| `s:starttls(opts?)` | `(true, nil)` \| `(nil, err)` — upgrade an existing plain socket |
+## Module contents
 
-`opts` :
+- [Core conventions](#tls-conventions)
+- [API overview](#tls-api-summary)
+- [TLS options](#tls-options)
+- [Direct TLS connection](#tls-connect)
+- [STARTTLS upgrade](#tls-starttls)
+- [Verification, hostname, and SNI](#tls-hostname-sni)
+- [Certificate authorities](#tls-ca)
+- [TLS versions](#tls-versions)
+- [Timeouts](#tls-timeouts)
+- [Socket state after failure](#tls-failure-state)
+- [Complete examples](#tls-examples)
+- [Error contract](#tls-errors)
+- [Security and limitations](#tls-design)
 
-| Field      | Type                               | Default                                                                                                                              |
-| ---------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `verify`   | boolean — certificate verification | `true`                                                                                                                               |
-| `ca_cert`  | string (path to a CA bundle file)  | system trust store                                                                                                                   |
-| `ca_path`  | string (path to a CA directory)    | system trust store                                                                                                                   |
-| `hostname` | string — SNI + name verification   | `connect_tls` : the `host` argument. `starttls` : **required** if `verify = true`                                                    |
-| `timeout`  | number (seconds)                   | infinite — budget applied to **each phase** (TCP connect, then TLS handshake), not a single envelope ; DNS resolution is not covered |
+<a id="tls-conventions"></a>
+## Core conventions
 
-> An earlier version of this page named the option `server_name`
-> (the real name is `hostname`) and documented an `alpn` option
-> that doesn't exist — see "Not in v1".
-
-A `tls_socket` has the same methods as a plain socket
-(`send`, `recv`, `recv_line`, `recv_all`, `set_timeout`,
-`close`, `peer`). The encryption is transparent.
-
-## Quick examples
-
-### Connect to IRC over TLS
+### Verification is on by default
 
 ```lua
-local s = assert(babet.socket.connect_tls("irc.libera.chat", 6697, {
-    timeout = 30,
-}))
-
-s:send("NICK babet-bot\r\n")
-s:send("USER babet 0 * :babet bot\r\n")
-
-while true do
-    local line, err = s:recv_line()
-    if not line then break end
-    print(line)
-    if line:match("^PING (.+)$") then
-        s:send("PONG " .. line:match("^PING (.+)$") .. "\r\n")
-    end
-end
-```
-
-### STARTTLS upgrade (SMTP submission)
-
-```lua
-local s = assert(babet.socket.connect("mail.example.com", 587))
-print(s:recv_line())                              -- 220 banner
-s:send("EHLO myhost\r\n")
-repeat
-    line = s:recv_line()
-until not line:match("^250%-")                    -- last 250 line
-
-s:send("STARTTLS\r\n")
-print(s:recv_line())                              -- 220 ready to start TLS
-
-assert(s:starttls({ hostname = "mail.example.com" }))
--- s is now encrypted ; continue with EHLO + AUTH + …
-```
-
-### Self-signed server (dev / private CA)
-
-```lua
-local s = assert(babet.socket.connect_tls("internal.svc", 5555, {
-    ca_cert = "/etc/myapp/internal-ca.crt",
+local sock = assert(babet.socket.connect_tls("example.com", 443, {
+    timeout = 10,
 }))
 ```
 
-### Skip verification (TESTING ONLY)
+`verify = false` explicitly disables both chain and hostname verification. It
+may be useful in controlled tests but encryption without authentication does
+not prevent an active man-in-the-middle attack.
+
+### Same stream API after handshake
 
 ```lua
-local s = assert(babet.socket.connect_tls("self-signed.local", 8443, {
+local sock = assert(babet.socket.connect_tls("irc.example.net", 6697, {
+    timeout = 10,
+}))
+assert(sock:set_timeout(120))
+assert(sock:send("PING :hello\r\n"))
+local line = assert(sock:recv_line())
+```
+
+Handshake timeout and later I/O timeout are separate.
+
+### SNI is not certificate verification
+
+SNI selects a TLS virtual host. Verification checks trust and reference
+identity. Babet sends DNS SNI whenever a DNS hostname is available, including
+when `verify = false`.
+
+<a id="tls-api-summary"></a>
+## API overview
+
+```lua
+local sock, err = babet.socket.connect_tls(host, port, opts?)
+local ok, err = sock:starttls(opts?)
+```
+
+```lua
+{
+    verify = true,
+    hostname = "example.com",
+    ca_cert = "/path/ca-bundle.pem",
+    ca_path = "/path/certs",
+    min_version = "1.2",
+    timeout = 10,
+}
+```
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `verify` | strict boolean | `true` | chain and hostname verification |
+| `hostname` | string | `connect_tls` host | reference name and DNS SNI |
+| `ca_cert` | string | no custom file | extra PEM trust file |
+| `ca_path` | string | no custom directory | OpenSSL hashed CA directory |
+| `min_version` | `"1.2"` or `"1.3"` | `"1.2"` | minimum protocol version |
+| `timeout` | finite number `>= 0` | `0` | handshake budget in seconds |
+
+Unknown fields are currently ignored; misspellings do not fail.
+
+<a id="tls-options"></a>
+## TLS options
+
+`verify` must be an actual boolean. `hostname`, `ca_cert`, `ca_path`, and
+`min_version` must be strings without NUL. `timeout` must be finite and
+non-negative; a positive value below 1 ms is rounded up.
+
+`hostname` has two roles:
+
+1. OpenSSL reference identity when verification is enabled;
+2. SNI value when it is a DNS name.
+
+Connect to an IP while validating a DNS certificate:
+
+```lua
+local sock = assert(babet.socket.connect_tls("203.0.113.10", 443, {
+    hostname = "api.example.com",
+    timeout = 10,
+}))
+```
+
+An IP literal is not sent as SNI. `ca_cert` and `ca_path` augment trust for that
+connection; they are not exclusive pinning.
+
+`min_version = "1.3"` raises the minimum. It does not cap the maximum.
+
+<a id="tls-connect"></a>
+## `babet.socket.connect_tls(host, port, opts?)`
+
+Establishes TCP then performs a client handshake:
+
+```lua
+local sock, err = babet.socket.connect_tls("example.com", 443, {
+    timeout = 10,
+})
+assert(sock, err)
+```
+
+Without `opts.hostname`, the `host` argument is used for verification and DNS
+SNI. For an IP connection to a DNS certificate, supply the name explicitly.
+
+After synchronous DNS resolution, one deadline covers every TCP address
+attempt and the TLS handshake. The handshake does not receive a fresh budget.
+DNS itself remains outside this controlled deadline.
+
+`opts.timeout` is not retained as the socket I/O default:
+
+```lua
+local sock = assert(babet.socket.connect_tls(host, port, { timeout = 10 }))
+assert(sock:set_timeout(30))
+```
+
+<a id="tls-starttls"></a>
+## `sock:starttls(opts?)`
+
+Upgrades an existing connected plain TCP socket in place:
+
+```lua
+local ok, err = sock:starttls({
+    hostname = "mail.example.com",
+    timeout = 10,
+})
+```
+
+On success it returns exactly `(true, nil)`.
+
+The socket must be open, connected, not already TLS, and have no pending
+plaintext buffered by Babet. `starttls` does not remember the hostname passed
+to the earlier TCP constructor, so `hostname` is mandatory when
+`verify = true`.
+
+Babet does not send a protocol `STARTTLS` command. The script must:
+
+1. negotiate in plaintext;
+2. request STARTTLS;
+3. validate the positive protocol reply;
+4. call `starttls`;
+5. resume the protocol over TLS, often with a new greeting.
+
+If a prior line/all read timed out after consuming plaintext, finish consuming
+or otherwise resolve that plaintext before upgrading. Babet rejects STARTTLS
+while the shared pending buffer is non-empty.
+
+<a id="tls-hostname-sni"></a>
+## Verification, hostname, and SNI
+
+| Connection | `verify` | `hostname` | Identity check | SNI |
+| --- | --- | --- | --- | --- |
+| DNS `example.com` | `true` | absent | `example.com` | `example.com` |
+| IP | `true` | `api.example.com` | DNS name | DNS name |
+| IP | `true` | absent | IP identity | none |
+| DNS | `false` | absent | none | DNS host |
+| IP | `false` | DNS name | none | DNS name |
+| IP | `false` | absent | none | none |
+
+Providing `hostname` can therefore still be required by a virtual host even
+when verification is disabled.
+
+<a id="tls-ca"></a>
+## Certificate authorities
+
+The socket TLS context attempts OpenSSL defaults, OpenSSL environment
+variables, and several known Linux/BSD CA locations. Per-call `ca_cert` and
+`ca_path` are then added.
+
+Custom trust is isolated per connection:
+
+```lua
+local a = assert(babet.socket.connect_tls("internal.example", 443, {
+    ca_cert = "/tmp/test-root.pem",
+    timeout = 5,
+}))
+a:close()
+-- Later calls do not retain /tmp/test-root.pem.
+```
+
+`ca_path` must follow OpenSSL's hashed-directory conventions. A CA file trusts
+certificates issued by that CA; it is not a leaf-certificate/public-key pin.
+Babet does not expose the peer certificate for custom pinning.
+
+<a id="tls-versions"></a>
+## TLS versions
+
+Protocols older than TLS 1.2 are always rejected.
+
+- default minimum: TLS 1.2;
+- optional minimum: TLS 1.3;
+- TLS 1.3 is negotiated automatically with the default when supported.
+
+No maximum-version option is exposed.
+
+<a id="tls-timeouts"></a>
+## Timeouts
+
+For `connect_tls`, `opts.timeout` covers TCP plus handshake after DNS. For
+`starttls`, it covers only the upgrade handshake and does not inherit
+`sock:set_timeout()`.
+
+After success, configure I/O separately:
+
+```lua
+assert(sock:set_timeout(30))
+local line, err = sock:recv_line()
+```
+
+TLS sockets remain non-blocking internally and OpenSSL WANT_READ/WANT_WRITE is
+coordinated with one poll deadline.
+
+<a id="tls-failure-state"></a>
+## Socket state after failure
+
+`connect_tls` returns no socket and closes all intermediate resources.
+
+Pre-handshake STARTTLS validation/configuration failures leave the plain TCP
+socket usable: invalid options, missing hostname, pending plaintext, context
+setup, or pre-handshake `fcntl` failure.
+
+Once `SSL_connect` begins, any failure closes the socket: timeout,
+interruption, certificate failure, alert, protocol, or I/O error. A ClientHello
+may already have been sent and peer bytes consumed, so falling back to
+plaintext would be unsafe. This is intentionally fail-closed.
+
+<a id="tls-examples"></a>
+## Complete examples
+
+### Raw HTTPS request
+
+For normal HTTP use [`babet.http`](http.md); this demonstrates stream use:
+
+```lua
+local sock = assert(babet.socket.connect_tls("example.com", 443, {
+    timeout = 10,
+}))
+assert(sock:set_timeout(10))
+assert(sock:send(
+    "GET / HTTP/1.1\r\n" ..
+    "Host: example.com\r\n" ..
+    "Connection: close\r\n\r\n"
+))
+local response = assert(sock:recv_all(nil, 8 * 1024 * 1024))
+print(response)
+sock:close()
+```
+
+### IP connection with DNS identity
+
+```lua
+local sock = assert(babet.socket.connect_tls("203.0.113.20", 443, {
+    hostname = "api.example.com",
+    ca_cert = "/etc/myapp/ca.pem",
+    timeout = 5,
+}))
+```
+
+### Simplified SMTP STARTTLS
+
+```lua
+local sock = assert(babet.socket.connect("mail.example.com", 587, 5))
+assert(sock:set_timeout(10))
+assert(sock:recv_line():match("^220"))
+assert(sock:send("EHLO client.example\r\n"))
+-- Parse the full multiline EHLO response and require STARTTLS.
+assert(sock:send("STARTTLS\r\n"))
+assert(sock:recv_line():match("^220"))
+assert(sock:starttls({
+    hostname = "mail.example.com",
+    timeout = 10,
+}))
+assert(sock:send("EHLO client.example\r\n"))
+```
+
+A complete SMTP client must correctly parse every multiline reply and prevent
+STARTTLS downgrade.
+
+### Controlled self-signed test
+
+```lua
+local sock = assert(babet.socket.connect_tls("127.0.0.1", 8443, {
     verify = false,
+    hostname = "dev.local", -- SNI is still sent
+    timeout = 3,
 }))
 ```
 
+Do not use this trust policy in production.
+
+<a id="tls-errors"></a>
 ## Error contract
 
-- All errors prefixed `"tls: ..."` (handshake, cert verify, etc.)
-  or `"socket: ..."` (DNS, connect, timeout).
-- `(nil, err)` always — no exceptions for "expected" failures
-  like cert mismatch.
-- **`verify=true` + invalid cert** → `(nil, "tls: certificate
-  verify failed: <reason>")`. Common reasons : expired,
-  self-signed, hostname mismatch, unknown CA.
-- **`starttls` with `verify = true` and no `opts.hostname`** →
-  `(nil, "tls: starttls with verify=true requires opts.hostname;
-  pass hostname or set verify=false")` — a certificate cannot be
-  verified without knowing which name to verify ; the explicit
-  refusal beats a silently incomplete verification.
-- **After a failed `starttls`** : the socket is handed back **as
-  it was** — plaintext, blocking, still open (you can close
-  cleanly or retry). Edge case : if restoring blocking mode fails
-  (nearly impossible), the socket is **closed** and the error
-  carries the suffix
-  `"(socket closed: could not restore blocking mode)"` — a safe,
-  explicit state instead of a socket with altered behaviour.
-- **NaN/Inf timeouts**, wrong types → raises via `luaL_error`.
+Wrong positional types raise; invalid values and runtime failures return
+`(nil, err)`: empty host, bad port/options, CA loading, DNS/TCP, timeout,
+interruption, handshake, certificate/hostname verification, and STARTTLS
+preconditions.
 
-## Trust store
+OpenSSL wording varies. Compare stable states such as `"timeout"` and
+`"interrupted"`; log full messages for diagnosis.
 
-Babet ships its own statically-linked OpenSSL. Out of the box,
-`verify=true` works on :
+<a id="tls-design"></a>
+## Security and limitations
 
-- **Arch, Debian, Ubuntu, Alpine, Gentoo** : via `--openssldir=/etc/ssl`
-  baked into the vendored OpenSSL.
-- **Fedora, RHEL, CentOS, Rocky, Alma, OpenSUSE, FreeBSD, NetBSD**
-  : via runtime probing of known CA bundle paths.
-
-Overrides, in priority order :
-
-1. `ca_cert` / `ca_path` per call.
-2. `SSL_CERT_FILE` / `SSL_CERT_DIR` environment variables.
-3. The two mechanisms above.
-
-If none of these find a CA store and you use `verify=true`, the
-handshake fails with a clear error. See
-[`security`](../security.md) for the full picture.
-
-## Design decisions
-
-- **TLS 1.2 minimum**. SSL 3, TLS 1.0, TLS 1.1 are
-  unconditionally rejected — they're broken, no modern server
-  should rely on them. TLS 1.3 is negotiated automatically when
-  available.
-- **`verify=true` by default, `verify=false` requires explicit
-  opt-in**. No way to accidentally turn off cert checking.
-- **`hostname` defaults to the host argument** (for
-  `connect_tls`), so SNI works out of the box. Pass it explicitly
-  when connecting by IP to a TLS server that uses SNI — and it is
-  required for `starttls` with verification, since the existing
-  socket doesn't know which name to expect.
-- **Same methods as plain socket**, so a function that takes a
-  `socket` works for both transparently.
-
-## Not in v1
-
-- ALPN negotiation (an earlier version of this page documented an
-  `alpn` option that never existed).
-- Client certificate authentication. Possible to add as a
-  `client_cert` / `client_key` opt later.
-- TLS session resumption / session tickets. Not commonly needed
-  at script level.
-- OCSP stapling verification. Reliance on OpenSSL's defaults.
+- Keep `verify = true` in production.
+- Validate against a trusted expected hostname, never one supplied by the peer.
+- STARTTLS must be required by application policy to prevent stripping.
+- No ALPN, client certificate, TLS server, peer-certificate access, custom
+  cipher policy, or application OCSP/CRL policy.
+- Protect and rotate private CA files.

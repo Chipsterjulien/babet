@@ -1,6 +1,7 @@
 #include "mode.hpp"
 #include "lua_utils.hpp"
 #include <filesystem>
+#include <cstring>
 #include <system_error>
 #include <string>
 #include <optional>
@@ -26,7 +27,13 @@ namespace
     {
         if (lua_type(L, index) == LUA_TSTRING)
         {
-            const char *mode_str = lua_tostring(L, index);
+            size_t mode_len = 0;
+            const char *mode_str = lua_tolstring(L, index, &mode_len);
+            if (std::memchr(mode_str, '\0', mode_len) != nullptr)
+            {
+                error_out = "mode string must not contain NUL byte";
+                return std::nullopt;
+            }
 
             // Refuse une chaîne vide.
             if (mode_str[0] == '\0')
@@ -89,7 +96,7 @@ int lua_setmode(lua_State *L)
         return luaL_error(L, "Expected a string as first argument (path)");
     }
 
-    const char *path = luaL_checkstring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
 
     std::string mode_error;
     auto mode_opt = resolve_mode(L, 2, mode_error);
@@ -117,7 +124,7 @@ int lua_setmode(lua_State *L)
  * @brief Gets the permissions of a file or directory.
  *
  * Lua usage: mode, err = babet.getMode(path)
- *   - mode : permission bits as an integer (0..0o777)
+ *   - mode : permission and special bits as an integer (0..0o7777)
  *
  * @param L Lua state.
  * @return int Number of return values on the Lua stack (2: mode/nil, err/nil).
@@ -134,7 +141,7 @@ int lua_getmode(lua_State *L)
         return luaL_error(L, "Expected a string as argument");
     }
 
-    const char *path = luaL_checkstring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
 
     std::error_code ec;
     auto perms = fs::status(path, ec).permissions();
@@ -145,7 +152,7 @@ int lua_getmode(lua_State *L)
         return 2;
     }
 
-    lua_pushinteger(L, static_cast<int>(perms) & 0777);
+    lua_pushinteger(L, static_cast<int>(perms) & 07777);
     lua_pushnil(L);
     return 2;
 }

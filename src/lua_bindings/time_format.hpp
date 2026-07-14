@@ -4,27 +4,27 @@
 #include <lua.hpp>
 
 /**
- * Lua bindings exposed under the `babet.time` sub-table.
+ * Bindings exposés sous la sous-table `babet.time` :
  *
- *   babet.time.iso(ts?)            -> "YYYY-MM-DDTHH:MM:SSZ"
+ *   babet.time.iso([ts])           -> string UTC
  *   babet.time.parse_iso(s)        -> (unix_ts integer, nil)
- *                                     |  (nil, "parse_iso: ...")
+ *                                     | (nil, "parse_iso: ...")
  *   babet.time.parse_duration(s)   -> (seconds integer, nil)
- *                                     |  (nil, "parse_duration: ...")
+ *                                     | (nil, "parse_duration: ...")
  *   babet.time.format_duration(n)  -> "1d2h3m4s"
  *
- * All timestamps are interpreted as Unix time (seconds since
- * 1970-01-01 UTC). All formatting is UTC (suffix "Z"); no timezone
- * database, no locale, no calendar arithmetic.
+ * Contrat de types strict : aucune coercition implicite entre strings et
+ * numbers. `iso` accepte zéro ou un number ; `format_duration` un number
+ * entier non négatif ; les deux parseurs exactement une string.
  *
- * Error contract:
- *   - Pure-computation functions (iso, format_duration) raise via
- *     luaL_error for invalid argument types (caller bugs).
- *   - Parsers (parse_iso, parse_duration) report user-input failures
- *     as (nil, "<funcname>: <reason>"), and raise via luaL_error only
- *     on type bugs (not a string).
- *   - Error messages are prefixed by the function name, matching the
- *     convention used by sqlite, user, crc32sum, etc.
+ * `iso` formate en UTC, sans locale ni base de fuseaux. Les fractions sont
+ * arrondies vers -infini à la seconde. `parse_iso` accepte volontairement
+ * un sous-ensemble strict à année sur quatre chiffres et timezone requise.
+ *
+ * Contrat d'erreur :
+ *   - iso / format_duration lèvent pour toute entrée invalide ;
+ *   - parse_iso / parse_duration lèvent pour type ou arité incorrects,
+ *     mais renvoient `(nil, "<fonction>: <raison>")` pour un texte invalide.
  */
 int lua_time_iso(lua_State *L);
 int lua_time_parse_iso(lua_State *L);

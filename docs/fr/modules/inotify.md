@@ -1,156 +1,245 @@
 > [English](../../en/modules/inotify.md) | **Français**
 
-# `babet.inotify` — surveillance d'événements fichier
+# `babet.inotify` — surveillance du système de fichiers
 
-Wrappe `inotify(7)` de Linux pour la délivrance instantanée
-d'événements fichier — pas de polling. Utilisé pour le rechargement
-à chaud de configuration, la surveillance de dossiers de dépôt, le
-tailing de logs, les triggers de synchronisation de fichiers, etc.
+`babet.inotify` expose une interface minimale au mécanisme Linux
+`inotify(7)`. Les notifications proviennent du noyau : il n'est pas
+nécessaire de parcourir périodiquement les dossiers surveillés.
 
-## Pourquoi
+Le module est **spécifique à Linux** et la surveillance n'est pas
+récursive.
 
-Poller un dossier avec `listDir` chaque seconde est gaspilleur
-(CPU + lookups inode) et laggy. `inotify` est le mécanisme dédié
-du kernel : le kernel ne réveille ton script que quand quelque
-chose change réellement, avec une latence sub-milliseconde.
+## Table des matières du module
 
-L'API Lua expose un contrat minimal sur un syscall notoirement
-délicat. Le débordement de queue est explicitement remonté (la
-seule chose pire que de perdre des événements silencieusement,
-c'est de ne pas te le dire).
+- [API](#inotify-api)
+- [Créer un watcher](#inotify-new)
+- [Ajouter une surveillance](#inotify-add)
+  - [Option `onlydir`](#inotify-onlydir)
+- [Lire les événements](#inotify-read)
+  - [Débordement de la file](#inotify-overflow)
+  - [Interruption par signal](#inotify-signal)
+- [Retirer et fermer](#inotify-remove-close)
+- [Exemple](#inotify-example)
+- [Contrat d'erreur](#inotify-errors)
+- [Limites](#inotify-limits)
 
+<a id="inotify-api"></a>
 ## API
 
-| Fonction | Renvoie |
+| Fonction | Résultat |
 | --- | --- |
-| `babet.inotify.new()` | `watcher` (userdata) \| `(nil, err)` |
-| `w:add(path, events)` | `integer` wd (watch descriptor) \| `(nil, err)` |
+| `babet.inotify.new()` | `watcher` \| `(nil, err)` |
+| `w:add(path, events [, opts])` | `wd` entier \| `(nil, err)` |
+| `w:read([timeout])` | tableau d'événements \| `(nil, "timeout")` \| `(nil, "interrupted")` \| `(nil, err)` |
 | `w:remove(wd)` | `(true, nil)` \| `(nil, err)` |
-| `w:read(timeout?)` | `table` d'événements \| `(nil, "timeout")` \| `(nil, "interrupted")` \| `(nil, err)` |
-| `w:close()` | `(true, nil)` — idempotent |
+| `w:close()` | `(true, nil)` |
 
-`read(timeout?)` : omis = **bloque** jusqu'au prochain événement ;
-`0` = **non bloquant** (rend les événements déjà en attente, sinon
-`(nil, "timeout")`) ; `t > 0` = attend au plus `t` secondes.
-Attention : cette convention diverge de celle de `workers` où `0`
-signifie aussi non-bloquant mais de `socket` où `set_timeout(0)`
-signifie infini — ici, « rends-moi ce qu'il y a maintenant » est le
-cas d'usage dominant.
+Les signatures sont strictes : les arguments supplémentaires lèvent une
+erreur Lua. `close()` est idempotente et le ramasse-miettes ferme aussi
+un watcher oublié.
 
-### Argument `events`
-
-Une liste 1..N stricte de strings de noms d'événements. Noms
-acceptables :
-
-| Nom | Déclenché quand |
-| --- | --- |
-| `"access"` | fichier accédé |
-| `"modify"` | contenu modifié |
-| `"attrib"` | métadonnées changées (perms, mtime, …) |
-| `"close_write"` | un fichier ouvert en écriture est fermé |
-| `"close_nowrite"` | un fd read-only est fermé |
-| `"close"` | alias combiné : `close_write` **ou** `close_nowrite` |
-| `"open"` | fichier ouvert |
-| `"moved_from"` | fichier déplacé hors du dossier surveillé |
-| `"moved_to"` | fichier déplacé dans le dossier surveillé |
-| `"move"` | alias combiné : `moved_from` **ou** `moved_to` |
-| `"create"` | fichier/dossier créé dans le dossier surveillé |
-| `"delete"` | fichier/dossier supprimé du dossier surveillé |
-| `"delete_self"` | le chemin surveillé lui-même est supprimé |
-| `"move_self"` | le chemin surveillé est déplacé |
-
-### Événement renvoyé par `read`
+<a id="inotify-new"></a>
+## Créer un watcher
 
 ```lua
-{
-    wd     = 1,                  -- watch descriptor
-    name   = "newfile.txt",      -- "" si la cible est le chemin surveillé lui-même
-    events = { create = true, close_write = true },
-    is_dir = false,
-    cookie = 0,                  -- non-zero apparie moved_from / moved_to
-}
-```
-
-Événement synthétique spécial pour le **débordement de queue** :
-
-```lua
-{ wd = -1, events = { overflow = true } }
-```
-
-Quand tu vois ça, la queue kernel a manqué de place et des
-événements ont été perdus. Re-scanne les chemins surveillés pour
-récupérer l'état.
-
-## Exemple rapide
-
-```lua
-local w = assert(babet.inotify.new())
-assert(w:add("/srv/incoming", { "close_write", "moved_to" }))
-
-babet.signal.handle("TERM", function() w:close(); os.exit(0) end)
-
-while true do
-    local events, err = w:read()      -- bloque jusqu'à quelque chose
-    if not events then
-        if err == "interrupted" then break end
-        io.stderr:write("inotify : ", err, "\n"); break
-    end
-    for _, ev in ipairs(events) do
-        if ev.events.overflow then
-            rescan()                    -- queue saturée, récupère
-        else
-            handle_new_file("/srv/incoming/" .. ev.name)
-        end
-    end
+local watcher, err = babet.inotify.new()
+if not watcher then
+    error(err)
 end
 ```
 
+Chaque appel crée une instance indépendante. Le descripteur inotify est
+ouvert avec `IN_NONBLOCK` et `IN_CLOEXEC` : `read()` pilote lui-même
+l'attente, et le descripteur n'est pas transmis aux programmes lancés
+par `exec`.
+
+<a id="inotify-add"></a>
+## Ajouter une surveillance
+
+```lua
+local wd, err = watcher:add(path, events [, opts])
+```
+
+`path` doit être une chaîne sans octet NUL. Il peut désigner un dossier
+ou un fichier existant.
+
+`events` est une liste stricte et non vide, indexée de `1` à `N`, sans
+trou ni clé supplémentaire. Chaque élément doit être l'un des noms
+suivants :
+
+| Nom | Événement demandé |
+| --- | --- |
+| `"access"` | lecture ou accès au fichier |
+| `"modify"` | contenu modifié |
+| `"attrib"` | attributs ou métadonnées modifiés |
+| `"close_write"` | descripteur ouvert en écriture fermé |
+| `"close_nowrite"` | descripteur non ouvert en écriture fermé |
+| `"close"` | combinaison de `close_write` et `close_nowrite` |
+| `"open"` | fichier ouvert |
+| `"moved_from"` | entrée déplacée hors du dossier surveillé |
+| `"moved_to"` | entrée déplacée dans le dossier surveillé |
+| `"move"` | combinaison de `moved_from` et `moved_to` |
+| `"create"` | entrée créée dans le dossier surveillé |
+| `"delete"` | entrée supprimée du dossier surveillé |
+| `"delete_self"` | cible surveillée supprimée |
+| `"move_self"` | cible surveillée déplacée |
+
+<a id="inotify-onlydir"></a>
+### Option `onlydir`
+
+```lua
+local wd = assert(watcher:add(path, { "create" }, {
+    onlydir = true,
+}))
+```
+
+`onlydir` doit être un booléen lorsqu'elle est présente :
+
+- `true` ajoute le masque Linux `IN_ONLYDIR` et refuse donc une cible qui
+  n'est pas un dossier ;
+- `false` conserve le comportement normal ;
+- les autres champs de `opts` sont actuellement ignorés.
+
+Ajouter de nouveau un watch sur la même cible suit la sémantique native
+d'inotify : le masque existant est remplacé, car `IN_MASK_ADD` n'est pas
+utilisé.
+
+<a id="inotify-read"></a>
+## Lire les événements
+
+```lua
+local events, err = watcher:read([timeout])
+```
+
+Le timeout est exprimé en secondes et accepte les valeurs décimales :
+
+- argument omis ou `nil` : attente illimitée ;
+- `0` : lecture non bloquante des événements déjà disponibles ;
+- valeur positive : attente bornée.
+
+Un timeout négatif, NaN, infini ou trop grand renvoie `(nil, err)`. Un
+argument d'un mauvais type lève une erreur Lua.
+
+Une lecture réussie renvoie une liste de tables :
+
+```lua
+{
+    {
+        wd = 1,
+        name = "photo.jpg",
+        events = { create = true, close_write = true },
+        is_dir = false,
+        cookie = 0,
+    },
+}
+```
+
+- `wd` est le watch descriptor renvoyé par `add` ;
+- `name` est le nom de l'entrée concernée, ou `""` pour un événement
+  portant sur la cible surveillée elle-même ;
+- `events` contient un booléen vrai pour chaque bit reçu ;
+- `is_dir` reflète `IN_ISDIR` ;
+- `cookie` permet d'apparier `moved_from` et `moved_to` ; hors déplacement,
+  il vaut généralement `0`.
+
+En plus des événements demandables par `add`, le noyau peut produire :
+
+- `events.ignored` lorsque le watch est retiré, automatiquement ou par
+  `remove` ;
+- `events.unmount` lorsque le système de fichiers surveillé est démonté.
+
+Un appel peut renvoyer plusieurs événements, car le module lit et décode
+un lot complet de la file noyau.
+
+<a id="inotify-overflow"></a>
+### Débordement de la file
+
+Lorsque la file inotify déborde, certains événements sont perdus. Le
+module renvoie explicitement :
+
+```lua
+{
+    wd = -1,
+    name = "",
+    events = { overflow = true },
+    is_dir = false,
+    cookie = 0,
+}
+```
+
+Le programme doit alors rescanner les chemins surveillés pour reconstruire
+un état fiable.
+
+<a id="inotify-signal"></a>
+### Interruption par signal
+
+Si un signal géré par `babet.signal` arrive pendant l'attente, son callback
+Lua est exécuté puis `read()` renvoie `(nil, "interrupted")`.
+
+<a id="inotify-remove-close"></a>
+## Retirer et fermer
+
+```lua
+assert(watcher:remove(wd))
+assert(watcher:close())
+```
+
+Après `remove(wd)`, le noyau place normalement un événement `ignored`
+dans la file. `remove` sur un identifiant invalide renvoie `(nil, err)`.
+
+Après `close`, `add`, `read` et `remove` renvoient une erreur indiquant
+que le watcher est fermé. `close` peut être appelée plusieurs fois.
+
+<a id="inotify-example"></a>
+## Exemple
+
+```lua
+local watcher = assert(babet.inotify.new())
+local wd = assert(watcher:add("/srv/incoming", {
+    "close_write",
+    "moved_to",
+}, {
+    onlydir = true,
+}))
+
+while true do
+    local events, err = watcher:read()
+    if not events then
+        if err == "interrupted" then
+            break
+        end
+        error(err)
+    end
+
+    for _, event in ipairs(events) do
+        if event.events.overflow then
+            rescan_directory()
+        elseif event.wd == wd then
+            process_entry(event.name)
+        end
+    end
+end
+
+watcher:close()
+```
+
+<a id="inotify-errors"></a>
 ## Contrat d'erreur
 
-- **`read(t)`** où `t` est NaN/Inf/négatif → lève via
-  `luaL_error`.
-- **`add(path, events)`** avec une table `events` non-liste
-  (sparse, clés extra, éléments non-string) → `(nil, err)`.
-- **`add` sur un chemin inexistant** → `(nil, "no such file or
-  directory")`.
-- **`read`** :
-  - table `events` en cas de succès.
-  - `(nil, "timeout")` si le timeout est écoulé.
-  - `(nil, "interrupted")` si un signal géré est arrivé.
-  - `(nil, err)` sur autres erreurs.
-- **Méthodes après `close`** → `(nil, "inotify: closed")`.
+- mauvais nombre ou mauvais type d'arguments : erreur Lua ;
+- valeur invalide, erreur système ou watcher fermé : `(nil, err)` ;
+- `read` sans événement avant l'échéance : `(nil, "timeout")` ;
+- signal géré pendant `read` : `(nil, "interrupted")` ;
+- `remove` et `close` réussis : `(true, nil)`.
 
-## Décisions de design
+Les erreurs système sont préfixées par `"inotify: "` et conservent la
+description fournie par le système.
 
-- **Non-récursif en v1**. `inotify(7)` lui-même n'est pas
-  récursif ; surveiller un arbre signifie le parcourir et
-  appeler `add` sur chaque sous-dossier, puis gérer les
-  événements `create` pour étendre la surveillance. C'est un vrai
-  travail de design avec des subtilités (races entre le parcours
-  et la délivrance d'événements, gestion du débordement) et
-  méritera un module dédié si/quand nécessaire. Constructible en
-  Lua pur au-dessus.
-- **Liste d'événements obligatoire, pas de "all" implicite**.
-  Surveiller tout sature la queue et force chaque événement à
-  traverser Lua. Forcer l'appelant à choisir les événements rend
-  le coût visible.
-- **Le débordement est remonté explicitement**, jamais avalé. Le
-  kernel a une queue finie (`/proc/sys/fs/inotify/max_queued_events`,
-  défaut 16384). Quand elle déborde, des événements sont perdus.
-  La seule action appropriée est de re-scanner ; perdre
-  silencieusement le signal flinguerait toute la fiabilité.
-- **`read()` est interruptible par signal**. Un `read()` qui
-  bloque pour toujours en ignorant `SIGTERM` est le bug classique
-  de l'arrêt gracieux. Voir [`signal`](signal.md).
-- **`IN_CLOEXEC`** sur le fd : pas hérité par les sous-process
-  `exec`utés, cohérent avec les sockets.
+<a id="inotify-limits"></a>
+## Limites
 
-## Hors v1
-
-- Surveillance récursive. À ajouter au niveau script (walk +
-  add) ou attendre une option `recursive = true`.
-- Plusieurs watchers par process. Faisable aujourd'hui en créant
-  plusieurs instances `inotify.new()` ; pas de registre intégré.
-- Sémantique `IN_MASK_ADD` (ajouter des événements à un watch
-  existant). Actuellement `add(path, events)` remplace le mask.
-  Besoin rare.
+- Linux uniquement ;
+- pas de surveillance récursive ;
+- pas de `IN_DONT_FOLLOW`, `IN_ONESHOT` ni `IN_MASK_ADD` ;
+- une instance peut contenir plusieurs watches et plusieurs instances
+  indépendantes peuvent coexister dans le même processus.

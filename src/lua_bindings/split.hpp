@@ -4,21 +4,29 @@
 #include <lua.hpp>
 
 /**
- * @brief Splits a given string using a specified delimiter and inserts the substrings into a Lua table.
+ * @brief Split a Lua string into a dense array of substrings.
  *
- * This function expects up to three arguments from the Lua stack:
- * - The string to be split.
- * - An optional delimiter (default is space ' ').
- * - An optional maximum number of splits (default is no limit).
+ * Lua signature:
+ *   babet.split(subject [, separator [, max_splits]]) -> table
  *
- * If the delimiter is an empty string, the function splits the input string into individual characters.
- * The resulting substrings are pushed into a Lua table which is then returned.
+ * - subject must be an actual Lua string and is handled with its exact byte
+ *   length, including embedded NUL bytes.
+ * - separator, when present, must be an actual Lua string containing either
+ *   zero bytes (byte mode) or exactly one byte (literal separator mode).
+ *   Omitting it also selects byte mode; there is no default space separator.
+ * - max_splits must be a Lua integer >= -1. It limits cuts only in literal
+ *   separator mode; -1 means unlimited and 0 returns the whole subject as the
+ *   sole element.
+ *
+ * Empty fields are preserved. In byte mode, an empty subject yields an empty
+ * table; with a non-empty separator, an empty subject yields { "" }.
  *
  * @param L The Lua state.
- * @return int The number of results to be returned to Lua (always 1, the table of substrings).
+ * @return 1 (the result table).
  *
- * @throws luaL_error If the arguments are invalid.
+ * @throws luaL_error For invalid arity, types, separator byte length, or a
+ *         max_splits value below -1.
  */
-int lua_split(lua_State* L);
+int lua_split(lua_State *L);
 
 #endif // SPLIT_HPP

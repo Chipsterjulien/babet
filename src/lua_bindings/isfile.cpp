@@ -35,9 +35,7 @@ int lua_isFile(lua_State *L)
         return luaL_error(L, "Expected a string as argument");
     }
 
-    size_t path_len;
-    const char *path_data = lua_tolstring(L, 1, &path_len);
-    std::string_view path(path_data, path_len);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
 
     try
     {

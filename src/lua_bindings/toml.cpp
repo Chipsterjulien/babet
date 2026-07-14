@@ -67,11 +67,15 @@ namespace
         lua_newtable(L);
         for (const auto &[key, value] : tbl)
         {
-            // key est un toml::key (wrapper sur string_view) ; .str()
-            // donne un string_view contenant la clé d'origine.
-            std::string_view k = key.str();
+            // Une clé TOML citée peut contenir n'importe quelle valeur
+            // scalaire Unicode échappée, y compris U+0000. lua_setfield()
+            // prend une chaîne C et tronquerait donc silencieusement une
+            // telle clé. On pousse explicitement la longueur puis on fait
+            // un rawset dans la table Lua fraîchement créée.
+            const std::string_view k = key.str();
+            lua_pushlstring(L, k.data(), k.size());
             push_toml_node(L, value);
-            lua_setfield(L, -2, std::string(k).c_str());
+            lua_rawset(L, -3);
         }
     }
 
@@ -95,11 +99,11 @@ namespace
         // CORRECTIF (revue Gemini post-audit v21, vérifié) : réserver
         // la pile avant de pousser. push_toml_node / push_toml_table
         // se récursent mutuellement (~2 slots simultanés par niveau :
-        // table + valeur ; 4 avec marge) et la profondeur vient du
+        // table + clé + valeur ; 5 avec marge) et la profondeur vient du
         // document TOML DÉCODÉ — donc potentiellement hostile. Le
         // throw rejoint le try/catch de lua_toml_decode -> (nil,
         // "toml: ..."), le canal d'erreur existant du module.
-        if (!lua_checkstack(L, 4))
+        if (!lua_checkstack(L, 5))
         {
             throw std::runtime_error("lua stack overflow during toml conversion");
         }
@@ -182,12 +186,15 @@ namespace
 
 int lua_toml_decode(lua_State *L)
 {
-    // Mauvais usage (arg absent ou pas une string) -> luaL_error.
-    // luaL_checktype lève strictement (pas de coercion silencieuse
-    // sur les nombres comme luaL_checkstring le ferait). C'est
-    // important : on a appris au Chantier 4 que luaL_checkstring
-    // accepte les numbers ; ici on veut un comportement strict pour
-    // un decode de string TOML.
+    const int argc = lua_gettop(L);
+    if (argc != 1)
+    {
+        return luaL_error(L, "Expected one argument");
+    }
+
+    // Mauvais type -> luaL_error. luaL_checktype lève strictement
+    // (pas de coercition silencieuse des nombres comme avec
+    // luaL_checkstring) : decode attend une vraie chaîne Lua.
     luaL_checktype(L, 1, LUA_TSTRING);
     size_t len = 0;
     const char *s = lua_tolstring(L, 1, &len);
@@ -209,6 +216,7 @@ int lua_toml_decode(lua_State *L)
             msg += ", col ";
             msg += std::to_string(src_region.begin.column);
             msg += ")";
+            lua_settop(L, argc);
             return push_fail(L, msg);
         }
         // Succès : result se convertit implicitement en toml::table&.
@@ -221,14 +229,16 @@ int lua_toml_decode(lua_State *L)
     }
     catch (const std::exception &e)
     {
-        // En mode noexcept (par défaut, sans TOML_EXCEPTIONS=1),
-        // toml::parse ne lève pas ; mais une exception interne dans
-        // la conversion en Lua (allocation, etc.) pourrait encore
-        // survenir. Invariant : aucune exception ne traverse.
+        // TOML_EXCEPTIONS=0 empêche les erreurs de parsing de lever,
+        // mais nos helpers de conversion peuvent encore produire une
+        // exception C++ (par exemple le garde-fou de pile Lua).
+        // Nettoyer les tables partielles garantit un retour stable.
+        lua_settop(L, argc);
         return push_fail(L, std::string("toml: ") + e.what());
     }
     catch (...)
     {
+        lua_settop(L, argc);
         return push_fail(L, "toml: unknown error");
     }
 }

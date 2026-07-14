@@ -2,37 +2,40 @@
 #define COPYTREE_HPP
 
 #include <filesystem>
+#include <lua.hpp>
 #include <optional>
 #include <string>
-#include <lua.hpp>
 
 /**
- * @brief Recursively copies a directory and its contents to a destination, handling symbolic links.
+ * @brief Recursively copy a directory tree.
  *
- * This function copies the contents of the source directory to the destination directory.
- * It handles directories, regular files, and symbolic links appropriately.
- * Symbolic links are recreated at the destination, pointing to their respective targets.
+ * Directories, regular files, and symbolic links are handled explicitly.
+ * Destination writes are confined by SecureDestination. Per-entry failures
+ * either stop immediately or are reported as warnings while other entries
+ * continue.
  *
- * @param source The source directory to copy from.
- * @param destination The destination directory to copy to.
- * @param continue_on_error Whether to continue on error or not (default is true).
- * @return std::optional<std::string> An optional string containing an error message if any, or an empty optional if successful.
+ * @param source Source directory. The root itself must not be a symlink.
+ * @param destination Destination directory. The root must not be a symlink.
+ * @param continue_on_error Continue after per-entry errors. Defaults to true.
+ * @return An error/warning summary on failure, or std::nullopt on full success.
  */
-std::optional<std::string> copy_directory(const std::filesystem::path& source, const std::filesystem::path& destination, bool continue_on_error = true);
+std::optional<std::string>
+copy_directory(const std::filesystem::path &source,
+               const std::filesystem::path &destination,
+               bool continue_on_error = true);
 
 /**
- * @brief Lua binding for the copy_directory function.
+ * @brief Lua binding for recursive directory copying.
  *
- * This function is a Lua binding that exposes the copy_directory function to Lua scripts.
- * It expects two string arguments representing the source and destination directories.
- * The third optional argument indicates whether to continue on error.
+ * Lua usage:
+ *   ok, err = babet.copyTree(source, destination)
+ *   ok, err = babet.copyTree(source, destination, continue_on_error)
  *
- * It returns one value to Lua:
- * A string containing the error message if the operation failed, or nil if it succeeded.
+ * The optional third argument defaults to true.
  *
- * @param L The Lua state.
- * @return int Number of return values on the Lua stack.
+ * @param L Lua state.
+ * @return Two values: true/nil on complete success, nil/error otherwise.
  */
-int lua_copyTree(lua_State* L);
+int lua_copyTree(lua_State *L);
 
 #endif // COPYTREE_HPP

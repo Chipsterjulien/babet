@@ -1,156 +1,769 @@
 > [English](../../en/modules/http.md) | **Français**
 
-# `babet.http` — client HTTP
+# HTTP — requêtes web synchrones, headers, corps, TLS et limites
 
-Un client HTTP/HTTPS simple basé sur
-[cpp-httplib](https://github.com/yhirose/cpp-httplib), réutilisant
-l'OpenSSL embarqué. Synchrone, bloquant, avec timeouts.
+`babet.http` est un client HTTP/HTTPS synchrone construit sur cpp-httplib et
+OpenSSL. Il convient aux APIs web, webhooks, téléchargements de taille bornée
+et appels REST simples.
 
-## Pourquoi
+Le module couvre :
 
-Presque chaque script non trivial doit parler à une API HTTP. Sans
-client intégré, on en vient à utiliser `curl` via `exec`, avec
-tout l'overhead de quoting et de spawn de process. `babet.http`
-rend une requête accessible en une ligne, avec la vérification TLS
-par défaut.
+- HTTP et HTTPS ;
+- GET, HEAD, OPTIONS, POST, PUT, PATCH et DELETE ;
+- paramètres de query encodés et normalisés ;
+- headers de requête ;
+- corps texte ou binaire ;
+- réponses binaires ;
+- headers répétés ;
+- redirections optionnelles ;
+- vérification TLS activée par défaut ;
+- timeout de connexion et budget global ;
+- taille maximale de réponse.
 
-## API
+Il ne fournit pas de streaming, de session persistante exposée, de cookies,
+de multipart/form-data, de helper de formulaire URL-encoded, de proxy, de
+serveur HTTP, de WebSocket, ni d'HTTP/2 ou HTTP/3.
 
-| Fonction                      | Renvoie                                                                                      |
-| ----------------------------- | -------------------------------------------------------------------------------------------- |
-| `babet.http.request(opts)`    | `response` (table) \| `(nil, err)` — méthodes : GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE |
-| `babet.http.get(url, opts?)`  | raccourci pour `request{ method="GET", url=url, ... }`                                       |
-| `babet.http.post(url, opts?)` | raccourci pour `request{ method="POST", url=url, ... }`                                      |
+## Table des matières du module
 
-> Pas de raccourcis `put`/`delete`/`patch` en v1 (une ancienne
-> version de cette page les annonçait à tort) : passe par
-> `request{ method = "PUT", ... }`. Voir « Hors v1 ».
+- [Conventions essentielles](#http-conventions)
+- [Vue d'ensemble de l'API](#http-api-summary)
+- [`request(opts)`](#http-request)
+- [`get(url, opts?)`](#http-get)
+- [`post` et ses formes d'appel](#http-post)
+- [URL, fragments et query](#http-url-query)
+- [Méthodes HTTP](#http-methods)
+- [Headers de requête](#http-request-headers)
+- [Corps de requête et Content-Type](#http-body)
+- [Timeouts](#http-timeout)
+- [TLS et CA](#http-tls)
+- [Redirections](#http-redirects)
+- [Taille maximale de réponse](#http-max-body)
+- [Table de réponse](#http-response)
+- [Exemples complets](#http-examples)
+- [Contrat d'erreur](#http-errors)
+- [Sécurité et limites](#http-design)
 
-### Table `opts`
+<a id="http-conventions"></a>
+## Conventions essentielles
 
-| Champ              | Type                                                                                                               | Défaut                                                                                             |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
-| `url`              | string (requis pour `request`)                                                                                     | —                                                                                                  |
-| `method`           | string — GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE                                                              | `"GET"`                                                                                            |
-| `headers`          | table de `name = value`                                                                                            | `{}`                                                                                               |
-| `body`             | string (interdit pour GET/HEAD/OPTIONS)                                                                            | `""`                                                                                               |
-| `query`            | table `{ clé = valeur }` — encodée URL et ajoutée à l'URL (`?a=b&c=d`), fusion propre avec une query déjà présente | —                                                                                                  |
-| `timeout`          | number (secondes)                                                                                                  | **aucun** — sans lui, les défauts internes de cpp-httplib s'appliquent ; passe-le systématiquement |
-| `verify`           | boolean (vérification cert TLS)                                                                                    | `true`                                                                                             |
-| `ca_cert`          | string (chemin du fichier CA bundle)                                                                               | défaut système                                                                                     |
-| `follow_redirects` | boolean                                                                                                            | **`false`** — le suivi est opt-in ; limite de hops interne à cpp-httplib                           |
+### Client synchrone
 
-### Table `response`
+L'appel bloque le thread courant jusqu'à la réponse ou l'erreur. Pour lancer
+plusieurs requêtes indépendantes en parallèle, utilise des
+[`workers`](workers.md), chacun avec sa propre requête.
+
+### Statut HTTP et erreur de transport
+
+Une réponse HTTP reçue est un succès de transport, même avec un statut 404 ou
+500 :
+
+```lua
+local response, err = babet.http.get(url, { timeout = 10 })
+assert(response, err)
+
+if response.status >= 200 and response.status < 300 then
+    print(response.body)
+else
+    io.stderr:write("HTTP ", response.status, "\n", response.body)
+end
+```
+
+Un échec DNS, TCP, TLS, timeout ou limite de corps renvoie `(nil, err)`.
+
+### Corps binaires
+
+Le corps de requête et `response.body` sont binary-safe :
+
+```lua
+local response = assert(babet.http.post(url, "AB\0CD", {
+    timeout = 10,
+}))
+assert(#response.body >= 0)
+```
+
+Les URL, méthodes, noms de headers, chemins de CA et valeurs destinées à une
+API C ne peuvent pas contenir de NUL. Les URL et headers refusent aussi CR/LF
+pour empêcher l'injection de lignes HTTP.
+
+### Options inconnues
+
+Les champs inconnus de la table sont actuellement ignorés. Cette faute ne
+produit donc pas d'erreur :
+
+```lua
+local r = babet.http.get(url, { timeot = 5 }) -- typo : pas de timeout
+```
+
+Utilise exactement les noms documentés et centralise éventuellement la
+construction des options dans ton application.
+
+<a id="http-api-summary"></a>
+## Vue d'ensemble de l'API
+
+```lua
+local response, err = babet.http.request(opts)
+local response, err = babet.http.get(url, opts?)
+local response, err = babet.http.post(url)
+local response, err = babet.http.post(url, body)
+local response, err = babet.http.post(url, opts)
+local response, err = babet.http.post(url, body, opts)
+local response, err = babet.http.post(url, nil, opts)
+```
+
+### Table d'options
+
+| Champ | Type | Défaut | Rôle |
+| --- | --- | --- | --- |
+| `url` | string | obligatoire pour `request` | URL absolue `http://` ou `https://` |
+| `method` | string | `"GET"` | méthode supportée, insensible à la casse |
+| `headers` | table | `{}` | noms string, valeurs string ou number |
+| `body` | string binaire | absent | corps, méthodes à corps uniquement |
+| `query` | table | absente | clés string, valeurs string ou number |
+| `timeout` | nombre fini `> 0` | défauts internes | secondes, connexion + budget global |
+| `verify` | booléen strict | `true` | vérification du certificat HTTPS |
+| `ca_cert` | string | trust store OpenSSL | fichier CA supplémentaire/configuré |
+| `follow_redirects` | booléen strict | `false` | suit les redirections |
+| `max_body_size` | entier `1..2 Gio` | `64 MiB` | cap de la réponse en mémoire |
+
+Les wrappers `get` et `post` remplacent toujours `url` et `method`, même si la
+table fournie contient d'autres valeurs.
+
+<a id="http-request"></a>
+## `babet.http.request(opts)`
+
+Forme générale pour toutes les méthodes :
+
+```lua
+local response, err = babet.http.request({
+    url = "https://api.example.com/items/42",
+    method = "DELETE",
+    headers = {
+        ["Authorization"] = "Bearer " .. token,
+    },
+    timeout = 10,
+})
+```
+
+Le premier argument doit être une table. `opts.url` doit être présent et être
+une string stricte. Les erreurs dans les champs renvoient `(nil, err)` plutôt
+que de lever, sauf mauvais type du premier argument.
+
+<a id="http-get"></a>
+## `babet.http.get(url, opts?)`
+
+Raccourci qui copie superficiellement `opts`, puis impose :
+
+```lua
+opts.url = url
+opts.method = "GET"
+```
+
+```lua
+local response, err = babet.http.get(
+    "https://api.example.com/health",
+    { timeout = 5 }
+)
+```
+
+Le second argument doit être absent, `nil` ou une table.
+
+Un corps est interdit pour GET, y compris via `opts.body` :
+
+```lua
+local response, err = babet.http.get(url, { body = "x" })
+-- nil, "http: body not allowed for GET"
+```
+
+<a id="http-post"></a>
+## `babet.http.post` et ses formes d'appel
+
+### Sans corps
+
+```lua
+local response, err = babet.http.post(url)
+local response, err = babet.http.post(url, { timeout = 5 })
+local response, err = babet.http.post(url, nil, { timeout = 5 })
+```
+
+Dans ces formes, aucun champ `body` n'est ajouté par le wrapper. La requête POST
+peut donc être envoyée sans corps explicite.
+
+### Corps positionnel
+
+```lua
+local response, err = babet.http.post(url, "payload", {
+    timeout = 5,
+})
+```
+
+Le corps doit être une string. Un nombre, un booléen ou une table à cette
+position lève une erreur Lua, sauf qu'une table au deuxième argument est
+interprétée comme `opts`.
+
+### Corps dans `opts`
+
+```lua
+local response, err = babet.http.post(url, {
+    body = "payload",
+    timeout = 5,
+})
+```
+
+### Priorité
+
+Si un corps positionnel et `opts.body` sont fournis, le corps positionnel
+gagne :
+
+```lua
+local response = assert(babet.http.post(url, "used", {
+    body = "ignored",
+    timeout = 5,
+}))
+```
+
+<a id="http-url-query"></a>
+## URL, fragments et query
+
+### URL absolue
+
+Babet accepte uniquement les schemes `http` et `https` :
+
+```lua
+https://example.com:8443/path?existing=1#fragment
+```
+
+L'URL doit contenir un host non vide. Les littéraux IPv6 entre crochets sont
+pris en charge :
+
+```lua
+local r, err = babet.http.get("http://[::1]:8080/", { timeout = 2 })
+```
+
+Le fragment `#...` n'est jamais envoyé au serveur.
+
+Babet n'effectue pas une validation RFC exhaustive du host avant de le passer à
+cpp-httplib. Les erreurs de résolution ou de syntaxe restantes apparaissent au
+transport.
+
+### Ajouter une query
+
+```lua
+local response = assert(babet.http.get("https://example.com/search", {
+    query = {
+        q = "lua socket",
+        page = 2,
+    },
+    timeout = 10,
+}))
+```
+
+Les clés doivent être des strings. Les valeurs peuvent être des strings ou des
+numbers. Babet protège les délimiteurs et les octets non ASCII, puis
+cpp-httplib 0.45.0 normalise la query avant l'envoi. Le format effectivement
+envoyé suit donc les conventions suivantes :
+
+- l'espace devient `+` ;
+- `+` devient `%2B` ;
+- `/` et `?` restent littéraux dans une valeur ;
+- les octets UTF-8 non ASCII sont percent-encodés en `%HH` ;
+- `&`, `=` et `%` sont percent-encodés lorsqu'ils appartiennent à une clé ou
+  une valeur.
+
+Par exemple, `q = "lua socket"` devient `q=lua+socket`, tandis que
+`path = "a/b"` reste `path=a/b`.
+
+Si l'URL contient déjà `?a=b`, les nouveaux paramètres sont ajoutés avec `&`.
+La query déjà présente est elle aussi normalisée par cpp-httplib : `%20` peut
+devenir `+` et `%2F` peut devenir `/`. Le fragment `#...` est supprimé avant
+l'envoi.
+
+L'ordre d'itération d'une table Lua n'est pas garanti : ne signe pas une URL en
+supposant l'ordre produit par `query`. Pour une signature canonique, construis
+toi-même une URL déjà ordonnée et tiens compte de la normalisation décrite
+ci-dessus.
+
+Les NUL présents dans une clé ou une valeur sont envoyés sous la forme `%00`,
+car la query est traitée comme des octets. Assure-toi que le serveur accepte ce
+contenu.
+
+<a id="http-methods"></a>
+## Méthodes HTTP
+
+Méthodes supportées :
+
+- GET ;
+- HEAD ;
+- OPTIONS ;
+- POST ;
+- PUT ;
+- PATCH ;
+- DELETE.
+
+La casse est normalisée : `method = "put"` devient PUT.
+
+```lua
+local response = assert(babet.http.request({
+    url = "https://api.example.com/items/42",
+    method = "PATCH",
+    body = '{"enabled":true}',
+    headers = { ["Content-Type"] = "application/json" },
+    timeout = 10,
+}))
+```
+
+GET, HEAD et OPTIONS refusent un champ `body`. POST, PUT, PATCH et DELETE
+acceptent un corps absent, vide ou non vide.
+
+Il n'existe pas de raccourci `put`, `patch` ou `delete` dans la version
+actuelle : utilise `request`.
+
+<a id="http-request-headers"></a>
+## Headers de requête
+
+```lua
+headers = {
+    ["Accept"] = "application/json",
+    ["Authorization"] = "Bearer " .. token,
+    ["X-Retry"] = 3,
+}
+```
+
+### Noms
+
+Une clé doit être une string non vide composée uniquement de caractères HTTP
+`token` : lettres, chiffres et ``!#$%&'*+-.^_`|~``.
+
+Sont notamment refusés :
+
+- espace ou tabulation ;
+- `:` ;
+- CR/LF ;
+- NUL ;
+- clé non string.
+
+Cette validation empêche l'injection d'un second header ou d'une ligne de
+requête.
+
+### Valeurs
+
+Une valeur peut être une string ou un number. Les nombres sont convertis en
+texte avec la conversion Lua.
+
+NUL, CR et LF sont refusés. Les booléens, tables et autres types sont refusés.
+
+### Doublons
+
+Une table Lua ne peut contenir qu'une valeur par clé exacte. Le binding ne
+fournit pas de forme permettant d'émettre plusieurs headers de requête portant
+le même nom. Pour les listes combinables, construis une valeur séparée par des
+virgules lorsque le standard du header l'autorise. Ne combine pas ainsi
+`Cookie` ou d'autres champs sans vérifier leur syntaxe.
+
+### Casse
+
+Les noms sont transmis avec la casse fournie. HTTP traite les noms de headers
+sans tenir compte de la casse. Pour détecter `Content-Type`, Babet compare en
+minuscules.
+
+<a id="http-body"></a>
+## Corps de requête et `Content-Type`
+
+### Corps absent et corps vide
+
+Ces deux cas sont distincts :
+
+```lua
+-- Aucun champ body.
+babet.http.post(url, { timeout = 5 })
+
+-- Corps explicitement présent, mais vide.
+babet.http.post(url, "", { timeout = 5 })
+```
+
+Lorsque `body` existe sur une méthode à corps et qu'aucun `Content-Type` n'est
+fourni, Babet utilise :
+
+```text
+application/octet-stream
+```
+
+Avec un corps absent, aucun Content-Type par défaut n'est ajouté.
+
+### JSON
+
+```lua
+local payload = assert(babet.json.encode({
+    name = "babet",
+    enabled = true,
+}))
+
+local response = assert(babet.http.post(url, payload, {
+    headers = {
+        ["Content-Type"] = "application/json",
+        ["Accept"] = "application/json",
+    },
+    timeout = 10,
+}))
+```
+
+### Formulaire URL-encoded
+
+Babet ne fournit pas de helper `form`. Encode explicitement le corps et le
+header :
+
+```lua
+local body = "user=julien&active=1" -- encoder chaque champ si non fiable
+local response = assert(babet.http.post(url, body, {
+    headers = {
+        ["Content-Type"] = "application/x-www-form-urlencoded",
+    },
+    timeout = 10,
+}))
+```
+
+La table `query` ne doit pas être détournée pour produire automatiquement un
+corps de formulaire : elle modifie uniquement l'URL.
+
+### Multipart
+
+Aucun constructeur multipart n'est fourni. Pour des uploads complexes ou du
+streaming de gros fichiers, utilise un outil spécialisé via `babet.exec`, par
+exemple `curl`, en transmettant les valeurs sensibles par arguments ou fichiers
+plutôt que par concaténation shell.
+
+<a id="http-timeout"></a>
+## `opts.timeout`
+
+```lua
+local response, err = babet.http.get(url, { timeout = 10 })
+```
+
+Le timeout doit être un nombre fini strictement positif. Les valeurs positives
+inférieures à 1 ms sont arrondies à 1 ms. Le maximum représentable est environ
+`INT_MAX` millisecondes.
+
+Babet configure deux protections cpp-httplib :
+
+- timeout de connexion ;
+- timeout maximal global de la requête.
+
+La première limite atteinte gagne.
+
+### Limite DNS
+
+Comme les sockets bruts, la résolution DNS synchrone peut se produire hors du
+budget effectivement contrôlé par cpp-httplib. Un résolveur bloqué peut donc
+faire dépasser la durée demandée.
+
+### Toujours en fournir un
+
+Sans `opts.timeout`, Babet laisse les valeurs internes de cpp-httplib et du
+système s'appliquer. Pour tout serveur distant, passe explicitement une limite.
+
+<a id="http-tls"></a>
+## HTTPS, vérification et CA
+
+### Vérification par défaut
+
+```lua
+local response = assert(babet.http.get("https://example.com/", {
+    timeout = 10,
+}))
+```
+
+`verify = true` par défaut. Le certificat et le hostname de l'URL sont
+vérifiés par cpp-httplib/OpenSSL.
+
+### CA spécifique
+
+```lua
+local response = assert(babet.http.get("https://internal.example/", {
+    ca_cert = "/etc/myapp/internal-ca.pem",
+    timeout = 10,
+}))
+```
+
+`ca_cert` configure le chemin de CA utilisé par le client HTTP. Contrairement à
+l'API socket TLS, HTTP n'expose pas `ca_path` et n'exécute pas le même probing
+manuel de plusieurs chemins de distributions. Il dépend du trust store par
+défaut de l'OpenSSL embarqué, des variables OpenSSL et du fichier fourni.
+
+### Désactiver la vérification
+
+```lua
+local response = assert(babet.http.get("https://127.0.0.1:8443/", {
+    verify = false,
+    timeout = 3,
+}))
+```
+
+Réserve cette forme aux tests contrôlés. Il n'existe pas d'option `hostname`
+HTTP séparée : le host de l'URL est utilisé.
+
+<a id="http-redirects"></a>
+## `follow_redirects`
+
+Par défaut, une redirection reste visible :
+
+```lua
+local r = assert(babet.http.get(url, { timeout = 10 }))
+if r.status == 301 or r.status == 302 or r.status == 307 or r.status == 308 then
+    print(r.headers.location)
+end
+```
+
+Pour suivre automatiquement :
+
+```lua
+local r = assert(babet.http.get(url, {
+    follow_redirects = true,
+    timeout = 10,
+}))
+```
+
+La table de réponse décrit alors la réponse finale. Babet n'expose pas
+l'historique des hops ni une option `max_redirects`; la limite interne de
+cpp-httplib s'applique.
+
+Avant d'activer le suivi sur une URL non fiable, considère :
+
+- redirection vers un autre domaine ;
+- passage HTTPS vers HTTP ;
+- accès à une adresse interne ou metadata cloud ;
+- transmission de headers sensibles selon la politique de la bibliothèque.
+
+<a id="http-max-body"></a>
+## `max_body_size`
+
+La réponse est entièrement accumulée en mémoire avant d'être renvoyée.
+
+```lua
+local response, err = babet.http.get(url, {
+    timeout = 30,
+    max_body_size = 8 * 1024 * 1024,
+})
+```
+
+- défaut : 64 MiB ;
+- minimum : 1 octet ;
+- maximum : 2 GiB ;
+- type : entier Lua strictement positif.
+
+Dès que le flux dépasserait la limite, Babet annule la réception et renvoie :
+
+```lua
+nil, "http: response body exceeds max_body_size"
+```
+
+Aucun corps partiel n'est exposé. Le header `Content-Length` n'est pas la seule
+protection : la limite s'applique aux chunks réellement reçus, y compris avec
+un transfert chunked ou une longueur absente/trompeuse.
+
+Pour télécharger un gros fichier, utilise une solution de streaming externe ;
+augmenter la limite jusqu'à 2 GiB implique potentiellement une allocation de
+plusieurs gigaoctets.
+
+<a id="http-response"></a>
+## Table de réponse
 
 ```lua
 {
     status = 200,
     body = "...",
-    headers = {                 -- clés normalisées en minuscules
+    headers = {
         ["content-type"] = "application/json",
-        ["content-length"] = "42",
+        ["set-cookie"] = "b=2",
+    },
+    headers_multi = {
+        ["content-type"] = { "application/json" },
+        ["set-cookie"] = { "a=1", "b=2" },
     },
 }
 ```
 
-> En-têtes **dupliqués** dans la réponse : la dernière valeur gagne
-> (une clé = une string). Conséquence connue : si un serveur envoie
-> plusieurs `Set-Cookie`, seul le dernier est visible. Si ce besoin
-> devient réel, `headers` pourra porter une table de strings pour
-> les clés répétées — voir « Hors v1 ».
+### `status`
 
-## Exemples rapides
+Nombre entier du statut HTTP reçu.
+
+### `body`
+
+Chaîne binaire complète, éventuellement vide. Pour HEAD, le corps est vide,
+même si `Content-Length` décrit la taille qu'aurait eue une réponse GET.
+
+### `headers`
+
+Table avec noms en minuscules. Si un header apparaît plusieurs fois, la
+dernière occurrence rencontrée gagne. Cette vue est pratique pour les headers
+simples mais insuffisante pour `Set-Cookie`.
+
+### `headers_multi`
+
+Chaque nom en minuscules pointe toujours vers une séquence de toutes les
+occurrences, même lorsqu'il n'y en a qu'une.
 
 ```lua
--- GET simple
-local r, err = babet.http.get("https://api.example.com/health")
-if r then
-    print(r.status, r.body)
+for _, cookie in ipairs(response.headers_multi["set-cookie"] or {}) do
+    print(cookie)
 end
-
--- POST JSON avec header d'auth
-local r, err = babet.http.post("https://api.example.com/v1/things", {
-    headers = {
-        ["Content-Type"] = "application/json",
-        ["Authorization"] = "Bearer " .. token,
-    },
-    body = babet.json.encode({ name = "widget", count = 7 }),
-    timeout = 10,
-})
-
--- Cert auto-signé (dev / CA privée)
-local r = babet.http.get("https://internal.svc/", {
-    ca_cert = "/etc/myapp/internal-ca.crt",
-})
-
--- Désactiver la vérification (TESTS UNIQUEMENT)
-local r = babet.http.get("https://expired.badssl.com/",
-                            { verify = false })
 ```
 
+L'ordre des occurrences suit celui fourni par cpp-httplib. L'ordre des noms
+dans `pairs()` n'est pas garanti.
+
+<a id="http-examples"></a>
+## Exemples complets
+
+### GET JSON
+
+```lua
+local response, err = babet.http.get("https://api.example.com/v1/status", {
+    headers = { ["Accept"] = "application/json" },
+    query = { verbose = 1 },
+    timeout = 10,
+    max_body_size = 1024 * 1024,
+})
+assert(response, err)
+
+if response.status ~= 200 then
+    error("HTTP " .. response.status .. ": " .. response.body)
+end
+
+local data, decode_err = babet.json.decode(response.body)
+assert(data, decode_err)
+```
+
+### POST JSON authentifié
+
+```lua
+local body = assert(babet.json.encode({ title = "hello" }))
+local response, err = babet.http.post(
+    "https://api.example.com/v1/items",
+    body,
+    {
+        headers = {
+            ["Authorization"] = "Bearer " .. token,
+            ["Content-Type"] = "application/json",
+            ["Accept"] = "application/json",
+        },
+        timeout = 15,
+        max_body_size = 2 * 1024 * 1024,
+    }
+)
+assert(response, err)
+```
+
+### PUT binaire
+
+```lua
+local file = assert(io.open("image.bin", "rb"))
+local payload = file:read("a")
+file:close()
+
+local response = assert(babet.http.request({
+    url = "https://upload.example.com/blob/42",
+    method = "PUT",
+    body = payload,
+    headers = { ["Content-Type"] = "application/octet-stream" },
+    timeout = 30,
+    max_body_size = 1024 * 1024,
+}))
+```
+
+Le fichier est lu entièrement en mémoire avant l'appel. Cette recette ne
+convient pas à un très gros fichier.
+
+### Gérer 404 séparément des erreurs réseau
+
+```lua
+local response, err = babet.http.get(url, { timeout = 5 })
+if not response then
+    io.stderr:write("transport impossible: ", err, "\n")
+elseif response.status == 404 then
+    print("ressource absente")
+elseif response.status >= 400 then
+    io.stderr:write("erreur HTTP ", response.status, "\n")
+else
+    print(response.body)
+end
+```
+
+### Requêtes parallèles avec WORKERS
+
+```lua
+local jobs = {}
+for i, url in ipairs(urls) do
+    jobs[i] = assert(babet.workers.spawn([[
+        local url = worker.args.url
+        local r, err = babet.http.get(url, {
+            timeout = 10,
+            max_body_size = 1024 * 1024,
+        })
+        if not r then error(err) end
+        return { status = r.status, size = #r.body }
+    ]], { url = url }))
+end
+
+for i, job in ipairs(jobs) do
+    local ok_result, value = job:join()
+    if ok_result then
+        print(urls[i], value.status, value.size)
+    else
+        io.stderr:write(urls[i], ": ", value, "\n")
+    end
+end
+```
+
+<a id="http-errors"></a>
 ## Contrat d'erreur
 
-- **Mauvais types d'argument** → lève via `luaL_error`.
-- **Erreurs réseau** (DNS, connect, timeout, TLS) →
-  `(nil, "http: <description>")`.
-- **`body` sur GET/HEAD/OPTIONS** → `(nil, "http: body not
-  allowed for <méthode>")` — signalé, jamais ignoré en silence.
-- **Méthode inconnue** → `(nil, "http: unsupported method '...'")`.
-- **Les erreurs de statut HTTP ne sont pas des erreurs** — un
-  `404` renvoie un `response` normal avec `status = 404`. La
-  sémantique du statut est la responsabilité de l'appelant.
+### Erreurs Lua levées
 
-## TLS / trust store
+Mauvais type des arguments positionnels :
 
-Babet embarque sa propre OpenSSL statique, donc il n'hérite pas
-automatiquement de la config `ca-certificates` de la distro. Deux
-mécanismes garantissent que `verify=true` fonctionne d'emblée :
+```lua
+babet.http.request("not a table")
+babet.http.get(42)
+babet.http.get(url, "not a table")
+babet.http.post(url, 42)
+```
 
-1. L'OpenSSL embarquée est compilée avec `--openssldir=/etc/ssl`,
-   couvrant Arch, Debian, Ubuntu, Alpine, Gentoo.
-2. `babet.socket.connect_tls` sonde en plus les chemins de CA
-   bundles connus (Fedora/RHEL, OpenSUSE, FreeBSD, NetBSD).
-   **`babet.http`, lui, s'appuie sur les défauts OpenSSL seuls**
-   (mécanisme 1) : sur un layout exotique où le point 1 ne suffit
-   pas, `http` peut nécessiter `ca_cert` là où `connect_tls`
-   fonctionne. `tools/verif_ca.lua` diagnostique les deux chemins.
+### Erreurs `(nil, err)`
 
-Tu peux override par appel avec `ca_cert`, ou globalement via les
-variables d'environnement `SSL_CERT_FILE` / `SSL_CERT_DIR`. Voir [`security`](../security.md) et
-[`tls`](tls.md) pour les détails.
+- `opts.url` absent ou non string ;
+- URL sans scheme/host, scheme non supporté, CR/LF ou NUL ;
+- méthode non supportée ;
+- corps sur GET/HEAD/OPTIONS ;
+- champ d'option au mauvais type ou hors plage ;
+- query invalide ;
+- nom ou valeur de header invalide ;
+- DNS, connexion, TLS, envoi, lecture ou timeout ;
+- corps de réponse dépassant `max_body_size` ;
+- exception interne convertie en message `http: …`.
 
-## Décisions de design
+### Pas une erreur Babet
 
-- **Synchrone, bloquant**. Les scripts font généralement du
-  request-response one-shot ; le sync est plus simple et
-  suffisant. Pour beaucoup d'appels parallèles, utilise
-  [`workers`](workers.md).
-- **`verify=true` par défaut**. Désactiver la vérification TLS
-  doit être explicite (`verify=false`). Pas de downgrade
-  silencieux.
-- **Le statut HTTP n'est pas une erreur**. L'appelant décide si
-  `404` ou `500` est un échec ; l'appel réseau lui-même a réussi.
-- **Headers normalisés en clés minuscules** dans la réponse, pour
-  que les lookups case-insensitive marchent directement
-  (`r.headers["content-type"]`).
-- **Redirects opt-in**. Une redirection non suivie est visible
-  (`status = 301/302` + header `location`) ; la suivre est une
-  décision de l'appelant (`follow_redirects = true`). La limite de
-  hops est celle de cpp-httplib, pas la nôtre.
+Un statut 1xx, 3xx, 4xx ou 5xx reçu produit une table normale. L'application
+définit sa propre politique.
 
-## Hors v1
+<a id="http-design"></a>
+## Sécurité et limites
 
-- Raccourcis `put` / `delete` / `patch` — couverts par
-  `request{ method = ... }` ; sucre trivial à ajouter si le besoin
-  se confirme.
-- `opts.ca_path` (dossier de CA par appel) et `opts.max_redirects`
-  — une ancienne version de cette page les documentait à tort.
-- En-têtes de réponse répétés en table de strings (cas
-  `Set-Cookie` multiples).
-- Streaming du body de réponse (ex : pour télécharger de gros
-  fichiers). Actuellement `body` est lu entièrement en mémoire.
-- HTTP/2 / HTTP/3.
-- WebSockets (utilise [`socket`](socket.md) + TLS + une
-  bibliothèque de framing Lua si nécessaire).
-- Côté serveur. cpp-httplib le supporte, mais exposer un serveur
-  HTTP robuste à Lua est un design à part entière.
+- **SSRF.** Une URL contrôlée par un utilisateur peut viser loopback, le LAN,
+  des sockets metadata cloud ou des services administratifs. Valide scheme,
+  host, port et redirections selon ton modèle de menace.
+- **Headers sensibles.** N'inclus pas un token dans les logs. Réfléchis à son
+  comportement en cas de redirection inter-domaines.
+- **TLS.** Garde `verify = true`. Une CA privée est préférable à
+  `verify = false`.
+- **Taille mémoire.** Réduis `max_body_size` au minimum attendu.
+- **Compression.** Selon les capacités compilées de cpp-httplib et les headers,
+  le corps peut être traité par la bibliothèque ; la limite Babet porte sur les
+  octets livrés au receiver.
+- **Pas de streaming.** Requête et réponse sont en mémoire.
+- **Pas de session exposée.** Chaque appel construit un nouveau client ; aucun
+  cookie jar ou pool de connexions n'est garanti à travers les appels.
+- **Pas de formulaire/multipart automatique.** Encode explicitement ou utilise
+  un outil spécialisé.
+- **DNS synchrone.** Le resolver peut dépasser le timeout demandé.
+- **API HTTP uniquement.** Pour un protocole custom, utilise SOCKET/TLS.

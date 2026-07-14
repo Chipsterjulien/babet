@@ -1,4 +1,5 @@
 #include "crc32.hpp"
+#include "lua_utils.hpp"
 
 #include <miniz.h>
 
@@ -126,7 +127,7 @@ int lua_crc32sum(lua_State *L)
         return luaL_error(L, "Expected a string as argument");
     }
 
-    const char *path = luaL_checkstring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
     std::string err_msg;
     auto result = crc32sum(path, err_msg);
 

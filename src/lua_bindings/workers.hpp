@@ -2,94 +2,78 @@
 #define WORKERS_HPP
 
 #include <lua.hpp>
+#include <functional>
 #include <string>
 
 /**
- * @brief Chantier 8 — Workers (concurrence à mémoire isolée).
+ * @brief Workers à mémoire Lua isolée et communication par queues JSON.
  *
- * Modèle famille B : chaque worker est une pthread avec son propre
- * lua_State neuf, communiquant avec le parent par sérialisation JSON
- * interne. Pas de mémoire partagée, pas de race condition possible
- * au niveau Lua.
+ * API parent :
  *
- * API publique exposée sur babet.workers :
- *   - spawn(code [, args] [, opts])
- *       Lance un worker exécutant la string Lua `code` dans un
- *       lua_State neuf. `args` est une table sérialisable (scalaires
- *       + tables sans cycle) accessible côté worker via worker.args.
- *       Retourne le userdata worker, ou (nil, err) en cas d'échec
- *       de spawn (sérialisation impossible, échec pthread_create).
+ *   job, err = babet.workers.spawn(code [, args] [, opts])
  *
- * Méthodes sur userdata worker (convention pcall-style — exception
- * délibérée à la convention (val, err) du reste de Babet, parce
- * qu'un worker peut légitimement retourner nil comme valeur métier) :
+ *   code : chaîne Lua stricte.
+ *   args : table sérialisable ou nil, visible via worker.args.
+ *   opts : inbox_capacity / outbox_capacity, entiers 1..1 000 000,
+ *          défaut 64 messages par queue.
  *
- *   - w:join() -> (ok, value)
- *       Attend la fin du worker (bloquant). Retourne (true, result)
- *       en succès ou (false, err_string) si le worker a levé une
- *       erreur Lua.
+ * Méthodes du job :
  *
- *   - w:poll() -> (state, value)
- *       Vérifie l'état sans bloquer. state vaut :
- *         "running" : worker pas terminé, value = nil
- *         "done"    : terminé OK, value = résultat (peut être nil)
- *         "error"   : terminé en erreur, value = message
+ *   job:join()        -> (true, result) | (false, err)
+ *   job:poll()        -> ("running", nil) |
+ *                        ("done", result) | ("error", err)
+ *   job:send(v, t?)   -> (true, nil) | (false, reason) | (nil, err)
+ *   job:recv(t?)      -> (true, value) | (false, reason)
+ *   job:close()       -> (true, nil) ; ferme l'inbox uniquement
  *
- * Lifecycle : auto-cleanup du lua_State et de la thread quand join()
- * ou poll()=="done"/"error" est appelé, ou via __gc en filet de
- * sécurité si l'utilisateur oublie.
+ * API dans l'état enfant :
  *
- * Hors v1 (envisageable en SemVer additif) : spawn(function) via
- * string.dump, w:kill() pour interrompre, pool de workers persistants,
- * channels Go-like, format de sérialisation binaire plus rapide.
+ *   worker.args
+ *   worker.send(v, t?) -> (true, nil) | (false, reason_or_error)
+ *   worker.recv(t?)    -> (true, value) | (false, reason)
+ *
+ * join() bloque sans timeout et consomme le résultat. poll() est non bloquant
+ * mais consomme également le résultat dès qu'il renvoie done/error ; il ne
+ * faut donc pas faire poll terminé puis join. close() ferme seulement la queue
+ * parent->worker afin que l'outbox reste drainable. Le __gc ferme les deux
+ * queues puis joint la pthread, et peut donc bloquer si le worker ne termine
+ * pas.
+ *
+ * Transport : nil, booléens, nombres finis, chaînes sans NUL acceptées par le
+ * validateur UTF-8, listes denses non vides et objets à clés string. Tables
+ * vides -> objets JSON. Fonctions, userdata, coroutines, cycles, tables
+ * creuses/mixtes et profondeur > 32 sont refusés. Seule la première valeur de
+ * retour traverse ; aucun traceback n'est ajouté automatiquement.
+ *
+ * Timeout des queues : nil/absent = infini, 0 = immédiat, valeur positive
+ * <= 86400 s = attente bornée arrondie au milliseconde supérieur. Les raisons
+ * normales sont full, empty, timeout et closed.
  */
 void register_workers(lua_State *L);
 
 /**
- * @brief Fournit au module workers le contexte de chargement de
- * modules utilisateur, pour que require("mymod") fonctionne aussi
- * dans les workers (comme dans le parent).
+ * @brief Fournit le contexte de chargement des modules utilisateur.
  *
- * À appeler depuis main.cpp UNE fois, après avoir déterminé le mode
- * d'exécution (dossier vs embarqué) et avant tout spawn.
- *
- * En mode dossier : projectDir est le chemin du dossier qui contient
- * main.lua (les workers ajouteront ?.lua et ?/init.lua à leur
- * package.path).
- *
- * En mode embarqué : exePath est le chemin du binaire Babet
- * (les workers enregistreront l'embedded searcher avec ce path).
- *
- * Si l'un des deux est utilisé, l'autre peut être vide. Si les deux
- * sont vides, les workers fonctionneront mais require() utilisateur
- * échouera (seuls stdlib + babet.* + modules bundlés via
- * package.preload restent disponibles).
+ * À appeler une fois après résolution du mode dossier/embarqué et avant tout
+ * spawn. En dossier, projectDir alimente package.path du worker. En embarqué,
+ * exePath permet d'enregistrer le searcher ZIP. Si les deux sont vides, seuls
+ * stdlib, babet.* et les modules bundle/preload restent disponibles.
  */
 void set_workers_init_context(const std::string &projectDir,
                               const std::string &exePath,
                               bool embedded);
 
-#include <functional>
-
-/*
- * État processus partagé (option A validée — revues croisées triées).
+/**
+ * @brief Exécute une mutation process-wide avant le premier spawn.
  *
- * setenv(3) et le répertoire courant sont PROCESS-WIDE : une mutation
- * pendant qu'un worker lit l'environnement (getenv, exec, résolution
- * DNS) est une course de données (setenv peut realloc `environ`), et
- * un chdir change le CWD de tous les threads. Règle unique, simple et
- * sans course : mutations autorisées AVANT le premier workers.spawn,
- * interdites ensuite — définitivement, même après join, même si le
- * spawn a ensuite échoué.
+ * setenv(3) et chdir(2) modifient un état partagé par tous les threads. Le
+ * premier workers.spawn valide marque donc définitivement le processus :
+ * toute mutation ultérieure est refusée, même après join et même si ce spawn
+ * échoue plus tard pendant sérialisation, initialisation ou pthread_create.
  *
- * with_process_env_lock(fn) : exécute fn() sous le verrou d'état
- * processus SI aucun worker n'a jamais été lancé, et rend true.
- * Rend false (sans exécuter fn) si un worker a déjà été lancé.
- * spawn marque le drapeau sous le MÊME verrou, avant toute création
- * effective : aucun worker ne peut naître pendant une mutation.
- * IMPORTANT : fn ne doit faire AUCUNE opération Lua (un longjmp sous
- * verrou laisserait le mutex tenu) — uniquement le syscall, résultats
- * capturés dans des locales.
+ * `fn` est exécutée sous le verrou uniquement si aucun spawn n'a encore marqué
+ * l'état. Elle ne doit effectuer aucune opération Lua : un longjmp sous verrou
+ * laisserait le mutex détenu.
  */
 bool with_process_env_lock(const std::function<void()> &fn);
 

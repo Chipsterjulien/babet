@@ -5,13 +5,22 @@
 #include <optional>
 #include <string>
 
+struct ChecksumResult
+{
+    std::optional<std::string> value;
+    std::string error;
+};
+
 /**
- * @brief Calculates the checksum of a file using the specified hash algorithm.
- *
- * @param path The path to the file.
- * @param md The EVP_MD object representing the hash algorithm.
- * @return An optional string containing the checksum, or an error message.
+ * Calculates a checksum while preserving a precise filesystem/OpenSSL error.
+ * Only regular files are accepted. Symbolic links to regular files remain
+ * supported because the opened descriptor is validated with fstat().
  */
-std::optional<std::string> calculate_checksum(const std::string &path, const EVP_MD* md);
+ChecksumResult calculate_checksum_detailed(const std::string &path,
+                                           const EVP_MD *md);
+
+/** Backward-compatible C++ helper used by the algorithm-specific wrappers. */
+std::optional<std::string> calculate_checksum(const std::string &path,
+                                              const EVP_MD *md);
 
 #endif // CHECKSUM_UTILS_HPP

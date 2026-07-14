@@ -472,14 +472,14 @@ namespace
     // Accept an integer or a non-fractional float (e.g. 3.0). Returns true
     // and fills `out` on success.
     //
-    // `truncate_frac`:
-    //   true  -> floor() the value (used by iso(ts) "best-effort").
+    // `floor_fraction`:
+    //   true  -> floor() the value (used by iso(ts)).
     //   false -> reject any fractional value (used by format_duration).
     //
     // NaN / Inf are always rejected. Out-of-int64_t-range is always
     // rejected.
     bool coerce_lua_integer(lua_State *L, int idx,
-                            bool truncate_frac,
+                            bool floor_fraction,
                             int64_t &out,
                             const char *err_prefix /* funcname for luaL_error */)
     {
@@ -488,7 +488,10 @@ namespace
             out = static_cast<int64_t>(lua_tointeger(L, idx));
             return true;
         }
-        if (!lua_isnumber(L, idx))
+        // `lua_isnumber` accepterait aussi une string numérique ("60").
+        // Les signatures publiques iso(number) et format_duration(number)
+        // exigent un vrai number Lua.
+        if (lua_type(L, idx) != LUA_TNUMBER)
         {
             luaL_error(L, "%s: expected a number", err_prefix);
             return false; // unreachable
@@ -499,8 +502,8 @@ namespace
             luaL_error(L, "%s: not a finite number", err_prefix);
             return false;
         }
-        lua_Number target = truncate_frac ? std::floor(f) : f;
-        if (!truncate_frac && std::floor(f) != f)
+        lua_Number target = floor_fraction ? std::floor(f) : f;
+        if (!floor_fraction && std::floor(f) != f)
         {
             luaL_error(L, "%s: not an integer", err_prefix);
             return false;
@@ -547,7 +550,7 @@ int lua_time_iso(lua_State *L)
     }
     else if (top == 1)
     {
-        // truncate_frac = true: iso(0.5) -> "1970-01-01T00:00:00Z".
+        // floor_fraction = true: iso(0.5) -> epoch, iso(-0.5) -> -1 s.
         if (!coerce_lua_integer(L, 1, true, ts, "iso"))
             return 0; // unreachable, coerce raised
     }
@@ -567,7 +570,9 @@ int lua_time_parse_iso(lua_State *L)
     {
         return luaL_error(L, "parse_iso: expected one argument");
     }
-    if (!lua_isstring(L, 1))
+    // `lua_isstring` accepte aussi les numbers ; le parseur exige une
+    // vraie string afin que parse_iso(42) soit une erreur de type.
+    if (lua_type(L, 1) != LUA_TSTRING)
     {
         return luaL_error(L, "parse_iso: expected a string");
     }
@@ -597,7 +602,9 @@ int lua_time_parse_duration(lua_State *L)
     {
         return luaL_error(L, "parse_duration: expected one argument");
     }
-    if (!lua_isstring(L, 1))
+    // Même contrat strict que parse_iso : pas de coercition implicite
+    // d'un number vers sa représentation textuelle.
+    if (lua_type(L, 1) != LUA_TSTRING)
     {
         return luaL_error(L, "parse_duration: expected a string");
     }
@@ -629,7 +636,7 @@ int lua_time_format_duration(lua_State *L)
     }
 
     int64_t n;
-    // truncate_frac = false: 3.7 is rejected, 3.0 is OK.
+    // floor_fraction = false: 3.7 is rejected, 3.0 is OK.
     if (!coerce_lua_integer(L, 1, false, n, "format_duration"))
         return 0; // unreachable
 

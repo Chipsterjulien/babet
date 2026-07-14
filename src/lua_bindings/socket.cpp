@@ -2,6 +2,7 @@
 #include "lua_utils.hpp"
 #include "signal.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <climits>
@@ -9,7 +10,9 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
+#include <utility>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -34,19 +37,16 @@ namespace
 {
 
     constexpr const char *SOCK_META = "LuapilotSocket";
+    constexpr size_t DEFAULT_RECV_ALL_MAX_BYTES = 64ULL * 1024ULL * 1024ULL;
+    constexpr lua_Integer MAX_RECV_ALL_MAX_BYTES =
+        2LL * 1024LL * 1024LL * 1024LL;
 
-    // État porté par l'userdata. Tenu minimal : fd, mode listen,
-    // timeout en ms. Le buffer de readline est externalisé hors
-    // userdata pour ne pas alourdir la structure (chaque appel
-    // recv_line alloue son propre std::string temporaire).
-    //
-    // Champ ssl (sous-étape 1 du Chantier 7) :
-    //   nullptr  = socket TCP brut (cas par défaut).
-    //   non-null = socket TLS connecté. Toutes les méthodes send/recv/
-    //              recv_line/recv_all/close/... testeront ce champ et
-    //              utiliseront SSL_read/SSL_write au lieu de recv/send
-    //              (sous-étape 3). Pour l'instant, le champ existe
-    //              mais aucune fonction ne le branche encore.
+    // État porté par l'userdata : descripteur, mode écoute, timeout,
+    // session TLS éventuelle et octets déjà consommés mais pas encore
+    // livrés à Lua. Le buffer `recv_pending` préserve l'ordre du flux
+    // lorsqu'un recv_line()/recv_all() est interrompu ou expire après
+    // avoir lu une partie des données. Les appels recv(), recv_line() et
+    // recv_all() le consultent tous avant de relire le socket.
     struct Sock
     {
         int fd;         // -1 si fermé
@@ -54,17 +54,10 @@ namespace
         int timeout_ms; // 0 = pas de timeout (bloquant infini)
         SSL *ssl;       // nullptr en TCP brut, non-null après TLS handshake
 
-        // CORRECTIF (post-bug bot IRC) : buffer persistant pour recv_line.
-        // Si recv_line a lu N octets puis tombe en timeout (pas de \n vu),
-        // les octets DOIVENT être conservés pour le prochain appel —
-        // sinon ils sont perdus (déjà consommés du socket par recv()).
-        // Bug reproductible : mettre set_timeout(1) sur un flux IRC et
-        // les premiers octets de certaines lignes étaient mangés. Le
-        // contrat (nil, "closed", partial) sur EOF documentait déjà
-        // l'intention de "ne pas perdre les octets déjà lus" ; on
-        // étend cette garantie au timeout, de façon TRANSPARENTE
-        // côté script (le buffer est interne, pas un partial à gérer).
-        std::string recv_line_pending;
+        // Octets déjà retirés du socket mais pas encore rendus à Lua.
+        // Ce buffer est commun aux trois méthodes de réception afin que
+        // leur mélange ne réordonne jamais le flux après un timeout.
+        std::string recv_pending;
     };
 
     Sock *check_sock(lua_State *L, int idx)
@@ -72,9 +65,23 @@ namespace
         return static_cast<Sock *>(luaL_checkudata(L, idx, SOCK_META));
     }
 
+    // Integer arguments exposed by the socket API are strict Lua integers.
+    // luaL_checkinteger also accepts numeric strings; that coercion makes
+    // configuration mistakes such as port = "443" needlessly silent.
+    lua_Integer check_strict_integer(lua_State *L, int idx,
+                                     const char *message)
+    {
+        luaL_checktype(L, idx, LUA_TNUMBER);
+        if (!lua_isinteger(L, idx))
+        {
+            luaL_argerror(L, idx, message);
+        }
+        return lua_tointeger(L, idx);
+    }
+
     // Pousse un nouveau userdata Sock initialisé, métatable posée.
     // CORRECTIF (placement new) : Sock contient maintenant un
-    // std::string (recv_line_pending) dont le constructeur doit être
+    // std::string (recv_pending) dont le constructeur doit être
     // appelé explicitement, lua_newuserdata ne faisant qu'un malloc.
     // Le destructeur est appelé symétriquement dans sock_gc.
     Sock *push_new_sock(lua_State *L, int fd, bool listening)
@@ -85,7 +92,7 @@ namespace
         s->listening = listening;
         s->timeout_ms = 0;
         s->ssl = nullptr; // TCP brut par défaut, TLS posé après par connect_tls/starttls
-        // recv_line_pending : déjà initialisé à "" par le constructeur par défaut.
+        // recv_pending : déjà initialisé à "" par le constructeur par défaut.
         luaL_getmetatable(L, SOCK_META);
         lua_setmetatable(L, -2);
         return s;
@@ -201,6 +208,81 @@ namespace
             return INT_MAX;
         }
         return static_cast<int>(delta);
+    }
+
+    // Parse un timeout positionnel en secondes. Si l'argument est absent ou
+    // nil, la valeur par défaut fournie par l'appelant est conservée. Un
+    // timeout explicite à 0 signifie toujours « bloquant infini ».
+    bool parse_timeout_argument(lua_State *L, int idx, int default_ms,
+                                int *out, std::string &err,
+                                const char *prefix_for_err)
+    {
+        *out = default_ms;
+        if (lua_isnoneornil(L, idx))
+        {
+            return true;
+        }
+        if (lua_type(L, idx) != LUA_TNUMBER)
+        {
+            err = prefix_for_err;
+            err += ": timeout must be a number";
+            return false;
+        }
+        lua_Number t = lua_tonumber(L, idx);
+        if (std::isnan(t) || !std::isfinite(t))
+        {
+            err = prefix_for_err;
+            err += ": timeout must be finite (not NaN or inf)";
+            return false;
+        }
+        if (t < 0.0)
+        {
+            err = prefix_for_err;
+            err += ": timeout must be >= 0";
+            return false;
+        }
+        if (t == 0.0)
+        {
+            *out = 0;
+            return true;
+        }
+        double ms = t * 1000.0;
+        if (ms > static_cast<double>(INT_MAX))
+        {
+            err = prefix_for_err;
+            err += ": timeout too large";
+            return false;
+        }
+        *out = (ms < 1.0) ? 1 : static_cast<int>(ms);
+        return true;
+    }
+
+    bool parse_recv_all_max_bytes(lua_State *L, int idx, size_t *out,
+                                  std::string &err)
+    {
+        *out = DEFAULT_RECV_ALL_MAX_BYTES;
+        if (lua_isnoneornil(L, idx))
+        {
+            return true;
+        }
+        if (!lua_isinteger(L, idx))
+        {
+            err = "socket: recv_all: max_bytes must be an integer";
+            return false;
+        }
+        const lua_Integer value = lua_tointeger(L, idx);
+        if (value <= 0)
+        {
+            err = "socket: recv_all: max_bytes must be > 0";
+            return false;
+        }
+        if (value > MAX_RECV_ALL_MAX_BYTES)
+        {
+            err = "socket: recv_all: max_bytes too large (maximum 2 GiB)";
+            return false;
+        }
+        *out = static_cast<size_t>(value);
+        return true;
     }
 
     // Attend que `fd` devienne prêt pour POLLIN (recv) ou POLLOUT
@@ -323,11 +405,11 @@ namespace
     // (premier appel suffit, idempotent). Pas de SSL_library_init()
     // explicite (déprécié). Pas de SSL_load_error_strings() (idem).
     //
-    // SSL_CTX global créé en lazy au premier connect_tls/starttls. Un
-    // seul context partagé pour toutes les connexions client : pas de
-    // raison d'en avoir plusieurs, OpenSSL est thread-safe sur SSL_CTX
-    // partagé. Le SSL_CTX est protégé par la durée de vie du processus
-    // (jamais détruit explicitement : libéré à l'exit, négligeable).
+    // SSL_CTX de base créé en lazy au premier connect_tls/starttls. Il
+    // contient uniquement les CA système et devient immuable après init.
+    // Les appels qui fournissent ca_cert/ca_path utilisent un contexte
+    // privé, afin qu'une CA ajoutée ne soit jamais approuvée par une autre
+    // connexion et qu'aucun worker ne modifie un contexte partagé.
     //
     // Versions : TLS_client_method() est la méthode "any version"
     // moderne (OpenSSL >= 1.1.0). On force TLS 1.2 minimum via
@@ -395,34 +477,111 @@ namespace
         return msg;
     }
 
-    // Initialise le SSL_CTX global (lazy, idempotent). Renvoie true
-    // si OK, false avec err rempli sinon.
-    //
-    // Configuration appliquée :
-    //   - TLS_client_method() (any version, négocie vers la plus haute
-    //     supportée mutuellement)
-    //   - TLS 1.2 minimum (TLS-D)
-    //   - SSL_VERIFY_PEER + verify_cb par défaut (rejet sur cert invalide
-    //     côté OpenSSL ; le hostname check est posé par SSL session, pas
-    //     ici, parce qu'il dépend du host passé à connect_tls)
-    //   - Verify paths système (TLS-5)
-    //   - SSL_MODE_AUTO_RETRY pour que SSL_read/SSL_write gèrent eux-
-    //     mêmes les renégociations transparentes sans retourner
-    //     SSL_ERROR_WANT_READ/WRITE en pleine opération applicative
-    //
-    // NB : aucune exception, aucun goto. Politique RAII manuelle sur
-    // SSL_CTX (libéré seulement si erreur de config en cours d'init).
-    // CORRECTIF (post-revue Gemini) : init thread-safe.
-    // Avant les workers, l'init était lazy ("if (g_tls_ctx) return")
-    // mais ce pattern est cassé en multi-thread : deux workers qui
-    // appellent connect_tls() exactement en même temps peuvent
-    // tomber dans la branche d'allocation tous les deux, leaker
-    // un SSL_CTX, et provoquer une race sur la configuration.
-    //
-    // std::call_once garantit que la fermeture passée est exécutée
-    // exactement une fois, peu importe le nombre de threads
-    // concurrents. Les autres threads bloquent jusqu'à la fin de
-    // l'init, puis voient le résultat.
+    // Construit un contexte client complet. Le contexte de base (sans CA
+    // personnalisée) est créé une seule fois et devient immuable. Lorsqu'un
+    // appel fournit ca_cert/ca_path, cette fonction crée au contraire un
+    // contexte privé pour cet appel : aucune autorité ajoutée ne peut alors
+    // contaminer les connexions suivantes ni entrer en concurrence avec un
+    // autre worker.
+    SSL_CTX *create_client_ctx(const char *custom_ca_file,
+                               const char *custom_ca_dir,
+                               std::string &err)
+    {
+        OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
+                             OPENSSL_INIT_LOAD_CRYPTO_STRINGS,
+                         nullptr);
+
+        SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+        if (ctx == nullptr)
+        {
+            err = format_tls_error("SSL_CTX_new failed");
+            return nullptr;
+        }
+
+        if (SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) != 1)
+        {
+            err = format_tls_error(
+                "set_min_proto_version(TLS1_2) failed");
+            SSL_CTX_free(ctx);
+            return nullptr;
+        }
+
+        // Passe 1 : chemins compile-time d'OpenSSL + variables
+        // SSL_CERT_FILE / SSL_CERT_DIR.
+        if (SSL_CTX_set_default_verify_paths(ctx) != 1)
+        {
+            // Non fatal : un CA explicite peut suffire, ou verify=false
+            // peut être demandé. On évite seulement de laisser une vieille
+            // erreur dans la pile OpenSSL du thread.
+            ERR_clear_error();
+        }
+
+        // Passe 2 : probing des emplacements courants des distributions.
+        struct CABundleCandidate
+        {
+            const char *file;
+            const char *dir;
+        };
+        static const CABundleCandidate candidates[] = {
+            {"/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs"},
+            {"/etc/pki/tls/certs/ca-bundle.crt", "/etc/pki/tls/certs"},
+            {"/etc/ssl/ca-bundle.pem", nullptr},
+            {"/var/lib/ca-certificates/ca-bundle.pem", nullptr},
+            {"/usr/local/etc/ssl/cert.pem", "/usr/local/etc/ssl/certs"},
+            {"/etc/openssl/certs/ca-certificates.crt",
+             "/etc/openssl/certs"},
+        };
+
+        for (const auto &candidate : candidates)
+        {
+            const char *use_file = nullptr;
+            const char *use_dir = nullptr;
+
+            if (candidate.file && ::access(candidate.file, R_OK) == 0)
+            {
+                use_file = candidate.file;
+            }
+            if (candidate.dir)
+            {
+                struct stat st;
+                if (::stat(candidate.dir, &st) == 0 && S_ISDIR(st.st_mode))
+                {
+                    use_dir = candidate.dir;
+                }
+            }
+            if (use_file == nullptr && use_dir == nullptr)
+            {
+                continue;
+            }
+
+            if (SSL_CTX_load_verify_locations(ctx, use_file, use_dir) == 1)
+            {
+                break;
+            }
+            ERR_clear_error();
+        }
+
+        // CA spécifique à CETTE configuration. Pour le contexte global,
+        // les deux pointeurs sont nuls et cette branche est ignorée.
+        if (custom_ca_file != nullptr || custom_ca_dir != nullptr)
+        {
+            if (SSL_CTX_load_verify_locations(ctx, custom_ca_file,
+                                              custom_ca_dir) != 1)
+            {
+                err = format_tls_error("load_verify_locations failed");
+                SSL_CTX_free(ctx);
+                return nullptr;
+            }
+        }
+
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+        SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
+        return ctx;
+    }
+
+    // Contexte de base partagé, strictement immuable après l'initialisation.
+    // Il ne contient que les autorités système. Les CA personnalisées sont
+    // chargées dans un contexte privé par appel (voir new_ssl_for_options).
     std::once_flag g_tls_init_flag;
     bool g_tls_init_success = false;
     std::string g_tls_init_err;
@@ -431,131 +590,8 @@ namespace
     {
         std::call_once(g_tls_init_flag, []()
                        {
-            // Premier appel idempotent depuis OpenSSL 1.1.0.
-            OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS |
-                                 OPENSSL_INIT_LOAD_CRYPTO_STRINGS,
-                             nullptr);
-
-            SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-            if (ctx == nullptr)
-            {
-                g_tls_init_err = format_tls_error("SSL_CTX_new failed");
-                g_tls_init_success = false;
-                return;
-            }
-
-            // TLS 1.2 minimum (TLS-D). TLS 1.3 sera négocié
-            // automatiquement si dispo des deux côtés.
-            if (SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION) != 1)
-            {
-                g_tls_init_err = format_tls_error(
-                    "set_min_proto_version(TLS1_2) failed");
-                SSL_CTX_free(ctx);
-                g_tls_init_success = false;
-                return;
-            }
-
-            // ====== Verify paths : CA bundle system =================
-            // Le bundle CA n'a pas un emplacement standard unique sur
-            // Linux/BSD ; chaque distro choisit son chemin. Comme
-            // notre OpenSSL est vendored et statiquement linké, on ne
-            // peut pas se reposer sur la config système du paquet
-            // openssl de la distro.
-            //
-            // Stratégie en deux passes :
-            //   1) SSL_CTX_set_default_verify_paths() : utilise les
-            //      chemins compile-time d'OpenSSL (configurés via
-            //      --openssldir=/etc/ssl dans build_local.sh) ET les
-            //      variables d'env SSL_CERT_FILE / SSL_CERT_DIR si
-            //      définies. Couvre Arch/Debian/Ubuntu/Alpine.
-            //   2) Probing d'une liste de chemins connus pour les
-            //      autres distros (Fedora/RHEL, OpenSUSE, *BSD).
-            //      On charge via SSL_CTX_load_verify_locations() qui
-            //      est additif (peut être appelé plusieurs fois).
-            //
-            // Politique : aucune des deux passes n'est obligatoire.
-            // Si rien n'est chargé, on continue quand même — le user
-            // peut toujours passer ca_cert explicitement, ou faire
-            // verify=false. Un fail dur ici casserait des usages
-            // légitimes (TLS sans verify, ou serveur interne avec
-            // ca_cert fourni).
-            //
-            // Passe 1 : chemins compile-time + env vars
-            if (SSL_CTX_set_default_verify_paths(ctx) != 1)
-            {
-                // Pas fatal. On vide la pile d'erreur pour que les
-                // prochains appels OpenSSL ne ramassent pas cette
-                // erreur résiduelle.
-                ERR_clear_error();
-            }
-
-            // Passe 2 : probing des emplacements connus.
-            // Le premier qui marche s'arrête (les CA system sont
-            // typiquement le même contenu partout, pas besoin de
-            // charger plusieurs sources).
-            struct CABundleCandidate
-            {
-                const char *file;
-                const char *dir;
-            };
-            static const CABundleCandidate candidates[] = {
-                // Debian / Ubuntu / Arch / Alpine / Gentoo
-                {"/etc/ssl/certs/ca-certificates.crt", "/etc/ssl/certs"},
-                // Fedora / RHEL / CentOS / Rocky / Alma
-                {"/etc/pki/tls/certs/ca-bundle.crt", "/etc/pki/tls/certs"},
-                // OpenSUSE
-                {"/etc/ssl/ca-bundle.pem", nullptr},
-                {"/var/lib/ca-certificates/ca-bundle.pem", nullptr},
-                // FreeBSD (security/ca_root_nss)
-                {"/usr/local/etc/ssl/cert.pem", "/usr/local/etc/ssl/certs"},
-                // NetBSD
-                {"/etc/openssl/certs/ca-certificates.crt",
-                 "/etc/openssl/certs"},
-            };
-
-            for (const auto &c : candidates)
-            {
-                const char *use_file = nullptr;
-                const char *use_dir = nullptr;
-                if (c.file && ::access(c.file, R_OK) == 0)
-                {
-                    use_file = c.file;
-                }
-                if (c.dir)
-                {
-                    struct stat st;
-                    if (::stat(c.dir, &st) == 0 && S_ISDIR(st.st_mode))
-                    {
-                        use_dir = c.dir;
-                    }
-                }
-                if (use_file == nullptr && use_dir == nullptr)
-                {
-                    continue;
-                }
-                if (SSL_CTX_load_verify_locations(ctx, use_file, use_dir)
-                    == 1)
-                {
-                    break; // CA chargé, stop le probing
-                }
-                // Échec sur ce chemin (rare : fichier illisible,
-                // format inconnu) : vider l'erreur et essayer le
-                // suivant.
-                ERR_clear_error();
-            }
-
-            // Vérification activée par défaut (TLS-C : verify=true).
-            // verify_cb = nullptr : comportement OpenSSL par défaut
-            // (rejette si verify_result != X509_V_OK).
-            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
-
-            // AUTO_RETRY : SSL_read/SSL_write gèrent les
-            // renégociations transparentes sans renvoyer WANT_READ/
-            // WANT_WRITE à l'appli.
-            SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
-
-            g_tls_ctx = ctx;
-            g_tls_init_success = true; });
+            g_tls_ctx = create_client_ctx(nullptr, nullptr, g_tls_init_err);
+            g_tls_init_success = (g_tls_ctx != nullptr); });
 
         if (!g_tls_init_success)
         {
@@ -618,7 +654,12 @@ namespace
                 lua_pop(L, 1);
                 return false;
             }
-            opts.ca_cert = lua_tostring(L, -1);
+            if (!lua_string_without_nul(L, -1, opts.ca_cert,
+                                        "tls: opts.ca_cert", err))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
         }
         lua_pop(L, 1);
 
@@ -632,7 +673,12 @@ namespace
                 lua_pop(L, 1);
                 return false;
             }
-            opts.ca_path = lua_tostring(L, -1);
+            if (!lua_string_without_nul(L, -1, opts.ca_path,
+                                        "tls: opts.ca_path", err))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
         }
         lua_pop(L, 1);
 
@@ -646,7 +692,12 @@ namespace
                 lua_pop(L, 1);
                 return false;
             }
-            opts.hostname = lua_tostring(L, -1);
+            if (!lua_string_without_nul(L, -1, opts.hostname,
+                                        "tls: opts.hostname", err))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
         }
         lua_pop(L, 1);
 
@@ -660,14 +711,20 @@ namespace
                 lua_pop(L, 1);
                 return false;
             }
-            const char *v = lua_tostring(L, -1);
-            if (std::strcmp(v, "1.2") != 0 && std::strcmp(v, "1.3") != 0)
+            std::string version;
+            if (!lua_string_without_nul(L, -1, version,
+                                        "tls: opts.min_version", err))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
+            if (version != "1.2" && version != "1.3")
             {
                 err = "tls: opts.min_version must be '1.2' or '1.3'";
                 lua_pop(L, 1);
                 return false;
             }
-            opts.min_version = v;
+            opts.min_version = std::move(version);
         }
         lua_pop(L, 1);
 
@@ -711,6 +768,56 @@ namespace
         return true;
     }
 
+    // Crée une session SSL avec le bon trust store.
+    // - sans ca_cert/ca_path : SSL_new sur le contexte global immuable ;
+    // - avec CA personnalisée : contexte privé complet, libéré juste après
+    //   SSL_new. SSL_new conserve sa propre référence au SSL_CTX jusqu'au
+    //   SSL_free final, donc la durée de vie reste correcte.
+    SSL *new_ssl_for_options(const TlsOptions &opts, std::string &err)
+    {
+        if (opts.ca_cert.empty() && opts.ca_path.empty())
+        {
+            SSL *ssl = SSL_new(g_tls_ctx);
+            if (ssl == nullptr)
+            {
+                err = format_tls_error("SSL_new failed");
+            }
+            return ssl;
+        }
+
+        const char *ca_file =
+            opts.ca_cert.empty() ? nullptr : opts.ca_cert.c_str();
+        const char *ca_dir =
+            opts.ca_path.empty() ? nullptr : opts.ca_path.c_str();
+
+        SSL_CTX *private_ctx = create_client_ctx(ca_file, ca_dir, err);
+        if (private_ctx == nullptr)
+        {
+            return nullptr;
+        }
+
+        SSL *ssl = SSL_new(private_ctx);
+        SSL_CTX_free(private_ctx); // SSL possède maintenant sa référence.
+        if (ssl == nullptr)
+        {
+            err = format_tls_error("SSL_new failed");
+            return nullptr;
+        }
+        return ssl;
+    }
+
+    bool is_ip_literal(const char *value)
+    {
+        if (value == nullptr || *value == '\0')
+        {
+            return false;
+        }
+        struct in_addr ipv4;
+        struct in6_addr ipv6;
+        return ::inet_pton(AF_INET, value, &ipv4) == 1 ||
+               ::inet_pton(AF_INET6, value, &ipv6) == 1;
+    }
+
     // Applique les options à un SSL* avant le handshake.
     // host_default sert pour le hostname check si opts.hostname est vide
     // (ex : "irc.libera.chat" pour connect_tls). Pour starttls() sur un
@@ -718,35 +825,30 @@ namespace
     // opts.hostname (le check serait sinon basé sur "127.0.0.1" ou
     // l'adresse IP, donc échouerait pour un vrai cert).
     //
-    // ATTENTION : les options ca_cert / ca_path modifient le SSL_CTX
-    // GLOBAL en v1 (pas par-connexion). C'est une limite acceptée :
-    // pour des cas multi-CA strictement isolés, attendre une v2 qui
-    // créerait un CTX par-connexion. Pour 99% des cas (bot IRC, SMTP,
-    // etc.), les CA système suffisent et ca_cert n'est même pas utilisé.
+    // ca_cert / ca_path ne sont pas appliqués ici : ils déterminent le
+    // SSL_CTX utilisé lors de new_ssl_for_options(), ce qui garantit leur
+    // isolation par connexion.
     bool apply_tls_options(SSL *ssl, const TlsOptions &opts,
                            const char *host_default, std::string &err)
     {
-        // Verify mode + hostname check (TLS-C + TLS-4)
+        const char *hn = !opts.hostname.empty()
+                             ? opts.hostname.c_str()
+                             : host_default;
+
+        // Certificate-chain and reference-identity verification are
+        // controlled by `verify`. SNI is independent: disabling certificate
+        // verification for a test connection must not prevent a virtual host
+        // from selecting the correct certificate/protocol endpoint.
         if (opts.verify)
         {
             SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
-            const char *hn = !opts.hostname.empty()
-                                 ? opts.hostname.c_str()
-                                 : host_default;
             if (hn && *hn)
             {
-                // SSL_set1_host : check chaîne ET hostname (CN/SAN).
-                // OpenSSL >= 1.0.2. Renvoie 1 en succès.
                 if (SSL_set1_host(ssl, hn) != 1)
                 {
                     err = format_tls_error("SSL_set1_host failed");
                     return false;
                 }
-                // SNI : même hostname envoyé au serveur. Peut échouer
-                // si hn est une IP littérale ; dans ce cas on ignore
-                // (pas de SNI pour IP, c'est conforme RFC 6066).
-                SSL_set_tlsext_host_name(ssl, hn);
-                ERR_clear_error();
             }
         }
         else
@@ -754,25 +856,20 @@ namespace
             SSL_set_verify(ssl, SSL_VERIFY_NONE, nullptr);
         }
 
-        // CA cert / CA path : load via SSL_CTX_load_verify_locations
-        // (cf. note sur le CTX global ci-dessus).
-        if (!opts.ca_cert.empty() || !opts.ca_path.empty())
+        // RFC 6066 defines server_name for DNS hostnames, not IP literals.
+        // Send SNI whenever a DNS name is available, including verify=false.
+        if (hn && *hn && !is_ip_literal(hn))
         {
-            const char *cf = opts.ca_cert.empty()
-                                 ? nullptr
-                                 : opts.ca_cert.c_str();
-            const char *cp = opts.ca_path.empty()
-                                 ? nullptr
-                                 : opts.ca_path.c_str();
-            if (SSL_CTX_load_verify_locations(g_tls_ctx, cf, cp) != 1)
+            if (SSL_set_tlsext_host_name(ssl, hn) != 1)
             {
-                err = format_tls_error("load_verify_locations failed");
+                err = format_tls_error("set SNI hostname failed");
                 return false;
             }
         }
+        ERR_clear_error();
 
-        // min_version : "1.2" déjà posé sur le CTX (init_openssl_ctx).
-        // "1.3" surcharge par-connexion.
+        // TLS 1.2 is the context-wide minimum. "1.3" raises the minimum for
+        // this connection; it is not a maximum-version selector.
         if (opts.min_version == "1.3")
         {
             if (SSL_set_min_proto_version(ssl, TLS1_3_VERSION) != 1)
@@ -798,9 +895,8 @@ namespace
     // WANT_READ/WANT_WRITE de tls_send_some / tls_recv_some.
     // En cas d'échec handshake, l'appelant remet bloquant avant de
     // fermer le fd (cohérence d'état avant cleanup).
-    bool tls_handshake(SSL *ssl, int fd, int timeout_ms, std::string &err)
+    bool tls_handshake(SSL *ssl, int fd, Deadline deadline, std::string &err)
     {
-        Deadline deadline = make_deadline(timeout_ms);
         for (;;)
         {
             ERR_clear_error();
@@ -936,8 +1032,10 @@ namespace
         {
             return 0; // rien à envoyer
         }
+        const size_t chunk = std::min(
+            len, static_cast<size_t>(INT_MAX));
         ERR_clear_error();
-        int n = SSL_write(ssl, data, static_cast<int>(len));
+        int n = SSL_write(ssl, data, static_cast<int>(chunk));
         if (n > 0)
         {
             return n;
@@ -1046,8 +1144,9 @@ namespace
     int sock_send(lua_State *L)
     {
         Sock *s = check_sock(L, 1);
+        luaL_checktype(L, 2, LUA_TSTRING);
         size_t len = 0;
-        const char *data = luaL_checklstring(L, 2, &len);
+        const char *data = lua_tolstring(L, 2, &len);
         if (s->fd < 0)
         {
             return push_fail(L, "socket: send: socket is closed");
@@ -1191,7 +1290,8 @@ namespace
     int sock_recv(lua_State *L)
     {
         Sock *s = check_sock(L, 1);
-        lua_Integer n = luaL_checkinteger(L, 2);
+        lua_Integer n = check_strict_integer(
+            L, 2, "count must be an integer");
         if (n <= 0)
         {
             return push_fail(L, "socket: recv: count must be > 0");
@@ -1201,6 +1301,15 @@ namespace
             return push_fail(L,
                              "socket: recv: count exceeds 16 MB cap");
         }
+
+        int effective_timeout_ms = 0;
+        std::string timeout_error;
+        if (!parse_timeout_argument(L, 3, s->timeout_ms,
+                                    &effective_timeout_ms, timeout_error,
+                                    "socket: recv"))
+        {
+            return push_fail(L, timeout_error);
+        }
         if (s->fd < 0)
         {
             return push_fail(L, "socket: recv: socket is closed");
@@ -1209,6 +1318,18 @@ namespace
         {
             return push_fail(L,
                              "socket: recv: cannot recv on a listening socket");
+        }
+
+        // recv_line()/recv_all() may already have consumed bytes before a
+        // timeout or interruption. Deliver those bytes first so switching
+        // receive helpers never reorders the TCP stream.
+        if (!s->recv_pending.empty())
+        {
+            const size_t count = std::min(
+                static_cast<size_t>(n), s->recv_pending.size());
+            lua_pushlstring(L, s->recv_pending.data(), count);
+            s->recv_pending.erase(0, count);
+            return 1;
         }
 
         // CORRECTIF (post-revue ChatGPT) : symétrie avec send(),
@@ -1223,9 +1344,9 @@ namespace
         // TLS (sous-étape 1.3) : si s->ssl non-null, route via
         // SSL_read avec gestion WANT_READ/WANT_WRITE.
         const bool is_tls = (s->ssl != nullptr);
-        const bool use_nonblock = (!is_tls) && (s->timeout_ms > 0);
+        const bool use_nonblock = (!is_tls) && (effective_timeout_ms > 0);
         const int recv_flags = use_nonblock ? MSG_DONTWAIT : 0;
-        Deadline deadline = make_deadline(s->timeout_ms);
+        Deadline deadline = make_deadline(effective_timeout_ms);
 
         std::vector<char> buf(static_cast<size_t>(n));
         std::string tls_err;
@@ -1336,6 +1457,15 @@ namespace
                              "socket: recv_line: cannot recv on a listening socket");
         }
 
+        int effective_timeout_ms = 0;
+        std::string timeout_error;
+        if (!parse_timeout_argument(L, 2, s->timeout_ms,
+                                    &effective_timeout_ms, timeout_error,
+                                    "socket: recv_line"))
+        {
+            return push_fail(L, timeout_error);
+        }
+
         // DEADLINE GLOBALE : la lecture ligne-par-ligne peut faire
         // beaucoup d'appels recv(1 byte). La deadline couvre TOUT
         // l'appel recv_line, pas chaque octet.
@@ -1346,15 +1476,15 @@ namespace
         // OpenSSL bufferise en interne -- le surcoût reste raisonnable
         // pour des protocoles texte légers (IRC, SMTP).
         const bool is_tls = (s->ssl != nullptr);
-        Deadline deadline = make_deadline(s->timeout_ms);
+        Deadline deadline = make_deadline(effective_timeout_ms);
 
         // CORRECTIF (post-bug bot IRC) : reprendre les octets déjà
-        // lus lors d'un timeout précédent. Si recv_line_pending est
+        // lus lors d'un timeout précédent. Si recv_pending est
         // vide (cas normal), acc démarre vide ; sinon on reprend
         // où on s'était arrêté. Le move + clear garantit qu'on ne
         // double-traite jamais les mêmes octets.
-        std::string acc = std::move(s->recv_line_pending);
-        s->recv_line_pending.clear();
+        std::string acc = std::move(s->recv_pending);
+        s->recv_pending.clear();
 
         std::string tls_err;
         char c;
@@ -1392,7 +1522,7 @@ namespace
                     // déjà lus pour ne pas les perdre (même logique
                     // que timeout), on dispatche le callback Lua
                     // utilisateur, puis on remonte "interrupted".
-                    s->recv_line_pending = std::move(acc);
+                    s->recv_pending = std::move(acc);
                     signal_dispatch_pending(L);
                     return push_fail(L, "interrupted");
                 }
@@ -1401,7 +1531,7 @@ namespace
                     // Erreur fatale : on conserve quand même les octets
                     // au cas où l'utilisateur ferait quelque chose
                     // d'intelligent ensuite. close() les libère via __gc.
-                    s->recv_line_pending = std::move(acc);
+                    s->recv_pending = std::move(acc);
                     return push_errno_fail(L, "recv_line");
                 }
                 if (r == 0)
@@ -1414,7 +1544,7 @@ namespace
                     // ms et le timeout se déclenche. SANS ce buffer,
                     // le ':' est jeté et l'appel suivant récupère
                     // "server NOTICE ..." sans son ':'.
-                    s->recv_line_pending = std::move(acc);
+                    s->recv_pending = std::move(acc);
                     return push_fail(L, "timeout");
                 }
             }
@@ -1434,19 +1564,19 @@ namespace
                     int wr = wait_ready_deadline(s->fd, POLLOUT, deadline);
                     if (wr == WAIT_INTERRUPTED)
                     {
-                        s->recv_line_pending = std::move(acc);
+                        s->recv_pending = std::move(acc);
                         signal_dispatch_pending(L);
                         return push_fail(L, "interrupted");
                     }
                     if (wr == 0)
                     {
                         // Idem : conserver acc.
-                        s->recv_line_pending = std::move(acc);
+                        s->recv_pending = std::move(acc);
                         return push_fail(L, "timeout");
                     }
                     if (wr < 0)
                     {
-                        s->recv_line_pending = std::move(acc);
+                        s->recv_pending = std::move(acc);
                         return push_errno_fail(L, "recv_line");
                     }
                     continue;
@@ -1454,21 +1584,23 @@ namespace
                 if (rc == TLS_IO_FATAL)
                 {
                     // Erreur TLS fatale : on garde quand même.
-                    s->recv_line_pending = std::move(acc);
+                    s->recv_pending = std::move(acc);
                     return push_fail(L, tls_err);
                 }
                 got = (rc == TLS_IO_EOF) ? 0 : rc;
             }
             else
             {
-                got = ::recv(s->fd, &c, 1, 0);
+                got = ::recv(s->fd, &c, 1,
+                             effective_timeout_ms > 0 ? MSG_DONTWAIT : 0);
                 if (got < 0)
                 {
-                    if (errno == EINTR)
+                    if (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK)
                     {
                         continue;
                     }
-                    s->recv_line_pending = std::move(acc);
+                    s->recv_pending = std::move(acc);
                     return push_errno_fail(L, "recv_line");
                 }
             }
@@ -1509,18 +1641,18 @@ namespace
             constexpr size_t MAX_LINE_BYTES = 8 * 1024 * 1024;
             if (acc.size() >= MAX_LINE_BYTES)
             {
-                s->recv_line_pending.clear();
+                s->recv_pending.clear();
                 return push_fail(L, "line too long");
             }
             acc.push_back(c);
         }
     }
 
-    // recv_all() : lit jusqu'à EOF du peer, accumule tout. Renvoie
-    // (data, nil) -- même chaîne vide est un succès (peer ferme sans
-    // rien envoyer). Timeout sur un read intermédiaire -> (nil,
-    // "timeout"). Si on veut un comportement "lire ce qui est dispo
-    // maintenant", utiliser recv(n) avec timeout court.
+    // recv_all(timeout?, max_bytes?) : lit jusqu'à EOF du peer.
+    // L'accumulation est bornée à 64 MiB par défaut ; le caller peut fournir
+    // une limite positive jusqu'à 2 GiB. Aucun corps partiel n'est renvoyé
+    // sur erreur, mais les octets déjà consommés restent dans recv_pending et
+    // seront livrés en premier lors du prochain appel de réception.
     int sock_recv_all(lua_State *L)
     {
         Sock *s = check_sock(L, 1);
@@ -1534,24 +1666,53 @@ namespace
                              "socket: recv_all: cannot recv on a listening socket");
         }
 
-        // DEADLINE GLOBALE : on lit jusqu'à EOF, donc potentiellement
-        // beaucoup de chunks. La deadline couvre TOUT l'appel.
-        //
-        // TLS (sous-étape 1.3) : tls_recv_some par chunks 4 KB. EOF
-        // est SSL_ERROR_ZERO_RETURN, signe que le serveur a envoyé
-        // close_notify — c'est le succès attendu pour recv_all.
-        const bool is_tls = (s->ssl != nullptr);
-        Deadline deadline = make_deadline(s->timeout_ms);
+        int effective_timeout_ms = 0;
+        std::string timeout_error;
+        if (!parse_timeout_argument(L, 2, s->timeout_ms,
+                                    &effective_timeout_ms, timeout_error,
+                                    "socket: recv_all"))
+        {
+            return push_fail(L, timeout_error);
+        }
 
-        std::string acc;
+        size_t max_bytes = 0;
+        std::string max_bytes_error;
+        if (!parse_recv_all_max_bytes(L, 3, &max_bytes, max_bytes_error))
+        {
+            return push_fail(L, max_bytes_error);
+        }
+
+        const bool is_tls = (s->ssl != nullptr);
+        Deadline deadline = make_deadline(effective_timeout_ms);
+
+        // Preserve stream order across receive helpers. If a previous call
+        // already buffered more than this call permits, fail without
+        // consuming it so a later call with a larger limit can recover it.
+        if (s->recv_pending.size() > max_bytes)
+        {
+            return push_fail(
+                L, "socket: recv_all: data exceeds max_bytes");
+        }
+        std::string acc = std::move(s->recv_pending);
+        s->recv_pending.clear();
+
+        auto preserve_and_fail = [&](std::string_view message) -> int
+        {
+            s->recv_pending = std::move(acc);
+            return push_fail(L, message);
+        };
+        auto preserve_and_errno_fail = [&](const char *prefix) -> int
+        {
+            const int saved_errno = errno;
+            s->recv_pending = std::move(acc);
+            errno = saved_errno;
+            return push_errno_fail(L, prefix);
+        };
+
         std::string tls_err;
         char buf[4096];
         for (;;)
         {
-            // CORRECTIF (post-bug IRC TLS) : voir explication détaillée
-            // dans sock_recv_line. Si OpenSSL a déjà déchiffré des octets
-            // dans son buffer interne, le FD socket est vide alors qu'il
-            // y a des données à lire.
             const bool ssl_has_data =
                 is_tls && (SSL_pending(s->ssl) > 0);
 
@@ -1560,16 +1721,17 @@ namespace
                 int r = wait_ready_deadline(s->fd, POLLIN, deadline);
                 if (r == WAIT_INTERRUPTED)
                 {
+                    s->recv_pending = std::move(acc);
                     signal_dispatch_pending(L);
                     return push_fail(L, "interrupted");
                 }
                 if (r < 0)
                 {
-                    return push_errno_fail(L, "recv_all");
+                    return preserve_and_errno_fail("recv_all");
                 }
                 if (r == 0)
                 {
-                    return push_fail(L, "timeout");
+                    return preserve_and_fail("timeout");
                 }
             }
 
@@ -1586,41 +1748,57 @@ namespace
                     int wr = wait_ready_deadline(s->fd, POLLOUT, deadline);
                     if (wr == WAIT_INTERRUPTED)
                     {
+                        s->recv_pending = std::move(acc);
                         signal_dispatch_pending(L);
                         return push_fail(L, "interrupted");
                     }
                     if (wr == 0)
-                        return push_fail(L, "timeout");
+                    {
+                        return preserve_and_fail("timeout");
+                    }
                     if (wr < 0)
-                        return push_errno_fail(L, "recv_all");
+                    {
+                        return preserve_and_errno_fail("recv_all");
+                    }
                     continue;
                 }
                 if (rc == TLS_IO_FATAL)
                 {
-                    return push_fail(L, tls_err);
+                    return preserve_and_fail(tls_err);
                 }
                 got = (rc == TLS_IO_EOF) ? 0 : rc;
             }
             else
             {
-                got = ::recv(s->fd, buf, sizeof(buf), 0);
+                got = ::recv(s->fd, buf, sizeof(buf),
+                             effective_timeout_ms > 0 ? MSG_DONTWAIT : 0);
                 if (got < 0)
                 {
-                    if (errno == EINTR)
+                    if (errno == EINTR || errno == EAGAIN ||
+                        errno == EWOULDBLOCK)
                     {
                         continue;
                     }
-                    return push_errno_fail(L, "recv_all");
+                    return preserve_and_errno_fail("recv_all");
                 }
             }
 
             if (got == 0)
             {
-                // EOF normal sur recv_all : c'est le SUCCÈS attendu.
                 lua_pushlstring(L, acc.data(), acc.size());
                 return 1;
             }
-            acc.append(buf, static_cast<size_t>(got));
+
+            const size_t chunk_size = static_cast<size_t>(got);
+            if (chunk_size > max_bytes - acc.size())
+            {
+                // The chunk has already been removed from the socket. Keep it
+                // internally even though this call returns no partial body.
+                acc.append(buf, chunk_size);
+                return preserve_and_fail(
+                    "socket: recv_all: data exceeds max_bytes");
+            }
+            acc.append(buf, chunk_size);
         }
     }
 
@@ -1639,10 +1817,19 @@ namespace
                              "socket: accept: socket is not listening");
         }
 
+        int effective_timeout_ms = 0;
+        std::string timeout_error;
+        if (!parse_timeout_argument(L, 2, s->timeout_ms,
+                                    &effective_timeout_ms, timeout_error,
+                                    "socket: accept"))
+        {
+            return push_fail(L, timeout_error);
+        }
+
         // DEADLINE GLOBALE : accept() bloque jusqu'à arrivée d'un
         // client. Si EINTR au milieu, on reboucle avec le temps
         // restant, jamais infini.
-        Deadline deadline = make_deadline(s->timeout_ms);
+        Deadline deadline = make_deadline(effective_timeout_ms);
 
         int r = wait_ready_deadline(s->fd, POLLIN, deadline);
         if (r == WAIT_INTERRUPTED)
@@ -1674,7 +1861,8 @@ namespace
                 ensure_cloexec(client_fd); // ceinture + bretelles
                 break;
             }
-            if (errno == EINTR)
+            if (errno == EINTR || errno == EAGAIN ||
+                errno == EWOULDBLOCK)
             {
                 // Refaire un wait_ready : on a perdu du temps, on
                 // doit re-vérifier que la deadline n'est pas dépassée
@@ -1717,13 +1905,15 @@ namespace
             ::close(s->fd);
             s->fd = -1;
         }
+        std::string().swap(s->recv_pending);
         return push_ok(L);
     }
 
     int sock_set_timeout(lua_State *L)
     {
         Sock *s = check_sock(L, 1);
-        lua_Number t = luaL_checknumber(L, 2);
+        luaL_checktype(L, 2, LUA_TNUMBER);
+        lua_Number t = lua_tonumber(L, 2);
         // CORRECTIF (post-revue ChatGPT) : rejeter NaN et inf avant
         // tout cast vers int (sinon comportement indéfini). std::isnan
         // détecte NaN, std::isfinite refuse +inf et -inf (et accepte
@@ -1827,7 +2017,7 @@ namespace
     // on ferme à la collecte de l'userdata. Pas de fuite de FD ni de SSL.
     // CORRECTIF (placement new) : on appelle aussi explicitement le
     // destructeur du Sock, car push_new_sock utilise placement new
-    // pour initialiser le std::string recv_line_pending.
+    // pour initialiser le std::string recv_pending.
     int sock_gc(lua_State *L)
     {
         Sock *s = static_cast<Sock *>(
@@ -1844,7 +2034,7 @@ namespace
                 ::close(s->fd);
                 s->fd = -1;
             }
-            s->~Sock(); // libère recv_line_pending
+            s->~Sock(); // libère recv_pending
         }
         return 0;
     }
@@ -1882,14 +2072,14 @@ namespace
     //
     // CORRECTIF (audit v21, option A validée) : chemin UNIFIÉ.
     //
-    // 1. La deadline est créée UNE FOIS, avant la boucle d'addrinfo.
-    //    L'ancienne version la recréait à CHAQUE tentative :
-    //    connect(host, port, 5) sur un host multi-A/AAAA pouvait
-    //    durer N × 5 s au total (ex : IPv6 trou noir qui échoue par
-    //    SO_ERROR à 4,9 s → la deadline repartait à zéro pour
-    //    l'IPv4). timeout = 5 signifie désormais 5 s pour l'appel
-    //    COMPLET, toutes adresses confondues — cohérent avec
-    //    send/recv, qui créent leur deadline une fois.
+    // 1. Après la résolution DNS bloquante, la deadline est créée UNE
+    //    FOIS avant la boucle d'addrinfo. L'ancienne version la recréait
+    //    à CHAQUE tentative : connect(host, port, 5) sur un host
+    //    multi-A/AAAA pouvait durer N × 5 s pour la seule phase TCP
+    //    (ex : IPv6 trou noir qui échoue par SO_ERROR à 4,9 s, puis
+    //    budget neuf pour l'IPv4). Le timeout borne désormais toutes les
+    //    tentatives TCP avec un budget partagé. La résolution DNS reste
+    //    hors budget, faute d'annulation portable sur glibc + musl.
     //
     // 2. Le connect passe TOUJOURS par O_NONBLOCK + poll, y compris
     //    sans timeout (deadline = NO_DEADLINE → poll infini).
@@ -1908,7 +2098,8 @@ namespace
     // lua_socket_connect_tls (avant le handshake TLS).
     int tcp_connect_blocking(const char *host, lua_Integer port,
                              int timeout_ms,
-                             std::string &err, bool &timed_out)
+                             std::string &err, bool &timed_out,
+                             Deadline *operation_deadline = nullptr)
     {
         timed_out = false;
 
@@ -1922,9 +2113,17 @@ namespace
             return -1;
         }
 
-        // Deadline GLOBALE : une seule pour toutes les tentatives.
-        // NO_DEADLINE (poll infini) si timeout_ms == 0.
+        // La résolution DNS ci-dessus reste volontairement bloquante et
+        // HORS du budget : getaddrinfo() n'offre pas de solution portable
+        // et proprement annulable sur glibc + musl. La deadline est donc
+        // créée juste après la résolution. Pour connect_tls(), elle est
+        // également renvoyée au caller afin que le handshake consomme le
+        // TEMPS RESTANT au lieu de repartir avec un budget neuf.
         Deadline deadline = make_deadline(timeout_ms);
+        if (operation_deadline != nullptr)
+        {
+            *operation_deadline = deadline;
+        }
 
         // Essaie chaque addrinfo dans l'ordre (IPv4/IPv6 selon DNS).
         int fd = -1;
@@ -2061,58 +2260,6 @@ namespace
         return fd;
     }
 
-    // Parse + valide timeout en secondes depuis la stack Lua à l'index
-    // donné (pour les fonctions qui prennent un timeout positionnel).
-    // Renvoie true en succès. En cas d'invalidité, remplit err et
-    // renvoie false. Si l'argument est absent/nil, *out reste 0 (=
-    // bloquant infini).
-    bool parse_positional_timeout(lua_State *L, int idx, int *out,
-                                  std::string &err,
-                                  const char *prefix_for_err)
-    {
-        *out = 0;
-        if (lua_isnoneornil(L, idx))
-        {
-            return true;
-        }
-        // CORRECTIF longjmp (post-revue Gemini) : luaL_checknumber
-        // utiliserait longjmp() si l'argument n'est pas un nombre,
-        // ce qui ne déroulerait PAS le std::string err alloué par
-        // l'appelant (lua_socket_connect). On vérifie le type
-        // manuellement et on remonte via la convention (false, err)
-        // que la fonction signe déjà.
-        if (lua_type(L, idx) != LUA_TNUMBER)
-        {
-            err = prefix_for_err;
-            err += ": timeout must be a number";
-            return false;
-        }
-        lua_Number t = lua_tonumber(L, idx);
-        if (std::isnan(t) || !std::isfinite(t))
-        {
-            err = prefix_for_err;
-            err += ": timeout must be finite (not NaN or inf)";
-            return false;
-        }
-        if (t < 0.0)
-        {
-            err = prefix_for_err;
-            err += ": timeout must be >= 0";
-            return false;
-        }
-        if (t > 0.0)
-        {
-            double ms = t * 1000.0;
-            if (ms > static_cast<double>(INT_MAX))
-            {
-                err = prefix_for_err;
-                err += ": timeout too large";
-                return false;
-            }
-            *out = (ms < 1.0) ? 1 : static_cast<int>(ms);
-        }
-        return true;
-    }
 } // namespace
 
 // -----------------------------------------------------------------------
@@ -2126,8 +2273,20 @@ namespace
 // appeler s:set_timeout(s) sur le socket retourné.
 int lua_socket_connect(lua_State *L)
 {
-    const char *host = luaL_checkstring(L, 1);
-    lua_Integer port = luaL_checkinteger(L, 2);
+    luaL_checktype(L, 1, LUA_TSTRING);
+    lua_Integer port = check_strict_integer(
+        L, 2, "port must be an integer");
+    std::string err;
+    std::string host;
+    if (!lua_string_without_nul(L, 1, host,
+                                "socket: connect: host", err))
+    {
+        return push_fail(L, err);
+    }
+    if (host.empty())
+    {
+        return push_fail(L, "socket: connect: host must not be empty");
+    }
     if (port < 0 || port > 65535)
     {
         return push_fail(L,
@@ -2135,15 +2294,14 @@ int lua_socket_connect(lua_State *L)
     }
 
     int timeout_ms = 0;
-    std::string err;
-    if (!parse_positional_timeout(L, 3, &timeout_ms, err,
-                                  "socket: connect"))
+    if (!parse_timeout_argument(L, 3, 0, &timeout_ms, err,
+                                "socket: connect"))
     {
         return push_fail(L, err);
     }
 
     bool timed_out = false;
-    int fd = tcp_connect_blocking(host, port, timeout_ms, err, timed_out);
+    int fd = tcp_connect_blocking(host.c_str(), port, timeout_ms, err, timed_out);
     if (fd < 0)
     {
         if (timed_out)
@@ -2173,24 +2331,36 @@ int lua_socket_connect(lua_State *L)
 //   min_version  : string, "1.2" (défaut) ou "1.3"
 //
 // Comportement :
-//   1. TCP connect (réutilise tcp_connect_blocking).
+//   1. Résolution DNS bloquante (hors timeout), puis TCP connect.
 //   2. Création SSL* sur le fd, application des options.
-//   3. SSL_connect() avec poll + deadline globale.
+//   3. SSL_connect() avec la MÊME deadline que le TCP : un budget partagé.
 //   4. Si verify ON, échec cert -> message lisible via SSL_get_verify_result.
 //
 // Le socket retourné est un Sock complet (méthodes send/recv/etc.
 // fonctionneront en TLS après la sous-étape 1.3).
 int lua_socket_connect_tls(lua_State *L)
 {
-    const char *host = luaL_checkstring(L, 1);
-    lua_Integer port = luaL_checkinteger(L, 2);
+    luaL_checktype(L, 1, LUA_TSTRING);
+    lua_Integer port = check_strict_integer(
+        L, 2, "port must be an integer");
+    std::string err;
+    std::string host;
+    if (!lua_string_without_nul(L, 1, host,
+                                "socket: connect_tls: host", err))
+    {
+        return push_fail(L, err);
+    }
+    if (host.empty())
+    {
+        return push_fail(L,
+                         "socket: connect_tls: host must not be empty");
+    }
     if (port < 0 || port > 65535)
     {
         return push_fail(L,
                          "socket: connect_tls: port must be in [0, 65535]");
     }
 
-    std::string err;
     TlsOptions opts;
     if (!parse_tls_options(L, 3, opts, err))
     {
@@ -2203,10 +2373,13 @@ int lua_socket_connect_tls(lua_State *L)
         return push_fail(L, err);
     }
 
-    // Phase 1 : TCP connect (réutilise le helper).
+    // Phase 1 : résolution DNS bloquante (hors budget), puis TCP connect.
+    // La deadline créée juste APRÈS le DNS est partagée avec le handshake
+    // TLS : timeout borne donc TCP + handshake avec un budget unique.
     bool timed_out = false;
-    int fd = tcp_connect_blocking(host, port, opts.timeout_ms,
-                                  err, timed_out);
+    Deadline operation_deadline = NO_DEADLINE;
+    int fd = tcp_connect_blocking(host.c_str(), port, opts.timeout_ms,
+                                  err, timed_out, &operation_deadline);
     if (fd < 0)
     {
         if (timed_out)
@@ -2222,11 +2395,11 @@ int lua_socket_connect_tls(lua_State *L)
     }
 
     // Phase 2 : créer SSL et l'attacher au fd.
-    SSL *ssl = SSL_new(g_tls_ctx);
+    SSL *ssl = new_ssl_for_options(opts, err);
     if (ssl == nullptr)
     {
         ::close(fd);
-        return push_fail(L, format_tls_error("SSL_new failed"));
+        return push_fail(L, err);
     }
     if (SSL_set_fd(ssl, fd) != 1)
     {
@@ -2236,7 +2409,7 @@ int lua_socket_connect_tls(lua_State *L)
     }
 
     // Phase 3 : appliquer les options (verify, hostname, CA, version).
-    if (!apply_tls_options(ssl, opts, host, err))
+    if (!apply_tls_options(ssl, opts, host.c_str(), err))
     {
         SSL_free(ssl);
         ::close(fd);
@@ -2272,7 +2445,7 @@ int lua_socket_connect_tls(lua_State *L)
         return push_fail(L, std::string("socket: connect_tls: fcntl: ") +
                                 std::strerror(e));
     }
-    bool hs_ok = tls_handshake(ssl, fd, opts.timeout_ms, err);
+    bool hs_ok = tls_handshake(ssl, fd, operation_deadline, err);
     if (!hs_ok)
     {
         if (flags >= 0)
@@ -2335,6 +2508,11 @@ int sock_starttls(lua_State *L)
         return push_fail(L,
                          "socket: starttls: TLS already active on this socket");
     }
+    if (!s->recv_pending.empty())
+    {
+        return push_fail(
+            L, "socket: starttls: pending plaintext data must be consumed first");
+    }
 
     std::string err;
     TlsOptions opts;
@@ -2363,10 +2541,10 @@ int sock_starttls(lua_State *L)
         return push_fail(L, err);
     }
 
-    SSL *ssl = SSL_new(g_tls_ctx);
+    SSL *ssl = new_ssl_for_options(opts, err);
     if (ssl == nullptr)
     {
-        return push_fail(L, format_tls_error("SSL_new failed"));
+        return push_fail(L, err);
     }
     if (SSL_set_fd(ssl, s->fd) != 1)
     {
@@ -2401,30 +2579,26 @@ int sock_starttls(lua_State *L)
         return push_fail(L, std::string("socket: starttls: fcntl: ") +
                                 std::strerror(e));
     }
-    bool hs_ok = tls_handshake(ssl, s->fd, s->timeout_ms, err);
+    // Le timeout de CET appel starttls prime sur le timeout par défaut
+    // du socket. opts.timeout absent/0 signifie handshake sans limite.
+    bool hs_ok = tls_handshake(ssl, s->fd,
+                               make_deadline(opts.timeout_ms), err);
     if (!hs_ok)
     {
-        // CORRECTIF (revue ChatGPT post-audit v21) : le contrat après
-        // un échec de starttls est « socket rendu tel quel, bloquant,
-        // toujours ouvert ». Si la remise en bloquant échoue (quasi
-        // impossible), ce contrat n'est plus garantissable : le
-        // script continuerait avec un socket silencieusement
-        // NON-BLOQUANT (recv rendrait EAGAIN). Dans ce cas on ferme
-        // le socket et on le dit dans l'erreur — un état sûr et
-        // explicite vaut mieux qu'un état plausible et faux.
-        // Dispatch AVANT d'éventuellement suffixer err : le test
-        // d'égalité stricte doit voir "interrupted" nu.
-        if (err == "interrupted")
+        // Fail-closed : SSL_connect peut déjà avoir envoyé un ClientHello
+        // et consommé des octets du peer. Le flux clair n'est donc plus
+        // réutilisable de manière fiable, même si l'erreur est un timeout
+        // ou une interruption. Fermer est la seule sortie sûre.
+        const bool interrupted = (err == "interrupted");
+        SSL_free(ssl);
+        ::close(s->fd);
+        s->fd = -1;
+        s->recv_pending.clear();
+        if (interrupted)
         {
             signal_dispatch_pending(L);
+            return push_fail(L, "interrupted");
         }
-        if (::fcntl(s->fd, F_SETFL, flags) < 0)
-        {
-            ::close(s->fd);
-            s->fd = -1;
-            err += " (socket closed: could not restore blocking mode)";
-        }
-        SSL_free(ssl);
         return push_fail(L, err);
     }
     // Succès : NE PAS remettre bloquant. FD reste O_NONBLOCK pour
@@ -2444,31 +2618,45 @@ int sock_starttls(lua_State *L)
 // "toutes les interfaces" (AI_PASSIVE prend le relais).
 int lua_socket_listen(lua_State *L)
 {
-    const char *host = luaL_checkstring(L, 1);
-    lua_Integer port = luaL_checkinteger(L, 2);
+    luaL_checktype(L, 1, LUA_TSTRING);
+    lua_Integer port = check_strict_integer(
+        L, 2, "port must be an integer");
+    lua_Integer requested_backlog = 16;
+    if (!lua_isnoneornil(L, 3))
+    {
+        requested_backlog = check_strict_integer(
+            L, 3, "backlog must be an integer");
+    }
+
+    std::string err;
+    std::string host;
+    if (!lua_string_without_nul(L, 1, host,
+                                "socket: listen: host", err))
+    {
+        return push_fail(L, err);
+    }
     if (port < 0 || port > 65535)
     {
         return push_fail(L,
                          "socket: listen: port must be in [0, 65535]");
     }
-    int backlog = 16;
-    if (!lua_isnoneornil(L, 3))
+    if (requested_backlog <= 0)
     {
-        lua_Integer b = luaL_checkinteger(L, 3);
-        if (b <= 0)
-        {
-            return push_fail(L,
-                             "socket: listen: backlog must be > 0");
-        }
-        backlog = static_cast<int>(b);
+        return push_fail(L,
+                         "socket: listen: backlog must be > 0");
     }
+    if (requested_backlog > static_cast<lua_Integer>(INT_MAX))
+    {
+        return push_fail(L,
+                         "socket: listen: backlog out of range");
+    }
+    const int backlog = static_cast<int>(requested_backlog);
 
     char port_str[16];
     std::snprintf(port_str, sizeof(port_str), "%lld",
                   static_cast<long long>(port));
 
-    std::string err;
-    struct addrinfo *res = resolve(host, port_str, true, err);
+    struct addrinfo *res = resolve(host.c_str(), port_str, true, err);
     if (!res)
     {
         return push_fail(L, err);
@@ -2508,6 +2696,20 @@ int lua_socket_listen(lua_State *L)
             continue;
         }
         if (::listen(fd, backlog) != 0)
+        {
+            last_errno = errno;
+            ::close(fd);
+            fd = -1;
+            continue;
+        }
+
+        // Garder le socket d'écoute non bloquant en permanence. accept()
+        // attend toujours via poll() (deadline finie ou infinie), puis
+        // accept4() ne peut donc jamais se bloquer à cause d'une course
+        // entre la disponibilité annoncée et l'acceptation effective.
+        int listen_flags = ::fcntl(fd, F_GETFL, 0);
+        if (listen_flags < 0 ||
+            ::fcntl(fd, F_SETFL, listen_flags | O_NONBLOCK) < 0)
         {
             last_errno = errno;
             ::close(fd);

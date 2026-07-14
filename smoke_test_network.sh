@@ -1,25 +1,16 @@
 #!/usr/bin/env bash
 # smoke_test_network.sh — Tests d'intégration réseau pour Babet.
 #
-# À lancer MANUELLEMENT avant chaque release tag, jamais par
-# run_tests.sh : ce dernier doit rester hermétique/offline pour
-# tourner partout (CI isolée, build chroot, machine sans réseau,
-# etc.). Ce script-ci sert à attraper les bugs que le harness
-# offline ne peut pas voir.
+# Ce script complète le harnais hermétique/offline avec quelques contrôles
+# réels. Les invariants appartenant à Babet sont bloquants. Les sondes vers
+# Google et l'AUR restent visibles mais sont non bloquantes par défaut, car un
+# service tiers, un proxy, un filtrage DNS ou une panne transitoire ne doit pas
+# suffire à invalider une release.
 #
-# Cas d'usage qui a motivé la création : le bug TLS de v1.6.0 (CA
-# bundle introuvable avec OpenSSL vendored compilé sans
-# --openssldir, fixé en v1.6.1). Les 799 tests du harness principal
-# ne l'ont pas détecté parce qu'ils utilisent tous des certs
-# auto-signés avec ca_cert explicite — exactement le chemin qui
-# court-circuite le bug.
-#
-# Stratégie : on neutralise SSL_CERT_FILE et SSL_CERT_DIR via
-# env -u pour s'assurer que le binaire trouve le CA bundle TOUT
-# SEUL, via ses propres mécanismes (compile-time --openssldir
-# + probing runtime).
+# Pour rendre aussi les sondes tierces bloquantes :
+#   BABET_SMOKE_STRICT_EXTERNAL=1 ./smoke_test_network.sh ./test/babet
 
-set -e
+set -u
 
 BIN="${1:-./test/babet}"
 if [ ! -x "$BIN" ]; then
@@ -28,112 +19,138 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-# Working dir temporaire avec cleanup automatique sur exit (même
-# en cas d'erreur), pour ne pas laisser traîner /tmp/babet-*/.
 TMPDIR=$(mktemp -d -t babet-smoke-XXXXXX)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 PASS=0
 FAIL=0
+WARN=0
+STRICT_EXTERNAL="${BABET_SMOKE_STRICT_EXTERNAL:-0}"
 
-# Helper : écrit le script Lua dans $TMPDIR/main.lua, lance le
-# binaire en mode dossier sur $TMPDIR, et compare la sortie à un
-# pattern grep -E.
-#
-# env -u SSL_CERT_FILE -u SSL_CERT_DIR : on neutralise ces
-# variables pour que le binaire doive se débrouiller sans aide
-# externe. Si ces variables étaient honorées au lieu du probing,
-# on raterait le bug qu'on veut attraper.
-run_test() {
+# run_case NOM SCRIPT PATTERN [required|advisory] [attempts]
+run_case() {
     local name="$1"
     local script="$2"
     local expected_pattern="$3"
+    local severity="${4:-required}"
+    local attempts="${5:-1}"
+    local output=""
+    local rc=1
+    local attempt
 
     echo "$script" > "$TMPDIR/main.lua"
 
-    local output
-    output=$(env -u SSL_CERT_FILE -u SSL_CERT_DIR \
-             "$BIN" "$TMPDIR" 2>&1) || true
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        set +e
+        output=$(env -u SSL_CERT_FILE -u SSL_CERT_DIR \
+                 "$BIN" "$TMPDIR" 2>&1)
+        rc=$?
+        set -e
 
-    if echo "$output" | grep -qE "$expected_pattern"; then
-        echo "[PASS] $name"
-        PASS=$((PASS + 1))
+        if [ ${rc} -eq 0 ] && echo "$output" | grep -qE "$expected_pattern"; then
+            echo "[PASS] $name"
+            PASS=$((PASS + 1))
+            return 0
+        fi
+
+        if [ ${attempt} -lt ${attempts} ]; then
+            sleep 1
+        fi
+    done
+
+    if [ "$severity" = "advisory" ] && [ "$STRICT_EXTERNAL" != "1" ]; then
+        echo "[WARN] $name"
+        WARN=$((WARN + 1))
     else
         echo "[FAIL] $name"
-        echo "       attendu (pattern) : $expected_pattern"
-        echo "       reçu              : $output"
         FAIL=$((FAIL + 1))
     fi
+    echo "       tentatives        : $attempts"
+    echo "       code de sortie    : $rc"
+    echo "       attendu (pattern) : $expected_pattern"
+    echo "       reçu              : $output"
+    return 0
 }
 
-echo "=== Smoke tests réseau (HTTPS, sans SSL_CERT_FILE/DIR) ==="
+echo "=== Smoke tests réseau (binaire normal) ==="
 echo "binaire : $BIN"
 echo "tmpdir  : $TMPDIR"
+if [ "$STRICT_EXTERNAL" = "1" ]; then
+    echo "mode    : strict (Google/AUR bloquants)"
+else
+    echo "mode    : normal (Google/AUR informatifs)"
+fi
 echo
 
-# -------------------------------------------------------------------
-# Test 1 : HTTPS sur un site public stable, verify=true par défaut.
-# Cible : google.com (HTTP/HTTPS depuis ~toujours, cert Let's Encrypt
-# ou Google Trust Services, chaîne CA standard présente dans tous
-# les trust stores).
-# Échec attendu sans le fix v1.6.1 : "ERR=tls: certificate verify
-# failed: unable to get local issuer certificate" parce que le CA
-# bundle n'est pas trouvé.
-# -------------------------------------------------------------------
-run_test "HTTPS google.com verify=true OK sans ca_cert" \
-'local r, e = babet.http.request{ url = "https://www.google.com/" }
-if r then print("STATUS=" .. r.status) else print("ERR=" .. tostring(e)) end' \
-'STATUS=(2|3)[0-9][0-9]'
+# 1. Timeout TCP borné vers TEST-NET-1.
+run_case "socket.connect vers 192.0.2.1 reste borné" \
+'local t0 = babet.time.monotonic()
+local sock, err = babet.socket.connect("192.0.2.1", 65000, 0.5)
+local elapsed = babet.time.monotonic() - t0
+if sock then
+    sock:close()
+    print("UNEXPECTED_OK")
+elseif elapsed <= 3.0 then
+    print(string.format("BOUNDED=%.3f ERR=%s", elapsed, tostring(err)))
+else
+    print(string.format("TOO_SLOW=%.3f ERR=%s", elapsed, tostring(err)))
+end' \
+'^BOUNDED=' required 1
 
-# -------------------------------------------------------------------
-# Test 2 : HTTPS sur AUR (cas concret qui a motivé le fix).
-# Endpoint API : retourne du JSON, status 200 attendu sur une
-# requête bien formée. Si l'AUR change son schéma, ce test peut
-# devoir être ajusté — c'est le risque assumé d'un smoke test
-# contre un vrai service.
-# -------------------------------------------------------------------
-run_test "HTTPS AUR API OK sans ca_cert (cas yaourt)" \
+# 2. Certificat public valide : vérifie le trust store système sans ca_cert.
+# Même infrastructure que les cas BadSSL ci-dessous, afin de réduire le
+# nombre de dépendances externes tout en testant réellement verify=true.
+run_case "HTTPS certificat public valide accepté sans ca_cert" \
 'local r, e = babet.http.request{
-    url = "https://aur.archlinux.org/rpc/v5/info?arg[]=google-chrome"
+    url = "https://sha256.badssl.com/",
+    timeout = 15,
+    headers = { ["User-Agent"] = "babet-smoke-test" }
 }
 if r then print("STATUS=" .. r.status) else print("ERR=" .. tostring(e)) end' \
-'STATUS=200'
+'STATUS=(2|3)[0-9][0-9]' required 2
 
-# -------------------------------------------------------------------
-# Test 3 : badssl.com sert un cert expiré sur expired.badssl.com.
-# verify=true (défaut) doit le rejeter avec une erreur lisible.
-# On vérifie juste qu'on obtient "ERR=" (donc PAS de STATUS), peu
-# importe le wording exact du message d'erreur OpenSSL.
-# -------------------------------------------------------------------
-run_test "HTTPS expired cert rejeté par verify=true" \
-'local r, e = babet.http.request{ url = "https://expired.badssl.com/" }
+# 3. Certificat expiré : verify=true doit le rejeter.
+run_case "HTTPS expired cert rejeté par verify=true" \
+'local r, e = babet.http.request{
+    url = "https://expired.badssl.com/", timeout = 15
+}
 if r then print("UNEXPECTED_OK=" .. r.status)
 else print("ERR=" .. tostring(e)) end' \
-'^ERR='
+'^ERR=' required 2
 
-# -------------------------------------------------------------------
-# Test 4 : même endpoint cert expiré, mais verify=false.
-# Le bypass volontaire doit fonctionner et retourner un 200.
-#
-# Pourquoi ce 4e test alors que le 3 suffit à valider verify=true :
-# c'est un test de SYMÉTRIE. Sans lui, si un refactor casse
-# silencieusement le chemin verify=false (par exemple un check
-# "verify forcé" qui se glisse par erreur dans la logique), on
-# ne s'en rendrait compte qu'en prod. Coût marginal nul, valeur
-# de non-régression nette.
-# -------------------------------------------------------------------
-run_test "HTTPS expired cert accepté avec verify=false" \
+# 4. Même certificat, verify=false : le bypass explicite doit fonctionner.
+run_case "HTTPS expired cert accepté avec verify=false" \
 'local r, e = babet.http.request{
-    url = "https://expired.badssl.com/", verify = false
+    url = "https://expired.badssl.com/", verify = false, timeout = 15
 }
 if r then print("STATUS=" .. r.status) else print("ERR=" .. tostring(e)) end' \
-'STATUS=(2|3)[0-9][0-9]'
+'STATUS=(2|3)[0-9][0-9]' required 2
+
+# 5. Sondes réelles et utiles, mais dépendantes de services tiers. Elles sont
+# relancées une fois et produisent un avertissement en cas d'indisponibilité.
+run_case "HTTPS google.com (sonde externe)" \
+'local r, e = babet.http.request{
+    url = "https://www.google.com/", timeout = 15,
+    headers = { ["User-Agent"] = "babet-smoke-test" }
+}
+if r then print("STATUS=" .. r.status) else print("ERR=" .. tostring(e)) end' \
+'STATUS=(2|3)[0-9][0-9]' advisory 2
+
+run_case "HTTPS AUR API (sonde yaourt)" \
+'local r, e = babet.http.request{
+    url = "https://aur.archlinux.org/rpc/v5/info?arg[]=google-chrome",
+    timeout = 15,
+    headers = { ["User-Agent"] = "babet-smoke-test" }
+}
+if r then print("STATUS=" .. r.status) else print("ERR=" .. tostring(e)) end' \
+'STATUS=200' advisory 2
 
 echo
 echo "=========================================="
-echo "Résultat : $PASS PASS / $FAIL FAIL"
+echo "Résultat : $PASS PASS / $FAIL FAIL / $WARN WARN"
 echo "=========================================="
 
 if [ "$FAIL" -gt 0 ]; then
     exit 1
 fi
+exit 0

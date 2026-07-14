@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <string_view>
 
 #include <poll.h>
 #include <sys/inotify.h>
@@ -181,11 +182,11 @@ namespace
         {"move_self", IN_MOVE_SELF},
     };
 
-    uint32_t event_name_to_flag(const char *name)
+    uint32_t event_name_to_flag(std::string_view name)
     {
         for (const auto &e : ADD_EVENTS)
         {
-            if (std::strcmp(e.name, name) == 0)
+            if (name == e.name)
             {
                 return e.flag;
             }
@@ -236,11 +237,50 @@ namespace
 
     int inot_add(lua_State *L)
     {
+        const int argc = lua_gettop(L);
+        if (argc < 3 || argc > 4)
+        {
+            return luaL_error(L,
+                              "inotify.add expects path, events and optional opts");
+        }
         Watcher *w = check_watcher(L, 1);
-        const char *path = luaL_checkstring(L, 2);
+
+        // Toutes les validations susceptibles de lever via luaL_error doivent
+        // précéder la construction de std::string. Lua utilise un longjmp pour
+        // ses erreurs : un destructeur C++ présent sur la pile ne serait alors
+        // pas exécuté (détecté par LeakSanitizer sur events mal typé).
+        luaL_checktype(L, 2, LUA_TSTRING);
         // events : OBLIGATOIRE (décision INOT-B). luaL_checktype lève
         // si absent (none) ou si ce n'est pas une table.
         luaL_checktype(L, 3, LUA_TTABLE);
+        bool onlydir = false;
+        if (!lua_isnoneornil(L, 4))
+        {
+            luaL_checktype(L, 4, LUA_TTABLE);
+            // Conserver le comportement historique de lua_getfield (donc
+            // l'éventuel __index), mais l'exécuter avant tout objet C++ non
+            // trivial afin qu'une erreur Lua ne contourne aucun destructeur.
+            lua_getfield(L, 4, "onlydir");
+            if (!lua_isnil(L, -1))
+            {
+                if (lua_type(L, -1) != LUA_TBOOLEAN)
+                {
+                    lua_pop(L, 1);
+                    return push_fail(L,
+                                     "inotify: add: opts.onlydir must be a boolean");
+                }
+                onlydir = lua_toboolean(L, -1) != 0;
+            }
+            lua_pop(L, 1);
+        }
+
+        std::string path;
+        std::string string_err;
+        if (!lua_string_without_nul(L, 2, path,
+                                    "inotify: add: path", string_err))
+        {
+            return push_fail(L, string_err);
+        }
 
         if (w->fd < 0)
         {
@@ -254,7 +294,7 @@ namespace
                              "inotify: add: events list must not be empty");
         }
 
-        uint32_t mask = 0;
+        uint32_t mask = onlydir ? IN_ONLYDIR : 0;
         for (lua_Integer i = 1; i <= count; ++i)
         {
             lua_rawgeti(L, 3, static_cast<lua_Integer>(i));
@@ -274,7 +314,14 @@ namespace
                 lua_pop(L, 1);
                 return push_fail(L, msg);
             }
-            const char *ename = lua_tostring(L, -1);
+            std::string ename;
+            std::string event_err;
+            if (!lua_string_without_nul(L, -1, ename,
+                                        "inotify: add: event", event_err))
+            {
+                lua_pop(L, 1);
+                return push_fail(L, event_err);
+            }
             uint32_t flag = event_name_to_flag(ename);
             if (flag == 0)
             {
@@ -322,10 +369,11 @@ namespace
             }
             else if (kt == LUA_TSTRING)
             {
-                const char *key = lua_tostring(L, -2);
+                size_t key_len = 0;
+                const char *key = lua_tolstring(L, -2, &key_len);
                 std::string msg = "inotify: add: events table has "
                                   "extra string key '";
-                msg += key;
+                msg.append(key, key_len);
                 msg += "' (events must be a list, not a dict)";
                 lua_pop(L, 2);
                 return push_fail(L, msg);
@@ -342,19 +390,7 @@ namespace
             lua_pop(L, 1); // value, keep key for next iteration
         }
 
-        // opts (optionnel). v1 : onlydir uniquement (cf. header).
-        if (!lua_isnoneornil(L, 4))
-        {
-            luaL_checktype(L, 4, LUA_TTABLE);
-            lua_getfield(L, 4, "onlydir");
-            if (lua_toboolean(L, -1))
-            {
-                mask |= IN_ONLYDIR;
-            }
-            lua_pop(L, 1);
-        }
-
-        int wd = ::inotify_add_watch(w->fd, path, mask);
+        int wd = ::inotify_add_watch(w->fd, path.c_str(), mask);
         if (wd < 0)
         {
             return push_errno_fail(L, "add");
@@ -365,6 +401,11 @@ namespace
 
     int inot_read(lua_State *L)
     {
+        const int argc = lua_gettop(L);
+        if (argc < 1 || argc > 2)
+        {
+            return luaL_error(L, "inotify.read expects an optional timeout");
+        }
         Watcher *w = check_watcher(L, 1);
         if (w->fd < 0)
         {
@@ -385,9 +426,13 @@ namespace
                                  "inotify: read: timeout must be a "
                                  "finite number >= 0");
             }
-            auto dur = std::chrono::duration<double>(secs);
-            deadline = Clock::now() +
-                       std::chrono::duration_cast<Clock::duration>(dur);
+            if (secs * 1000.0 > static_cast<double>(INT_MAX))
+            {
+                return push_fail(L,
+                                 "inotify: read: timeout too large");
+            }
+            const auto timeout_ms = static_cast<long long>(secs * 1000.0);
+            deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
         }
 
         // Buffer aligné pour struct inotify_event. Dimensionné large
@@ -516,8 +561,18 @@ namespace
 
     int inot_remove(lua_State *L)
     {
+        if (lua_gettop(L) != 2)
+        {
+            return luaL_error(L, "inotify.remove expects a watch descriptor");
+        }
         Watcher *w = check_watcher(L, 1);
         lua_Integer wd = luaL_checkinteger(L, 2);
+        if (wd < static_cast<lua_Integer>(INT_MIN) ||
+            wd > static_cast<lua_Integer>(INT_MAX))
+        {
+            return push_fail(L,
+                             "inotify: remove: watch descriptor out of range");
+        }
         if (w->fd < 0)
         {
             return push_fail(L, "inotify: remove: watcher is closed");
@@ -533,6 +588,10 @@ namespace
 
     int inot_close(lua_State *L)
     {
+        if (lua_gettop(L) != 1)
+        {
+            return luaL_error(L, "inotify.close expects no argument");
+        }
         Watcher *w = check_watcher(L, 1);
         if (w->fd >= 0)
         {
@@ -570,6 +629,10 @@ namespace
 
     int lua_inotify_new(lua_State *L)
     {
+        if (lua_gettop(L) != 0)
+        {
+            return luaL_error(L, "inotify.new expects no argument");
+        }
         // IN_NONBLOCK : read() pilote son blocage via poll() (INOT-C).
         // IN_CLOEXEC  : pas d'héritage par les sous-processus exec
         //               (INOT-F, même rationale que les sockets).

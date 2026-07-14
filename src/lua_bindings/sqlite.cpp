@@ -1,10 +1,10 @@
 // =====================================================================
 // sqlite.cpp — implémentation des bindings SQLite
 // =====================================================================
-// Session 1 : open / close / exec SANS paramètres.
-// Sessions à venir : bind de paramètres, query, types, doc.
+// Implémente open / close / exec / query, le bind des paramètres,
+// l'itérateur paresseux de lignes et le mapping des types.
 //
-// Voir sqlite.hpp pour le design global.
+// Voir sqlite.hpp pour le contrat public.
 
 #include "sqlite.hpp"
 #include "lua_utils.hpp"
@@ -17,6 +17,7 @@ extern "C"
 
 #include "sqlite3.h"
 
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -49,13 +50,10 @@ namespace
         {
             if (handle)
             {
-                // sqlite3_close_v2 est la variante "tolérante" : ferme
-                // proprement même si des statements préparées sont
-                // encore vivantes. Comme on ne stocke pas de stmts
-                // entre les appels (chaque exec/query prepare et
-                // finalize en interne), close_v2 fera juste le même
-                // travail que close() en pratique — mais c'est plus
-                // sûr en cas de bug ou d'évolution future.
+                // sqlite3_close_v2 est la variante "tolérante" : elle
+                // marque la connexion comme zombie si un itérateur query
+                // possède encore un statement actif, puis libère réellement
+                // le handle quand le dernier statement est finalisé.
                 sqlite3_close_v2(handle);
                 handle = nullptr;
             }
@@ -105,6 +103,85 @@ namespace
             msg += "no database handle";
         }
         return push_sqlite_fail(L, msg);
+    }
+
+    // SQLite's prepare APIs take an int byte count and still treat the first
+    // NUL as the end of the SQL text. Rejecting NUL avoids silently executing
+    // only a prefix such as "SELECT 1\0; DROP TABLE ...". The INT_MAX guard
+    // also prevents size_t -> int narrowing before sqlite3_prepare_v2().
+    bool get_checked_sql(lua_State *L, int idx,
+                         const char *&sql, size_t &sql_len,
+                         std::string &error)
+    {
+        sql = lua_tolstring(L, idx, &sql_len);
+        if (std::memchr(sql, '\0', sql_len) != nullptr)
+        {
+            error = "SQL text must not contain NUL byte";
+            return false;
+        }
+        if (sql_len > static_cast<size_t>(INT_MAX))
+        {
+            error = "SQL text is too large (maximum INT_MAX bytes)";
+            return false;
+        }
+        return true;
+    }
+
+    // Renvoie true lorsque le tail laissé par sqlite3_prepare_v2 ne
+    // contient que des séparateurs autorisés : espaces, points-virgules
+    // et commentaires SQL. Les commentaires `-- ...` vont jusqu'à la fin
+    // de ligne ; les commentaires `/* ... */` sont traités comme des
+    // blancs, y compris s'ils se terminent avec la fin de la chaîne.
+    // Toute autre donnée signifie qu'un second statement est présent.
+    bool sql_tail_is_empty(const char *tail)
+    {
+        if (tail == nullptr)
+        {
+            return true;
+        }
+
+        const char *p = tail;
+        for (;;)
+        {
+            while (*p == ' ' || *p == '\t' || *p == '\n' ||
+                   *p == '\r' || *p == '\f' || *p == '\v' ||
+                   *p == ';')
+            {
+                ++p;
+            }
+
+            if (*p == '\0')
+            {
+                return true;
+            }
+
+            if (p[0] == '-' && p[1] == '-')
+            {
+                p += 2;
+                while (*p != '\0' && *p != '\n' && *p != '\r')
+                {
+                    ++p;
+                }
+                continue;
+            }
+
+            if (p[0] == '/' && p[1] == '*')
+            {
+                p += 2;
+                while (*p != '\0' && !(p[0] == '*' && p[1] == '/'))
+                {
+                    ++p;
+                }
+                if (*p == '\0')
+                {
+                    return true;
+                }
+                p += 2;
+                continue;
+            }
+
+            return false;
+        }
     }
 
     // ============================================================
@@ -179,8 +256,22 @@ namespace
     // Méthodes du userdata Db
     // ============================================================
 
+    // Vérifie si une table Lua ne contient aucune paire clé/valeur.
+    // L'index est converti en index absolu car lua_next modifie la pile.
+    bool lua_table_is_empty(lua_State *L, int idx)
+    {
+        idx = lua_absindex(L, idx);
+        lua_pushnil(L);
+        if (lua_next(L, idx) != 0)
+        {
+            lua_pop(L, 2); // value + key
+            return false;
+        }
+        return true;
+    }
+
     // ============================================================
-    // Helpers de bind (session 2)
+    // Helpers de bind
     // ============================================================
     //
     // Le bind suit les contrats validés en design :
@@ -391,11 +482,13 @@ namespace
             int kt = lua_type(L, -2);
             if (kt == LUA_TSTRING)
             {
-                const char *key = lua_tostring(L, -2);
+                size_t key_len = 0;
+                const char *key_data = lua_tolstring(L, -2, &key_len);
+                std::string key(key_data, key_len);
                 if (required_names.find(key) == required_names.end())
                 {
                     err = "extra param '";
-                    err += key;
+                    err.append(key_data, key_len);
                     err += "' (not used by this SQL)";
                     lua_pop(L, 2); // value + key
                     return false;
@@ -480,7 +573,14 @@ namespace
         // sqlite.open et toml.decode.
         luaL_checktype(L, 2, LUA_TSTRING);
         size_t sql_len = 0;
-        const char *sql = lua_tolstring(L, 2, &sql_len);
+        const char *sql = nullptr;
+        {
+            std::string sql_error;
+            if (!get_checked_sql(L, 2, sql, sql_len, sql_error))
+            {
+                return push_sqlite_fail(L, sql_error);
+            }
+        }
 
         // Détecter si on a des params : 3e argument fourni ET non-nil.
         // Si params est fourni mais pas une table → raise (cohérent
@@ -596,21 +696,26 @@ namespace
         // Refuser le multi-statement avec params : pzTail doit être
         // soit nullptr, soit pointer sur du whitespace/commentaires
         // uniquement.
-        if (pzTail && *pzTail)
+        if (!sql_tail_is_empty(pzTail))
         {
-            const char *p = pzTail;
-            while (*p && (*p == ' ' || *p == '\t' || *p == '\n' ||
-                          *p == '\r' || *p == ';'))
+            sqlite3_finalize(stmt);
+            return push_sqlite_fail(L,
+                                    "exec with params supports only one statement; "
+                                    "use exec(sql) without params for multi-statement SQL");
+        }
+
+        // Un SQL vide ou composé uniquement de séparateurs/commentaires
+        // ne produit aucun sqlite3_stmt. Sans paramètres, exec est déjà un
+        // no-op réussi ; avec une table vide, on conserve la même sémantique.
+        // Une table non vide reste une erreur de programmation explicite.
+        if (!stmt)
+        {
+            if (!lua_table_is_empty(L, 3))
             {
-                ++p;
+                luaL_error(L,
+                           "sqlite.exec: params table is not empty but SQL contains no statement");
             }
-            if (*p)
-            {
-                sqlite3_finalize(stmt);
-                return push_sqlite_fail(L,
-                                        "exec with params supports only one statement; "
-                                        "use exec(sql) without params for multi-statement SQL");
-            }
+            return push_ok(L);
         }
 
         // Bind : retourne false + message si erreur. Avant de raise
@@ -684,7 +789,7 @@ namespace
     }
 
     // ============================================================
-    // Userdata Stmt : itérateur pour db:query() — session 3
+    // Userdata Stmt : itérateur pour db:query()
     // ============================================================
     //
     // Un Stmt encapsule un sqlite3_stmt prêt à itérer. Il est
@@ -932,8 +1037,8 @@ namespace
     // db:query(sql, params?) → stmt (callable iterator) | (nil, err)
     //
     // Prépare le SQL, bind les params si fournis, retourne un Stmt
-    // callable. Si quelque chose échoue avant l'itération (prepare
-    // ou bind), on retourne (nil, err) sans créer le Stmt.
+    // callable. Une erreur de préparation renvoie (nil, err) ; une
+    // table params invalide lève une erreur Lua après finalisation.
     //
     // Refuse le multi-statement même sans params : un SELECT itéré
     // multiple n'a pas de sens pour la boucle `for row in ...`.
@@ -951,7 +1056,14 @@ namespace
 
         luaL_checktype(L, 2, LUA_TSTRING);
         size_t sql_len = 0;
-        const char *sql = lua_tolstring(L, 2, &sql_len);
+        const char *sql = nullptr;
+        {
+            std::string sql_error;
+            if (!get_checked_sql(L, 2, sql, sql_len, sql_error))
+            {
+                return push_sqlite_fail(L, sql_error);
+            }
+        }
 
         int top = lua_gettop(L);
         bool has_params = false;
@@ -975,27 +1087,29 @@ namespace
         }
 
         // Refuser le multi-statement (avec ou sans params).
-        if (pzTail && *pzTail)
+        if (!sql_tail_is_empty(pzTail))
         {
-            const char *p = pzTail;
-            while (*p && (*p == ' ' || *p == '\t' || *p == '\n' ||
-                          *p == '\r' || *p == ';'))
-            {
-                ++p;
-            }
-            if (*p)
-            {
-                sqlite3_finalize(stmt);
-                return push_sqlite_fail(L,
-                                        "query supports only one statement; "
-                                        "use exec(sql) for multi-statement SQL");
-            }
+            sqlite3_finalize(stmt);
+            return push_sqlite_fail(L,
+                                    "query supports only one statement; "
+                                    "use exec(sql) for multi-statement SQL");
         }
 
-        // Si pas de params fournis mais le statement a des
-        // placeholders, raise plutôt que de binder NULL implicitement.
-        // Cohérent avec db_exec (audit point 1).
-        if (!has_params)
+        // Un SQL vide ou uniquement composé de commentaires prépare
+        // un statement nul : query renvoie alors un itérateur déjà épuisé.
+        // Si une table params non vide a été fournie, elle ne doit pas être
+        // ignorée silencieusement.
+        if (!stmt)
+        {
+            if (has_params && !lua_table_is_empty(L, 3))
+            {
+                luaL_error(L,
+                           "sqlite.query: params table is not empty but SQL contains no statement");
+            }
+        }
+        // Si pas de params fournis mais le statement a des placeholders,
+        // renvoyer une erreur plutôt que de binder NULL implicitement.
+        else if (!has_params)
         {
             int n_placeholders = sqlite3_bind_parameter_count(stmt);
             if (n_placeholders > 0)
@@ -1008,7 +1122,7 @@ namespace
             }
         }
 
-        if (has_params)
+        if (has_params && stmt)
         {
             std::string bind_err;
             bool bind_ok = bind_params_from_table(L, stmt, 3, bind_err);
@@ -1058,17 +1172,25 @@ namespace
         // appelant, pas une intention d'ouvrir un fichier nommé "42".
         // Pattern aligné sur toml.decode et workers.spawn.
         luaL_checktype(L, 1, LUA_TSTRING);
-        const char *path = lua_tostring(L, 1);
 
-        // Parse opts ; lance une erreur Lua si malformés.
+        // Parse opts first: it may raise a Lua error. No owning C++ string is
+        // alive yet, so the longjmp cannot bypass a string destructor.
         OpenOpts opts = parse_open_opts(L, 2);
+
+        std::string path;
+        std::string path_err;
+        if (!lua_string_without_nul(L, 1, path,
+                                    "sqlite: path", path_err))
+        {
+            return push_fail(L, path_err);
+        }
 
         // Ouverture avec les flags par défaut équivalents à sqlite3_open :
         //   CREATE | READWRITE.
         // sqlite3_open_v2 permettrait de durcir avec NOMUTEX par exemple,
         // mais on garde le défaut pour cohérence avec SQLITE_THREADSAFE=1.
         sqlite3 *handle = nullptr;
-        int rc = sqlite3_open(path, &handle);
+        int rc = sqlite3_open(path.c_str(), &handle);
         if (rc != SQLITE_OK)
         {
             std::string msg = handle ? sqlite3_errmsg(handle) : sqlite3_errstr(rc);

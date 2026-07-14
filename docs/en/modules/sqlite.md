@@ -2,23 +2,27 @@
 
 # `babet.sqlite` — embedded SQL database
 
-Wraps SQLite 3.53.1 (vendored), the most-deployed database engine
-in the world. Zero-config persistence for any script that needs
-more than a JSON file but less than a database server.
+`babet.sqlite` embeds SQLite 3.53.1 and exposes a deliberately small Lua API:
+open a connection, execute SQL, and lazily iterate over results. Prepared
+statements remain internal; `prepare`, `step`, and `finalize` are not exposed.
 
-## Why
+## Module contents
 
-A script that needs to keep state across runs (a bot's seen-list,
-a scraper's progress, accumulated metrics) shouldn't have to pull
-in PostgreSQL or invent its own file format. SQLite is exactly
-right at this scale : single file, transactional, fast, no daemon.
+- [API](#sqlite-api)
+  - [Opening and closing](#sqlite-open-close)
+  - [Execution](#sqlite-exec)
+  - [SQL parameters](#sqlite-parameters)
+  - [SQL text and NUL bytes](#sqlite-sql-text)
+- [Row reading and type mapping](#sqlite-rows)
+- [Lifetime](#sqlite-lifetime)
+- [Error contract](#sqlite-errors)
+- [Complete example](#sqlite-example)
+- [Not exposed in v1](#sqlite-not-exposed)
 
-The Lua API mirrors the SQLite C API closely (open / exec /
-prepare / step / finalize) with safer defaults and Lua-friendly
-error returns.
-
+<a id="sqlite-api"></a>
 ## API
 
+<a id="sqlite-open-close"></a>
 ### Opening and closing
 
 | Function | Returns |
@@ -26,146 +30,258 @@ error returns.
 | `babet.sqlite.open(path, opts?)` | `db` (userdata) \| `(nil, err)` |
 | `db:close()` | `(true, nil)` — idempotent |
 
-`opts` :
+`open` opens or creates a read/write database. The special path `":memory:"`
+creates an in-memory database which is lost on close. The path must be a string
+without NUL bytes.
 
-| Field          | Type                                                      | Default                                |
-| -------------- | --------------------------------------------------------- | -------------------------------------- |
-| `wal`          | boolean — enable WAL journal mode                         | `false`                                |
-| `busy_timeout` | integer ms — automatic retry for this long on a locked db | `0` = **none** (immediate SQLITE_BUSY) |
+`opts` is an optional table:
 
-> An earlier version of this page also documented `opts.readonly`
-> and `opts.foreign_keys` : they don't exist — see "Not in v1".
+| Field | Type | Default |
+| --- | --- | --- |
+| `wal` | boolean — requests `PRAGMA journal_mode=WAL` | `false` |
+| `busy_timeout` | integer from `0` to `3600000` ms | `0` — no wait |
 
-Special path `":memory:"` opens an in-memory database (lost on
-close). Use for tests or transient processing.
+`wal = true` requests WAL mode, but SQLite may keep another mode when WAL is not
+applicable. This notably happens with `":memory:"`, which keeps its in-memory
+journal mode without making `open` fail.
 
-### Execution and queries
+`busy_timeout` asks SQLite to retry for the requested duration when the database
+is locked. A value of `0` lets `SQLITE_BUSY` surface immediately.
 
-| Function                 | Returns                                                          |
-| ------------------------ | ----------------------------------------------------------------- |
-| `db:exec(sql)`           | `(true, nil)` \| `(nil, err)` — multi-statement accepted         |
-| `db:exec(sql, params)`   | same, with bound parameters                                       |
-| `db:query(sql, params?)` | `stmt` (iterator) \| `(nil, err)` — **one** statement only       |
+<a id="sqlite-exec"></a>
+### Execution
 
-`db:query` returns a **callable iterator**, not a table : each call
-yields the next row (a table keyed by column names), then `nil`
-once exhausted — the idiomatic use is `for row in db:query(...) do`.
-Resources are released on exhaustion or garbage collection ;
-`stmt:close()` releases earlier (iteration abandoned midway).
+| Function | Returns |
+| --- | --- |
+| `db:exec(sql)` | `(true, nil)` \| `(nil, err)` — multiple statements accepted |
+| `db:exec(sql, params)` | `(true, nil)` \| `(nil, err)` — **one** statement only |
+| `db:query(sql, params?)` | `stmt` (callable iterator) \| `(nil, err)` — **one** statement only |
+| `stmt:close()` | `(true, nil)` — idempotent |
 
-Multi-statement SQL passed to `query` returns
-`(nil, "sqlite: query supports only one statement; …")` — for
-multi-statement SQL, use `exec`.
+#### `db:exec`
 
-## Type mapping
+Without a `params` table, `exec` accepts multiple semicolon-separated
+statements. They are prepared and executed in order. Execution stops at the
+first error; earlier effects remain unless the statements were inside an
+explicit transaction.
 
-| SQLite type | Lua type |
+With a `params` table, only one statement is accepted. A second statement
+returns `(nil, err)`. Trailing whitespace, semicolons, and SQL comments
+(`-- ...` or `/* ... */`) do not count as a second statement.
+
+A `SELECT` passed to `exec` is stepped to completion, but its rows are ignored.
+Use `query` to read them.
+
+An empty SQL string, or one containing only separators/comments, is a successful
+no-op with `exec(sql)` or `exec(sql, {})`. A non-empty `params` table without an
+SQL statement raises a Lua error.
+
+#### `db:query`
+
+`query` immediately prepares one statement and returns a **callable iterator**.
+The statement is not executed until the iterator is called for the first time:
+
+```lua
+local stmt = assert(db:query("SELECT id, name FROM users ORDER BY id"))
+
+local first = stmt() -- first sqlite3_step() call
+while first do
+    print(first.id, first.name)
+    first = stmt()
+end
+```
+
+The idiomatic form is:
+
+```lua
+for row in db:query("SELECT id, name FROM users ORDER BY id") do
+    print(row.id, row.name)
+end
+```
+
+Each row is a table keyed by column name. The iterator returns `nil` once
+exhausted and finalizes the statement at that point. `stmt:close()` releases it
+earlier; later calls to `stmt()` simply return `nil`. Garbage collection also
+finalizes an abandoned iterator, for example after a `break`.
+
+`query` is not restricted to `SELECT`. A DDL or DML statement is executed on
+the iterator's first call, then the iterator ends without yielding a row.
+
+A query with no matching rows returns an iterator that immediately yields
+`nil`. Empty or comment-only SQL likewise returns an already-exhausted iterator.
+
+Multiple statements are rejected. Trailing whitespace, semicolons, and comments
+remain valid:
+
+```lua
+local stmt = assert(db:query("SELECT 1 AS value; -- trailing comment"))
+print(stmt().value)
+```
+
+<a id="sqlite-parameters"></a>
+### SQL parameters
+
+The following forms are supported:
+
+| Placeholder | Lua value |
+| --- | --- |
+| `?` | `params[1]`, `params[2]`, etc., in `?` appearance order |
+| `:name`, `@name`, `$name` | `params.name` — prefix removed |
+
+Positional and named parameters may be mixed:
+
+```lua
+assert(db:exec(
+    "INSERT INTO events VALUES (?, :kind, ?)",
+    { 42, 1700000000, kind = "start" }
+))
+```
+
+The table must match the placeholders exactly. Missing or extra parameters,
+sparse numeric indexes, non-integer numeric indexes, and unsupported value types
+raise a Lua error. Passing `nil` as the third argument is equivalent to omitting
+the table.
+
+Numbered `?NNN` placeholders are not part of the public contract. Use `?` or a
+named placeholder.
+
+Accepted bind types:
+
+| Lua type | SQLite value |
+| --- | --- |
+| boolean | INTEGER `0` or `1` |
+| integer | INTEGER |
+| non-integer number | REAL |
+| string | TEXT, including strings containing NUL bytes |
+
+A Lua string is **always** bound with `sqlite3_bind_text`, even when the target
+column is declared `BLOB`. Version 1 exposes neither a BLOB constructor nor a
+sentinel for binding `NULL`. Use the SQL literal `NULL` when needed.
+
+<a id="sqlite-sql-text"></a>
+### SQL text and NUL bytes
+
+The SQL text must be a string without NUL bytes. SQLite would treat the NUL as
+end-of-string and could execute only a prefix, so Babet rejects it before
+preparing anything. SQL length is also limited to `INT_MAX` bytes, matching the
+`sqlite3_prepare_v2` API.
+
+This restriction applies only to the **SQL text**. Bound strings are binary-safe
+and may contain NUL bytes.
+
+<a id="sqlite-rows"></a>
+## Row reading and type mapping
+
+| SQLite type read | Lua type |
 | --- | --- |
 | INTEGER | integer |
 | REAL | number (float) |
 | TEXT | string |
-| BLOB | string (binary-safe) |
-| NULL | read : **key absent** from the row (`row.col == nil`, but `pairs()` won't see it) ; write : use the SQL literal `NULL` (no sentinel in v1) |
+| BLOB | binary-safe string, including an empty BLOB |
+| NULL | absent key (`row.col == nil` and not visible through `pairs`) |
 
-## Quick examples
+When multiple result columns have the same name, each assignment overwrites the
+previous one: the last column wins. Use aliases to retain every value:
+
+```sql
+SELECT users.id AS user_id, orders.id AS order_id
+FROM users
+JOIN orders ON orders.user_id = users.id;
+```
+
+<a id="sqlite-lifetime"></a>
+## Lifetime
+
+`db:close()` is idempotent. After closing, every new `db:exec` or `db:query`
+call returns `(nil, "sqlite: connection closed")`.
+
+An iterator created **before** `db:close()` remains usable. Babet uses
+`sqlite3_close_v2`, so SQLite temporarily keeps a "zombie" connection until the
+last active statement has been finalized.
 
 ```lua
-local db = assert(babet.sqlite.open("state.db", { wal = true }))
+local stmt = assert(db:query("SELECT id FROM users ORDER BY id"))
+assert(db:close())
 
--- Schema (multi-statement : exec)
-db:exec([[
+for row in stmt do
+    print(row.id) -- remains valid
+end
+```
+
+<a id="sqlite-errors"></a>
+## Error contract
+
+Errors fall into two categories:
+
+- Operational errors detected by `open`, `close`, `exec`, or while preparing a
+  `query` return `(nil, "sqlite: <description>")`. The message contains a
+  description but does not guarantee a numeric SQLite error code.
+- Wrong argument types, invalid `params` tables, and errors occurring while an
+  iterator is called raise a Lua error. Wrap the iteration in `pcall` when such
+  errors must be caught.
+
+Without a `params` table, placeholders are checked in **every** statement passed
+to `exec`. Babet returns an explicit error instead of allowing SQLite to bind
+`NULL` silently.
+
+<a id="sqlite-example"></a>
+## Complete example
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    wal = true,
+    busy_timeout = 2000,
+}))
+
+assert(db:exec([[
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT UNIQUE NOT NULL,
-        active INTEGER DEFAULT 1
+        active INTEGER NOT NULL DEFAULT 1
     );
-]])
+    CREATE INDEX IF NOT EXISTS users_active_idx ON users(active);
+]]))
 
--- Insert with parameters
-assert(db:exec("INSERT INTO users (name) VALUES (?)", { "alice" }))
+assert(db:exec(
+    "INSERT INTO users (name) VALUES (?)",
+    { "alice" }
+))
 
--- Last rowid : via SQL (no dedicated method in v1)
-for row in db:query("SELECT last_insert_rowid() AS id") do
-    print("inserted with id", row.id)
-end
-
--- Query : query returns an ITERATOR
-for row in db:query("SELECT id, name FROM users WHERE active = ?",
-                    { 1 }) do
+for row in db:query(
+    "SELECT id, name FROM users WHERE active = ? ORDER BY id",
+    { 1 }
+) do
     print(row.id, row.name)
 end
 
--- Transaction : via SQL (no wrapper in v1)
-db:exec("BEGIN")
-local ok1 = db:exec("UPDATE users SET active = 0 WHERE name = ?",
-                    { "alice" })
-local ok2 = db:exec("UPDATE users SET active = 1 WHERE name = ?",
-                    { "bob" })
-if ok1 and ok2 then
-    db:exec("COMMIT")
+assert(db:exec("BEGIN"))
+local ok, err = db:exec(
+    "UPDATE users SET active = 0 WHERE name = :name",
+    { name = "alice" }
+)
+if ok then
+    assert(db:exec("COMMIT"))
 else
     db:exec("ROLLBACK")
+    error(err)
 end
 
-db:close()
+assert(db:close())
 ```
 
-## Error contract
+<a id="sqlite-not-exposed"></a>
+## Not exposed in v1
 
-- All runtime errors → `(nil, "sqlite: <description>")` with the
-  SQLite error code in the message.
-- **`exec(sql)` with placeholders but no `params` argument** →
-  `(nil, "sqlite: SQL contains placeholders but no params table
-  provided; …")` — an explicit error instead of silently binding
-  NULL. The guard applies to **every** statement of a
-  multi-statement SQL string (v21 audit).
-- **Supported placeholders** : `?` (positional, bound from
-  `params[1]`, `params[2]`, …) and `:name` / `@name` / `$name`
-  (named, bound from `params.name` — the prefix is ignored).
-  Numbered **`?NNN` placeholders are not supported** : the binder
-  would treat them as a "named" parameter whose name is `"NNN"`
-  (string key), a trap more than a feature. Use `?` or `:name`.
-- **Sparse keys in `params`** (e.g. `{[1] = "a", [3] = "c"}`) →
-  `(nil, err)`.
-- **Empty BLOB string** → stored correctly as empty BLOB
-  (previously buggy in pre-1.5).
-- **Methods after `close`** → `(nil, "sqlite: connection closed")`.
-- **Wrong argument types** → raises via `luaL_error`.
+The following items are not implemented:
 
-## Design decisions
+- `db:prepare`, `stmt:exec`, and `stmt:finalize`;
+- `db:transaction(fn)` and `db:in_transaction()`;
+- `db:last_insert_rowid()` and `db:changes()`;
+- `opts.readonly` and `opts.foreign_keys`;
+- a `db.NULL` sentinel or `sqlite.blob(data)` constructor;
+- the `sqlite3_blob_open` streaming BLOB API;
+- the `sqlite3_backup_init` backup API.
 
-- **WAL is opt-in, not default**. WAL is strictly better for most
-  use cases, but it creates `*-wal` and `*-shm` sidecar files
-  that some users find surprising. Opt-in keeps the default
-  surprise-free, but every long-running daemon should pass
-  `wal=true`.
-- **Placeholders without `params` is an error**, not a silent
-  NULL bind. Catches a class of injection-adjacent bugs early.
-- **Errors are returned, not raised**. Even malformed SQL returns
-  `(nil, err)`. Scripts that don't check are noisy but not
-  catastrophic.
-
-## Not in v1
-
-> The following items were wrongly presented as available in an
-> earlier version of this page — they belong to the original design
-> and are **not implemented** :
-> `db:prepare` / `stmt:exec` / `stmt:finalize` (reusable prepared
-> statements — `query` re-prepares on each call),
-> `db:transaction(fn)` / `db:in_transaction()` (workaround :
-> `exec("BEGIN"/"COMMIT"/"ROLLBACK")`, see example),
-> `db:last_insert_rowid()` / `db:changes()` (workaround :
-> `SELECT last_insert_rowid()` / `SELECT changes()`),
-> `opts.readonly` / `opts.foreign_keys` (workaround :
-> `PRAGMA foreign_keys = ON` via `exec`), and the `db.NULL` write
-> sentinel.
-
-- `BLOB` streaming I/O (`sqlite3_blob_open`). Use string
-  serialisation if you fit in memory.
-- Virtual tables / FTS5 / R-Tree. Available via raw SQL if the
-  vendored SQLite is built with them ; no Lua-level API yet.
-- Backup API (`sqlite3_backup_init`). For now, `VACUUM INTO
-  'backup.db'` works as a one-liner.
-
-For a higher-level ORM-like layer, build it in Lua on top of
-this API.
+Transactions, `last_insert_rowid`, `changes`, foreign keys, and `VACUUM INTO`
+remain available through raw SQL. FTS5 and R-Tree are not enabled in the current
+embedded build.

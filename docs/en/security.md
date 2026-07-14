@@ -22,15 +22,20 @@ run untrusted scripts, use a purpose-built Lua sandbox instead.
 The hardening work in Babet protects *legitimate* use against
 accidents and supply-chain tampering :
 
-- **Path / symlink handling** uses `lexically_relative()` and
-  component-wise `is_within()` guards (never string prefix checks),
-  so a `cp src dst/` cannot escape into a sibling tree via a
-  symlinked path component.
-- **Process-group cleanup** in `babet.exec` ensures that
-  forked children don't outlive the parent or leak zombie
-  processes when the script is interrupted.
+- **`copyTree` / `moveTree` confinement** : the destination root is
+  opened once, then every create, copy and move is performed relative to
+  that descriptor with `openat`/`mkdirat`/`renameat` and
+  `O_NOFOLLOW`/`AT_SYMLINK_NOFOLLOW`. A pre-existing symlink, or one swapped
+  during the operation, cannot redirect a write to an outside target. The
+  `is_within()` guards additionally reject a destination resolving inside
+  the source.
+- **Bounded process-group cleanup** in `babet.exec` also covers the
+  `chdir`/`exec` launch phase, internal polling failures, and children that
+  close all pipes while continuing to run. On timeout, TERM then KILL target
+  the whole group; these error paths never end in an unbounded final
+  `waitpid`.
 - **Output limits** on `babet.exec` bound the amount of stdout
-  and stderr captured into memory (default 16 MiB each, configurable),
+  and stderr captured into memory (default 10 MiB each, configurable),
   so a runaway subprocess can't OOM the Babet process.
 - **Dependency checksums** : every vendored dependency is
   SHA256-pinned in `build_local.sh`. An empty hash refuses to build.
@@ -38,10 +43,18 @@ accidents and supply-chain tampering :
   This protects against a compromised upstream or Wayback Machine
   archive (which is the fallback source).
 - **TLS verification** is on by default (`verify=true`). Disabling
-  it requires an explicit `verify=false` per call — no silent
-  fallback. Custom CA stores can be passed via `ca_cert` or
-  `ca_path`, or via `SSL_CERT_FILE` / `SSL_CERT_DIR` environment
-  variables.
+  it requires an explicit per-call `verify=false` — there is no silent
+  fallback. TLS sockets accept extra trust through `ca_cert` or `ca_path`;
+  HTTP exposes `ca_cert`. OpenSSL's `SSL_CERT_FILE` / `SSL_CERT_DIR` remain
+  available. SNI is sent independently from verification when a DNS hostname
+  is known.
+- **HTTP line validation** rejects CR/LF in URLs and header values, and header
+  names must follow the HTTP `token` grammar. User-controlled values cannot
+  inject an extra header or request line through those fields.
+- **Network memory limits** bound `socket:recv_line`, `socket:recv_all`, and
+  `http.max_body_size`. After a socket-read timeout, already consumed bytes
+  stay in one shared pending buffer so switching receive methods cannot lose or
+  reorder the stream.
 
 ## What it does *not* protect against
 

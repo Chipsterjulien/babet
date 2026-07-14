@@ -13,8 +13,9 @@
 //   w:add(path, events [, opts]) -> wd | (nil, err)
 //     Pose une surveillance sur `path`. `events` est une LISTE
 //     OBLIGATOIRE et non vide de noms d'événements (array de strings).
-//     `opts` (table optionnelle) accepte des modifieurs. Renvoie le
-//     watch descriptor (integer) en succès.
+//     `opts` (table optionnelle) accepte `onlydir` (booléen strict),
+//     qui ajoute IN_ONLYDIR. Les autres champs sont ignorés. Renvoie
+//     le watch descriptor (integer) en succès.
 //
 //   w:read([timeout]) -> events | (nil, "timeout")
 //                              | (nil, "interrupted")
@@ -74,7 +75,7 @@
 // Conventions d'erreur (miroir de socket / http / toml)
 // ---------------------------------------------------------------------
 //
-//   - Mauvais TYPE d'argument         -> luaL_error (raise).
+//   - Mauvais NOMBRE/TYPE d'argument  -> luaL_error (raise).
 //   - Mauvaise VALEUR / erreur runtime -> (nil, err).
 //   - Action réussie (remove/close)    -> (true, nil).
 //   - Nom d'événement inconnu dans add() -> (nil, err) (miroir de la

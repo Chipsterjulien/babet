@@ -20,6 +20,7 @@
 #include "lua_bindings/json.hpp"
 #include "lua_bindings/link.hpp"
 #include "lua_bindings/listFiles.hpp"
+#include "lua_bindings/lua_utils.hpp"
 #include "lua_bindings/md5.hpp"
 #include "lua_bindings/memoryUtils.hpp"
 #include "lua_bindings/mergeTables.hpp"
@@ -299,7 +300,7 @@ void register_babet(lua_State *L)
     // Cf. user.hpp pour le design.
     register_user(L);
 
-    // babet.VERSION = "1.7.1"
+    // babet.VERSION = BABET_VERSION_STRING
     lua_pushstring(L, BABET_VERSION_STRING);
     lua_setfield(L, -2, "VERSION");
 
@@ -476,7 +477,13 @@ int main(int argc, char *argv[])
         // optional vide = pas de zip / pas de main.lua embarqué : ce
         // n'est PAS une erreur, juste « je ne suis pas packagé » -> on
         // bascule en mode outil Babet (étape 2).
-        auto fileData = readEmbeddedFile(exePath, "main.lua");
+        std::string embedded_error;
+        auto fileData = readEmbeddedFile(exePath, "main.lua", &embedded_error);
+        if (!fileData && !embedded_error.empty())
+        {
+            std::cerr << "Erreur : " << embedded_error << std::endl;
+            return 1;
+        }
         if (fileData)
         {
             lua_State *L = luaL_newstate();
@@ -501,7 +508,9 @@ int main(int argc, char *argv[])
 
             if (luaL_loadbuffer(L, fileData->data(), fileData->size(), "main.lua") || lua_pcall(L, 0, LUA_MULTRET, 0))
             {
-                std::cerr << "Erreur : " << lua_tostring(L, -1) << std::endl;
+                std::cerr << "Erreur : "
+                          << lua_value_to_display_string(L, -1)
+                          << std::endl;
                 lua_close(L);
                 return 1;
             }
@@ -586,8 +595,16 @@ int main(int argc, char *argv[])
     fs::path target = fs::absolute(path, abs_ec);
     if (abs_ec) target = fs::path(path);
     std::error_code ec;
+    fs::file_status target_status = fs::status(target, ec);
+    if (ec && ec != std::errc::no_such_file_or_directory &&
+        ec != std::errc::not_a_directory)
+    {
+        std::cerr << "Erreur : impossible d'inspecter '" << path
+                  << "' : " << ec.message() << std::endl;
+        return 1;
+    }
 
-    if (fs::is_regular_file(target, ec))
+    if (fs::is_regular_file(target_status))
     {
         // Mode FICHIER : package.path et le contexte workers sont
         // ancrés au répertoire du script, pour que require() des
@@ -597,7 +614,7 @@ int main(int argc, char *argv[])
                                argc, argv);
     }
 
-    if (fs::is_directory(target, ec))
+    if (fs::is_directory(target_status))
     {
         // Mode DOSSIER : comportement historique inchangé.
         std::string mainLuaPath = (target / "main.lua").string();
@@ -609,7 +626,15 @@ int main(int argc, char *argv[])
         // Le message conserve "main.lua introuvable" (Test 5 le
         // greppe) et précise le cas non-régulier.
         std::error_code mec;
-        if (!fs::is_regular_file(mainLuaPath, mec))
+        const fs::file_status main_status = fs::status(mainLuaPath, mec);
+        if (mec && mec != std::errc::no_such_file_or_directory &&
+            mec != std::errc::not_a_directory)
+        {
+            std::cerr << "Erreur : impossible d'inspecter main.lua dans le répertoire "
+                      << path << " : " << mec.message() << std::endl;
+            return 1;
+        }
+        if (!fs::is_regular_file(main_status))
         {
             std::cerr << "Erreur : main.lua introuvable (ou pas un fichier régulier) dans le répertoire "
                       << path << std::endl;

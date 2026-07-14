@@ -100,7 +100,13 @@ namespace
 // `which("foo")` qui rend nil silencieusement induirait en erreur.)
 int lua_sys_which(lua_State *L)
 {
-    const char *name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 1, LUA_TSTRING);
+    std::string name;
+    std::string err;
+    if (!lua_string_without_nul(L, 1, name, "which: name", err))
+    {
+        return push_fail(L, err);
+    }
     std::string found = find_in_path(name);
     if (found.empty())
     {
@@ -118,8 +124,22 @@ int lua_sys_which(lua_State *L)
 // or "8080"`. Mauvais usage (arg absent/non-string) -> luaL_error.
 int lua_sys_env(lua_State *L)
 {
-    const char *name = luaL_checkstring(L, 1);
-    const char *val = std::getenv(name);
+    luaL_checktype(L, 1, LUA_TSTRING);
+
+    // env() suit la convention historique de cette API : une faute de type
+    // ou un nom impossible lève une erreur Lua. On vérifie le NUL avant de
+    // construire un objet C++ afin de ne pas franchir un luaL_argerror avec
+    // des destructeurs actifs.
+    size_t name_len = 0;
+    const char *name_data = lua_tolstring(L, 1, &name_len);
+    if (std::memchr(name_data, '\0', name_len) != nullptr)
+    {
+        return luaL_argerror(L, 1,
+                             "env: name must not contain NUL byte");
+    }
+
+    std::string name(name_data, name_len);
+    const char *val = std::getenv(name.c_str());
     if (val == nullptr)
     {
         lua_pushnil(L);
@@ -137,8 +157,16 @@ int lua_sys_env(lua_State *L)
 // la libc rejette avec EINVAL, on relaie proprement.
 int lua_sys_setenv(lua_State *L)
 {
-    const char *name = luaL_checkstring(L, 1);
-    const char *value = luaL_checkstring(L, 2);
+    luaL_checktype(L, 1, LUA_TSTRING);
+    luaL_checktype(L, 2, LUA_TSTRING);
+    std::string name;
+    std::string value;
+    std::string err;
+    if (!lua_string_without_nul(L, 1, name, "setenv: name", err) ||
+        !lua_string_without_nul(L, 2, value, "setenv: value", err))
+    {
+        return push_fail(L, err);
+    }
     // 1 = overwrite : on remplace une valeur existante (comportement
     // attendu d'un setter, sinon on aurait un setter qui ne fait
     // parfois rien selon l'état du process — exactement le « muet »
@@ -153,7 +181,7 @@ int lua_sys_setenv(lua_State *L)
     int saved = 0;
     if (!with_process_env_lock([&]()
                                {
-            rc = ::setenv(name, value, 1);
+            rc = ::setenv(name.c_str(), value.c_str(), 1);
             saved = errno; }))
     {
         return push_fail(L,

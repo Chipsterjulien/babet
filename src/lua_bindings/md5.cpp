@@ -1,6 +1,6 @@
 #include "md5.hpp"
+#include "lua_utils.hpp"
 #include "checksum_utils.hpp"
-#include "openssl_utils.hpp"
 #include <openssl/evp.h>
 
 std::optional<std::string> md5sum(const std::string &path)
@@ -15,18 +15,18 @@ int lua_md5sum(lua_State *L)
         return luaL_error(L, "Expected one string argument");
     }
 
-    const char *path = luaL_checkstring(L, 1);
-    auto result = md5sum(path);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
+    auto result = calculate_checksum_detailed(path, EVP_md5());
 
-    if (result.has_value())
+    if (result.value.has_value())
     {
-        lua_pushstring(L, result->c_str());
+        lua_pushstring(L, result.value->c_str());
         lua_pushnil(L);
     }
     else
     {
         lua_pushnil(L);
-        lua_pushstring(L, get_openssl_error().c_str());
+        lua_pushstring(L, result.error.c_str());
     }
     return 2;
 }

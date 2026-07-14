@@ -108,7 +108,7 @@ int lua_touch(lua_State *L)
         return luaL_argerror(L, 1, "Expected a string as argument");
     }
 
-    const char *path = luaL_checkstring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
     std::string error_message = touch(path);
     if (error_message.empty())
     {

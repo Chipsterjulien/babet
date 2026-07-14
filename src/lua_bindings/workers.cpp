@@ -14,6 +14,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -65,11 +66,35 @@ namespace
     //   - (false, "timeout") timeout_ms > 0 expiré sans succès
     //                        (échec APRÈS ATTENTE)
     //   - (false, "closed")  queue fermée (push toujours, pop si vide)
+    //   - (false, "out of memory" / "internal ...") erreur interne
+    //                        interceptée sans laisser le mutex verrouillé
     //
     // La distinction "full"/"empty" (non-bloquant immédiat) vs "timeout"
     // (attente effective expirée) est utile à l'utilisateur : elle
     // signale s'il vient de tomber sur une queue déjà saturée/vide ou
     // si la condition d'arrêt s'est imposée pendant qu'il patientait.
+    struct PthreadMutexGuard
+    {
+        pthread_mutex_t *mutex;
+        bool locked;
+
+        explicit PthreadMutexGuard(pthread_mutex_t *m) noexcept
+            : mutex(m), locked(pthread_mutex_lock(m) == 0)
+        {
+        }
+
+        ~PthreadMutexGuard()
+        {
+            if (locked)
+            {
+                pthread_mutex_unlock(mutex);
+            }
+        }
+
+        PthreadMutexGuard(const PthreadMutexGuard &) = delete;
+        PthreadMutexGuard &operator=(const PthreadMutexGuard &) = delete;
+    };
+
     struct MessageQueue
     {
         std::deque<std::string> q;
@@ -163,10 +188,13 @@ namespace
         // push : insère un message. Retourne (true, "") ou (false, reason).
         std::pair<bool, const char *> push(std::string msg, int64_t timeout_ms)
         {
-            pthread_mutex_lock(&mu);
+            PthreadMutexGuard lock(&mu);
+            if (!lock.locked)
+            {
+                return {false, "internal mutex error"};
+            }
             if (closed)
             {
-                pthread_mutex_unlock(&mu);
                 return {false, "closed"};
             }
 
@@ -175,7 +203,6 @@ namespace
             {
                 if (q.size() >= capacity)
                 {
-                    pthread_mutex_unlock(&mu);
                     return {false, "full"};
                 }
             }
@@ -188,7 +215,6 @@ namespace
                 }
                 if (closed)
                 {
-                    pthread_mutex_unlock(&mu);
                     return {false, "closed"};
                 }
             }
@@ -206,7 +232,6 @@ namespace
                     {
                         if (q.size() >= capacity && !closed)
                         {
-                            pthread_mutex_unlock(&mu);
                             return {false, "timeout"};
                         }
                         break;
@@ -214,15 +239,24 @@ namespace
                 }
                 if (closed)
                 {
-                    pthread_mutex_unlock(&mu);
                     return {false, "closed"};
                 }
             }
 
             // Insertion.
-            q.push_back(std::move(msg));
+            try
+            {
+                q.push_back(std::move(msg));
+            }
+            catch (const std::bad_alloc &)
+            {
+                return {false, "out of memory"};
+            }
+            catch (...)
+            {
+                return {false, "internal queue error"};
+            }
             pthread_cond_signal(&not_empty);
-            pthread_mutex_unlock(&mu);
             return {true, ""};
         }
 
@@ -230,7 +264,11 @@ namespace
         // (false, reason). out_msg n'est modifié que si succès.
         std::pair<bool, const char *> pop(std::string &out_msg, int64_t timeout_ms)
         {
-            pthread_mutex_lock(&mu);
+            PthreadMutexGuard lock(&mu);
+            if (!lock.locked)
+            {
+                return {false, "internal mutex error"};
+            }
 
             // Cas non-bloquant.
             if (timeout_ms == 0)
@@ -239,10 +277,8 @@ namespace
                 {
                     if (closed)
                     {
-                        pthread_mutex_unlock(&mu);
                         return {false, "closed"};
                     }
-                    pthread_mutex_unlock(&mu);
                     return {false, "empty"};
                 }
             }
@@ -255,7 +291,6 @@ namespace
                 }
                 if (q.empty() && closed)
                 {
-                    pthread_mutex_unlock(&mu);
                     return {false, "closed"};
                 }
             }
@@ -275,10 +310,8 @@ namespace
                         {
                             if (closed)
                             {
-                                pthread_mutex_unlock(&mu);
                                 return {false, "closed"};
                             }
-                            pthread_mutex_unlock(&mu);
                             return {false, "timeout"};
                         }
                         break;
@@ -286,16 +319,25 @@ namespace
                 }
                 if (q.empty() && closed)
                 {
-                    pthread_mutex_unlock(&mu);
                     return {false, "closed"};
                 }
             }
 
             // Extraction.
-            out_msg = std::move(q.front());
-            q.pop_front();
+            try
+            {
+                out_msg = std::move(q.front());
+                q.pop_front();
+            }
+            catch (const std::bad_alloc &)
+            {
+                return {false, "out of memory"};
+            }
+            catch (...)
+            {
+                return {false, "internal queue error"};
+            }
             pthread_cond_signal(&not_full);
-            pthread_mutex_unlock(&mu);
             return {true, ""};
         }
 
@@ -314,11 +356,12 @@ namespace
             // seul le __gc du parent y passe.
             if (!initialized)
                 return;
-            pthread_mutex_lock(&mu);
+            PthreadMutexGuard lock(&mu);
+            if (!lock.locked)
+                return;
             closed = true;
             pthread_cond_broadcast(&not_full);
             pthread_cond_broadcast(&not_empty);
-            pthread_mutex_unlock(&mu);
         }
     };
 
@@ -346,6 +389,12 @@ namespace
         std::string result_json;
         std::string err_msg;
 
+        // Repli sans allocation pour le catch englobant de la thread.
+        // Si la construction de err_msg échoue elle-même (bad_alloc),
+        // ce buffer fixe permet tout de même de publier une erreur au
+        // parent sans laisser sortir d'exception de la pthread.
+        char emergency_error[256];
+
         // Lecture seule pour la thread après spawn. Mémoire stable
         // pendant toute la durée de vie de la thread.
         std::string code;
@@ -365,6 +414,43 @@ namespace
     constexpr int WORKER_RUNNING = 0;
     constexpr int WORKER_DONE = 1;
     constexpr int WORKER_ERROR = 2;
+
+    const char *worker_error_text(const Worker *w) noexcept
+    {
+        return w->emergency_error[0] != '\0'
+                   ? w->emergency_error
+                   : w->err_msg.c_str();
+    }
+
+    // Filet de sécurité ultime : cette fonction ne doit jamais lever.
+    // Elle ferme les queues, publie un message (avec repli sur buffer
+    // fixe) puis passe le worker en WORKER_ERROR avec release.
+    void publish_unhandled_worker_exception(Worker *w,
+                                            const char *detail) noexcept
+    {
+        w->inbox.close();
+        w->outbox.close();
+
+        w->emergency_error[0] = '\0';
+        try
+        {
+            w->err_msg = "workers: internal: unhandled C++ exception";
+            if (detail && detail[0] != '\0')
+            {
+                w->err_msg += ": ";
+                w->err_msg += detail;
+            }
+        }
+        catch (...)
+        {
+            std::snprintf(w->emergency_error,
+                          sizeof(w->emergency_error),
+                          "workers: internal C++ exception: %.190s",
+                          detail ? detail : "unknown");
+        }
+
+        w->status.store(WORKER_ERROR, std::memory_order_release);
+    }
 
     // Contexte d'init pour le require() utilisateur dans les workers.
     // Rempli par set_workers_init_context() depuis main.cpp avant tout
@@ -813,10 +899,10 @@ namespace
     // le global "worker.args" puis "worker.args" via le namespace
     // "worker", charge code, exécute en pcall, sérialise le résultat.
     //
-    // Tout est encapsulé en pcall : aucune erreur Lua ne tue le process.
-    // En cas de crash C++ dans le code de l'utilisateur (très rare avec
-    // pcall en place), c'est la thread qui meurt et on remontera "error"
-    // avec un message générique.
+    // Les erreurs Lua sont encapsulées en pcall. La fonction de thread
+    // entière est en plus protégée par un catch C++ englobant et déclarée
+    // noexcept : aucune exception C++ ne peut sortir vers pthread et
+    // déclencher std::terminate(). Toute anomalie devient WORKER_ERROR.
 
     // ============================================================
     // Chantier 9-3 : worker.send / worker.recv côté worker
@@ -932,10 +1018,8 @@ namespace
         return 2;
     }
 
-    void *worker_thread_main(void *arg)
+    void *worker_thread_run(Worker *w, lua_State *&L)
     {
-        Worker *w = static_cast<Worker *>(arg);
-
         // ==========================================================
         // Bloquer les signaux gérables par babet.signal dans ce
         // worker. Sans cela, le kernel pourrait délivrer un SIGTERM
@@ -959,7 +1043,7 @@ namespace
         pthread_sigmask(SIG_BLOCK, &mask, nullptr);
         // ==========================================================
 
-        lua_State *L = luaL_newstate();
+        L = luaL_newstate();
         if (!L)
         {
             w->err_msg = "workers: failed to create lua_State for worker";
@@ -1081,9 +1165,8 @@ namespace
                                  "worker");
         if (rc != LUA_OK)
         {
-            const char *m = lua_tostring(L, -1);
-            w->err_msg = m ? std::string(m)
-                           : "workers: failed to load code (no message)";
+            w->err_msg = "workers: failed to load code: ";
+            w->err_msg += lua_value_to_display_string(L, -1);
             w->status.store(WORKER_ERROR, std::memory_order_release);
             // Chantier 9-3 : ferme les queues pour que les recv/send
             // futurs côté parent voient 'closed' au lieu d'attendre.
@@ -1104,9 +1187,8 @@ namespace
         rc = lua_pcall(L, 0, 1, 0);
         if (rc != LUA_OK)
         {
-            const char *m = lua_tostring(L, -1);
-            w->err_msg = m ? std::string(m)
-                           : "workers: worker raised error (no message)";
+            w->err_msg = "workers: worker raised error: ";
+            w->err_msg += lua_value_to_display_string(L, -1);
             w->status.store(WORKER_ERROR, std::memory_order_release);
             // Chantier 9-3 : ferme les queues pour que les recv/send
             // futurs côté parent voient 'closed' au lieu d'attendre.
@@ -1133,23 +1215,11 @@ namespace
             lua_close(L);
             return nullptr;
         }
-        try
-        {
-            w->result_json = result_j.dump();
-        }
-        catch (const std::exception &e)
-        {
-            w->err_msg = std::string(
-                             "workers: internal: result_json dump failed: ") +
-                         e.what();
-            w->status.store(WORKER_ERROR, std::memory_order_release);
-            // Chantier 9-3 : ferme les queues pour que les recv/send
-            // futurs côté parent voient 'closed' au lieu d'attendre.
-            w->inbox.close();
-            w->outbox.close();
-            lua_close(L);
-            return nullptr;
-        }
+        // Toute exception C++ (UTF-8 JSON invalide, bad_alloc, etc.) est
+        // volontairement laissée au catch ENGLOBANT de la pthread. Cela
+        // garantit un chemin unique : fermeture du lua_State et des queues,
+        // publication WORKER_ERROR, et aucune exception vers pthread.
+        w->result_json = result_j.dump();
 
         // Chantier 9-3 : ferme les queues au succès.
         w->inbox.close();
@@ -1159,14 +1229,61 @@ namespace
         return nullptr;
     }
 
+    void *worker_thread_main(void *arg) noexcept
+    {
+        Worker *w = static_cast<Worker *>(arg);
+        lua_State *L = nullptr;
+
+        try
+        {
+            return worker_thread_run(w, L);
+        }
+        catch (const std::bad_alloc &)
+        {
+            if (L)
+            {
+                lua_close(L);
+            }
+            publish_unhandled_worker_exception(w, "out of memory");
+            return nullptr;
+        }
+        catch (const std::exception &e)
+        {
+            if (L)
+            {
+                lua_close(L);
+            }
+            publish_unhandled_worker_exception(w, e.what());
+            return nullptr;
+        }
+        catch (...)
+        {
+            if (L)
+            {
+                lua_close(L);
+            }
+            publish_unhandled_worker_exception(w, "unknown exception");
+            return nullptr;
+        }
+    }
+
     // ==================================================================
     // Fonctions exposées
     // ==================================================================
 
     int lua_workers_spawn(lua_State *L)
     {
+        // Contrat strict : le code doit être une vraie chaîne Lua.
+        // luaL_checklstring convertirait silencieusement un nombre en texte,
+        // puis créerait un worker qui échouerait seulement au chargement du
+        // chunk. Refuser immédiatement donne une erreur d'appel claire.
+        if (lua_gettop(L) < 1 || lua_type(L, 1) != LUA_TSTRING)
+        {
+            return luaL_error(L,
+                              "workers.spawn: code must be a string");
+        }
         size_t code_len = 0;
-        const char *code = luaL_checklstring(L, 1, &code_len);
+        const char *code = lua_tolstring(L, 1, &code_len);
 
         // Vérification de type sur args et opts (les contenus sont
         // validés via la sérialisation).
@@ -1192,7 +1309,7 @@ namespace
             lua_getfield(L, 3, "inbox_capacity");
             if (!lua_isnil(L, -1))
             {
-                if (!lua_isnumber(L, -1))
+                if (lua_type(L, -1) != LUA_TNUMBER)
                 {
                     return luaL_error(L,
                                       "workers.spawn: opts.inbox_capacity must be a number");
@@ -1201,8 +1318,8 @@ namespace
                 if (n != std::floor(n) || n <= 0 || n > 1000000)
                 {
                     return luaL_error(L,
-                                      "workers.spawn: opts.inbox_capacity must be a "
-                                      "positive integer (got %g)",
+                                      "workers.spawn: opts.inbox_capacity must be an "
+                                      "integer between 1 and 1000000 (got %g)",
                                       (double)n);
                 }
                 inbox_cap = (int)n;
@@ -1212,7 +1329,7 @@ namespace
             lua_getfield(L, 3, "outbox_capacity");
             if (!lua_isnil(L, -1))
             {
-                if (!lua_isnumber(L, -1))
+                if (lua_type(L, -1) != LUA_TNUMBER)
                 {
                     return luaL_error(L,
                                       "workers.spawn: opts.outbox_capacity must be a number");
@@ -1221,8 +1338,8 @@ namespace
                 if (n != std::floor(n) || n <= 0 || n > 1000000)
                 {
                     return luaL_error(L,
-                                      "workers.spawn: opts.outbox_capacity must be a "
-                                      "positive integer (got %g)",
+                                      "workers.spawn: opts.outbox_capacity must be an "
+                                      "integer between 1 and 1000000 (got %g)",
                                       (double)n);
                 }
                 outbox_cap = (int)n;
@@ -1273,6 +1390,7 @@ namespace
         w->tid_valid = false;
         w->status.store(WORKER_RUNNING, std::memory_order_relaxed);
         w->joined.store(false, std::memory_order_relaxed);
+        w->emergency_error[0] = '\0';
         w->code.assign(code, code_len);
         w->args_json = std::move(args_json_str);
         luaL_getmetatable(L, WORKER_META);
@@ -1310,6 +1428,50 @@ namespace
         return 1; // userdata Worker au sommet
     }
 
+    // Désérialise le résultat interne d'un worker et pousse la valeur Lua.
+    // En cas d'échec, restaure exactement la pile et fournit un message
+    // explicite dans errbuf. Cette situation indique une corruption ou un
+    // bug interne : elle ne doit jamais être transformée en succès + nil.
+    bool push_deserialized_worker_result(lua_State *L,
+                                         const std::string &result_json,
+                                         char *errbuf,
+                                         size_t errbuf_size) noexcept
+    {
+        const int initial_top = lua_gettop(L);
+        try
+        {
+            json r = json::parse(result_json);
+            std::string conversion_error;
+            if (!json_to_lua(L, r, conversion_error, 0))
+            {
+                lua_settop(L, initial_top);
+                std::snprintf(
+                    errbuf, errbuf_size,
+                    "workers: internal: failed to deserialize result: %.380s",
+                    conversion_error.c_str());
+                return false;
+            }
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            lua_settop(L, initial_top);
+            std::snprintf(
+                errbuf, errbuf_size,
+                "workers: internal: failed to parse serialized result: %.380s",
+                e.what());
+            return false;
+        }
+        catch (...)
+        {
+            lua_settop(L, initial_top);
+            std::snprintf(
+                errbuf, errbuf_size,
+                "workers: internal: failed to deserialize result");
+            return false;
+        }
+    }
+
     int worker_join(lua_State *L)
     {
         Worker *w = check_worker(L, 1);
@@ -1333,32 +1495,24 @@ namespace
         int st = w->status.load(std::memory_order_acquire);
         if (st == WORKER_DONE)
         {
-            lua_pushboolean(L, 1);
-            // Désérialiser le résultat. json_to_lua laisse la pile
-            // propre en cas d'échec (nettoyage interne). On rend
-            // (true, nil) si la désérialisation échoue : politique
-            // "on a annoncé success, on ne recule pas" — un échec
-            // ici serait un bug de notre sérialisation, pas de
-            // l'utilisateur.
-            try
+            char decode_error[512] = {};
+            if (push_deserialized_worker_result(
+                    L, w->result_json, decode_error,
+                    sizeof(decode_error)))
             {
-                json r = json::parse(w->result_json);
-                std::string err;
-                if (!json_to_lua(L, r, err, 0))
-                {
-                    lua_pushnil(L);
-                }
+                lua_pushboolean(L, 1);
+                lua_insert(L, -2);
+                return 2;
             }
-            catch (...)
-            {
-                lua_pushnil(L);
-            }
+
+            lua_pushboolean(L, 0);
+            lua_pushstring(L, decode_error);
             return 2;
         }
         // WORKER_ERROR (ou running anormal — ne devrait pas se produire
         // après pthread_join).
         lua_pushboolean(L, 0);
-        lua_pushstring(L, w->err_msg.c_str());
+        lua_pushstring(L, worker_error_text(w));
         return 2;
     }
 
@@ -1396,26 +1550,24 @@ namespace
 
         if (st == WORKER_DONE)
         {
-            lua_pushstring(L, "done");
-            try
+            char decode_error[512] = {};
+            if (push_deserialized_worker_result(
+                    L, w->result_json, decode_error,
+                    sizeof(decode_error)))
             {
-                json r = json::parse(w->result_json);
-                std::string err;
-                if (!json_to_lua(L, r, err, 0))
-                {
-                    lua_pushnil(L);
-                }
+                lua_pushstring(L, "done");
+                lua_insert(L, -2);
+                return 2;
             }
-            catch (...)
-            {
-                lua_pushnil(L);
-            }
+
+            lua_pushstring(L, "error");
+            lua_pushstring(L, decode_error);
             return 2;
         }
 
         // WORKER_ERROR
         lua_pushstring(L, "error");
-        lua_pushstring(L, w->err_msg.c_str());
+        lua_pushstring(L, worker_error_text(w));
         return 2;
     }
 
@@ -1423,8 +1575,8 @@ namespace
     // avec la sémantique convenue :
     //   - absent / nil          -> -1 (blocage indéfini)
     //   - 0 (entier ou float)   ->  0 (non-bloquant immédiat)
-    //   - n > 0                 -> floor(n * 1000) ms
-    //   - n < 0, NaN, Inf       -> luaL_error (mauvais usage)
+    //   - 0 < n <= 86400       -> ceil(n * 1000) ms (minimum 1 ms)
+    //   - n < 0, n > 86400, NaN, Inf -> luaL_error (mauvais usage)
     //   - non-numérique         -> luaL_error
     //
     // Retourne directement la valeur ms (peut lever via luaL_error).
@@ -1434,7 +1586,7 @@ namespace
         {
             return -1; // blocage indéfini
         }
-        if (!lua_isnumber(L, idx))
+        if (lua_type(L, idx) != LUA_TNUMBER)
         {
             luaL_error(L,
                        "workers: timeout must be a number (seconds) or nil");
@@ -1457,13 +1609,24 @@ namespace
         {
             return 0;
         }
-        // floor(n * 1000) avec garde anti-débordement à 24h.
-        lua_Number ms = std::floor(n * 1000.0);
-        if (ms > 24.0 * 3600.0 * 1000.0)
+        // Résolution milliseconde. Toute valeur strictement positive
+        // attend au moins 1 ms : l'ancien floor transformait par exemple
+        // 0,0005 s en mode non bloquant, contrairement au contrat.
+        // Les durées supérieures à 24 h sont refusées plutôt que tronquées
+        // silencieusement à 24 h.
+        constexpr lua_Number MAX_TIMEOUT_SECONDS = 24.0 * 3600.0;
+        if (n > MAX_TIMEOUT_SECONDS)
         {
-            ms = 24.0 * 3600.0 * 1000.0;
+            luaL_error(L,
+                       "workers: timeout too large (max 86400 seconds)");
+            return 0;
         }
-        return (int64_t)ms;
+        lua_Number ms = std::ceil(n * 1000.0);
+        if (ms < 1.0)
+        {
+            ms = 1.0;
+        }
+        return static_cast<int64_t>(ms);
     }
 
     // =================================================================

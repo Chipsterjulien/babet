@@ -13,6 +13,8 @@ using nlohmann::json;
 namespace
 {
 
+    constexpr lua_Integer MAX_JSON_INDENT = 256;
+
     // Profondeur d'imbrication max, dans les deux sens. Garde-fou : une
     // table Lua cyclique récurserait à l'infini -> on coupe net avec une
     // erreur propre plutôt qu'un débordement de pile C++. 1000 est très
@@ -110,16 +112,20 @@ namespace
             lua_pop(L, 1); // retire la valeur, garde la clé pour lua_next
         }
 
-        if (str_keys == 0 && int_keys == 0)
-        {
-            return TableShape::EmptyObject;
-        }
-
+        // Vérifier les clés invalides avant de conclure que la table est
+        // vide. Une table qui ne contient que des clés non représentables
+        // ([0], [1.5], [true], etc.) n'est pas un objet vide : elle doit
+        // être refusée au lieu d'être silencieusement encodée en {}.
         if (has_bad_key)
         {
             throw std::runtime_error(
                 "json: unsupported table key (keys must be positive "
                 "integers for arrays, or strings for objects)");
+        }
+
+        if (str_keys == 0 && int_keys == 0)
+        {
+            return TableShape::EmptyObject;
         }
 
         if (str_keys > 0 && int_keys > 0)
@@ -403,12 +409,12 @@ namespace
 int lua_json_encode(lua_State *L)
 {
     int argc = lua_gettop(L);
-    if (argc < 1)
+    if (argc < 1 || argc > 2)
     {
-        return luaL_error(L, "Expected at least one argument");
+        return luaL_error(L, "Expected one or two arguments");
     }
 
-    long indent = -1; // -1 = compact
+    int indent = -1; // -1 = compact
     if (argc >= 2 && !lua_isnil(L, 2))
     {
         if (!lua_istable(L, 2))
@@ -423,10 +429,20 @@ int lua_json_encode(lua_State *L)
                 lua_pop(L, 1);
                 return luaL_error(L, "opts.indent must be an integer");
             }
-            indent = static_cast<long>(lua_tointeger(L, -1));
-            if (indent < 0)
+            lua_Integer requested_indent = lua_tointeger(L, -1);
+            if (requested_indent < 0)
             {
                 indent = -1; // négatif traité comme compact
+            }
+            else if (requested_indent > MAX_JSON_INDENT)
+            {
+                lua_pop(L, 1);
+                return luaL_error(
+                    L, "opts.indent too large (maximum is 256)");
+            }
+            else
+            {
+                indent = static_cast<int>(requested_indent);
             }
         }
         lua_pop(L, 1);
@@ -437,7 +453,7 @@ int lua_json_encode(lua_State *L)
         json j = lua_to_json(L, 1, 0);
         std::string s = (indent < 0)
                             ? j.dump()
-                            : j.dump(static_cast<int>(indent));
+                            : j.dump(indent);
         lua_pushlstring(L, s.data(), s.size());
         lua_pushnil(L);
         return 2;
@@ -459,7 +475,10 @@ int lua_json_decode(lua_State *L)
     {
         return luaL_error(L, "Expected one argument");
     }
-    if (!lua_isstring(L, 1))
+    // lua_isstring() accepte aussi les nombres et les convertirait
+    // implicitement en texte. decode() exige volontairement une vraie
+    // chaîne Lua afin que les erreurs de type ne soient pas masquées.
+    if (lua_type(L, 1) != LUA_TSTRING)
     {
         return luaL_error(L, "Expected a string as argument");
     }

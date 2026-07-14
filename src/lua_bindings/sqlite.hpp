@@ -6,7 +6,7 @@
 //
 //   db, err = babet.sqlite.open(path, opts?)
 //   ok, err = db:exec(sql, params?)
-//   for row in db:query(sql, params?) do ... end        -- (à venir, session 3)
+//   for row in db:query(sql, params?) do ... end
 //   ok, err = db:close()
 //
 // Le userdata "db" est un handle vers une connexion SQLite. Il est
@@ -20,20 +20,22 @@
 //          exposés en V1). Les prepared statements sont créés et
 //          libérés en interne à chaque exec/query.
 //
-// Types :  NULL ↔ nil
-//          INTEGER ↔ integer Lua
-//          REAL ↔ number Lua (float)
-//          TEXT ↔ string Lua
-//          BLOB ↔ string Lua (binary-safe)
-//          BOOL Lua ↔ INTEGER 0/1 (en bind seulement, lecture = integer)
+// Types en lecture :
+//          NULL → clé absente de la table Lua
+//          INTEGER → integer Lua
+//          REAL → number Lua (float)
+//          TEXT / BLOB → string Lua (binary-safe)
+// Types en bind : bool → INTEGER 0/1, integer/float → numérique SQLite,
+//                 string Lua → TEXT (jamais BLOB en V1).
 //
-// Erreurs : contrat Babet standard : (nil, "sqlite: <msg>") ou
-//           (true, nil). Pas de raise sur erreur SQL ; raise seulement
-//           sur erreur de type d'argument (programmation Lua incorrecte).
+// Erreurs : les erreurs opérationnelles de open/exec/query/close sont
+//           renvoyées sous forme (nil, "sqlite: <msg>"). Les mauvais
+//           types, les tables params invalides et les erreurs survenant
+//           pendant l'itération lèvent une erreur Lua.
 //
 // Options open :
-//   wal           : bool (par défaut false) — active PRAGMA journal_mode=WAL
-//   busy_timeout  : int  (par défaut 0)     — sqlite3_busy_timeout en ms
+//   wal           : bool (par défaut false) — demande journal_mode=WAL
+//   busy_timeout  : int 0..3600000 ms (par défaut 0)
 //
 // Concurrence : aucun lock Babet global. SQLite gère ses propres
 //   verrous fichier. Mode WAL recommandé pour multi-readers + 1 writer.

@@ -23,7 +23,7 @@ git clone https://github.com/Chipsterjulien/babet.git
 cd babet
 ./build_local.sh        # télécharge les deps et compile
                         # (~5 min au premier lancement, plus vite après)
-./run_tests.sh          # harness offline — doit afficher 974 PASS / 0 FAIL
+./run_tests.sh          # harness offline — doit terminer avec 0 FAIL
 ```
 
 Le script de build télécharge chaque dépendance depuis sa source
@@ -57,6 +57,9 @@ Empaquète un script et ses modules dans un binaire autonome :
 ./test/babet --create-exe . myapp
 ./myapp        # lance main.lua depuis le ZIP embarqué
 ```
+
+Les dossiers de métadonnées de contrôle de version `.git`, `.svn` et
+`.hg` sont exclus automatiquement, à n’importe quelle profondeur.
 
 En interne, Babet append un ZIP à son propre binaire et lit
 `main.lua` (plus tous les modules `require`) depuis ce ZIP au

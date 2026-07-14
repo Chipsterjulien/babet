@@ -22,8 +22,12 @@ int lua_copy_file(lua_State *L)
         return luaL_error(L, "Expected two string arguments: source and destination paths");
     }
 
-    std::filesystem::path src_path(luaL_checkstring(L, 1));
-    std::filesystem::path dest_path(luaL_checkstring(L, 2));
+    const std::string_view source =
+        luaL_checkstring_view_without_nul(L, 1, "source");
+    const std::string_view destination =
+        luaL_checkstring_view_without_nul(L, 2, "destination");
 
-    return push_action_result(L, custom_copy_file(src_path, dest_path));
+    return push_action_result(
+        L, custom_copy_file(std::filesystem::path(source),
+                            std::filesystem::path(destination)));
 }

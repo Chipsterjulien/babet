@@ -165,6 +165,8 @@ build_one() {
             --variable=colorlinks:true \
             --variable=linkcolor:blue \
             --variable=urlcolor:blue \
+            --variable=mainfont:'DejaVu Serif' \
+            --variable=sansfont:'DejaVu Sans' \
             --variable=monofont:'DejaVu Sans Mono' \
             -o "$out"
     )

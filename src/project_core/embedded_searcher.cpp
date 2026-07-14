@@ -1,14 +1,27 @@
 #include "embedded_searcher.hpp"
 #include "zip_utils.hpp"
 #include <algorithm>
+#include <cstring>
 #include <string>
 #include <optional>
 #include <vector>
 
+static int embedded_read_error_loader(lua_State *L)
+{
+    const char *message = lua_tostring(L, lua_upvalueindex(1));
+    return luaL_error(L, "%s", message ? message : "embedded file read error");
+}
+
 static int embedded_lua_searcher(lua_State *L)
 {
-    const char *moduleName = luaL_checkstring(L, 1);
+    size_t module_len = 0;
+    const char *moduleName = luaL_checklstring(L, 1, &module_len);
     const char *exePath = luaL_checkstring(L, lua_upvalueindex(1));
+    if (std::memchr(moduleName, '\0', module_len) != nullptr)
+    {
+        lua_pushliteral(L, "\n\tembedded module name contains NUL byte");
+        return 1;
+    }
 
     // CORRECTIF longjmp (post-revue Gemini) : si luaL_loadbuffer
     // échoue (erreur de syntaxe dans un .lua embarqué), on doit
@@ -29,7 +42,7 @@ static int embedded_lua_searcher(lua_State *L)
 
     {
         // "foo.bar" -> "foo/bar"
-        std::string base = moduleName;
+        std::string base(moduleName, module_len);
         std::replace(base.begin(), base.end(), '.', '/');
 
         // On tente, dans l'ordre, les deux conventions Lua standard :
@@ -45,7 +58,21 @@ static int embedded_lua_searcher(lua_State *L)
 
         for (const auto &path : candidates)
         {
-            auto data = readEmbeddedFile(exePath, path);
+            std::string read_error;
+            auto data = readEmbeddedFile(exePath, path, &read_error);
+            if (!read_error.empty())
+            {
+                // L'entrée existe mais ne peut pas être chargée (taille
+                // excessive, archive corrompue, allocation impossible).
+                // Renvoyer un loader qui lève garantit que require() ne
+                // contourne pas l'erreur en cherchant un module homonyme
+                // dans package.path après l'archive embarquée.
+                lua_pushlstring(L, read_error.data(), read_error.size());
+                lua_pushcclosure(L, embedded_read_error_loader, 1);
+                lua_pushlstring(L, path.data(), path.size());
+                found = true;
+                break;
+            }
             if (data)
             {
                 found = true;

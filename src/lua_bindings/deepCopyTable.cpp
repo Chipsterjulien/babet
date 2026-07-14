@@ -13,50 +13,43 @@ bool deepCopyTable(lua_State *L, int srcIndex, int depth, int maxDepth, VisitedM
 {
     assert(lua_istable(L, srcIndex));
 
-    if (depth > maxDepth)
-    {
-        return false;
-    }
-
-    // CORRECTIF (revue Gemini post-audit v21, vérifié) : réserver la
-    // pile AVANT de pousser. L'API Lua ne garantit qu'environ
-    // LUA_MINSTACK (20) slots libres à l'entrée de la fonction C ;
-    // cette récursion consomme des slots à CHAQUE niveau et
-    // MAX_DEPTH = 75 (cf. deepCopyTable.hpp) : atteindre le plafond
-    // suppose déjà ~75 x 5 = ~375 slots poussés — une table
-    // légalement imbriquée débordait donc la pile allouée bien avant
-    // le garde-fou de profondeur -> corruption mémoire (UB), pas une
-    // erreur propre.
-    // Même classe de bug déjà corrigée dans json.cpp (lignes ~220 et
-    // ~295) lors d'une session précédente — le garde n'avait jamais
-    // été propagé ici. lua_checkstack FAIT GRANDIR la pile si besoin
-    // (jusqu'à ~LUAI_MAXSTACK) : l'échec est donc théorique, et
-    // MAX_DEPTH déclenche bien avant ; on rend false par le canal
-    // existant (le caller signale « too deep », approximation
-    // acceptable pour un cas inatteignable en pratique).
-    //
-    // Comptage : au pic, un niveau a 5 slots simultanés au-dessus de
-    // son point d'entrée — copy, key, value, keyDup, valueCopy (le
-    // 5e est poussé par CE niveau quand la valeur n'est pas une
-    // table ; pour une table, il est réservé par le checkstack de
-    // l'appel récursif enfant). Les autres chemins (rawgeti,
-    // pushvalue+luaL_ref, getmetatable) restent sous 5.
-    if (!lua_checkstack(L, 5))
-    {
-        return false;
-    }
-
     // Index absolu : la pile va grandir, un index relatif deviendrait faux.
     srcIndex = lua_absindex(L, srcIndex);
 
     const void *srcPointer = lua_topointer(L, srcIndex);
 
-    // Déjà copiée ? On réutilise la copie existante (gère cycles + partage).
+    // Déjà copiée ? On réutilise la copie existante AVANT d'appliquer la
+    // limite de profondeur. Une référence cyclique ou partagée ne descend
+    // pas réellement dans une nouvelle table : la refuser uniquement parce
+    // que l'arête de retour se trouve à maxDepth + 1 cassait les cycles qui
+    // se refermaient exactement à la profondeur maximale autorisée.
     auto it = visited.find(srcPointer);
     if (it != visited.end())
     {
+        if (!lua_checkstack(L, 1))
+        {
+            return false;
+        }
         lua_rawgeti(L, LUA_REGISTRYINDEX, it->second); // pousse la copie
         return true;
+    }
+
+    if (depth > maxDepth)
+    {
+        return false;
+    }
+
+    // Réserver la pile AVANT de pousser. L'API Lua ne garantit qu'environ
+    // LUA_MINSTACK (20) slots libres à l'entrée de la fonction C ; cette
+    // récursion consomme des slots à chaque niveau et MAX_DEPTH = 75.
+    // lua_checkstack agrandit la pile si nécessaire. En cas d'échec
+    // théorique, on propage le canal false existant.
+    //
+    // Au pic, un niveau utilise cinq slots au-dessus de son point d'entrée :
+    // copy, key, value, keyDup et valueCopy.
+    if (!lua_checkstack(L, 5))
+    {
+        return false;
     }
 
     // Nouvelle table de destination.

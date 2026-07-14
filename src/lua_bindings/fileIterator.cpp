@@ -13,31 +13,93 @@ FileIterator::FileIterator(const std::string &path, bool recursive)
 
 void FileIterator::loadFiles(const fs::path &path, bool recursive)
 {
-    std::error_code ec;
-
-    auto addFiles = [&](const auto &iterator)
+    auto fail = [](const fs::path &entry, const std::error_code &ec)
     {
-        for (const auto &entry : iterator)
+        throw std::runtime_error(
+            "cannot inspect '" + entry.string() + "': " + ec.message());
+    };
+
+    auto add_if_regular = [&](const fs::directory_entry &entry)
+    {
+        // Inspect the directory entry itself first. A dangling symbolic link is
+        // a valid directory entry and must not make an iterator over regular
+        // files fail. Genuine lstat/symlink_status errors are still reported.
+        std::error_code link_ec;
+        const fs::file_status link_status = entry.symlink_status(link_ec);
+        if (link_ec)
         {
-            if (entry.is_regular_file(ec))
+            fail(entry.path(), link_ec);
+        }
+
+        if (fs::is_symlink(link_status))
+        {
+            // Preserve the historical behaviour for a valid symlink to a
+            // regular file by returning the link path. If its target cannot be
+            // resolved (dangling link, loop, inaccessible target), simply skip
+            // it: the link itself was inspected successfully and is not a
+            // regular file entry we can yield safely.
+            std::error_code target_ec;
+            const fs::file_status target_status = entry.status(target_ec);
+            if (!target_ec && fs::is_regular_file(target_status))
             {
                 files.emplace_back(entry.path().string());
             }
+            return;
+        }
+
+        if (fs::is_regular_file(link_status))
+        {
+            files.emplace_back(entry.path().string());
         }
     };
 
     if (recursive)
     {
-        addFiles(fs::recursive_directory_iterator(path, ec));
-    }
-    else
-    {
-        addFiles(fs::directory_iterator(path, ec));
+        std::error_code ec;
+        fs::recursive_directory_iterator it(path, ec);
+        const fs::recursive_directory_iterator end;
+        if (ec)
+        {
+            throw std::runtime_error("cannot access directory: " +
+                                     ec.message());
+        }
+
+        while (it != end)
+        {
+            add_if_regular(*it);
+
+            std::error_code increment_ec;
+            it.increment(increment_ec);
+            if (increment_ec)
+            {
+                throw std::runtime_error(
+                    "cannot continue directory iteration: " +
+                    increment_ec.message());
+            }
+        }
+        return;
     }
 
+    std::error_code ec;
+    fs::directory_iterator it(path, ec);
+    const fs::directory_iterator end;
     if (ec)
     {
         throw std::runtime_error("cannot access directory: " + ec.message());
+    }
+
+    while (it != end)
+    {
+        add_if_regular(*it);
+
+        std::error_code increment_ec;
+        it.increment(increment_ec);
+        if (increment_ec)
+        {
+            throw std::runtime_error(
+                "cannot continue directory iteration: " +
+                increment_ec.message());
+        }
     }
 }
 
@@ -95,7 +157,7 @@ int lua_gcFileIterator(lua_State *L)
 
 int lua_createFileIterator(lua_State *L)
 {
-    const char *path = luaL_checkstring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
     bool recursive = lua_gettop(L) >= 2 && lua_toboolean(L, 2);
 
     // Construire l'objet d'abord : si ça throw, la pile Lua n'a pas été touchée.

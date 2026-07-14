@@ -25,16 +25,20 @@ usage.
 Le travail de durcissement dans Babet protège les usages
 *légitimes* contre les accidents et les attaques de supply chain :
 
-- **Gestion des chemins / symlinks** utilise `lexically_relative()`
-  et des guards `is_within()` composant par composant (jamais des
-  checks de préfixe de string), donc un `cp src dst/` ne peut pas
-  s'évader dans un arbre voisin via un composant symlinké.
-- **Cleanup des groupes de processus** dans `babet.exec`
-  garantit que les enfants forkés ne survivent pas au parent et
-  ne laissent pas de processus zombies quand le script est
-  interrompu.
+- **Confinement de `copyTree` / `moveTree`** : la racine destination est
+  ouverte une fois, puis chaque création, copie et déplacement est effectué
+  relativement à ce descripteur avec `openat`/`mkdirat`/`renameat` et
+  `O_NOFOLLOW`/`AT_SYMLINK_NOFOLLOW`. Un symlink préexistant ou remplacé
+  pendant l'opération ne peut pas rediriger une écriture vers une cible
+  extérieure. Les gardes `is_within()` empêchent en plus de choisir une
+  destination résolue dans la source.
+- **Cleanup borné des groupes de processus** dans `babet.exec` couvre aussi
+  la phase `chdir`/`exec`, les erreurs internes de polling et le cas où un
+  enfant ferme ses pipes tout en continuant à tourner. Au timeout, TERM puis
+  KILL visent le groupe entier ; Babet ne fait jamais de `waitpid` final
+  illimité dans ces chemins d'erreur.
 - **Limites de sortie** sur `babet.exec` bornent la quantité
-  de stdout et stderr capturés en mémoire (par défaut 16 MiB
+  de stdout et stderr capturés en mémoire (par défaut 10 MiB
   chacun, configurable), pour qu'un sous-processus emballé ne
   puisse pas OOM le processus Babet.
 - **Checksums des dépendances** : chaque dépendance embarquée est
@@ -44,9 +48,19 @@ Le travail de durcissement dans Babet protège les usages
   Wayback Machine altérée (source de fallback).
 - **Vérification TLS** est activée par défaut (`verify=true`). La
   désactiver demande un `verify=false` explicite par appel — pas
-  de fallback silencieux. Des CA stores personnalisés peuvent
-  être passés via `ca_cert` ou `ca_path`, ou via les variables
-  d'environnement `SSL_CERT_FILE` / `SSL_CERT_DIR`.
+  de fallback silencieux. Pour les sockets TLS, des CA supplémentaires
+  peuvent être passées via `ca_cert` ou `ca_path`; HTTP expose
+  `ca_cert`. Les variables OpenSSL `SSL_CERT_FILE` / `SSL_CERT_DIR`
+  restent également disponibles. SNI est envoyé indépendamment de la
+  vérification lorsqu'un hostname DNS est connu.
+- **Validation des lignes HTTP** : les URL et valeurs de headers refusent
+  CR/LF, et les noms de headers doivent respecter la grammaire HTTP `token`.
+  Une valeur contrôlée par un utilisateur ne peut donc pas injecter un header
+  ou une seconde ligne de requête via ces champs.
+- **Limites réseau en mémoire** : `socket:recv_line`, `socket:recv_all` et
+  `http.max_body_size` bornent les accumulations principales. Après un timeout
+  de lecture socket, les octets déjà consommés restent dans un buffer commun
+  afin de ne pas être perdus ou réordonnés si le script change de méthode.
 
 ## Ce contre quoi il *ne protège pas*
 

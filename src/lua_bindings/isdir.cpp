@@ -36,7 +36,7 @@ int lua_isDir(lua_State *L)
         return luaL_error(L, "Expected a string as argument");
     }
 
-    std::string path = lua_tostring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
 
     try
     {

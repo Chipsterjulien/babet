@@ -1,45 +1,45 @@
 #include "sleep.hpp"
 #include "lua_utils.hpp"
 #include "signal.hpp"
-#include <chrono>
 #include <cmath>
 #include <limits>
-#include <stdexcept>
 #include <string>
 #include <cerrno>
 #include <cstring>
 #include <time.h>
 
 /**
- * Converts a string to a std::chrono::duration based on the unit.
- * @param duration The duration value.
- * @param unit The unit of time ("s" for seconds, "ms" for milliseconds, "us" for microseconds).
- * @return The corresponding std::chrono::duration.
+ * Convertit une durée en secondes selon l'unité publique de sleep().
+ * Retourne false pour une unité textuelle inconnue ; le binding conserve
+ * alors son contrat historique `(nil, "Invalid time unit")`.
+ *
+ * Le helper ne lève pas d'exception : aucun objet C++ à durée de vie non
+ * triviale ne reste ainsi actif lorsque le binding appelle l'API Lua.
  */
-std::chrono::duration<double> convert_to_duration(double duration, const std::string &unit)
+bool convert_to_seconds(double duration, const char *unit, double &seconds)
 {
-    if (unit == "s")
+    if (std::strcmp(unit, "s") == 0)
     {
-        return std::chrono::duration<double>(duration);
+        seconds = duration;
+        return true;
     }
-    else if (unit == "ms")
+    if (std::strcmp(unit, "ms") == 0)
     {
-        return std::chrono::duration<double, std::milli>(duration);
+        seconds = duration / 1000.0;
+        return true;
     }
-    else if (unit == "us")
+    if (std::strcmp(unit, "us") == 0)
     {
-        return std::chrono::duration<double, std::micro>(duration);
+        seconds = duration / 1000000.0;
+        return true;
     }
-    else
-    {
-        throw std::invalid_argument("Invalid time unit");
-    }
+    return false;
 }
 
 /**
  * Lua binding for the sleep function.
  * @param L The Lua state.
- * @return Number of return values (0).
+ * @return Deux valeurs Lua : (true, nil) ou (nil, err).
  * Lua usage: lua_sleep(duration, unit)
  *   - duration: The amount of time to sleep.
  *   - unit: The unit of time (optional, default is seconds). Can be "s" for seconds, "ms" for milliseconds, "us" for microseconds.
@@ -58,7 +58,9 @@ int lua_sleep(lua_State *L)
     {
         return luaL_error(L, "Expected one or two arguments: duration and optional unit");
     }
-    if (!lua_isnumber(L, 1))
+    // `lua_isnumber` accepte aussi les strings numériques. Le contrat
+    // public exige un vrai number Lua, comme les autres bindings audités.
+    if (lua_type(L, 1) != LUA_TNUMBER)
     {
         return luaL_argerror(L, 1, "Expected a number as the first argument for duration");
     }
@@ -83,32 +85,32 @@ int lua_sleep(lua_State *L)
         return luaL_argerror(L, 1, "Duration must be non-negative");
     }
 
-    // CORRECTIF longjmp (post-revue Gemini) : `const char *` au lieu
-    // de `std::string` pour stocker la valeur par défaut. Si l'arg 2
-    // n'est pas une string, luaL_argerror fait un longjmp qui ne
-    // déroule PAS les destructeurs C++. Avec un pointeur, rien à
-    // détruire. La conversion implicite const char* -> std::string
-    // pour l'appel à convert_to_duration se fait à l'intérieur du
-    // try/catch, donc une éventuelle exception serait propre.
+    // `const char *` plutôt que `std::string` : si l'argument 2 est
+    // invalide, luaL_argerror effectue un longjmp qui ne déroule pas les
+    // destructeurs C++. Aucun objet à durée de vie non triviale n'est donc
+    // actif au point des validations Lua.
     const char *unit = "s";
     if (argc == 2)
     {
-        if (!lua_isstring(L, 2))
+        // `lua_isstring` considère aussi un number comme convertible en
+        // string. Refus strict afin que sleep(1, 42) soit une erreur de type.
+        if (lua_type(L, 2) != LUA_TSTRING)
         {
             return luaL_argerror(L, 2, "Expected a string as the second argument for unit");
         }
-        unit = lua_tostring(L, 2);
+        size_t unit_len = 0;
+        unit = lua_tolstring(L, 2, &unit_len);
+        if (std::memchr(unit, '\0', unit_len) != nullptr)
+        {
+            return luaL_argerror(L, 2,
+                                 "Unit must not contain NUL byte");
+        }
     }
 
-    double seconds;
-    try
+    double seconds = 0.0;
+    if (!convert_to_seconds(duration, unit, seconds))
     {
-        auto duration_chrono = convert_to_duration(duration, unit);
-        seconds = duration_chrono.count();
-    }
-    catch (const std::invalid_argument &e)
-    {
-        return push_fail(L, e.what());
+        return push_fail(L, "Invalid time unit");
     }
 
     // CORRECTIF (audit v21) : borne haute avant le cast vers time_t.
@@ -117,7 +119,7 @@ int lua_sleep(lua_State *L)
     // (un `>` laisserait passer seconds == 2^63, dont le cast est
     // indéfini). 2^63 secondes ≈ 292 milliards d'années : aucune
     // attente légitime n'est restreinte. Longjmp-safe : seuls des
-    // POD sont vivants ici (duration_chrono est mort avec le try).
+    // POD sont vivants ici.
     constexpr double kMaxTimeT =
         static_cast<double>(std::numeric_limits<time_t>::max());
     if (seconds >= kMaxTimeT)

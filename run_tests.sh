@@ -8,10 +8,55 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME="babet"
 TEST_DIR="${SCRIPT_DIR}/test"
 EXAMPLES_DIR="${SCRIPT_DIR}/examples"
+ENABLE_SANITIZERS=0
+RELEASE_VALIDATION=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --sanitizers)
+            ENABLE_SANITIZERS=1
+            ;;
+        --release)
+            RELEASE_VALIDATION=1
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--sanitizers|--release]"
+            echo "  (par défaut)   Build normal + tests complets"
+            echo "  --sanitizers   Build ASan/UBSan + tests compatibles avec les sanitizers"
+            echo "  --release      Validation pré-release complète en une commande"
+            exit 0
+            ;;
+        *)
+            echo "Argument inconnu : $arg"
+            echo "Voir $0 --help"
+            exit 1
+            ;;
+    esac
+done
+
+if [ "${RELEASE_VALIDATION}" -eq 1 ]; then
+    if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+        echo "Les options --release et --sanitizers ne peuvent pas être combinées."
+        exit 1
+    fi
+    exec bash "${SCRIPT_DIR}/validate_release.sh"
+fi
+
+BUILD_ARGS=()
+if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    BUILD_ARGS+=(--sanitizers)
+    # Les valeurs fournies par l'utilisateur restent prioritaires.
+    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1}"
+    export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}"
+fi
 
 # --- 1. Compilation -------------------------------------------------
-echo "### Compilation ###"
-if ! bash "${SCRIPT_DIR}/build_local.sh"; then
+if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    echo "### Compilation (ASan + UBSan) ###"
+else
+    echo "### Compilation ###"
+fi
+if ! bash "${SCRIPT_DIR}/build_local.sh" "${BUILD_ARGS[@]}"; then
     echo "ÉCHEC : la compilation a échoué."
     exit 1
 fi
@@ -22,6 +67,31 @@ if [ ! -f "${BINARY}" ]; then
     echo "ÉCHEC : binaire introuvable après compilation (${BINARY})."
     exit 1
 fi
+
+# Les tests 6 et 8 injectent une bibliothèque de test avec LD_PRELOAD.
+# Pour un binaire ASan, le runtime AddressSanitizer doit rester le premier
+# objet chargé ; sinon le loader arrête le processus avant même main().
+ASAN_RUNTIME=""
+if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    ASAN_RUNTIME=$(ldd "${BINARY}" 2>/dev/null \
+        | awk '/asan/ && $3 ~ /^\// { print $3; exit }')
+    if [ -z "${ASAN_RUNTIME}" ] || [ ! -f "${ASAN_RUNTIME}" ]; then
+        echo "ÉCHEC : runtime ASan dynamique introuvable pour ${BINARY}."
+        exit 1
+    fi
+fi
+
+babet_test_preload() {
+    local hook="$1"
+    local value="${hook}"
+    if [ -n "${ASAN_RUNTIME}" ]; then
+        value="${ASAN_RUNTIME}:${value}"
+    fi
+    if [ -n "${LD_PRELOAD:-}" ]; then
+        value="${value}:${LD_PRELOAD}"
+    fi
+    printf '%s' "${value}"
+}
 
 modes_ok=0
 modes_total=0
@@ -278,6 +348,33 @@ LUA
     fi
     rm -rf "${STAB_DIR}"
 
+    # --- 4e : métadonnées VCS exclues récursivement (lot 4) --------
+    mkdir -p "${SYMLINK_ROOT}/proj/.git/objects" \
+             "${SYMLINK_ROOT}/proj/nested/.svn/pristine" \
+             "${SYMLINK_ROOT}/proj/nested/deeper/.hg/store"
+    printf 'git-secret\n' > "${SYMLINK_ROOT}/proj/.git/objects/secret"
+    printf 'svn-secret\n' > "${SYMLINK_ROOT}/proj/nested/.svn/pristine/secret"
+    printf 'hg-secret\n' > "${SYMLINK_ROOT}/proj/nested/deeper/.hg/store/secret"
+    printf 'normal\n' > "${SYMLINK_ROOT}/proj/nested/normal.txt"
+
+    VCS_BIN="${SYMLINK_ROOT}/app_vcs"
+    if ! "${BINARY}" --create-exe "${SYMLINK_ROOT}/proj" "${VCS_BIN}" \
+        > /dev/null 2>&1; then
+        echo "  -> exclusion .git/.svn/.hg : ÉCHEC (création du binaire)"
+        test4_ok=0
+    else
+        vcs_entries=$(unzip -Z1 "${VCS_BIN}" 2>/dev/null || true)
+        if echo "${vcs_entries}" | grep -Eq '(^|/)\.(git|svn|hg)(/|$)'; then
+            echo "  -> exclusion .git/.svn/.hg : ÉCHEC (métadonnées présentes)"
+            test4_ok=0
+        elif ! echo "${vcs_entries}" | grep -q '^nested/normal.txt$'; then
+            echo "  -> exclusion .git/.svn/.hg : ÉCHEC (fichier normal absent)"
+            test4_ok=0
+        else
+            echo "  -> exclusion récursive .git/.svn/.hg : OK"
+        fi
+    fi
+
     rm -rf "${SYMLINK_ROOT}"
 fi
 
@@ -405,6 +502,461 @@ if [ ${test5_ok} -eq 1 ]; then
     modes_ok=$((modes_ok + 1))
 else
     echo "  -> Test 5 : ÉCHEC"
+fi
+echo ""
+
+# === Test 6 : lancement/nettoyage exec bornés (lot 5A) =============
+# 1) L'ancien code attendait pipe_exec de façon bloquante AVANT sa
+#    deadline : une chdir() enfant bloquée rendait timeout inopérant.
+# 2) Une erreur fatale de poll tombait ensuite dans un waitpid bloquant
+#    sans tuer le child. Le preload reproduit les deux scénarios sans
+#    ajouter de hook de test au binaire de production.
+echo "### Test 6 : exec lancement/nettoyage bornés ###"
+modes_total=$((modes_total + 1))
+test6_ok=1
+
+EXEC_ROOT=$(mktemp -d)
+if [ -z "${EXEC_ROOT}" ] || [ ! -d "${EXEC_ROOT}" ]; then
+    echo "  -> ÉCHEC (impossible de créer un dossier temporaire)"
+    test6_ok=0
+else
+    mkdir -p "${EXEC_ROOT}/slow_cwd"
+    cat > "${EXEC_ROOT}/slow_chdir.c" << 'C'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <poll.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+
+static int (*real_chdir_fn)(const char *) = 0;
+static int (*real_poll_fn)(struct pollfd *, nfds_t, int) = 0;
+static int enabled = 0;
+static int fail_poll = 0;
+static int poll_failed_once = 0;
+static pid_t owner_pid = 0;
+static const char *target = 0;
+
+__attribute__((constructor))
+static void init_slow_chdir(void)
+{
+    real_chdir_fn = (int (*)(const char *))dlsym(RTLD_NEXT, "chdir");
+    real_poll_fn = (int (*)(struct pollfd *, nfds_t, int))
+        dlsym(RTLD_NEXT, "poll");
+    enabled = getenv("BABET_TEST_SLOW_CHDIR") != 0;
+    fail_poll = getenv("BABET_TEST_FAIL_POLL") != 0;
+    owner_pid = getpid();
+    target = getenv("BABET_TEST_SLOW_CHDIR_TARGET");
+}
+
+int chdir(const char *path)
+{
+    if (!real_chdir_fn)
+    {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (enabled && target && path && strcmp(path, target) == 0)
+    {
+        struct timespec delay = {5, 0};
+        while (nanosleep(&delay, &delay) != 0 && errno == EINTR) {}
+    }
+    return real_chdir_fn(path);
+}
+
+static int is_babet_exec_io_poll(const struct pollfd *fds,
+                                 nfds_t nfds, int timeout)
+{
+    /*
+     * La boucle d'E/S de babet.exec() appelle poll() sans timeout avec :
+     *   - stdout en lecture ;
+     *   - stderr en lecture ;
+     *   - stdin désactivé (fd négatif) quand aucun stdin n'est fourni.
+     *
+     * Sous ASan, le runtime peut effectuer ses propres poll() avant le
+     * test. L'ancien filtre (nfds == 3) consommait alors l'injection trop
+     * tôt et la commande "sleep 5" allait jusqu'à son terme. On vise ici
+     * uniquement la forme exacte du poll() de babet.exec().
+     */
+    return fds != 0 && nfds == 3 && timeout == -1 &&
+           fds[0].fd >= 0 && fds[0].events == POLLIN &&
+           fds[1].fd >= 0 && fds[1].events == POLLIN &&
+           fds[2].fd < 0  && fds[2].events == POLLOUT;
+}
+
+int poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+    if (!real_poll_fn)
+    {
+        errno = ENOSYS;
+        return -1;
+    }
+    if (fail_poll && getpid() == owner_pid && !poll_failed_once &&
+        is_babet_exec_io_poll(fds, nfds, timeout))
+    {
+        poll_failed_once = 1;
+        errno = EIO;
+        return -1;
+    }
+    return real_poll_fn(fds, nfds, timeout);
+}
+C
+    cat > "${EXEC_ROOT}/test.lua" << LUA
+local t0 = babet.monotonic()
+local r, e = babet.exec("true", {}, {
+    cwd = "${EXEC_ROOT}/slow_cwd",
+    timeout = 0.30,
+})
+local dt = babet.monotonic() - t0
+if type(r) == "table" and e == nil and r.timed_out == true and dt < 2.0 then
+    print("EXEC_PRELAUNCH_TIMEOUT_OK")
+else
+    io.stderr:write("bad result: r=" .. tostring(r)
+        .. " e=" .. tostring(e) .. " dt=" .. tostring(dt) .. "\n")
+    os.exit(1)
+end
+LUA
+    cat > "${EXEC_ROOT}/test_poll.lua" << 'LUA'
+local t0 = babet.monotonic()
+local r, e = babet.exec("sleep", { "5" })
+local dt = babet.monotonic() - t0
+if r == nil and type(e) == "string"
+    and e:find("poll failed", 1, true) ~= nil and dt < 2.0 then
+    print("EXEC_POLL_CLEANUP_OK")
+else
+    io.stderr:write("bad result: r=" .. tostring(r)
+        .. " e=" .. tostring(e) .. " dt=" .. tostring(dt) .. "\n")
+    os.exit(1)
+end
+LUA
+
+    if ! cc -shared -fPIC -O2 "${EXEC_ROOT}/slow_chdir.c" \
+        -ldl -o "${EXEC_ROOT}/slow_chdir.so"; then
+        echo "  -> ÉCHEC (compilation du preload)"
+        test6_ok=0
+    else
+        t6_out=$(LD_PRELOAD="$(babet_test_preload "${EXEC_ROOT}/slow_chdir.so")" \
+            BABET_TEST_SLOW_CHDIR=1 \
+            BABET_TEST_SLOW_CHDIR_TARGET="${EXEC_ROOT}/slow_cwd" \
+            "${BINARY}" "${EXEC_ROOT}/test.lua" 2>&1)
+        t6_rc=$?
+        if [ ${t6_rc} -eq 0 ] \
+            && echo "${t6_out}" | grep -q "EXEC_PRELAUNCH_TIMEOUT_OK"; then
+            echo "  -> timeout inclut chdir/exec : OK"
+        else
+            echo "  -> ÉCHEC (rc=${t6_rc}, sortie=${t6_out})"
+            test6_ok=0
+        fi
+
+        if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+            # Le runtime ASan intercepte poll() avant les bibliothèques de
+            # test chargées ensuite par LD_PRELOAD. Forcer notre hook avant
+            # ASan fait au contraire refuser le démarrage du processus.
+            #
+            # Ce test d'injection artificielle n'est donc pas fiable dans
+            # un processus ASan. La commande --release l'exécute
+            # obligatoirement à l'étape 3 avec le build normal, tandis que
+            # tous les chemins ordinaires de babet.exec restent couverts
+            # ici par ASan/UBSan et par le harnais Lua complet.
+            echo "  -> erreur poll injectée : différée au build normal final (ASan/LD_PRELOAD incompatibles)"
+        else
+            t6_poll_out=$(LD_PRELOAD="$(babet_test_preload "${EXEC_ROOT}/slow_chdir.so")" \
+                BABET_TEST_FAIL_POLL=1 \
+                "${BINARY}" "${EXEC_ROOT}/test_poll.lua" 2>&1)
+            t6_poll_rc=$?
+            if [ ${t6_poll_rc} -eq 0 ] \
+                && echo "${t6_poll_out}" | grep -q "EXEC_POLL_CLEANUP_OK"; then
+                echo "  -> erreur poll : child nettoyé sans blocage : OK"
+            else
+                echo "  -> ÉCHEC poll (rc=${t6_poll_rc}, sortie=${t6_poll_out})"
+                test6_ok=0
+            fi
+        fi
+    fi
+    rm -rf "${EXEC_ROOT}"
+fi
+
+if [ ${test6_ok} -eq 1 ]; then
+    echo "  -> Test 6 : OK"
+    modes_ok=$((modes_ok + 1))
+else
+    echo "  -> Test 6 : ÉCHEC"
+fi
+echo ""
+
+# === Test 7 : diagnostics des erreurs Lua non textuelles (lot 5B) ===
+echo "### Test 7 : diagnostics Lua non textuels ###"
+modes_total=$((modes_total + 1))
+test7_ok=1
+
+ERROR_ROOT=$(mktemp -d)
+if [ -z "${ERROR_ROOT}" ] || [ ! -d "${ERROR_ROOT}" ]; then
+    echo "  -> ÉCHEC (impossible de créer un dossier temporaire)"
+    test7_ok=0
+else
+    cat > "${ERROR_ROOT}/error_table.lua" << 'LUA'
+error({ code = 42 })
+LUA
+
+    t7_file_out=$("${BINARY}" "${ERROR_ROOT}/error_table.lua" 2>&1)
+    t7_file_rc=$?
+    if [ ${t7_file_rc} -eq 1 ] \
+        && { echo "${t7_file_out}" | grep -q "table:" \
+             || echo "${t7_file_out}" | grep -q "type table"; }; then
+        echo "  -> script error({}) : diagnostic utile : OK"
+    else
+        echo "  -> ÉCHEC script error({}) (rc=${t7_file_rc}, sortie=${t7_file_out})"
+        test7_ok=0
+    fi
+
+    mkdir -p "${ERROR_ROOT}/embedded_project"
+    cp "${ERROR_ROOT}/error_table.lua" \
+       "${ERROR_ROOT}/embedded_project/main.lua"
+    if ! "${BINARY}" --create-exe "${ERROR_ROOT}/embedded_project" \
+        "${ERROR_ROOT}/error_embedded" >/dev/null 2>&1; then
+        echo "  -> ÉCHEC (création du binaire error({}))"
+        test7_ok=0
+    else
+        t7_emb_out=$("${ERROR_ROOT}/error_embedded" 2>&1)
+        t7_emb_rc=$?
+        if [ ${t7_emb_rc} -eq 1 ] \
+            && { echo "${t7_emb_out}" | grep -q "table:" \
+                 || echo "${t7_emb_out}" | grep -q "type table"; }; then
+            echo "  -> embarqué error({}) : diagnostic utile : OK"
+        else
+            echo "  -> ÉCHEC embarqué error({}) (rc=${t7_emb_rc}, sortie=${t7_emb_out})"
+            test7_ok=0
+        fi
+    fi
+    rm -rf "${ERROR_ROOT}"
+fi
+
+if [ ${test7_ok} -eq 1 ]; then
+    echo "  -> Test 7 : OK"
+    modes_ok=$((modes_ok + 1))
+else
+    echo "  -> Test 7 : ÉCHEC"
+fi
+echo ""
+
+# === Test 8 : rollback setAttributes après chmod partiel (lot 5B) ===
+echo "### Test 8 : rollback setAttributes ###"
+modes_total=$((modes_total + 1))
+test8_ok=1
+
+ATTR_ROOT=$(mktemp -d)
+if [ -z "${ATTR_ROOT}" ] || [ ! -d "${ATTR_ROOT}" ]; then
+    echo "  -> ÉCHEC (impossible de créer un dossier temporaire)"
+    test8_ok=0
+else
+    ATTR_TARGET="${ATTR_ROOT}/target.txt"
+    printf 'rollback-test\n' > "${ATTR_TARGET}"
+    chmod 0644 "${ATTR_TARGET}"
+
+    cat > "${ATTR_ROOT}/chmod_partial.c" << 'C'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+typedef int (*chmod_fn)(const char *, mode_t);
+static chmod_fn real_chmod_fn = 0;
+static const char *target = 0;
+static int failed_once = 0;
+
+__attribute__((constructor))
+static void init_chmod_partial(void)
+{
+    real_chmod_fn = (chmod_fn)dlsym(RTLD_NEXT, "chmod");
+    target = getenv("BABET_TEST_CHMOD_TARGET");
+}
+
+int chmod(const char *path, mode_t mode)
+{
+    if (!real_chmod_fn)
+    {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    if (!failed_once && target && path && strcmp(path, target) == 0)
+    {
+        const int rc = real_chmod_fn(path, mode);
+        if (rc == 0)
+        {
+            failed_once = 1;
+            errno = EIO;
+            return -1;
+        }
+        return rc;
+    }
+
+    return real_chmod_fn(path, mode);
+}
+C
+
+    cat > "${ATTR_ROOT}/test.lua" << LUA
+local path = "${ATTR_TARGET}"
+local before, before_err = babet.getAttributes(path)
+assert(type(before) == "table" and before_err == nil)
+
+local ok, err = babet.setAttributes(path, before.owner, before.group, tonumber("600", 8))
+local mode, mode_err = babet.getMode(path)
+
+if ok == nil and type(err) == "string"
+    and err:find("chmod failed after chown", 1, true) ~= nil
+    and mode == tonumber("644", 8) and mode_err == nil then
+    print("SETATTR_ROLLBACK_OK")
+else
+    io.stderr:write("bad result: ok=" .. tostring(ok)
+        .. " err=" .. tostring(err)
+        .. " mode=" .. tostring(mode)
+        .. " mode_err=" .. tostring(mode_err) .. "\n")
+    os.exit(1)
+end
+LUA
+
+    if ! cc -shared -fPIC -O2 "${ATTR_ROOT}/chmod_partial.c" \
+        -ldl -o "${ATTR_ROOT}/chmod_partial.so"; then
+        echo "  -> ÉCHEC (compilation du preload)"
+        test8_ok=0
+    else
+        t8_out=$(LD_PRELOAD="$(babet_test_preload "${ATTR_ROOT}/chmod_partial.so")" \
+            BABET_TEST_CHMOD_TARGET="${ATTR_TARGET}" \
+            "${BINARY}" "${ATTR_ROOT}/test.lua" 2>&1)
+        t8_rc=$?
+        if [ ${t8_rc} -eq 0 ] \
+            && echo "${t8_out}" | grep -q "SETATTR_ROLLBACK_OK"; then
+            echo "  -> chmod partiel : attributs restaurés : OK"
+        else
+            echo "  -> ÉCHEC rollback (rc=${t8_rc}, sortie=${t8_out})"
+            test8_ok=0
+        fi
+    fi
+    rm -rf "${ATTR_ROOT}"
+fi
+
+if [ ${test8_ok} -eq 1 ]; then
+    echo "  -> Test 8 : OK"
+    modes_ok=$((modes_ok + 1))
+else
+    echo "  -> Test 8 : ÉCHEC"
+fi
+echo ""
+
+# === Test 9 : chemin exécutable sans troncature PATH_MAX (lot 6) ===
+echo "### Test 9 : chemin exécutable dynamique ###"
+modes_total=$((modes_total + 1))
+test9_ok=1
+
+EXEPATH_ROOT=$(mktemp -d)
+if [ -z "${EXEPATH_ROOT}" ] || [ ! -d "${EXEPATH_ROOT}" ]; then
+    echo "  -> ÉCHEC (impossible de créer un dossier temporaire)"
+    test9_ok=0
+else
+    cat > "${EXEPATH_ROOT}/readlink_full.c" << 'C'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <string.h>
+#include <unistd.h>
+
+typedef ssize_t (*readlink_fn)(const char *, char *, size_t);
+static readlink_fn real_readlink_fn = 0;
+static int injected = 0;
+
+ssize_t readlink(const char *path, char *buffer, size_t size)
+{
+    if (!real_readlink_fn)
+    {
+        real_readlink_fn = (readlink_fn)dlsym(RTLD_NEXT, "readlink");
+    }
+
+    if (!injected && path && strcmp(path, "/proc/self/exe") == 0)
+    {
+        injected = 1;
+        memset(buffer, 'x', size);
+        return (ssize_t)size;
+    }
+    return real_readlink_fn(path, buffer, size);
+}
+C
+
+    cat > "${EXEPATH_ROOT}/test_executable_path.cpp" << 'CPP'
+#include "executable_path.hpp"
+#include <cstdlib>
+#include <iostream>
+#include <limits.h>
+#include <string>
+
+int main(int argc, char **argv)
+{
+    if (argc < 1)
+    {
+        return 2;
+    }
+
+    char expected[PATH_MAX];
+    if (!realpath(argv[0], expected))
+    {
+        return 3;
+    }
+
+    try
+    {
+        const std::string actual = getExecutablePath();
+        if (actual != expected)
+        {
+            std::cerr << "actual=" << actual << " expected=" << expected
+                      << "\n";
+            return 1;
+        }
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << error.what() << "\n";
+        return 1;
+    }
+
+    std::cout << "EXECUTABLE_PATH_DYNAMIC_OK\n";
+    return 0;
+}
+CPP
+
+    if ! cc -shared -fPIC -O2 "${EXEPATH_ROOT}/readlink_full.c" \
+        -ldl -o "${EXEPATH_ROOT}/readlink_full.so"; then
+        echo "  -> ÉCHEC (compilation du preload readlink)"
+        test9_ok=0
+    elif ! c++ -std=c++23 -O2 \
+        -I"${SCRIPT_DIR}/src/project_core" \
+        "${EXEPATH_ROOT}/test_executable_path.cpp" \
+        "${SCRIPT_DIR}/src/project_core/executable_path.cpp" \
+        -o "${EXEPATH_ROOT}/test_executable_path"; then
+        echo "  -> ÉCHEC (compilation du harnais executable_path)"
+        test9_ok=0
+    else
+        t9_out=$(LD_PRELOAD="${EXEPATH_ROOT}/readlink_full.so" \
+            "${EXEPATH_ROOT}/test_executable_path" 2>&1)
+        t9_rc=$?
+        if [ ${t9_rc} -eq 0 ] \
+            && echo "${t9_out}" | grep -q "EXECUTABLE_PATH_DYNAMIC_OK"; then
+            echo "  -> readlink plein : buffer agrandi sans troncature : OK"
+        else
+            echo "  -> ÉCHEC chemin dynamique (rc=${t9_rc}, sortie=${t9_out})"
+            test9_ok=0
+        fi
+    fi
+    rm -rf "${EXEPATH_ROOT}"
+fi
+
+if [ ${test9_ok} -eq 1 ]; then
+    echo "  -> Test 9 : OK"
+    modes_ok=$((modes_ok + 1))
+else
+    echo "  -> Test 9 : ÉCHEC"
 fi
 echo ""
 

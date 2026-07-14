@@ -8,10 +8,11 @@
 #include "http.hpp"
 #include "lua_utils.hpp"
 
-#include <cctype>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <ctime>
 #include <exception>
 #include <string>
@@ -21,23 +22,92 @@
 namespace
 {
 
+    constexpr std::size_t DEFAULT_MAX_BODY_SIZE =
+        64ull * 1024ull * 1024ull;
+    constexpr lua_Integer MAX_CONFIGURABLE_BODY_SIZE =
+        2ll * 1024ll * 1024ll * 1024ll;
+
+    bool is_ascii_alpha(unsigned char c)
+    {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    }
+
+    bool is_ascii_digit(unsigned char c)
+    {
+        return c >= '0' && c <= '9';
+    }
+
+    bool is_ascii_alnum(unsigned char c)
+    {
+        return is_ascii_alpha(c) || is_ascii_digit(c);
+    }
+
     std::string to_lower(std::string s)
     {
         for (char &c : s)
         {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            const auto uc = static_cast<unsigned char>(c);
+            if (uc >= 'A' && uc <= 'Z')
+            {
+                c = static_cast<char>(uc - 'A' + 'a');
+            }
         }
         return s;
     }
 
+    void to_upper_ascii(std::string &s)
+    {
+        for (char &c : s)
+        {
+            const auto uc = static_cast<unsigned char>(c);
+            if (uc >= 'a' && uc <= 'z')
+            {
+                c = static_cast<char>(uc - 'a' + 'A');
+            }
+        }
+    }
+
+    bool contains_cr_or_lf(const std::string &value)
+    {
+        return value.find('\r') != std::string::npos ||
+               value.find('\n') != std::string::npos;
+    }
+
+    bool is_http_token_char(unsigned char c)
+    {
+        return is_ascii_alnum(c) || c == '!' || c == '#' || c == '$' ||
+               c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' ||
+               c == '-' || c == '.' || c == '^' || c == '_' || c == '`' ||
+               c == '|' || c == '~';
+    }
+
+    bool valid_header_name(const std::string &name)
+    {
+        if (name.empty())
+        {
+            return false;
+        }
+        for (unsigned char c : name)
+        {
+            if (!is_http_token_char(c))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool is_unreserved(unsigned char c)
     {
-        return std::isalnum(c) != 0 || c == '-' || c == '_' ||
+        return is_ascii_alnum(c) || c == '-' || c == '_' ||
                c == '.' || c == '~';
     }
 
-    // Percent-encodage RFC 3986 : seuls les "unreserved" passent tels
-    // quels, tout le reste devient %HH (hex majuscule).
+    // Première passe de percent-encodage : seuls les "unreserved"
+    // passent tels quels. cpp-httplib 0.45.0 renormalise ensuite la
+    // query avant envoi (espace -> '+', '/' et '?' laissés littéraux).
+    // Cette première passe protège néanmoins les délimiteurs '&'/'='
+    // et les octets non ASCII avant cette normalisation.
     std::string percent_encode(const std::string &in)
     {
         static const char *hex = "0123456789ABCDEF";
@@ -250,13 +320,41 @@ namespace
         lua_pushlstring(L, res->body.data(), res->body.size());
         lua_setfield(L, -2, "body");
 
+        // Table rétrocompatible : une chaîne par nom, dernière valeur
+        // rencontrée gagnante.
         lua_newtable(L);
+        int headers_idx = lua_absindex(L, -1);
+
+        // Vue complète : chaque nom est toujours associé à un tableau,
+        // même lorsqu'il n'apparaît qu'une seule fois. Cela permet de
+        // traiter Set-Cookie et les autres en-têtes répétés sans changer
+        // le contrat historique de `headers`.
+        lua_newtable(L);
+        int multi_idx = lua_absindex(L, -1);
+
         for (const auto &h : res->headers)
         {
-            std::string key = to_lower(h.first); // dernière valeur gagne
+            std::string key = to_lower(h.first);
+
             lua_pushlstring(L, h.second.data(), h.second.size());
-            lua_setfield(L, -2, key.c_str());
+            lua_setfield(L, headers_idx, key.c_str());
+
+            lua_getfield(L, multi_idx, key.c_str());
+            if (lua_isnil(L, -1))
+            {
+                lua_pop(L, 1);
+                lua_newtable(L);
+                lua_pushvalue(L, -1);
+                lua_setfield(L, multi_idx, key.c_str());
+            }
+            lua_Integer next =
+                static_cast<lua_Integer>(lua_rawlen(L, -1)) + 1;
+            lua_pushlstring(L, h.second.data(), h.second.size());
+            lua_seti(L, -2, next);
+            lua_pop(L, 1);
         }
+
+        lua_setfield(L, -3, "headers_multi");
         lua_setfield(L, -2, "headers");
 
         lua_pushnil(L);
@@ -275,7 +373,18 @@ namespace
             lua_pop(L, 1);
             return push_fail(L, "http: 'url' (string) is required");
         }
-        std::string url = lua_tostring(L, -1);
+        std::string url;
+        std::string string_err;
+        if (!lua_string_without_nul(L, -1, url, "http: url", string_err))
+        {
+            lua_pop(L, 1);
+            return push_fail(L, string_err);
+        }
+        if (contains_cr_or_lf(url))
+        {
+            lua_pop(L, 1);
+            return push_fail(L, "http: url must not contain CR or LF");
+        }
         lua_pop(L, 1);
 
         // --- method (optionnel, défaut GET) ---------------------------
@@ -288,12 +397,13 @@ namespace
                 lua_pop(L, 1);
                 return push_fail(L, "http: 'method' must be a string");
             }
-            method = lua_tostring(L, -1);
-            for (char &c : method)
+            if (!lua_string_without_nul(L, -1, method,
+                                        "http: method", string_err))
             {
-                c = static_cast<char>(
-                    std::toupper(static_cast<unsigned char>(c)));
+                lua_pop(L, 1);
+                return push_fail(L, string_err);
             }
+            to_upper_ascii(method);
         }
         lua_pop(L, 1);
 
@@ -367,6 +477,11 @@ namespace
         lua_getfield(L, opts_idx, "verify");
         if (!lua_isnil(L, -1))
         {
+            if (lua_type(L, -1) != LUA_TBOOLEAN)
+            {
+                lua_pop(L, 1);
+                return push_fail(L, "http: 'verify' must be a boolean");
+            }
             verify = lua_toboolean(L, -1) != 0;
         }
         lua_pop(L, 1);
@@ -382,7 +497,12 @@ namespace
                 lua_pop(L, 1);
                 return push_fail(L, "http: 'ca_cert' must be a string");
             }
-            ca_cert = lua_tostring(L, -1);
+            if (!lua_string_without_nul(L, -1, ca_cert,
+                                        "http: ca_cert", string_err))
+            {
+                lua_pop(L, 1);
+                return push_fail(L, string_err);
+            }
             has_ca = true;
         }
         lua_pop(L, 1);
@@ -392,7 +512,45 @@ namespace
         lua_getfield(L, opts_idx, "follow_redirects");
         if (!lua_isnil(L, -1))
         {
+            if (lua_type(L, -1) != LUA_TBOOLEAN)
+            {
+                lua_pop(L, 1);
+                return push_fail(
+                    L, "http: 'follow_redirects' must be a boolean");
+            }
             follow = lua_toboolean(L, -1) != 0;
+        }
+        lua_pop(L, 1);
+
+        // --- max_body_size (optionnel, octets) -------------------------
+        // Défaut : 64 Mio. Le plafond configurable de 2 Gio reste
+        // cohérent avec exec.max_output et empêche les conversions ou
+        // allocations déraisonnables. `nil` signifie le défaut ; toutes
+        // les autres valeurs doivent être des entiers strictement positifs.
+        std::size_t max_body_size = DEFAULT_MAX_BODY_SIZE;
+        lua_getfield(L, opts_idx, "max_body_size");
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_isinteger(L, -1))
+            {
+                lua_pop(L, 1);
+                return push_fail(
+                    L, "http: 'max_body_size' must be an integer");
+            }
+            lua_Integer raw_limit = lua_tointeger(L, -1);
+            if (raw_limit <= 0)
+            {
+                lua_pop(L, 1);
+                return push_fail(
+                    L, "http: 'max_body_size' must be > 0");
+            }
+            if (raw_limit > MAX_CONFIGURABLE_BODY_SIZE)
+            {
+                lua_pop(L, 1);
+                return push_fail(
+                    L, "http: 'max_body_size' too large (maximum is 2 GiB)");
+            }
+            max_body_size = static_cast<std::size_t>(raw_limit);
         }
         lua_pop(L, 1);
 
@@ -421,13 +579,37 @@ namespace
                     lua_pop(L, 2);
                     return push_fail(L, "http: header names must be strings");
                 }
-                std::string hk = lua_tostring(L, -2);
+                std::string hk;
+                if (!lua_string_without_nul(L, -2, hk,
+                                            "http: header name", string_err))
+                {
+                    lua_pop(L, 2);
+                    return push_fail(L, string_err);
+                }
+                if (!valid_header_name(hk))
+                {
+                    lua_pop(L, 2);
+                    return push_fail(
+                        L, "http: invalid header name");
+                }
                 std::string hv;
                 if (!lua_value_to_string(L, -1, hv))
                 {
                     lua_pop(L, 2);
                     return push_fail(
                         L, "http: header values must be strings or numbers");
+                }
+                if (hv.find('\0') != std::string::npos)
+                {
+                    lua_pop(L, 2);
+                    return push_fail(
+                        L, "http: header value must not contain NUL byte");
+                }
+                if (contains_cr_or_lf(hv))
+                {
+                    lua_pop(L, 2);
+                    return push_fail(
+                        L, "http: header value must not contain CR or LF");
                 }
                 bool is_body_method =
                     (method == "POST" || method == "PUT" ||
@@ -495,6 +677,16 @@ namespace
             httplib::Client cli(parts.origin);
             cli.set_follow_location(follow);
             cli.enable_server_certificate_verification(verify);
+
+            // La limite du corps est appliquée par Babet via un
+            // ContentReceiver ci-dessous. On désactive donc la limite
+            // interne de cpp-httplib : selon le chemin de lecture, la
+            // v0.45.0 peut traduire son dépassement en Error::Read au
+            // lieu de Error::ExceedMaxPayloadSize, ce qui ferait perdre
+            // le diagnostic précis attendu par l'API Lua. Notre
+            // receiver garde en plus le contrôle exact du corps partiel
+            // et fonctionne au-delà du défaut interne de 100 Mio.
+            cli.set_payload_max_length(0);
             if (has_ca)
             {
                 cli.set_ca_cert_path(ca_cert);
@@ -543,48 +735,73 @@ namespace
                 content_type = "application/octet-stream";
             }
 
-            // finish() factorise le tri (échec transport vs réponse) ;
-            // prend le Result par valeur (move depuis le prvalue).
-            auto finish = [&](httplib::Result res) -> int
-            {
-                if (!res)
-                {
-                    return push_fail(L, std::string("http: ") +
-                                            httplib::to_string(res.error()));
-                }
-                return push_response(L, res);
-            };
+            // Utiliser Request + ContentReceiver donne à Babet une
+            // détection non ambiguë du dépassement, indépendamment de la
+            // manière dont cpp-httplib traduit l'annulation interne.
+            // Le buffer reste local : si la limite est dépassée, aucun
+            // corps partiel n'est jamais exposé à Lua.
+            std::string response_body;
+            bool body_too_large = false;
 
-            if (method == "GET")
+            httplib::Request request;
+            request.method = method;
+            request.path = parts.target;
+            request.headers = headers;
+
+            // L'overload générique Client::send(Request) de
+            // cpp-httplib 0.45.0 n'initialise pas start_time_ lui-même.
+            // Sans cette affectation, set_max_timeout() reste inopérant
+            // pour les requêtes construites manuellement ici.
+            if (has_timeout)
             {
-                return finish(cli.Get(parts.target, headers));
+                request.start_time_ = std::chrono::steady_clock::now();
             }
-            if (method == "HEAD")
+
+            if (has_body)
             {
-                return finish(cli.Head(parts.target, headers));
+                request.body = body;
             }
-            if (method == "OPTIONS")
+            // Préserve aussi un Content-Type fourni explicitement sur
+            // une méthode à corps même si le corps est vide, comme les
+            // anciens overloads Post/Put/Patch/Delete de cpp-httplib.
+            if (!content_type.empty())
             {
-                return finish(cli.Options(parts.target, headers));
+                request.set_header("Content-Type", content_type);
             }
-            if (method == "POST")
+
+            request.content_receiver =
+                [&](const char *data, std::size_t data_length,
+                    std::size_t /*offset*/,
+                    std::size_t /*total_length*/) -> bool
+                {
+                    // Forme soustractive : aucune addition ne peut
+                    // déborder avant le contrôle.
+                    if (response_body.size() > max_body_size ||
+                        data_length > max_body_size - response_body.size())
+                    {
+                        body_too_large = true;
+                        return false;
+                    }
+                    response_body.append(data, data_length);
+                    return true;
+                };
+
+            httplib::Result res = cli.send(request);
+            if (!res)
             {
-                return finish(
-                    cli.Post(parts.target, headers, body, content_type));
+                if (body_too_large)
+                {
+                    return push_fail(
+                        L, "http: response body exceeds max_body_size");
+                }
+                return push_fail(L, std::string("http: ") +
+                                        httplib::to_string(res.error()));
             }
-            if (method == "PUT")
-            {
-                return finish(
-                    cli.Put(parts.target, headers, body, content_type));
-            }
-            if (method == "PATCH")
-            {
-                return finish(
-                    cli.Patch(parts.target, headers, body, content_type));
-            }
-            // DELETE (seule restante : déjà filtrée plus haut)
-            return finish(
-                cli.Delete(parts.target, headers, body, content_type));
+
+            // Avec un ContentReceiver, cpp-httplib ne remplit pas
+            // res->body : transférer explicitement le buffer validé.
+            res->body = std::move(response_body);
+            return push_response(L, res);
         }
         catch (const std::exception &e)
         {
@@ -621,7 +838,7 @@ int lua_http_request(lua_State *L)
 
 int lua_http_get(lua_State *L)
 {
-    const char *url = luaL_checkstring(L, 1);
+    luaL_checktype(L, 1, LUA_TSTRING);
 
     lua_newtable(L);
     int dst = lua_gettop(L);
@@ -630,7 +847,7 @@ int lua_http_get(lua_State *L)
         luaL_checktype(L, 2, LUA_TTABLE);
         shallow_merge(L, 2, dst);
     }
-    lua_pushstring(L, url);
+    lua_pushvalue(L, 1);
     lua_setfield(L, dst, "url");
     lua_pushstring(L, "GET");
     lua_setfield(L, dst, "method");
@@ -639,7 +856,7 @@ int lua_http_get(lua_State *L)
 
 int lua_http_post(lua_State *L)
 {
-    const char *url = luaL_checkstring(L, 1);
+    luaL_checktype(L, 1, LUA_TSTRING);
 
     int body_type = lua_type(L, 2);
     int opts_arg = 3;
@@ -665,7 +882,7 @@ int lua_http_post(lua_State *L)
         luaL_checktype(L, opts_arg, LUA_TTABLE);
         shallow_merge(L, opts_arg, dst);
     }
-    lua_pushstring(L, url);
+    lua_pushvalue(L, 1);
     lua_setfield(L, dst, "url");
     lua_pushstring(L, "POST");
     lua_setfield(L, dst, "method");

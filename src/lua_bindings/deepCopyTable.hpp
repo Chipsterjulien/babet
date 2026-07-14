@@ -8,14 +8,15 @@
  * @file deepCopyTable.hpp
  * @brief Déclarations pour la copie profonde des tables Lua.
  *
- * La copie profonde préserve toutes les clés telles quelles (numériques,
- * trouées, chaînes...), partage la métatable de la source, et gère
- * correctement les cycles : si une table apparaît plusieurs fois dans le
- * graphe source (y compris en se référençant elle-même), elle ne donne
- * lieu qu'à UNE seule copie, réutilisée partout.
+ * La copie profonde duplique récursivement les VALEURS qui sont des tables.
+ * Les clés sont conservées telles quelles : une table utilisée comme clé
+ * reste donc la table source, elle n'est pas copiée. La métatable de chaque
+ * table copiée est partagée avec la source. Les cycles et sous-tables
+ * partagées rencontrés dans les valeurs sont préservés : une table source
+ * ne donne lieu qu'à une seule copie, réutilisée partout.
  */
 
-constexpr int MAX_DEPTH = 75; // Profondeur maximale de récursion (garde-fou)
+constexpr int MAX_DEPTH = 75; // 75 descentes sous la racine (profondeur racine = 0)
 
 /**
  * @brief Associe le pointeur d'une table source à la référence (registre Lua)

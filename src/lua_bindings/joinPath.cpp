@@ -1,5 +1,6 @@
 #include "joinPath.hpp"
 #include <string>
+#include <cstring>
 #include <vector>
 #include <optional>
 
@@ -42,6 +43,11 @@ std::optional<std::string> get_segments(lua_State *L, std::vector<std::string> &
                 lua_pop(L, 1);
                 return "Segments cannot be empty";
             }
+            if (std::memchr(segment, '\0', len) != nullptr)
+            {
+                lua_pop(L, 1);
+                return "Segments must not contain NUL byte";
+            }
             segments.emplace_back(segment, len);
             lua_pop(L, 1);
         }
@@ -66,6 +72,10 @@ std::optional<std::string> get_segments(lua_State *L, std::vector<std::string> &
             if (len == 0)
             {
                 return "Segments cannot be empty";
+            }
+            if (std::memchr(segment, '\0', len) != nullptr)
+            {
+                return "Segments must not contain NUL byte";
             }
             segments.emplace_back(segment, len);
         }

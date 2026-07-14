@@ -37,10 +37,12 @@
 struct lua_State;
 
 // Conventions de retour :
-//   (number, nil)   en succès
-//   (nil, string)   en cas d'échec (très improbable sur Linux moderne :
-//                   CLOCK_MONOTONIC et CLOCK_REALTIME sont garantis
-//                   disponibles et accessibles sans privilège).
+//   number          en succès (une seule valeur Lua)
+//   (nil, string)   si clock_gettime échoue — cas théorique sur Linux
+//                   moderne, mais prévu par l'implémentation.
+//
+// Les deux fonctions exigent une arité nulle, y compris via leurs alias
+// babet.time.monotonic et babet.time.now.
 int lua_monotonic(lua_State *L);
 int lua_now(lua_State *L);
 

@@ -1,4 +1,5 @@
 #include "fileUtils.hpp"
+#include "lua_utils.hpp"
 #include <functional>
 
 namespace fs = std::filesystem;
@@ -57,7 +58,7 @@ int lua_genericFunction(lua_State* L, Func func) {
         return luaL_error(L, "Expected one string argument");
     }
 
-    const char* path = luaL_checkstring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
     auto result = func(path);
 
     if (result) {

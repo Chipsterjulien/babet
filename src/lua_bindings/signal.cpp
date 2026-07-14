@@ -12,6 +12,7 @@ extern "C"
 }
 
 #include <signal.h>
+#include <cstring>
 #include <string.h>
 #include <errno.h>
 #include <pthread.h>
@@ -210,7 +211,21 @@ namespace
     // ou lance une erreur Lua si invalide.
     int check_signum(lua_State *L)
     {
-        const char *name = luaL_checkstring(L, 1);
+        // Contrat public strict : un nom de signal est une chaîne Lua.
+        // luaL_checklstring accepterait aussi un nombre en le convertissant
+        // implicitement en texte ; cette coercition rendait les diagnostics
+        // incohérents avec le reste de l'API et masquait les erreurs d'appel.
+        if (lua_type(L, 1) != LUA_TSTRING)
+        {
+            luaL_argerror(L, 1, "signal name must be a string");
+        }
+        size_t name_len = 0;
+        const char *name = lua_tolstring(L, 1, &name_len);
+        if (std::memchr(name, '\0', name_len) != nullptr)
+        {
+            luaL_argerror(L, 1,
+                          "signal name must not contain NUL byte");
+        }
         int signum = signum_from_name(name);
         if (signum < 0)
         {

@@ -25,9 +25,9 @@ int lua_symlinkattr(lua_State *L)
         return luaL_argerror(L, 3, "Expected an integer as the third argument (group GID)");
     }
 
-    const char *path = luaL_checkstring(L, 1);
     lua_Integer owner_raw = luaL_checkinteger(L, 2);
     lua_Integer group_raw = luaL_checkinteger(L, 3);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
 
     if (owner_raw < 0 || group_raw < 0)
     {
@@ -52,7 +52,7 @@ int lua_symlinkattr(lua_State *L)
 
     // lchown agit sur le lien symbolique lui-même, sans le suivre
     // (chown, lui, agirait sur la cible du lien).
-    if (lchown(path, owner, group) != 0)
+    if (lchown(path.c_str(), owner, group) != 0)
     {
         return push_fail(L, std::generic_category().message(errno));
     }

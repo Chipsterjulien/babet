@@ -14,9 +14,7 @@ int lua_fileExists(lua_State *L)
         return luaL_error(L, "Expected one string argument");
     }
 
-    size_t len;
-    const char *path_data = lua_tolstring(L, 1, &len);
-    fs::path path(std::string_view(path_data, len));
+    fs::path path(luaL_checkstring_without_nul(L, 1, "path"));
 
     std::error_code ec;
     fs::file_status status = fs::status(path, ec);

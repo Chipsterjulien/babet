@@ -60,7 +60,15 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
     // déroutant au premier lancement. is_regular_file suit les
     // symlinks : un lien vers un vrai main.lua reste accepté.
     std::error_code mec;
-    if (!fs::is_regular_file(mainLuaPath, mec))
+    const fs::file_status main_status = fs::status(mainLuaPath, mec);
+    if (mec && mec != std::errc::no_such_file_or_directory &&
+        mec != std::errc::not_a_directory)
+    {
+        std::cerr << "Error: cannot inspect main.lua in directory " << dir
+                  << " - " << mec.message() << std::endl;
+        return false;
+    }
+    if (!fs::is_regular_file(main_status))
     {
         std::cerr << "Error: main.lua not found (or not a regular file) in the directory "
                   << dir << std::endl;
@@ -141,18 +149,35 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
         std::string exe = getExecutablePath();
         // CORRECTIF (revue ChatGPT post-audit v21, vérifié) : refuser
         // une sortie ÉQUIVALENTE au binaire en cours d'exécution.
-        // mergeFiles ouvre la sortie en ofstream (troncature) pendant
-        // qu'il LIT le binaire courant : si output désigne le même
+        // Même si mergeFiles publie maintenant par rename atomique, on
+        // refuse toujours que output désigne le binaire en cours : remplacer
+        // l'exécutable lancé serait une opération surprenante et risquée.
+        // Si output désigne le même
         // inode (chemin direct, symlink ou hardlink),
         // `babet --create-exe proj /chemin/vers/babet` DÉTRUISAIT
         // babet lui-même (il ne restait souvent que le zip).
         // fs::equivalent résout liens symboliques et durs.
         std::error_code eq_ec;
-        if (fs::exists(output, eq_ec) && fs::equivalent(exe, output, eq_ec))
+        const bool output_exists = fs::exists(output, eq_ec);
+        if (eq_ec)
         {
-            std::cerr << "Error: output must not overwrite the running Babet executable."
-                      << std::endl;
-            return false;
+            throw std::system_error(
+                eq_ec, "cannot inspect output path '" + output + "'");
+        }
+        if (output_exists)
+        {
+            const bool same_file = fs::equivalent(exe, output, eq_ec);
+            if (eq_ec)
+            {
+                throw std::system_error(
+                    eq_ec, "cannot compare output path '" + output + "'");
+            }
+            if (same_file)
+            {
+                std::cerr << "Error: output must not overwrite the running Babet executable."
+                          << std::endl;
+                return false;
+            }
         }
         mergeFiles(exe, zipFileName, output);
     }
@@ -162,11 +187,10 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
         return false;
     }
 
-    if (chmod(output.c_str(), 0755) != 0)
-    {
-        std::cerr << "Error: failed to make the file executable " << output << std::endl;
-        return false;
-    }
+    // mergeFiles écrit dans un temporaire du même dossier, pose le mode
+    // 0755, fsync puis publie par rename atomique. Aucun chmod ne doit être
+    // effectué après publication : son échec laisserait sinon un nouvel
+    // output en place tout en annonçant que la construction a échoué.
 
     return true;
 }

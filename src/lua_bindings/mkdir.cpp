@@ -6,16 +6,15 @@
 namespace fs = std::filesystem;
 
 /**
- * @brief Create a directory path.
+ * @brief Recursively create a directory path (mkdir -p semantics).
  *
- * This function attempts to create the specified directory path. If the directory already exists
- * and ignore_if_exists is true, no error is returned.
+ * Existing directories are accepted. A regular file or another non-directory
+ * entry anywhere in the path is an error.
  *
- * @param path The directory path to create.
- * @param ignore_if_exists If true, does not return an error if the directory already exists.
- * @return std::optional<std::string> An error message if present, or std::nullopt if successful.
+ * @param path Directory path to create.
+ * @return An error message on failure, or std::nullopt on success.
  */
-std::optional<std::string> create_directory(const std::string& path, bool ignore_if_exists) {
+std::optional<std::string> create_directory(const std::string &path) {
     std::error_code ec;
     std::error_code abs_ec;
     fs::path dir_path = fs::absolute(path, abs_ec);
@@ -32,10 +31,7 @@ std::optional<std::string> create_directory(const std::string& path, bool ignore
                 case static_cast<int>(std::errc::no_space_on_device):
                     return "No space left on device: " + dir_path.string();
                 case static_cast<int>(std::errc::file_exists):
-                    if (!ignore_if_exists) {
-                        return "The path already exists and is not a directory: " + dir_path.string();
-                    }
-                    break;
+                    return "The path already exists and is not a directory: " + dir_path.string();
                 default:
                     return "cannot create directory '" + dir_path.string() + "': " + ec.message();
             }
@@ -46,30 +42,25 @@ std::optional<std::string> create_directory(const std::string& path, bool ignore
 }
 
 /**
- * @brief Lua binding for creating a directory path.
+ * @brief Lua binding for recursive, idempotent directory creation.
  *
- * This function can be called from Lua to create a directory. It returns nil if successful,
- * or an error message if it fails.
+ * Lua usage: ok, err = babet.mkdir(path)
  *
- * Lua usage: error_message = lua_mkdir(path, ignore_if_exists)
- *
- * @param L The Lua state.
- * @return int Number of return values (1: error message or nil).
+ * @param L Lua state.
+ * @return Two values: true/nil on success, nil/error on failure.
  */
 int lua_mkdir(lua_State *L)
 {
     int argc = lua_gettop(L);
-    if (argc < 1)
+    if (argc != 1)
     {
-        return luaL_error(L, "Expected one argument");
+        return luaL_error(L, "Expected exactly one argument");
     }
     if (!lua_isstring(L, 1))
     {
         return luaL_error(L, "Expected a string as argument");
     }
 
-    const char *path = luaL_checkstring(L, 1);
-    bool ignore_if_exists = (argc > 1) ? lua_toboolean(L, 2) : false;
-
-    return push_action_result(L, create_directory(path, ignore_if_exists));
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
+    return push_action_result(L, create_directory(path));
 }

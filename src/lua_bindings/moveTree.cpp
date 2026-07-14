@@ -1,5 +1,8 @@
 #include "moveTree.hpp"
 #include "lua_utils.hpp"
+#include "secure_destination.hpp"
+
+#include <algorithm>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -8,17 +11,28 @@ namespace fs = std::filesystem;
 
 namespace
 {
+    struct TreeEntry
+    {
+        fs::path source_path;
+        fs::path relative_path;
+    };
+
+    struct SymlinkMapping
+    {
+        fs::path relative_path;
+        fs::path target;
+    };
+
+    struct TreeScan
+    {
+        std::vector<TreeEntry> directories;
+        std::vector<TreeEntry> movable_entries;
+        std::vector<SymlinkMapping> symlinks;
+        bool has_retargeted_symlink = false;
+    };
+
     // `candidate` est-il `base` lui-même, ou strictement dessous ?
-    // Comparaison par COMPOSANT (et non par préfixe de chaîne) : un
-    // premier composant "..data" / "..." commence par ".." sans être
-    // le parent "..". Un rfind("..",0) le classerait à tort hors base
-    // et désactiverait le garde -> trou de sécurité. rel == "."
-    // (candidate == base) -> true (voulu : refus dest==source ; et
-    // destination_real / "." == destination_real, inoffensif au
-    // retarget).
-    //
-    // (Dupliqué à l'identique dans copyTree.cpp — stratégie symlink
-    // partagée volontairement ; voir le commentaire détaillé là-bas.)
+    // Comparaison par COMPOSANT (et non par préfixe de chaîne).
     bool is_within(const fs::path &base, const fs::path &candidate)
     {
         auto rel = candidate.lexically_relative(base);
@@ -33,60 +47,181 @@ namespace
         auto it = rel.begin();
         return it != rel.end() && *it != fs::path("..");
     }
+
+    std::string traversal_error(const fs::path &path,
+                                const std::error_code &ec)
+    {
+        return "cannot read directory '" + path.string() + "': " +
+               ec.message();
+    }
+
+    std::size_t relative_depth(const fs::path &base, const fs::path &path)
+    {
+        fs::path relative = path.lexically_relative(base);
+        return static_cast<std::size_t>(
+            std::distance(relative.begin(), relative.end()));
+    }
+
+    // Parcours explicite sans skip_permission_denied : moveTree ne doit
+    // jamais annoncer un succès après avoir ignoré une partie de source.
+    // Le scan se fait AVANT toute modification afin de détecter les erreurs
+    // de parcours et de préparer les liens symboliques transactionnellement.
+    std::string scan_tree(const fs::path &source,
+                          const fs::path &source_real,
+                          const fs::path &destination_real,
+                          TreeScan &scan)
+    {
+        std::vector<fs::path> pending_directories;
+        pending_directories.push_back(source);
+
+        while (!pending_directories.empty())
+        {
+            fs::path current = std::move(pending_directories.back());
+            pending_directories.pop_back();
+
+            std::error_code ec;
+            fs::directory_iterator it(current, fs::directory_options::none,
+                                      ec);
+            if (ec)
+            {
+                return traversal_error(current, ec);
+            }
+
+            const fs::directory_iterator end;
+            while (it != end)
+            {
+                const fs::path path = it->path();
+                fs::file_status status = it->symlink_status(ec);
+                if (ec)
+                {
+                    return "cannot inspect '" + path.string() + "': " +
+                           ec.message();
+                }
+
+                fs::path relative_path = path.lexically_relative(source);
+
+                if (fs::is_directory(status) && !fs::is_symlink(status))
+                {
+                    scan.directories.push_back(
+                        {path, relative_path});
+                    pending_directories.push_back(path);
+                }
+                else if (fs::is_symlink(status))
+                {
+                    fs::path old_target = fs::read_symlink(path, ec);
+                    if (ec)
+                    {
+                        return "cannot read symlink '" + path.string() +
+                               "': " + ec.message();
+                    }
+
+                    fs::path new_target = old_target;
+                    bool retargeted = false;
+
+                    if (old_target.is_absolute())
+                    {
+                        std::error_code target_ec;
+                        fs::path target_real =
+                            fs::weakly_canonical(old_target, target_ec);
+                        if (!target_ec && is_within(source_real, target_real))
+                        {
+                            new_target =
+                                destination_real /
+                                target_real.lexically_relative(source_real);
+                            retargeted = (new_target != old_target);
+                        }
+                        // Cible non résoluble : on conserve le lien tel quel.
+                    }
+
+                    scan.symlinks.push_back(
+                        {relative_path, new_target});
+                    scan.has_retargeted_symlink =
+                        scan.has_retargeted_symlink || retargeted;
+                }
+                else
+                {
+                    // Même périmètre qu'avant : tout ce qui n'est ni dossier
+                    // ni symlink est déplacé via rename, avec fallback
+                    // copy_file pour les fichiers traversant un filesystem.
+                    scan.movable_entries.push_back(
+                        {path, relative_path});
+                }
+
+                it.increment(ec);
+                if (ec)
+                {
+                    return traversal_error(current, ec);
+                }
+            }
+        }
+
+        // Le parcours DFS ci-dessus rencontre normalement les parents avant
+        // les enfants. Le tri explicite rend toutefois cet invariant évident
+        // et indépendant de l'ordre d'énumération du filesystem.
+        std::stable_sort(
+            scan.directories.begin(), scan.directories.end(),
+            [&source](const TreeEntry &a, const TreeEntry &b)
+            {
+                return relative_depth(source, a.source_path) <
+                       relative_depth(source, b.source_path);
+            });
+
+        return "";
+    }
+
+    void rollback_created_symlinks(SecureDestination &destination,
+                                    const std::vector<fs::path> &paths)
+    {
+        for (auto it = paths.rbegin(); it != paths.rend(); ++it)
+        {
+            destination.remove_entry_best_effort(*it);
+        }
+    }
 } // namespace
 
 /**
  * @brief Moves a directory tree from the source path to the destination path.
  *
  * Stratégie :
- *   1. On tente fs::rename atomique sur le dossier entier (O(1) sur la
- *      même partition, instantané même pour des arbres énormes).
- *   2. Si EXDEV (partitions différentes) ou destination existante, on
- *      bascule sur un fallback récursif :
- *      - dossiers : create_directories en destination
- *      - fichiers réguliers : tente fs::rename, et en cas d'EXDEV bascule
- *        sur copy_file + remove pour passer la frontière de filesystem
- *      - symlinks : recréés dans la destination en post-pass. La cible est
- *        retargetée uniquement si elle est absolue ET pointait à l'intérieur
- *        de l'arbre source ; sinon elle est conservée telle quelle. Un lien
- *        relatif reste donc valide après le déplacement si et seulement si
- *        sa cible bouge avec lui (typiquement : cible dans le même arbre,
- *        ou cible extérieure à source dont le chemin reste atteignable).
- *      - source : remove_all en fin de parcours
+ *   1. Valider et scanner entièrement la source avant toute modification.
+ *   2. Utiliser fs::rename sur le dossier entier seulement si la destination
+ *      n'existe pas ET qu'aucun lien absolu interne ne doit être réécrit.
+ *      Le chemin rapide produit ainsi exactement la même sémantique que le
+ *      fallback.
+ *   3. Fallback fusion/cross-device :
+ *      - créer les dossiers de destination ;
+ *      - créer tous les symlinks AVANT de supprimer ceux de la source ;
+ *      - déplacer les autres entrées ;
+ *      - supprimer l'arborescence source résiduelle en dernier.
  *
- * Refuse explicitement les cas où la destination est dans l'arbre source
- * (par exemple moveTree("src", "src/backup")), qui produiraient un parcours
- * récursif corrompu.
- *
- * @param source The source path of the directory tree to move.
- * @param destination The destination path where the directory tree will be moved.
- * @return An error message if any, or an empty string if successful.
+ * Si la création d'un symlink échoue, les symlinks déjà créés par cet appel
+ * sont retirés et la source n'a encore subi aucune modification.
  */
 std::string moveTree(const fs::path &source, const fs::path &destination)
 {
-    std::error_code ec;
-
     // Validations préalables.
     std::error_code src_ec;
-    if (!fs::exists(source, src_ec))
+    const fs::file_status source_status = fs::symlink_status(source, src_ec);
+    if (src_ec == std::errc::no_such_file_or_directory)
     {
         return "source path does not exist: " + source.string();
     }
-    if (!fs::is_directory(source, src_ec))
+    if (src_ec)
+    {
+        return "cannot inspect source path '" + source.string() +
+               "': " + src_ec.message();
+    }
+    if (fs::is_symlink(source_status))
+    {
+        return "source root must not be a symlink: '" + source.string() + "'";
+    }
+    if (!fs::is_directory(source_status))
     {
         return "source path is not a directory: " + source.string();
     }
 
-    // Chemins RÉELS (symlinks résolus), pas seulement normalisés
-    // lexicalement — même raisonnement que copyTree : sans ça, une
-    // destination ou une cible de lien atteignant physiquement source
-    // via un lien échapperait aux gardes (lexically_normal ne suit
-    // aucun lien). weakly_canonical résout la partie existante (liens
-    // suivis) + reste lexical : la destination n'existe pas forcément.
-    // TOCTOU : résolution au moment du contrôle, fenêtre réduite non
-    // fermée. (Voir copyTree.cpp pour le détail du raisonnement.)
+    // Chemins réels pour les gardes et le retarget des liens absolus.
     std::error_code wc_ec;
-
     fs::path source_real = fs::weakly_canonical(source, wc_ec);
     if (wc_ec)
     {
@@ -101,10 +236,6 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
                "': " + wc_ec.message();
     }
 
-    // Garde : refuser destination == source ou destination ⊂ source
-    // (chemins réels, comparaison par composant via is_within). Sans
-    // ça, le parcours récursif rencontrerait la destination créée à
-    // l'intérieur -> corruption.
     if (is_within(source_real, destination_real))
     {
         return "destination cannot be inside source: '" +
@@ -112,144 +243,111 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
                source.string() + "'";
     }
 
-    // --- Chemin rapide : rename atomique du dossier entier ----------
-    // Sur la même partition, fs::rename est instantané (un seul syscall).
-    // On ne le tente que si la destination n'existe PAS : sinon le fallback
-    // ci-dessous implémente une fusion entrée par entrée, comportement que
-    // fs::rename ne sait pas faire.
     std::error_code dst_ec;
-    if (!fs::exists(destination, dst_ec))
+    fs::file_status destination_status =
+        fs::symlink_status(destination, dst_ec);
+    if (dst_ec && dst_ec != std::errc::no_such_file_or_directory)
     {
-        fs::rename(source, destination, ec);
-        if (!ec)
-        {
-            return ""; // Succès, terminé en O(1).
-        }
-        if (ec != std::errc::cross_device_link)
-        {
-            // Erreur autre qu'EXDEV : pas la peine d'essayer le fallback,
-            // il échouera pareil (permissions, chemin invalide, etc.).
-            return "cannot move '" + source.string() + "' to '" +
-                   destination.string() + "': " + ec.message();
-        }
-        // ec == EXDEV : source et destination sur partitions différentes.
-        // On bascule sur le fallback, qui gère le cross-device fichier
-        // par fichier via copy_file + remove.
-        ec.clear();
+        return "cannot inspect destination path '" + destination.string() +
+               "': " + dst_ec.message();
+    }
+    if (!dst_ec && fs::is_symlink(destination_status))
+    {
+        return "destination root must not be a symlink: '" +
+               destination.string() + "'";
+    }
+    bool destination_exists =
+        !dst_ec && fs::exists(destination_status);
+
+    TreeScan scan;
+    if (std::string err = scan_tree(source, source_real,
+                                    destination_real, scan);
+        !err.empty())
+    {
+        return err;
     }
 
-    // --- Fallback : déplacement entrée par entrée -------------------
-    // Couvre deux cas : (a) destination existe déjà = fusion, (b) source
-    // et destination sur des partitions différentes = cross-device.
+    // Chemin rapide cohérent : il n'est autorisé que si aucun lien ne
+    // nécessite de changement de cible. Les liens relatifs, cassés ou
+    // absolus extérieurs sont alors préservés à l'identique dans les deux
+    // stratégies.
+    if (!destination_exists && !scan.has_retargeted_symlink)
+    {
+        std::error_code rename_ec;
+        fs::rename(source, destination, rename_ec);
+        if (!rename_ec)
+        {
+            return "";
+        }
+        if (rename_ec != std::errc::cross_device_link)
+        {
+            return "cannot move '" + source.string() + "' to '" +
+                   destination.string() + "': " + rename_ec.message();
+        }
+        // EXDEV : poursuivre avec le fallback entrée par entrée.
+    }
 
-    std::vector<std::pair<fs::path, fs::path>> symlink_mappings;
+    SecureDestination secure_destination;
+    if (auto secure_error = secure_destination.open_root(destination);
+        secure_error)
+    {
+        return *secure_error;
+    }
 
-    fs::create_directories(destination, ec);
+    for (const TreeEntry &entry : scan.directories)
+    {
+        if (auto directory_error =
+                secure_destination.ensure_directory(entry.relative_path);
+            directory_error)
+        {
+            return *directory_error;
+        }
+    }
+
+    // Tous les liens sont créés avant le premier déplacement de fichier.
+    // Ainsi, une collision ou une permission insuffisante ne détruit jamais
+    // le lien original. On retire nos créations si la phase échoue.
+    std::vector<fs::path> created_symlinks;
+    created_symlinks.reserve(scan.symlinks.size());
+
+    for (const SymlinkMapping &mapping : scan.symlinks)
+    {
+        if (auto symlink_error = secure_destination.create_symlink(
+                mapping.target, mapping.relative_path);
+            symlink_error)
+        {
+            rollback_created_symlinks(secure_destination,
+                                      created_symlinks);
+            return *symlink_error;
+        }
+        created_symlinks.push_back(mapping.relative_path);
+    }
+
+    for (const TreeEntry &entry : scan.movable_entries)
+    {
+        if (auto move_error = secure_destination.move_entry(
+                entry.source_path, entry.relative_path);
+            move_error)
+        {
+            // À ce stade certains fichiers peuvent déjà avoir été déplacés.
+            // Ne pas retirer les symlinks destination : cela aggraverait
+            // l'état partiel et pourrait supprimer le seul lien utile côté
+            // destination. Les liens source restent présents jusqu'au
+            // remove_all final.
+            return *move_error;
+        }
+    }
+
+    std::error_code ec;
+
+    // Source résiduelle = dossiers + symlinks. Les liens destination sont
+    // déjà tous présents, donc un échec de suppression ne provoque plus de
+    // perte du seul exemplaire du lien.
+    fs::remove_all(source, ec);
     if (ec)
     {
-        return "cannot create destination directory: " + ec.message();
-    }
-
-    try
-    {
-        for (const auto &entry : fs::recursive_directory_iterator(source, fs::directory_options::skip_permission_denied))
-        {
-            const auto &path = entry.path();
-            // PURE lexical, surtout PAS fs::relative : ce dernier résout
-            // les symlinks (weakly_canonical des deux côtés). Pour une
-            // entrée symlink il renverrait le relatif de la cible et non
-            // du lien -> arbre reconstruit faux. L'itérateur fournit
-            // path = source/... littéral. (Même raisonnement que
-            // copyTree.cpp, voir le commentaire détaillé là-bas.)
-            fs::path relative_path = path.lexically_relative(source);
-            fs::path dest_path = destination / relative_path;
-
-            auto file_status = fs::symlink_status(path);
-
-            if (fs::is_directory(file_status) && !fs::is_symlink(file_status))
-            {
-                fs::create_directories(dest_path, ec);
-                if (ec)
-                {
-                    return "cannot create directory '" + dest_path.string() + "': " + ec.message();
-                }
-            }
-            else if (fs::is_symlink(file_status))
-            {
-                fs::path old_target = fs::read_symlink(path);
-                fs::path new_target = old_target;
-
-                if (old_target.is_absolute())
-                {
-                    // Cible réelle (liens résolus) vs source_real :
-                    // reconnaît une cible atteignant source via un lien.
-                    std::error_code tec;
-                    fs::path target_real = fs::weakly_canonical(old_target, tec);
-                    if (!tec)
-                    {
-                        if (is_within(source_real, target_real))
-                        {
-                            new_target = destination_real /
-                                         target_real.lexically_relative(source_real);
-                        }
-                    }
-                    // tec non nul = cible non résoluble (boucle, accès) :
-                    // on conserve old_target tel quel (décision actée :
-                    // un lien cassé reste déplacé à l'identique).
-                }
-
-                symlink_mappings.emplace_back(dest_path, new_target);
-            }
-            else
-            {
-                // Fichier régulier : on tente le rename rapide d'abord.
-                fs::rename(path, dest_path, ec);
-                if (ec == std::errc::cross_device_link)
-                {
-                    // Cross-device : copier puis supprimer.
-                    ec.clear();
-                    fs::copy_file(path, dest_path,
-                                  fs::copy_options::overwrite_existing, ec);
-                    if (ec)
-                    {
-                        return "cannot copy '" + path.string() + "' to '" +
-                               dest_path.string() + "': " + ec.message();
-                    }
-                    fs::remove(path, ec);
-                    if (ec)
-                    {
-                        return "cannot remove source file '" + path.string() +
-                               "' after copy: " + ec.message();
-                    }
-                }
-                else if (ec)
-                {
-                    return "cannot move '" + path.string() + "' to '" + dest_path.string() + "': " + ec.message();
-                }
-            }
-        }
-
-        // Supprime l'arborescence source résiduelle (dossiers vides + symlinks).
-        fs::remove_all(source, ec);
-        if (ec)
-        {
-            return "cannot remove source directory '" + source.string() + "': " + ec.message();
-        }
-
-        // Recrée les symlinks dans la destination.
-        for (const auto &[dest_symlink, target] : symlink_mappings)
-        {
-            fs::create_symlink(target, dest_symlink, ec);
-            if (ec)
-            {
-                return "cannot create symlink '" + dest_symlink.string() +
-                       "' -> '" + target.string() + "': " + ec.message();
-            }
-        }
-    }
-    catch (const fs::filesystem_error &e)
-    {
-        return std::string(e.what());
+        return "cannot remove source directory '" + source.string() +
+               "': " + ec.message();
     }
 
     return "";
@@ -259,21 +357,22 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
  * @brief Lua binding for moveTree function.
  *
  * Lua usage: ok, err = babet.moveTree(source, destination)
- *
- * @param L Lua state.
- * @return int Number of return values on the Lua stack (2: ok/nil, err/nil).
  */
 int lua_moveTree(lua_State *L)
 {
-    if (lua_gettop(L) != 2 || !lua_isstring(L, 1) || !lua_isstring(L, 2))
+    if (lua_gettop(L) != 2 || !lua_isstring(L, 1) ||
+        !lua_isstring(L, 2))
     {
         return luaL_error(L, "Expected two strings as arguments");
     }
 
-    const char *source = luaL_checkstring(L, 1);
-    const char *destination = luaL_checkstring(L, 2);
+    const std::string_view source =
+        luaL_checkstring_view_without_nul(L, 1, "source");
+    const std::string_view destination =
+        luaL_checkstring_view_without_nul(L, 2, "destination");
 
-    std::string error_message = moveTree(source, destination);
+    std::string error_message =
+        moveTree(fs::path(source), fs::path(destination));
     if (error_message.empty())
     {
         return push_ok(L);

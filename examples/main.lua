@@ -38,6 +38,16 @@ local function ok_fail(name, val, err)
         "val=" .. tostring(val) .. " err=" .. tostring(err))
 end
 
+-- erreur Lua attendue (validation stricte d'un argument)
+local function ok_raises(name, fn, needle)
+    local call_ok, err = pcall(fn)
+    local good = call_ok == false and type(err) == "string"
+    if good and needle then
+        good = err:find(needle, 1, true) ~= nil
+    end
+    ok(name, good, tostring(err))
+end
+
 -- --- setup -----------------------------------------------------------
 local startDir, sderr = babet.currentDir()
 if not startDir then
@@ -48,8 +58,13 @@ end
 local SB = "_babet_selftest"
 local function sb(name) return SB .. "/" .. name end
 
--- nettoyage préventif d'un éventuel run précédent
-babet.rmdirAll(SB)
+-- nettoyage préventif d'un éventuel run précédent. Depuis le LOT 6,
+-- rmdirAll est strictement réservé aux vrais dossiers ; un ancien fichier ou
+-- symlink portant le nom du sandbox est donc nettoyé avec remove().
+local cleanup_ok = babet.rmdirAll(SB)
+if cleanup_ok ~= true then
+    babet.remove(SB)
+end
 
 print("=== setup ===")
 ok_act("mkdir(sandbox)", babet.mkdir(SB))
@@ -100,6 +115,16 @@ do
         babet.isDir(SB) == true
         and babet.isDir(SB) == babet.isdir(SB)
         and babet.isDir(sb("probe.txt")) == false)
+
+    for _, entry in ipairs({
+        { "fileExists", babet.fileExists },
+        { "isFile", babet.isFile },
+        { "isDir", babet.isDir },
+    }) do
+        ok_raises("LOT 3 " .. entry[1] .. ": NUL path rejected",
+            function() return entry[2](sb("probe.txt") .. "\0ignored") end,
+            "NUL")
+    end
 end
 
 -- =====================================================================
@@ -150,6 +175,24 @@ do
 
     v, e = babet.getAttributes("/n/existe/pas")
     ok_fail("getAttributes(bad) -> (nil, err)", v, e)
+
+    for _, entry in ipairs({
+        { "fileSize", babet.fileSize },
+        { "getBasename", babet.getBasename },
+        { "getExtension", babet.getExtension },
+        { "getFilename", babet.getFilename },
+        { "getPath", babet.getPath },
+        { "listFiles", babet.listFiles },
+        { "getMode", babet.getMode },
+        { "getAttributes", babet.getAttributes },
+    }) do
+        ok_raises("LOT 3 " .. entry[1] .. ": NUL path rejected",
+            function() return entry[2](sb("probe.txt") .. "\0ignored") end,
+            "NUL")
+    end
+
+    local joined, joined_err = babet.joinPath("a", "b\0ignored")
+    ok_fail("LOT 3 joinPath: NUL segment rejected", joined, joined_err)
 end
 
 -- =====================================================================
@@ -170,6 +213,49 @@ do
 
         v, e = babet[fn]("/n/existe/pas")
         ok_fail(fn .. "(bad) -> (nil, err)", v, e)
+
+        ok_raises("LOT 3 " .. fn .. ": NUL path rejected",
+            function() return babet[fn](sb("probe.txt") .. "\0ignored") end,
+            "NUL")
+    end
+
+    -- LOT 6 : les hash OpenSSL ne doivent jamais finaliser un digest après
+    -- une erreur d'E/S, ni lire indéfiniment un pseudo-fichier.
+    local crypto_hashers = {
+        "md5sum", "sha1sum", "sha256sum", "sha512sum", "sha384sum",
+        "sha3_256sum", "sha3_384sum", "sha3_512sum",
+        "blake2b512sum", "blake2s256sum",
+    }
+    for _, fn in ipairs(crypto_hashers) do
+        local v, e = babet[fn](SB)
+        ok_fail("LOT 6 " .. fn .. ": directory rejected", v, e)
+        ok("  directory error mentions regular file",
+            type(e) == "string" and e:find("regular file", 1, true) ~= nil,
+            tostring(e))
+    end
+
+    do
+        local v, e = babet.sha256sum("/dev/zero")
+        ok_fail("LOT 6 sha256sum: character device rejected", v, e)
+        ok("  device error mentions regular file",
+            type(e) == "string" and e:find("regular file", 1, true) ~= nil,
+            tostring(e))
+
+        v, e = babet.sha256sum("/proc/self/mem")
+        ok_fail("LOT 6 sha256sum: read error is not a fake digest", v, e)
+        ok("  read/open error is explicit",
+            type(e) == "string"
+            and (e:find("cannot read", 1, true)
+                or e:find("cannot open", 1, true)),
+            tostring(e))
+
+        babet.exec("ln", { "-s", "probe.txt", sb("hash_link") })
+        local direct, direct_err = babet.sha256sum(sb("probe.txt"))
+        local via_link, link_err = babet.sha256sum(sb("hash_link"))
+        ok("LOT 6 checksums keep symlinks to regular files supported",
+            direct_err == nil and link_err == nil and direct == via_link,
+            "direct=" .. tostring(direct) .. " link=" .. tostring(via_link)
+                .. " err=" .. tostring(link_err))
     end
 end
 
@@ -238,6 +324,10 @@ do
 
         s, e = J.encode(true)
         ok("encode(true) == 'true'", s == "true" and e == nil)
+
+        s, e = J.encode(nil)
+        ok("encode(nil) == 'null'", s == "null" and e == nil,
+            "s=" .. tostring(s))
     end
 
     -- --- sous-type entier vs flottant à la décode -------------------
@@ -252,6 +342,10 @@ do
 
         v, e = J.decode("1e3")
         ok("decode('1e3') -> float", e == nil and math.type(v) == "float")
+
+        v, e = J.decode("9223372036854775808")
+        ok("decode(unsigned > math.maxinteger) -> float",
+            e == nil and math.type(v) == "float")
     end
 
     -- --- empty table vs empty_array ---------------------------------
@@ -322,15 +416,57 @@ do
         s, e = J.encode(doc, { indent = -1 })
         ok("negative indent -> compact (no line break)",
             e == nil and s:find("\n", 1, true) == nil)
+
+        s, e = J.encode(doc, { indent = 0 })
+        ok("indent=0 -> formatted output with line breaks",
+            e == nil and s:find("\n", 1, true) ~= nil)
+
+        s, e = J.encode({ a = 1 }, { pretty = true })
+        ok("unknown encode options are ignored (pretty is not supported)",
+            e == nil and s:find("\n", 1, true) == nil)
+
+        local indent_ok, indent_err = pcall(function()
+            return J.encode(doc, { indent = 257 })
+        end)
+        ok("LOT 3 json: indent > 256 rejected cleanly",
+            indent_ok == false and type(indent_err) == "string"
+            and indent_err:find("too large", 1, true) ~= nil,
+            tostring(indent_err))
+
+        local huge_indent_ok, huge_indent_err = pcall(function()
+            return J.encode(doc, { indent = math.maxinteger })
+        end)
+        ok("LOT 3 json: huge indent rejected before narrowing",
+            huge_indent_ok == false and type(huge_indent_err) == "string"
+            and huge_indent_err:find("too large", 1, true) ~= nil,
+            tostring(huge_indent_err))
     end
 
-    -- --- UTF-8 conservé --------------------------------------------
+    -- --- chaînes UTF-8 et binary-safe ------------------------------
     do
         local original = "café ☕ — naïve"
         local s = J.encode(original)
         local v, e = J.decode(s)
         ok("UTF-8 round-trip intact", e == nil and v == original,
             "v=" .. tostring(v))
+
+        local with_nul = "a\0b"
+        s, e = J.encode(with_nul)
+        v = J.decode(s)
+        ok("string with embedded NUL round-trips",
+            e == nil and v == with_nul, "s=" .. tostring(s))
+
+        s, e = J.encode({ [with_nul] = with_nul })
+        local obj = J.decode(s)
+        ok("object key with embedded NUL round-trips",
+            e == nil and obj[with_nul] == with_nul,
+            "s=" .. tostring(s))
+
+        v, e = J.encode("\255")
+        ok_fail("encode(invalid UTF-8) -> (nil, err)", v, e)
+
+        v, e = J.decode('"' .. "\255" .. '"')
+        ok_fail("decode(invalid UTF-8 string) -> (nil, err)", v, e)
     end
 
     -- --- erreurs : (nil, err), jamais d'exception Lua --------------
@@ -340,6 +476,15 @@ do
 
         v, e = J.encode({ [1] = "a", [3] = "c" })
         ok_fail("encode sparse array -> (nil, err)", v, e)
+
+        v, e = J.encode({ [0] = "zero" })
+        ok_fail("encode array key 0 -> (nil, err)", v, e)
+
+        v, e = J.encode({ [1.5] = "float key" })
+        ok_fail("encode float table key -> (nil, err)", v, e)
+
+        v, e = J.encode({ [true] = "boolean key" })
+        ok_fail("encode boolean table key -> (nil, err)", v, e)
 
         v, e = J.encode(0 / 0)
         ok_fail("encode(NaN) -> (nil, err)", v, e)
@@ -352,6 +497,14 @@ do
 
         v, e = J.decode("{ pas du json")
         ok_fail("decode(invalid JSON) -> (nil, err)", v, e)
+        ok("decode parse error includes line and column",
+            type(e) == "string"
+            and e:find("line", 1, true) ~= nil
+            and e:find("column", 1, true) ~= nil,
+            tostring(e))
+
+        v, e = J.decode("null true")
+        ok_fail("decode(trailing data) -> (nil, err)", v, e)
 
         -- cyclic table : captée par le garde-fou de profondeur
         local cyc = {}
@@ -380,6 +533,22 @@ do
         s = J.encode(nested)
         ok('round-trip {"a":[]} preserved', s == '{"a":[]}',
             "s=" .. tostring(s))
+
+        -- seuls les arrays vides décodés sont marqués. Un array non vide
+        -- puis vidé redevient ambigu et doit être re-marqué explicitement.
+        local emptied = J.decode("[1]")
+        emptied[1] = nil
+        ok("decoded non-empty array emptied later -> '{}'",
+            J.encode(emptied) == "{}")
+        ok("as_array restores [] after emptying a decoded array",
+            J.encode(J.as_array(emptied)) == "[]")
+    end
+
+    -- --- objets : doublons -------------------------------------------
+    do
+        local obj, e = J.decode('{"x":1,"x":2}')
+        ok("duplicate JSON object key: last value wins",
+            e == nil and obj.x == 2)
     end
 
     -- --- sentinels en lecture seule --------------------------------
@@ -418,6 +587,14 @@ do
         local d = J.as_array(J.as_array({}))
         ok("as_array idempotent", J.encode(d) == "[]")
 
+        -- le marquage est la métatable et remplace celle déjà présente
+        local previous_mt = {}
+        local with_mt = setmetatable({}, previous_mt)
+        J.as_array(with_mt)
+        ok("as_array replaces an existing metatable",
+            getmetatable(with_mt) ~= previous_mt
+            and J.encode(with_mt) == "[]")
+
         -- marked but with string key -> error at encode
         local bad = J.as_array({})
         bad.k = "v"
@@ -440,6 +617,18 @@ do
         ok("as_array recovers the marking -> '[]'",
             J.encode(J.as_array(r)) == "[]")
     end
+
+    -- --- validation stricte des arguments ----------------------------
+    do
+        ok("decode(number) raises instead of coercing to string",
+            pcall(function() J.decode(42) end) == false)
+        ok("encode() without a value raises",
+            pcall(function() J.encode() end) == false)
+        ok("encode(value, opts, extra) raises",
+            pcall(function() J.encode(1, nil, "extra") end) == false)
+        ok("encode(value, nil) remains valid",
+            J.encode(1, nil) == "1")
+    end
 end
 
 -- =====================================================================
@@ -460,6 +649,63 @@ do
 
     r, e = babet.remove(sb("t1.txt")) -- already removed
     ok_fail("remove(already gone) -> (nil, err)", r, e)
+
+    -- LOT 6 : contrats stricts remove/rmdir/rmdirAll.
+    babet.mkdir(sb("lot6_remove_dir"))
+    r, e = babet.remove(sb("lot6_remove_dir"))
+    ok_fail("LOT 6 remove(directory) is rejected", r, e)
+    ok("  directory remains after remove refusal",
+        babet.isDir(sb("lot6_remove_dir")) == true)
+    ok_act("  rmdir removes the empty directory",
+        babet.rmdir(sb("lot6_remove_dir")))
+
+    babet.touch(sb("lot6_rmdir_file"))
+    r, e = babet.rmdir(sb("lot6_rmdir_file"))
+    ok_fail("LOT 6 rmdir(file) is rejected", r, e)
+    local ra, rea = babet.rmdirAll(sb("lot6_rmdir_file"))
+    ok_fail("LOT 6 rmdirAll(file) is rejected", ra, rea)
+    ok("  regular file remains after directory-operation refusals",
+        babet.isFile(sb("lot6_rmdir_file")) == true)
+    ok_act("  remove deletes the regular file",
+        babet.remove(sb("lot6_rmdir_file")))
+
+    babet.mkdir(sb("lot6_dir_target"))
+    babet.exec("ln", { "-s", "lot6_dir_target", sb("lot6_dir_link") })
+    r, e = babet.rmdir(sb("lot6_dir_link"))
+    ok_fail("LOT 6 rmdir(directory symlink) is rejected", r, e)
+    ra, rea = babet.rmdirAll(sb("lot6_dir_link"))
+    ok_fail("LOT 6 rmdirAll(directory symlink) is rejected", ra, rea)
+    ok("  directory target remains intact",
+        babet.isDir(sb("lot6_dir_target")) == true)
+    ok_act("  remove deletes the directory symlink itself",
+        babet.remove(sb("lot6_dir_link")))
+    ok_act("  cleanup real target directory",
+        babet.rmdir(sb("lot6_dir_target")))
+
+    babet.exec("ln", { "-s", "missing_target", sb("lot6_broken") })
+    ok_act("LOT 6 remove(dangling symlink) succeeds",
+        babet.remove(sb("lot6_broken")))
+
+    babet.exec("ln", { "-s", "still_missing", sb("lot6_broken_old") })
+    local rr, rre = babet.rename(
+        sb("lot6_broken_old"), sb("lot6_broken_new"))
+    ok_act("LOT 6 rename(dangling symlink) succeeds", rr, rre)
+    local link_probe = babet.exec("readlink", { sb("lot6_broken_new") })
+    ok("  renamed dangling symlink keeps its target",
+        type(link_probe) == "table" and link_probe.code == 0
+        and link_probe.stdout:find("still_missing", 1, true) ~= nil,
+        type(link_probe) == "table" and link_probe.stdout or tostring(link_probe))
+    ok_act("  cleanup renamed dangling symlink",
+        babet.remove(sb("lot6_broken_new")))
+
+    local fifo_create = babet.exec("mkfifo", { sb("lot6_fifo") })
+    if type(fifo_create) == "table" and fifo_create.code == 0 then
+        r, e = babet.remove(sb("lot6_fifo"))
+        ok_fail("LOT 6 remove(FIFO) is rejected", r, e)
+        babet.exec("rm", { "-f", sb("lot6_fifo") })
+    else
+        print("[INFO] LOT 6 remove(FIFO): SKIP (mkfifo unavailable)")
+    end
 
     -- rename
     babet.touch(sb("old.txt"))
@@ -545,6 +791,9 @@ do
         babet.touch(sb("mkd/bloqueur"))
         local v2, e2 = babet.mkdir(sb("mkd/bloqueur/sous"))
         ok_fail("mkdir bloqué par un FICHIER -> (nil, err)", v2, e2)
+        ok_raises("DOC FS mkdir: second argument rejected",
+            function() return babet.mkdir(sb("mkd/extra"), true) end,
+            "one argument")
     end
 
     -- copyTree
@@ -552,6 +801,53 @@ do
     babet.touch(sb("treesrc/a.txt"))
     ok_act("copyTree(treesrc -> treedst)",
         babet.copyTree(sb("treesrc"), sb("treedst")))
+
+    -- Audit documentation FS : le troisième argument vaut true par défaut.
+    -- Un type d'entrée non pris en charge produit donc un warning, les autres
+    -- entrées sont tout de même copiées, puis l'appel signale les warnings.
+    do
+        local default_src = sb("copytree_default_src")
+        local default_dst = sb("copytree_default_dst")
+        babet.mkdir(default_src)
+        babet.touch(default_src .. "/visible.txt")
+        local fifo_result = babet.exec("mkfifo", {
+            default_src .. "/unsupported_fifo"
+        })
+        if type(fifo_result) == "table" and fifo_result.code == 0 then
+            local dv, de = babet.copyTree(default_src, default_dst)
+            ok_fail("DOC FS copyTree default continues and reports warnings",
+                dv, de)
+            ok("  default copied supported entries",
+                babet.isFile(default_dst .. "/visible.txt") == true)
+            ok("  default error mentions warnings",
+                type(de) == "string"
+                and de:find("warnings", 1, true) ~= nil,
+                "err=" .. tostring(de))
+            babet.exec("rm", { "-f", default_src .. "/unsupported_fifo" })
+            babet.rmdirAll(default_src)
+            babet.rmdirAll(default_dst)
+        else
+            print("[INFO] DOC FS copyTree default: SKIP (mkfifo unavailable)")
+            babet.rmdirAll(default_src)
+        end
+    end
+
+    -- LOT 6 : une copie crée un nouvel inode appartenant à l'appelant ; elle
+    -- ne doit donc jamais recopier setuid/setgid/sticky depuis la source.
+    babet.mkdir(sb("lot6_mode_src"))
+    babet.touch(sb("lot6_mode_src/tool"))
+    ok_act("LOT 6 setup: source mode 04755",
+        babet.setMode(sb("lot6_mode_src/tool"), "4755"))
+    local mode_copy, mode_copy_err = babet.copyTree(
+        sb("lot6_mode_src"), sb("lot6_mode_dst"))
+    ok_act("LOT 6 copyTree copies file with special mode safely",
+        mode_copy, mode_copy_err)
+    local copied_mode, copied_mode_err =
+        babet.getMode(sb("lot6_mode_dst/tool"))
+    ok("  copied inode keeps 0755 but drops special bits",
+        copied_mode_err == nil and copied_mode == tonumber("755", 8),
+        "mode=" .. tostring(copied_mode)
+            .. " err=" .. tostring(copied_mode_err))
 
     -- moveTree
     babet.mkdir(sb("movesrc"))
@@ -613,6 +909,18 @@ do
         local r = babet.exec("readlink", { p })
         return type(r) == "table" and (r.stdout:gsub("%s+$", "")) or nil
     end
+    local function stdout_trim(r)
+        if type(r) ~= "table" or type(r.stdout) ~= "string" then
+            return nil
+        end
+        return (r.stdout:gsub("%s+$", ""))
+    end
+    local function realpath(p)
+        return stdout_trim(babet.exec("readlink", { "-f", p }))
+    end
+    local function device_id(p)
+        return stdout_trim(babet.exec("stat", { "-c", "%d", p }))
+    end
     local cwd = babet.currentDir()
     local function abs(p) return cwd .. "/" .. p end
 
@@ -633,16 +941,38 @@ do
         local r2, e2 = babet.moveTree(sb("sym/hl_src"), sb("sym/hl_link/backup"))
         ok_fail("moveTree: dest via symlink to source -> refus", r2, e2)
 
-        -- B) source donnée VIA un symlink + lien absolu intra-source :
-        --    must be retargeted into the destination. Before hardening
-        --    (source non résolue), il restait pointé vers la source.
+        -- B) LOT 6 : une racine source symbolique est refusée. Sinon,
+        --    le fast path rename déplacerait le lien lui-même tandis que le
+        --    fallback cross-filesystem copierait le contenu de sa cible.
         babet.mkdir(sb("sym/rs"))
         babet.touch(sb("sym/rs/data.txt"))
         mklink(abs(sb("sym/rs/data.txt")), sb("sym/rs/ptr"))
         mklink(abs(sb("sym/rs")), sb("sym/srcvia"))
 
-        local rc = babet.copyTree(sb("sym/srcvia"), sb("sym/viad"))
-        ok_act("copyTree(srcvia -> viad)", rc)
+        local src_link_copy, src_link_copy_err =
+            babet.copyTree(sb("sym/srcvia"), sb("sym/viad_rejected"))
+        ok_fail("LOT 6 copyTree: racine source symlink refusée",
+            src_link_copy, src_link_copy_err)
+        ok("  erreur copyTree mentionne symlink",
+            type(src_link_copy_err) == "string"
+            and src_link_copy_err:find("symlink", 1, true) ~= nil,
+            tostring(src_link_copy_err))
+
+        local src_link_move, src_link_move_err =
+            babet.moveTree(sb("sym/srcvia"), sb("sym/moved_via_rejected"))
+        ok_fail("LOT 6 moveTree: racine source symlink refusée",
+            src_link_move, src_link_move_err)
+        ok("  erreur moveTree mentionne symlink",
+            type(src_link_move_err) == "string"
+            and src_link_move_err:find("symlink", 1, true) ~= nil,
+            tostring(src_link_move_err))
+        ok("  lien source et cible restent intacts après refus",
+            readlink(sb("sym/srcvia")) == abs(sb("sym/rs"))
+            and babet.isFile(sb("sym/rs/data.txt")) == true)
+
+        -- Les liens internes restent, eux, pris en charge et retargetés.
+        local rc, rc_err = babet.copyTree(sb("sym/rs"), sb("sym/viad"))
+        ok_act("copyTree(source réelle -> viad)", rc, rc_err)
         local tgt = readlink(sb("sym/viad/ptr"))
         ok("absolute intra-source link retargeted to destination",
             type(tgt) == "string"
@@ -681,8 +1011,338 @@ do
         local rdm, edm = babet.moveTree(sb("sym/dd_src"), sb("sym/dd_src/..data"))
         ok_fail("moveTree: dest 'src/..data' (inside source) -> refus", rdm, edm)
 
+        -- F) Régression LOT 1 : un lien absolu interne doit être
+        --    réécrit de façon identique sur le même filesystem. Avant le
+        --    correctif, le fast path fs::rename déplaçait le dossier en bloc
+        --    et laissait le lien pointer vers l'ancien emplacement.
+        babet.mkdir(sb("sym/lot1_same_src"))
+        babet.touch(sb("sym/lot1_same_src/data.txt"))
+        mklink(abs(sb("sym/lot1_same_src/data.txt")),
+            sb("sym/lot1_same_src/ptr"))
+        local mv_same, mv_same_err = babet.moveTree(
+            sb("sym/lot1_same_src"), sb("sym/lot1_same_dst"))
+        ok_act("LOT 1 moveTree: lien absolu interne (même FS)",
+            mv_same, mv_same_err)
+        local same_target = readlink(sb("sym/lot1_same_dst/ptr"))
+        local same_expected_root = realpath(sb("sym/lot1_same_dst"))
+        ok("  cible réécrite vers la destination",
+            type(same_expected_root) == "string"
+            and same_target == same_expected_root .. "/data.txt",
+            "target=" .. tostring(same_target)
+            .. " expected=" .. tostring(same_expected_root))
+        ok("  lien déplacé résout le fichier",
+            babet.isFile(sb("sym/lot1_same_dst/ptr")) == true)
+        ok("  source supprimée après succès",
+            babet.isDir(sb("sym/lot1_same_src")) == false)
+
+        -- G) Régression LOT 1 : même sémantique lors d'un déplacement
+        --    réellement cross-filesystem. Le test est ignoré proprement si
+        --    /dev/shm n'est pas disponible, pas inscriptible, ou vit sur le
+        --    même device que le sandbox.
+        do
+            local cross_dst = "/dev/shm/babet_lot1_move_"
+                .. tostring(babet.pid())
+            babet.rmdirAll(cross_dst)
+
+            local probe_ok = babet.mkdir(cross_dst)
+            local sandbox_dev = device_id(SB)
+            local shm_dev = device_id(cross_dst)
+            babet.rmdirAll(cross_dst)
+
+            if probe_ok == true and sandbox_dev and shm_dev
+                and sandbox_dev ~= shm_dev then
+                babet.mkdir(sb("sym/lot1_cross_src"))
+                babet.touch(sb("sym/lot1_cross_src/data.txt"))
+                mklink(abs(sb("sym/lot1_cross_src/data.txt")),
+                    sb("sym/lot1_cross_src/ptr"))
+
+                local mv_cross, mv_cross_err = babet.moveTree(
+                    sb("sym/lot1_cross_src"), cross_dst)
+                ok_act("LOT 1 moveTree: lien absolu interne (cross-FS)",
+                    mv_cross, mv_cross_err)
+
+                local cross_target = readlink(cross_dst .. "/ptr")
+                local cross_expected_root = realpath(cross_dst)
+                ok("  cible cross-FS réécrite vers la destination",
+                    type(cross_expected_root) == "string"
+                    and cross_target == cross_expected_root .. "/data.txt",
+                    "target=" .. tostring(cross_target)
+                    .. " expected=" .. tostring(cross_expected_root))
+                ok("  lien cross-FS résout le fichier",
+                    babet.isFile(cross_dst .. "/ptr") == true)
+                ok("  source cross-FS supprimée après succès",
+                    babet.isDir(sb("sym/lot1_cross_src")) == false)
+                babet.rmdirAll(cross_dst)
+
+                local cross_mode_dst = "/dev/shm/babet_lot6_mode_"
+                    .. tostring(babet.pid())
+                babet.rmdirAll(cross_mode_dst)
+                babet.mkdir(sb("sym/lot6_cross_mode_src"))
+                babet.touch(sb("sym/lot6_cross_mode_src/tool"))
+                babet.setMode(sb("sym/lot6_cross_mode_src/tool"), "4755")
+                local mm, mme = babet.moveTree(
+                    sb("sym/lot6_cross_mode_src"), cross_mode_dst)
+                ok_act("LOT 6 moveTree cross-FS strips special bits",
+                    mm, mme)
+                local cross_mode, cross_mode_err =
+                    babet.getMode(cross_mode_dst .. "/tool")
+                ok("  cross-FS copied inode mode is 0755",
+                    cross_mode_err == nil and cross_mode == tonumber("755", 8),
+                    "mode=" .. tostring(cross_mode)
+                        .. " err=" .. tostring(cross_mode_err))
+                babet.rmdirAll(cross_mode_dst)
+            else
+                print("[INFO] LOT 1 moveTree cross-FS: SKIP "
+                    .. "(/dev/shm indisponible ou même filesystem)")
+            end
+        end
+
+        -- H) Régression LOT 1 : une collision pendant la création du lien
+        --    destination ne doit supprimer NI le lien source, NI ses fichiers.
+        --    Avant le correctif, remove_all(source) était exécuté avant
+        --    create_symlink(destination), provoquant une perte de données.
+        babet.mkdir(sb("sym/lot1_collision_src"))
+        babet.touch(sb("sym/lot1_collision_src/data.txt"))
+        local collision_original_target =
+            abs(sb("sym/lot1_collision_src/data.txt"))
+        mklink(collision_original_target,
+            sb("sym/lot1_collision_src/ptr"))
+        babet.mkdir(sb("sym/lot1_collision_dst"))
+        do
+            local f = assert(io.open(
+                sb("sym/lot1_collision_dst/ptr"), "wb"))
+            f:write("DESTINATION_INTACT")
+            f:close()
+        end
+
+        local mv_collision, mv_collision_err = babet.moveTree(
+            sb("sym/lot1_collision_src"),
+            sb("sym/lot1_collision_dst"))
+        ok_fail("LOT 1 moveTree: collision de lien -> échec propre",
+            mv_collision, mv_collision_err)
+        ok("  lien source toujours présent et inchangé",
+            readlink(sb("sym/lot1_collision_src/ptr"))
+                == collision_original_target,
+            "target=" .. tostring(
+                readlink(sb("sym/lot1_collision_src/ptr"))))
+        ok("  fichier source toujours présent",
+            babet.isFile(sb("sym/lot1_collision_src/data.txt")) == true)
+        ok("  dossier source toujours présent",
+            babet.isDir(sb("sym/lot1_collision_src")) == true)
+        do
+            local f = io.open(sb("sym/lot1_collision_dst/ptr"), "rb")
+            local content = f and f:read("*a") or nil
+            if f then f:close() end
+            ok("  collision destination laissée intacte",
+                content == "DESTINATION_INTACT",
+                "content=" .. tostring(content))
+        end
+
+        -- I) Régression LOT 5A : une destination de fusion ne doit
+        --    jamais traverser un symlink déjà présent. Les écritures
+        --    restent confinées sous la racine destination, y compris
+        --    pour le dernier composant (fichier symlinké).
+        do
+            local outside = sb("sym/lot5a_outside")
+            babet.mkdir(outside)
+
+            -- Dossier intermédiaire destination -> extérieur.
+            babet.mkdir(sb("sym/lot5a_copy_src/sub"))
+            babet.touch(sb("sym/lot5a_copy_src/sub/file.txt"))
+            babet.mkdir(sb("sym/lot5a_copy_dst"))
+            mklink(abs(outside), sb("sym/lot5a_copy_dst/sub"))
+
+            local cp_escape, cp_escape_err = babet.copyTree(
+                sb("sym/lot5a_copy_src"),
+                sb("sym/lot5a_copy_dst"), false)
+            ok_fail("LOT 5A copyTree: symlink de dossier destination refusé",
+                cp_escape, cp_escape_err)
+            ok("  erreur copyTree mentionne le symlink",
+                type(cp_escape_err) == "string"
+                and cp_escape_err:find("symlink", 1, true) ~= nil,
+                "err=" .. tostring(cp_escape_err))
+            ok("  aucun fichier écrit hors destination",
+                babet.fileExists(outside .. "/file.txt") == false)
+            ok("  source copyTree intacte après refus",
+                babet.fileExists(sb("sym/lot5a_copy_src/sub/file.txt"))
+                    == true)
+
+            -- Dernier composant destination symlinké vers un fichier
+            -- extérieur : la cible ne doit jamais être tronquée.
+            babet.mkdir(sb("sym/lot5a_file_src"))
+            do
+                local f = assert(io.open(
+                    sb("sym/lot5a_file_src/file.txt"), "wb"))
+                f:write("NEW")
+                f:close()
+            end
+            babet.mkdir(sb("sym/lot5a_file_dst"))
+            do
+                local f = assert(io.open(outside .. "/target.txt", "wb"))
+                f:write("ORIGINAL")
+                f:close()
+            end
+            mklink(abs(outside .. "/target.txt"),
+                sb("sym/lot5a_file_dst/file.txt"))
+
+            local cp_file, cp_file_err = babet.copyTree(
+                sb("sym/lot5a_file_src"),
+                sb("sym/lot5a_file_dst"), false)
+            ok_fail("LOT 5A copyTree: fichier destination symlinké refusé",
+                cp_file, cp_file_err)
+            local target_file = io.open(outside .. "/target.txt", "rb")
+            local target_content = target_file and target_file:read("*a")
+                or nil
+            if target_file then target_file:close() end
+            ok("  cible extérieure strictement inchangée",
+                target_content == "ORIGINAL",
+                "content=" .. tostring(target_content))
+
+            -- Même garde pour moveTree : le refus intervient avant le
+            -- premier déplacement, donc source et extérieur restent intacts.
+            babet.mkdir(sb("sym/lot5a_move_src/sub"))
+            babet.touch(sb("sym/lot5a_move_src/sub/file.txt"))
+            babet.mkdir(sb("sym/lot5a_move_dst"))
+            mklink(abs(outside), sb("sym/lot5a_move_dst/sub"))
+
+            local mv_escape, mv_escape_err = babet.moveTree(
+                sb("sym/lot5a_move_src"),
+                sb("sym/lot5a_move_dst"))
+            ok_fail("LOT 5A moveTree: symlink de dossier destination refusé",
+                mv_escape, mv_escape_err)
+            ok("  erreur moveTree mentionne le symlink",
+                type(mv_escape_err) == "string"
+                and mv_escape_err:find("symlink", 1, true) ~= nil,
+                "err=" .. tostring(mv_escape_err))
+            ok("  extérieur intact après moveTree",
+                babet.fileExists(outside .. "/file.txt") == false)
+            ok("  source moveTree intacte après refus",
+                babet.fileExists(sb("sym/lot5a_move_src/sub/file.txt"))
+                    == true)
+
+            -- Dernier composant symlinké : moveTree possède son propre
+            -- chemin renameat/cross-device et doit appliquer la même garde.
+            babet.mkdir(sb("sym/lot5a_move_file_src"))
+            do
+                local f = assert(io.open(
+                    sb("sym/lot5a_move_file_src/file.txt"), "wb"))
+                f:write("MOVE_NEW")
+                f:close()
+            end
+            babet.mkdir(sb("sym/lot5a_move_file_dst"))
+            do
+                local f = assert(io.open(
+                    outside .. "/move_target.txt", "wb"))
+                f:write("MOVE_ORIGINAL")
+                f:close()
+            end
+            mklink(abs(outside .. "/move_target.txt"),
+                sb("sym/lot5a_move_file_dst/file.txt"))
+
+            local mv_file, mv_file_err = babet.moveTree(
+                sb("sym/lot5a_move_file_src"),
+                sb("sym/lot5a_move_file_dst"))
+            ok_fail("LOT 5A moveTree: fichier destination symlinké refusé",
+                mv_file, mv_file_err)
+            local move_target = io.open(
+                outside .. "/move_target.txt", "rb")
+            local move_target_content = move_target
+                and move_target:read("*a") or nil
+            if move_target then move_target:close() end
+            ok("  cible extérieure moveTree inchangée",
+                move_target_content == "MOVE_ORIGINAL",
+                "content=" .. tostring(move_target_content))
+            ok("  fichier source moveTree conservé après refus",
+                babet.fileExists(
+                    sb("sym/lot5a_move_file_src/file.txt")) == true)
+        end
+
         -- nettoyage : un seul appel, sûr, indépendant de l'ordre
         babet.rmdirAll(sb("sym"))
+    end
+
+    -- Régression LOT 3 : aucun chemin Lua contenant un NUL ne doit être
+    -- tronqué puis agir sur la partie située avant le NUL.
+    for _, entry in ipairs({
+        { "mkdir", function(p) return babet.mkdir(p) end },
+        { "touch", function(p) return babet.touch(p) end },
+        { "remove", function(p) return babet.remove(p) end },
+        { "rmdir", function(p) return babet.rmdir(p) end },
+        { "rmdirAll", function(p) return babet.rmdirAll(p) end },
+    }) do
+        ok_raises("LOT 3 " .. entry[1] .. ": NUL path rejected",
+            function() return entry[2](sb("nul_target") .. "\0ignored") end,
+            "NUL")
+    end
+
+    for _, entry in ipairs({
+        { "copy", function(a, b) return babet.copy(a, b) end },
+        { "rename", function(a, b) return babet.rename(a, b) end },
+        { "link", function(a, b) return babet.link(a, b) end },
+        { "copyTree", function(a, b) return babet.copyTree(a, b) end },
+        { "moveTree", function(a, b) return babet.moveTree(a, b) end },
+    }) do
+        ok_raises("LOT 3 " .. entry[1] .. ": NUL source rejected",
+            function() return entry[2](sb("probe.txt") .. "\0ignored",
+                sb("nul_dest")) end, "NUL")
+        ok_raises("LOT 3 " .. entry[1] .. ": NUL destination rejected",
+            function() return entry[2](sb("probe.txt"),
+                sb("nul_dest") .. "\0ignored") end, "NUL")
+    end
+
+    -- Régression LOT 1 : copyTree ne doit plus ignorer silencieusement
+    -- une branche inaccessible. Sous root, chmod 000 ne discrimine pas le
+    -- bug historique (root conserve l'accès), donc le cas est SKIP.
+    do
+        local id_result = babet.exec("id", { "-u" })
+        local uid = tonumber(stdout_trim(id_result))
+        if uid == 0 then
+            print("[INFO] LOT 1 copyTree permissions: SKIP (root)")
+        elseif uid == nil then
+            print("[INFO] LOT 1 copyTree permissions: SKIP "
+                .. "(UID indéterminable)")
+        else
+            local perm_src = sb("lot1_perm_src")
+            local perm_strict = sb("lot1_perm_strict")
+            local perm_continue = sb("lot1_perm_continue")
+
+            babet.mkdir(perm_src .. "/locked")
+            babet.touch(perm_src .. "/visible.txt")
+            babet.touch(perm_src .. "/locked/secret.txt")
+            ok_act("LOT 1 setup: verrouillage du sous-dossier",
+                babet.setMode(perm_src .. "/locked", "000"))
+
+            local strict_ok, strict_err = babet.copyTree(
+                perm_src, perm_strict, false)
+            ok_fail("LOT 1 copyTree strict: dossier illisible -> erreur",
+                strict_ok, strict_err)
+            ok("  erreur strict explicite",
+                type(strict_err) == "string"
+                and strict_err:find("cannot read directory", 1, true)
+                    ~= nil,
+                "err=" .. tostring(strict_err))
+
+            local continue_ok, continue_err = babet.copyTree(
+                perm_src, perm_continue, true)
+            ok_fail("LOT 1 copyTree continue: warnings signalés",
+                continue_ok, continue_err)
+            ok("  résultat mentionne les warnings",
+                type(continue_err) == "string"
+                and continue_err:find("warnings", 1, true) ~= nil,
+                "err=" .. tostring(continue_err))
+            ok("  fichier accessible tout de même copié",
+                babet.isFile(perm_continue .. "/visible.txt") == true)
+            ok("  fichier inaccessible non copié",
+                babet.fileExists(
+                    perm_continue .. "/locked/secret.txt") == false)
+
+            -- Restaurer avant le nettoyage, sinon rmdirAll peut échouer pour
+            -- un utilisateur non privilégié.
+            babet.setMode(perm_src .. "/locked", "700")
+            babet.rmdirAll(perm_src)
+            babet.rmdirAll(perm_strict)
+            babet.rmdirAll(perm_continue)
+        end
     end
 end
 
@@ -702,11 +1362,30 @@ do
         "mode=" .. tostring(m))
 
     -- forme nombre
-    ok_act("setMode(perm.txt, 0o644) [number]",
+    ok_act("setMode(perm.txt, 0644 octal) [number]",
         babet.setMode(sb("perm.txt"), tonumber("644", 8)))
     m, e = babet.getMode(sb("perm.txt"))
     ok("getMode reflects setMode(644)", m == tonumber("644", 8) and e == nil,
         "mode=" .. tostring(m))
+
+    -- LOT 4 : setMode acceptait déjà les bits spéciaux, mais getMode
+    -- les masquait avec 0777. La lecture doit désormais être symétrique.
+    ok_act("LOT 4 setMode(perm.txt, '4755')",
+        babet.setMode(sb("perm.txt"), "4755"))
+    m, e = babet.getMode(sb("perm.txt"))
+    ok("LOT 4 getMode exposes setuid + permissions (04755)",
+        m == tonumber("4755", 8) and e == nil,
+        "mode=" .. tostring(m))
+    local special_attrs, special_attrs_err =
+        babet.getAttributes(sb("perm.txt"))
+    ok("LOT 5B getAttributes exposes special mode bits (04755)",
+        type(special_attrs) == "table"
+        and special_attrs.mode == tonumber("4755", 8)
+        and special_attrs_err == nil,
+        "mode=" .. tostring(special_attrs and special_attrs.mode)
+        .. " err=" .. tostring(special_attrs_err))
+    ok_act("LOT 4 restore mode 0644",
+        babet.setMode(sb("perm.txt"), "644"))
 
     -- string invalid -> (nil, err) propre
     local r, e2 = babet.setMode(sb("perm.txt"), "858")
@@ -724,13 +1403,40 @@ do
     local r2, e3 = babet.setAttributes("/n/existe/pas", 0, 0)
     ok_fail("setAttributes(bad path) -> (nil, err)", r2, e3)
 
+    -- LOT 5B : le mode doit être validé AVANT tout chown/stat utile.
+    -- Le chemin inexistant rend le test discriminant : l'ancien code
+    -- répondait ENOENT après avoir accepté la valeur hors plage.
+    local bad_mode_v, bad_mode_e = babet.setAttributes(
+        "/n/existe/pas", 0, 0, tonumber("10000", 8))
+    ok_fail("LOT 5B setAttributes rejects mode > 07777",
+        bad_mode_v, bad_mode_e)
+    ok("  invalid mode detected before touching the path",
+        type(bad_mode_e) == "string"
+        and bad_mode_e:find("mode", 1, true) ~= nil,
+        "err=" .. tostring(bad_mode_e))
+
     -- symlinkattr on the link created in the filesystem section
     if attrs then
         ok_act("symlinkattr(link.txt, self uid/gid)",
             babet.symlinkattr(sb("link.txt"), attrs.owner, attrs.group))
         ok_act("symlinkAttr (alias camelCase canonique) idem",
             babet.symlinkAttr(sb("link.txt"), attrs.owner, attrs.group))
+
+        ok_raises("LOT 3 setAttributes: NUL path rejected",
+            function() return babet.setAttributes(
+                sb("perm.txt") .. "\0ignored",
+                attrs.owner, attrs.group) end, "NUL")
+        ok_raises("LOT 3 symlinkAttr: NUL path rejected",
+            function() return babet.symlinkAttr(
+                sb("link.txt") .. "\0ignored",
+                attrs.owner, attrs.group) end, "NUL")
     end
+
+    local mode_v, mode_e = babet.setMode(sb("perm.txt"), "700\0ignored")
+    ok_fail("LOT 3 setMode: NUL in mode string rejected", mode_v, mode_e)
+    ok_raises("LOT 3 setMode: NUL path rejected",
+        function() return babet.setMode(
+            sb("perm.txt") .. "\0ignored", "700") end, "NUL")
 end
 
 -- =====================================================================
@@ -741,6 +1447,7 @@ print("=== env / cwd (avant le premier worker) ===")
 -- suite arrive dans la section find, juste en dessous). Les tests de
 -- succès vivent donc ICI.
 do
+    local original_path = babet.env("PATH")
     local name = "BABET_SYS_TEST_VAR"
     local ok_set, err = babet.setenv(name, "hello-42")
     ok_val("setenv('NAME', 'val') -> (true, nil)", ok_set, err)
@@ -751,8 +1458,38 @@ do
     babet.setenv(name, "world")
     ok("  setenv overwrite", babet.env(name) == "world")
 
-    local v, e = babet.setenv("bad=name", "x")
+    local empty_name = "BABET_SYS_EMPTY_VALUE"
+    local empty_ok, empty_err = babet.setenv(empty_name, "")
+    ok_val("setenv(name, '') defines an empty value", empty_ok, empty_err)
+    ok("  env(name) returns '' (not nil)", babet.env(empty_name) == "")
+
+    local v, e = babet.setenv("", "x")
+    ok_fail("setenv('', value) -> (nil, err)", v, e)
+
+    v, e = babet.setenv("bad=name", "x")
     ok_fail("setenv('bad=name') -> (nil, err)", v, e)
+
+    v, e = babet.setenv("BABET_BAD\0NAME", "x")
+    ok_fail("LOT 3 setenv: NUL in name rejected", v, e)
+    v, e = babet.setenv("BABET_BAD_VALUE", "x\0y")
+    ok_fail("LOT 3 setenv: NUL in value rejected", v, e)
+
+    local direct_probe = sb("sys_which_probe")
+    do
+        local f = assert(io.open(direct_probe, "wb"))
+        assert(f:write("#!/bin/sh\nexit 0\n"))
+        assert(f:close())
+    end
+    assert(babet.setMode(direct_probe, "644"))
+    local probe_path, probe_err = babet.which(direct_probe)
+    ok_fail("which(direct non-executable file) -> (nil, err)",
+        probe_path, probe_err)
+    assert(babet.setMode(direct_probe, "755"))
+    probe_path, probe_err = babet.which(direct_probe)
+    ok_val("which(direct executable file) -> path", probe_path, probe_err)
+    ok("  direct executable path is absolute",
+        type(probe_path) == "string" and probe_path:sub(1, 1) == "/",
+        tostring(probe_path))
 
     -- chdir no-op (vers le CWD courant) : succès avant le premier
     -- worker, sans déplacer la suite.
@@ -771,8 +1508,18 @@ do
         type(cwd) == "string" and cwd:find(SB, 1, true) ~= nil,
         "cwd=" .. tostring(cwd))
 
+    assert(type(original_path) == "string")
+    assert(babet.setenv("PATH", ":"))
+    local via_empty_path, via_empty_err = babet.which("sys_which_probe")
+    ok_val("which respects empty PATH component as current directory",
+        via_empty_path, via_empty_err)
+    assert(babet.setenv("PATH", original_path))
+
     r, e = babet.chdir("/n/existe/pas")
     ok_fail("chdir(bad path) -> (nil, err)", r, e)
+
+    ok_raises("LOT 3 chdir: NUL path rejected",
+        function() return babet.chdir(startDir .. "\0ignored") end, "NUL")
 
     -- retour au répertoire de départ
     r, e = babet.chdir(startDir)
@@ -788,8 +1535,28 @@ do
     ok_val("find(sandbox, {type='f'})", results, e,
         function(x) return type(x) == "table" end)
 
+    local default_results, default_err = babet.find(SB)
+    ok_val("LOT 5B find(path) accepts omitted opts",
+        default_results, default_err,
+        function(x) return type(x) == "table" and #x > 0 end)
+    local nil_results, nil_err = babet.find(SB, nil)
+    ok_val("LOT 5B find(path, nil) uses default opts",
+        nil_results, nil_err,
+        function(x) return type(x) == "table" and #x > 0 end)
+
     results, e = babet.find("/n/existe/pas", { type = "f" })
     ok_fail("find(bad path) -> (nil, err)", results, e)
+
+    ok_raises("LOT 3 find: NUL root rejected",
+        function() return babet.find(SB .. "\0ignored", { type = "f" }) end,
+        "NUL")
+    for _, field in ipairs({ "type", "name", "iname", "path" }) do
+        local opts = {}
+        opts[field] = "f\0ignored"
+        local nv, ne = babet.find(SB, opts)
+        ok_fail("LOT 3 find: NUL in option '" .. field .. "' rejected",
+            nv, ne)
+    end
 
     -- find with ECMAScript regex : trouve tous les fichiers .txt
     -- of the sandbox (we created several during previous tests)
@@ -802,12 +1569,34 @@ do
     ok_val("find iname case-insensitive", results_ci, e_ci,
         function(x) return type(x) == "table" and #x > 0 end)
 
-    -- Concurrent find from multiple workers (post-Gemini fix:
-    -- RegexCache is now thread_local). With the old global cache,
-    -- this would corrupt the unordered_map and crash. We spawn 4
-    -- workers each running find with a different regex repeatedly.
-    -- If thread_local is correctly applied, all workers complete
-    -- successfully and return their result counts.
+    -- LOT 4/6 : chaque regex est compilée une seule fois par appel, puis
+    -- réutilisée pour toutes les entrées du parcours, sans cache permanent.
+    local path_cache_ok = true
+    for _ = 1, 50 do
+        local pr, pe = babet.find(SB, { type = "f", path = ".*\\.txt$" })
+        if type(pr) ~= "table" or pe ~= nil or #pr == 0 then
+            path_cache_ok = false
+            break
+        end
+    end
+    ok("LOT 6 find path regex repeated (once per call)", path_cache_ok)
+
+    local dynamic_regex_ok = true
+    for i = 1, 500 do
+        local dr, de = babet.find(SB, {
+            type = "f",
+            name = "^lot6_dynamic_pattern_" .. tostring(i) .. "$",
+        })
+        if type(dr) ~= "table" or de ~= nil then
+            dynamic_regex_ok = false
+            break
+        end
+    end
+    ok("LOT 6 find accepts many distinct regexes without permanent cache",
+        dynamic_regex_ok)
+
+    -- Concurrent find from multiple workers. Regex objects now live only for
+    -- one call, so workers share no mutable cache and need no mutex.
     do
         local W = babet.workers
         local jobs = {}
@@ -833,7 +1622,7 @@ do
                 all_ok = false
             end
         end
-        ok("concurrent find x4 workers (thread_local RegexCache)",
+        ok("concurrent find x4 workers (per-call regex objects)",
             all_ok)
     end
 
@@ -948,14 +1737,34 @@ do
 
         local function body()
             local v, e
+            local function not_missing_message(label, value, err)
+                ok_fail(label, value, err)
+                local lower = tostring(err):lower()
+                ok("  LOT 4 erreur système non déguisée en chemin absent",
+                    lower:find("does not exist", 1, true) == nil
+                    and lower:find("not found", 1, true) == nil,
+                    "err=" .. tostring(err))
+            end
+
             v, e = babet.find(roleaks .. "/x", { type = "f" })
-            ok_fail("find sous parent EACCES -> (nil, err) sans crash", v, e)
+            not_missing_message(
+                "find sous parent EACCES -> (nil, err) sans crash", v, e)
             v, e = babet.remove(roleaks .. "/inside.txt")
-            ok_fail("remove sous parent EACCES -> (nil, err) sans crash", v, e)
+            not_missing_message(
+                "remove sous parent EACCES -> (nil, err) sans crash", v, e)
             v, e = babet.rename(roleaks .. "/a", roleaks .. "/b")
-            ok_fail("rename sous parent EACCES -> (nil, err) sans crash", v, e)
+            not_missing_message(
+                "rename sous parent EACCES -> (nil, err) sans crash", v, e)
             v, e = babet.link(roleaks .. "/inside.txt", roleaks .. "/ln")
-            ok_fail("link sous parent EACCES -> (nil, err) sans crash", v, e)
+            not_missing_message(
+                "link sous parent EACCES -> (nil, err) sans crash", v, e)
+            v, e = babet.copy(roleaks .. "/inside.txt",
+                sb("lot4_copy_target.txt"))
+            not_missing_message(
+                "copy sous parent EACCES -> (nil, err) sans crash", v, e)
+            v, e = babet.fileSize(roleaks .. "/inside.txt")
+            not_missing_message(
+                "fileSize sous parent EACCES -> (nil, err) précis", v, e)
         end
         local ok_body, err_body = pcall(body)
 
@@ -991,6 +1800,73 @@ do
 
     local it2, e2 = babet.createFileIterator("/n/existe/pas")
     ok_fail("createFileIterator(bad) -> (nil, err)", it2, e2)
+
+    ok_raises("LOT 3 createFileIterator: NUL path rejected",
+        function() return babet.createFileIterator(SB .. "\0ignored") end,
+        "NUL")
+
+    -- LOT 5B : un lien cassé est une entrée valide, mais pas un fichier
+    -- régulier utilisable. Il doit être ignoré sans faire échouer tout
+    -- l'itérateur. Un lien valide vers un fichier conserve le comportement
+    -- historique : le chemin du lien est renvoyé.
+    local iter_link_dir = sb("iterator_symlinks")
+    babet.mkdir(iter_link_dir)
+    babet.touch(iter_link_dir .. "/real.txt")
+    babet.link("real.txt", iter_link_dir .. "/valid-link")
+    babet.link("missing-target", iter_link_dir .. "/broken-link")
+
+    local link_it, link_it_err = babet.createFileIterator(iter_link_dir)
+    ok_val("LOT 5B FileIterator ignores dangling symlinks",
+        link_it, link_it_err, function(x) return x ~= nil end)
+    if link_it then
+        local seen = {}
+        while true do
+            local f = link_it:next()
+            if not f then break end
+            seen[f] = true
+        end
+        ok("  regular file returned",
+            seen[iter_link_dir .. "/real.txt"] == true)
+        ok("  valid symlink to regular file returned",
+            seen[iter_link_dir .. "/valid-link"] == true)
+        ok("  dangling symlink skipped",
+            seen[iter_link_dir .. "/broken-link"] ~= true)
+    end
+    babet.rmdirAll(iter_link_dir)
+
+    -- Une vraie erreur de parcours ne doit pas être effacée par une entrée
+    -- suivante. Le cas chmod 000 n'est pas discriminant sous root.
+    local id_result = babet.exec("id", { "-u" })
+    local uid = type(id_result) == "table"
+        and tonumber((id_result.stdout or ""):match("%d+")) or nil
+    if uid == 0 then
+        print("[INFO] LOT 5B FileIterator permission error: SKIP (root)")
+    elseif uid == nil then
+        print("[INFO] LOT 5B FileIterator permission error: SKIP "
+            .. "(UID indéterminable)")
+    else
+        local iter_err_dir = sb("iterator_permission_error")
+        local locked_dir = iter_err_dir .. "/locked"
+        babet.mkdir(locked_dir)
+        babet.touch(locked_dir .. "/secret.txt")
+        babet.touch(iter_err_dir .. "/visible.txt")
+        babet.setMode(locked_dir, "000")
+
+        local bad_it, bad_it_err = babet.createFileIterator(
+            iter_err_dir, true)
+
+        -- Restauration avant les assertions pour garantir le nettoyage.
+        babet.setMode(locked_dir, "755")
+        babet.rmdirAll(iter_err_dir)
+
+        ok_fail("LOT 5B FileIterator preserves traversal errors",
+            bad_it, bad_it_err)
+        ok("  iterator error identifies a traversal failure",
+            type(bad_it_err) == "string"
+            and (bad_it_err:find("cannot continue", 1, true) ~= nil
+                or bad_it_err:find("Permission denied", 1, true) ~= nil),
+            "err=" .. tostring(bad_it_err))
+    end
 
     -- :close() puis :next() doit lever une erreur Lua propre
     local it3 = babet.createFileIterator(SB)
@@ -1036,6 +1912,42 @@ print("")
 print("=== exec ===")
 
 do
+    -- Documentation lot 3 : contrat précis des signatures. Seul le
+    -- premier argument invalide lève ; les erreurs de validation des
+    -- arguments/options suivants sont renvoyées sous forme (nil, err).
+    ok("DOC 3 exec: missing command raises",
+        pcall(function() return babet.exec() end) == false)
+    ok("DOC 3 exec: command must be a strict string",
+        pcall(function() return babet.exec(42) end) == false)
+
+    local bad_args, bad_args_err = babet.exec("echo", "hello")
+    ok_fail("DOC 3 exec: args non-table -> (nil, err)",
+        bad_args, bad_args_err)
+
+    local bad_arg_value, bad_arg_value_err = babet.exec(
+        "echo", { "ok", 42 })
+    ok_fail("DOC 3 exec: args elements must be strings",
+        bad_arg_value, bad_arg_value_err)
+
+    local bad_opts, bad_opts_err = babet.exec("echo", {}, "opts")
+    ok_fail("DOC 3 exec: opts non-table -> (nil, err)",
+        bad_opts, bad_opts_err)
+
+    local bad_cwd_type, bad_cwd_type_err = babet.exec(
+        "echo", {}, { cwd = 42 })
+    ok_fail("DOC 3 exec: opts.cwd must be a string",
+        bad_cwd_type, bad_cwd_type_err)
+
+    local bad_env_type, bad_env_type_err = babet.exec(
+        "echo", {}, { env = "bad" })
+    ok_fail("DOC 3 exec: opts.env must be a table",
+        bad_env_type, bad_env_type_err)
+
+    local bad_env_value, bad_env_value_err = babet.exec(
+        "echo", {}, { env = { BABET_VALUE = 42 } })
+    ok_fail("DOC 3 exec: env values must be strings",
+        bad_env_value, bad_env_value_err)
+
     -- commande simple qui succeededt
     local r, e = babet.exec("echo", { "hello" })
     ok("exec('echo hello') -> (table, nil)",
@@ -1084,6 +1996,25 @@ do
     ok("exec: environment variable transmitted",
         type(r7) == "table" and r7.stdout:find("ok42", 1, true) ~= nil,
         "stdout=" .. tostring(r7 and r7.stdout))
+
+    local r7_empty = babet.exec("sh", { "-c", [[
+        if [ "${BABET_EMPTY+x}" = x ] && [ -z "$BABET_EMPTY" ]; then
+            printf empty-but-defined
+        fi
+    ]] }, { env = { BABET_EMPTY = "" } })
+    ok("DOC 3 exec: empty env value stays defined",
+        type(r7_empty) == "table"
+        and r7_empty.stdout == "empty-but-defined",
+        "stdout=" .. tostring(r7_empty and r7_empty.stdout))
+
+    local binary_stdout = babet.exec("sh", { "-c",
+        "printf 'a\\000b'" })
+    ok("DOC 3 exec: stdout capture is binary-safe",
+        type(binary_stdout) == "table"
+        and binary_stdout.stdout == "a\0b"
+        and #binary_stdout.stdout == 3,
+        "len=" .. tostring(binary_stdout and binary_stdout.stdout
+            and #binary_stdout.stdout))
 
     -- grosse sortie : vérifie l'absence de deadlock (drain before waitpid)
     local r8 = babet.exec("sh",
@@ -1141,6 +2072,22 @@ do
         and r15.stdout:find("avant_timeout", 1, true) ~= nil,
         "stdout=" .. tostring(r15 and r15.stdout))
 
+    -- Régression LOT 5A : le timeout doit continuer à s'appliquer si le
+    -- child ferme stdin/stdout/stderr puis reste vivant. Avant le correctif,
+    -- la boucle d'I/O se terminait et le waitpid final redevenait bloquant.
+    local t_closed_fds = babet.monotonic()
+    local r_closed_fds = babet.exec("sh", {
+        "-c", "exec 0<&- 1>&- 2>&-; sleep 5",
+    }, { timeout = 0.2 })
+    local dt_closed_fds = babet.monotonic() - t_closed_fds
+    ok("LOT 5A exec: timeout après fermeture précoce des pipes",
+        type(r_closed_fds) == "table"
+        and r_closed_fds.timed_out == true
+        and dt_closed_fds < 3.0,
+        "dt=" .. tostring(dt_closed_fds)
+        .. " timed_out=" .. tostring(r_closed_fds
+            and r_closed_fds.timed_out))
+
     -- timeout invalid -> (nil, err)
     local r16, e16 = babet.exec("echo", { "x" }, { timeout = -1 })
     ok_fail("exec(negative timeout) -> (nil, err)", r16, e16)
@@ -1150,6 +2097,36 @@ do
     ok_fail("exec(NaN timeout) -> (nil, err)", r16b, e16b)
     local r16c, e16c = babet.exec("echo", { "x" }, { timeout = math.huge })
     ok_fail("exec(Inf timeout) -> (nil, err)", r16c, e16c)
+
+    local r16d, e16d = babet.exec("echo", { "x" }, { timeout = 1e300 })
+    ok_fail("LOT 3 exec: huge finite timeout rejected", r16d, e16d)
+    ok("  huge timeout message mentions 'too large'",
+        type(e16d) == "string" and e16d:find("too large", 1, true) ~= nil,
+        tostring(e16d))
+
+    local nul_cmd, nul_cmd_err = babet.exec("echo\0ignored", { "x" })
+    ok_fail("LOT 3 exec: NUL in command rejected", nul_cmd, nul_cmd_err)
+    local nul_arg, nul_arg_err = babet.exec("echo", { "x\0ignored" })
+    ok_fail("LOT 3 exec: NUL in argument rejected", nul_arg, nul_arg_err)
+    local nul_cwd, nul_cwd_err = babet.exec("pwd", {}, { cwd = "/tmp\0ignored" })
+    ok_fail("LOT 3 exec: NUL in cwd rejected", nul_cwd, nul_cwd_err)
+    local nul_env_key, nul_env_key_err = babet.exec("true", {}, {
+        env = { ["BABET_BAD\0KEY"] = "x" },
+    })
+    ok_fail("LOT 3 exec: NUL in env key rejected",
+        nul_env_key, nul_env_key_err)
+    local nul_env_val, nul_env_val_err = babet.exec("true", {}, {
+        env = { BABET_BAD_VALUE = "x\0ignored" },
+    })
+    ok_fail("LOT 3 exec: NUL in env value rejected",
+        nul_env_val, nul_env_val_err)
+
+    local binary_stdin = "a\0b\0c"
+    local binary_echo = babet.exec("cat", {}, { stdin = binary_stdin })
+    ok("LOT 3 exec: stdin remains binary-safe",
+        type(binary_echo) == "table" and binary_echo.stdout == binary_stdin,
+        "len=" .. tostring(binary_echo and binary_echo.stdout
+            and #binary_echo.stdout))
 
     -- Chantier 10-D : opts.env clé invalide rejetée
     local rE1, eE1 = babet.exec("echo", { "x" }, { env = { ["A=B"] = "v" } })
@@ -1324,6 +2301,96 @@ do
         and a_copy.forward.back == a_copy, -- referme la boucle sur la copie
         "boucle reclosede ? " ..
         tostring(a_copy.forward and a_copy.forward.back == a_copy))
+
+    -- Audit documentation Tables : contrat d'appel et valeur de retour.
+    ok("DOC TABLES deepCopyTable without argument raises",
+        pcall(babet.deepCopyTable) == false)
+    ok("DOC TABLES deepCopyTable rejects extra arguments",
+        pcall(babet.deepCopyTable, {}, {}) == false)
+    ok("DOC TABLES deepCopyTable rejects a non-table",
+        pcall(babet.deepCopyTable, 42) == false)
+    ok("DOC TABLES deepCopyTable returns exactly one value",
+        select("#", babet.deepCopyTable({})) == 1)
+
+    -- Les VALEURS table sont copiées, mais les clés table sont conservées
+    -- par référence. Si la même table apparaît à la fois comme clé et comme
+    -- valeur, ces deux positions ne pointent donc plus vers le même objet.
+    do
+        local key = { id = 7 }
+        local src = { [key] = "under-original-key", key_as_value = key }
+        local dst = babet.deepCopyTable(src)
+        ok("DOC TABLES table-valued key is preserved by reference",
+            dst[key] == "under-original-key")
+        ok("DOC TABLES table value is copied even when also used as a key",
+            dst.key_as_value ~= key and dst.key_as_value.id == 7)
+        ok("DOC TABLES copied table value is not substituted as the key",
+            dst[dst.key_as_value] == nil)
+    end
+
+    -- Le parcours est brut : __index/__pairs ne créent pas de champs dans la
+    -- copie. La métatable réelle est toutefois partagée avec la source.
+    do
+        local mt = { __index = { virtual = 12 } }
+        local src = setmetatable({ stored = 1 }, mt)
+        local dst = babet.deepCopyTable(src)
+        ok("DOC TABLES deepCopyTable shares the metatable object",
+            getmetatable(dst) == mt and getmetatable(src) == mt)
+        ok("DOC TABLES deepCopyTable copies only raw stored entries",
+            rawget(dst, "stored") == 1 and rawget(dst, "virtual") == nil)
+        ok("DOC TABLES shared __index still applies to the copy",
+            dst.virtual == 12)
+        mt.extra = "shared"
+        ok("DOC TABLES mutating the shared metatable affects both",
+            getmetatable(src).extra == "shared"
+            and getmetatable(dst).extra == "shared")
+    end
+
+    -- Les valeurs non-table sont réutilisées telles quelles.
+    do
+        local fn = function() return 42 end
+        local co = coroutine.create(function() end)
+        local dst = babet.deepCopyTable({ fn = fn, co = co })
+        ok("DOC TABLES function values are shared",
+            dst.fn == fn and dst.fn() == 42)
+        ok("DOC TABLES thread values are shared",
+            dst.co == co)
+    end
+
+    -- MAX_DEPTH = 75 autorise 75 descentes sous la racine. Le retour d'un
+    -- cycle à depth 76 doit réutiliser la racine déjà copiée au lieu d'être
+    -- rejeté comme une nouvelle table trop profonde.
+    do
+        local root = {}
+        local node = root
+        for _ = 1, 75 do
+            node.child = {}
+            node = node.child
+        end
+        node.back = root
+        local okp, copied = pcall(babet.deepCopyTable, root)
+        ok("DOC TABLES cycle closing at the exact depth limit is accepted",
+            okp == true and type(copied) == "table", tostring(copied))
+        if okp then
+            local tail = copied
+            for _ = 1, 75 do tail = tail.child end
+            ok("DOC TABLES boundary cycle closes on the copied root",
+                tail.back == copied)
+        else
+            ok("DOC TABLES boundary cycle closes on the copied root", false)
+        end
+
+        local too_deep = {}
+        node = too_deep
+        for _ = 1, 76 do
+            node.child = {}
+            node = node.child
+        end
+        local okdeep, errdeep = pcall(babet.deepCopyTable, too_deep)
+        ok("DOC TABLES one additional unique table level is rejected",
+            okdeep == false and type(errdeep) == "string"
+            and errdeep:find("max depth 75", 1, true) ~= nil,
+            tostring(errdeep))
+    end
 end
 
 -- =====================================================================
@@ -1355,6 +2422,11 @@ do
         ok("  1er élément == 'a\\0b' (NUL préservé)",
             p ~= nil and p[1] == "a" .. string.char(0) .. "b")
         ok("  2e élément == 'c'", p ~= nil and p[2] == "c")
+
+        local nul_sep = babet.split("a\0b", "\0")
+        ok("LOT 3 split: NUL delimiter remains binary-safe",
+            type(nul_sep) == "table" and #nul_sep == 2
+            and nul_sep[1] == "a" and nul_sep[2] == "b")
     end
 
     -- Comportements historiques FIGÉS (décision post-audit v21 : la
@@ -1415,9 +2487,189 @@ do
             type(w2) == "table" and #w2 == 3)
     end
 
+    -- Audit documentation Strings : arité, types stricts et cas limites
+    -- observables qui n'étaient pas encore verrouillés par le harnais.
+    ok("DOC STRINGS split() without subject raises",
+        pcall(babet.split) == false)
+    ok("DOC STRINGS split rejects a fourth argument",
+        pcall(babet.split, "a,b", ",", 1, true) == false)
+    ok("DOC STRINGS subject must be a strict Lua string",
+        pcall(babet.split, 123, ",") == false)
+    ok("DOC STRINGS boolean subject is rejected",
+        pcall(babet.split, true, ",") == false)
+    ok("DOC STRINGS separator must be a strict Lua string",
+        pcall(babet.split, "123", 2) == false)
+    ok("DOC STRINGS explicit nil separator is rejected",
+        pcall(babet.split, "abc", nil) == false)
+    ok("DOC STRINGS max_splits rejects numeric strings",
+        pcall(babet.split, "a,b", ",", "1") == false)
+    ok("DOC STRINGS max_splits rejects floats",
+        pcall(babet.split, "a,b", ",", 1.0) == false)
+    ok("DOC STRINGS explicit nil max_splits is rejected",
+        pcall(babet.split, "a,b", ",", nil) == false)
+
+    local literal_dot = babet.split("a.b.c", ".")
+    ok("DOC STRINGS separator is literal, not a Lua pattern",
+        #literal_dot == 3 and literal_dot[1] == "a"
+        and literal_dot[2] == "b" and literal_dot[3] == "c")
+
+    local leading = babet.split(",a", ",")
+    ok("DOC STRINGS preserves a leading empty field",
+        #leading == 2 and leading[1] == "" and leading[2] == "a")
+    local repeated = babet.split("a,,b", ",")
+    ok("DOC STRINGS preserves empty fields between separators",
+        #repeated == 3 and repeated[1] == "a"
+        and repeated[2] == "" and repeated[3] == "b")
+    local trailing = babet.split("a,", ",")
+    ok("DOC STRINGS preserves a trailing empty field",
+        #trailing == 2 and trailing[1] == "a" and trailing[2] == "")
+
+    local absent = babet.split("abc", ",")
+    ok("DOC STRINGS absent separator returns the whole subject",
+        #absent == 1 and absent[1] == "abc")
+    local unlimited = babet.split("a,b,c", ",", -1)
+    ok("DOC STRINGS max_splits=-1 means unlimited",
+        #unlimited == 3 and unlimited[3] == "c")
+    local bounded = babet.split("a,b,c,d", ",", 2)
+    ok("DOC STRINGS max_splits counts cuts, remainder stays whole",
+        #bounded == 3 and bounded[1] == "a"
+        and bounded[2] == "b" and bounded[3] == "c,d")
+
+    local chars_with_limit = babet.split("abc", "", 0)
+    ok("DOC STRINGS max_splits is unused in byte mode",
+        #chars_with_limit == 3 and table.concat(chars_with_limit) == "abc")
+
+    local utf8_subject = "été"
+    local utf8_parts = babet.split(utf8_subject .. ":ok", ":")
+    ok("DOC STRINGS UTF-8 bytes are preserved around an ASCII separator",
+        #utf8_parts == 2 and utf8_parts[1] == utf8_subject
+        and utf8_parts[2] == "ok")
+    local utf8_bytes = babet.split("é")
+    ok("DOC STRINGS character mode splits UTF-8 by bytes",
+        #utf8_bytes == #"é" and #utf8_bytes == 2
+        and #utf8_bytes[1] == 1 and #utf8_bytes[2] == 1
+        and table.concat(utf8_bytes) == "é")
+    ok("DOC STRINGS multi-byte UTF-8 separator is rejected",
+        pcall(babet.split, "aéb", "é") == false)
+
+    ok("DOC STRINGS split returns exactly one value",
+        select("#", babet.split("a,b", ",")) == 1)
+    local empty_chars = babet.split("", "")
+    ok("DOC STRINGS empty subject with empty separator -> empty table",
+        type(empty_chars) == "table" and #empty_chars == 0)
+
     -- mergeTables
     local merged = babet.mergeTables({ "a", "b" }, { "c", "d" })
     ok("mergeTables -> table", type(merged) == "table")
+
+    local sparse = babet.mergeTables(
+        { [4] = "d", [2] = "b", label = "first", [0] = "zero-a" },
+        { [7] = "g", [1] = "a", label = "second", [0] = "zero-b" })
+    ok("LOT 5B mergeTables compacts sparse positive integer keys",
+        sparse[1] == "b" and sparse[2] == "d"
+        and sparse[3] == "a" and sparse[4] == "g"
+        and sparse[5] == nil,
+        "values=" .. tostring(sparse[1]) .. "," .. tostring(sparse[2])
+        .. "," .. tostring(sparse[3]) .. "," .. tostring(sparse[4]))
+    ok("LOT 5B mergeTables keeps non-list keys last-writer-wins",
+        sparse.label == "second" and sparse[0] == "zero-b")
+
+    -- Audit documentation Tables : contrat d'appel et règles exactes.
+    ok("DOC TABLES mergeTables without arguments raises",
+        pcall(babet.mergeTables) == false)
+    ok("DOC TABLES mergeTables requires at least two tables",
+        pcall(babet.mergeTables, {}) == false)
+    ok("DOC TABLES mergeTables rejects any non-table argument",
+        pcall(babet.mergeTables, {}, 42) == false)
+    ok("DOC TABLES mergeTables returns exactly one value",
+        select("#", babet.mergeTables({}, {})) == 1)
+    local empty_merge = babet.mergeTables({}, {})
+    ok("DOC TABLES two empty tables produce a plain empty table",
+        type(empty_merge) == "table" and next(empty_merge) == nil
+        and getmetatable(empty_merge) == nil)
+
+    do
+        local nested = { value = 1 }
+        local left = { label = "left", nested = nested, [2] = "b" }
+        local right = { label = "right", [1] = "a" }
+        local result = babet.mergeTables(left, right)
+        ok("DOC TABLES mergeTables leaves its inputs unchanged",
+            left.label == "left" and left[1] == nil and left[2] == "b"
+            and right.label == "right" and right[1] == "a")
+        ok("DOC TABLES mergeTables is shallow for table values",
+            result.nested == nested)
+        result.nested.value = 99
+        ok("DOC TABLES shallow result mutations reach the source subtable",
+            left.nested.value == 99)
+    end
+
+    do
+        local mt = {
+            __index = { virtual = "not stored" },
+            __pairs = function()
+                return next, { forged = true }, nil
+            end,
+        }
+        local src = setmetatable({ stored = true }, mt)
+        local result = babet.mergeTables(src, {})
+        ok("DOC TABLES mergeTables ignores source metatables",
+            getmetatable(result) == nil)
+        ok("DOC TABLES mergeTables traverses raw stored entries only",
+            result.stored == true and rawget(result, "virtual") == nil
+            and rawget(result, "forged") == nil)
+    end
+
+    do
+        local table_key = {}
+        local function_key = function() end
+        local r = babet.mergeTables(
+            {
+                [true] = "bool-a",
+                [table_key] = "table-a",
+                [function_key] = "function-a",
+                [-1] = "neg-a",
+                [0] = "zero-a",
+                [1.5] = "float-a",
+                ["1"] = "string-a",
+            },
+            {
+                [true] = "bool-b",
+                [table_key] = "table-b",
+                [function_key] = "function-b",
+                [-1] = "neg-b",
+                [0] = "zero-b",
+                [1.5] = "float-b",
+                ["1"] = "string-b",
+            })
+        ok("DOC TABLES boolean map keys use last-writer-wins",
+            r[true] == "bool-b")
+        ok("DOC TABLES table map keys keep identity and overwrite",
+            r[table_key] == "table-b")
+        ok("DOC TABLES function map keys keep identity and overwrite",
+            r[function_key] == "function-b")
+        ok("DOC TABLES non-list numeric keys remain map keys",
+            r[-1] == "neg-b" and r[0] == "zero-b"
+            and r[1.5] == "float-b")
+        ok("DOC TABLES numeric-looking string keys remain map keys",
+            r["1"] == "string-b")
+    end
+
+    do
+        local a = { [3] = "a3", [1] = "a1" }
+        local b = { [2.0] = "b2", [1] = "b1" }
+        local r = babet.mergeTables(a, b)
+        ok("DOC TABLES positive integer keys are sorted per source",
+            r[1] == "a1" and r[2] == "a3")
+        ok("DOC TABLES integral float keys are canonical integer list keys",
+            r[3] == "b1" and r[4] == "b2" and r[5] == nil)
+    end
+
+    do
+        local shared_value = { n = 1 }
+        local r = babet.mergeTables({ [1] = shared_value }, { [1] = shared_value })
+        ok("DOC TABLES duplicate positive keys append both values",
+            r[1] == shared_value and r[2] == shared_value and r[3] == nil)
+    end
 
     -- getMemoryUsage
     local mem = babet.getMemoryUsage()
@@ -1425,8 +2677,11 @@ do
         "mem=" .. tostring(mem))
 
     local used, total = babet.getDetailedMemoryUsage()
-    ok("getDetailedMemoryUsage() -> 2 numbers",
-        type(used) == "number" and type(total) == "number")
+    ok("getDetailedMemoryUsage() -> 2 integers",
+        math.type(used) == "integer" and math.type(total) == "integer")
+    ok("getDetailedMemoryUsage() values are currently identical",
+        used == total, "used=" .. tostring(used)
+        .. " total=" .. tostring(total))
 
     -- helloThere : imprime, ne returns rien, ne doit pas planter
     local hello_ok = pcall(babet.helloThere)
@@ -1458,6 +2713,32 @@ do
         pcall(babet.sleep, 2 ^ 63) == false)
     -- Sanity après les gardes : une durée normale dort toujours.
     ok_act("sleep(1000, 'us') après les gardes", babet.sleep(1000, "us"))
+    ok_raises("LOT 3 sleep: NUL in unit rejected",
+        function() return babet.sleep(0, "ms\0ignored") end, "NUL")
+
+    -- Audit documentation Time : types et arité stricts. Les helpers
+    -- lua_isnumber/lua_isstring de Lua accepteraient sinon des coercitions
+    -- implicites contraires aux signatures publiques.
+    ok("DOC TIME sleep() without duration raises",
+        pcall(babet.sleep) == false)
+    ok("DOC TIME sleep rejects extra arguments",
+        pcall(babet.sleep, 0, "s", true) == false)
+    ok("DOC TIME sleep rejects numeric strings",
+        pcall(babet.sleep, "1", "ms") == false)
+    ok("DOC TIME sleep rejects a numeric unit",
+        pcall(babet.sleep, 1, 42) == false)
+    do
+        local v, e = babet.sleep(0, "minutes")
+        ok("DOC TIME unknown textual sleep unit -> (nil, err)",
+            v == nil and e == "Invalid time unit",
+            "v=" .. tostring(v) .. " err=" .. tostring(e))
+    end
+    do
+        local v, e = babet.sleep(0)
+        ok("DOC TIME sleep(0) succeeds immediately",
+            v == true and e == nil,
+            "v=" .. tostring(v) .. " err=" .. tostring(e))
+    end
 end
 
 -- =====================================================================
@@ -1513,6 +2794,15 @@ do
         pcall(function() babet.monotonic("abc") end) == false)
     ok("now({}) -> luaL_error",
         pcall(function() babet.now({}) end) == false)
+
+    ok("DOC TIME monotonic success returns exactly one value",
+        select("#", babet.monotonic()) == 1)
+    ok("DOC TIME now success returns exactly one value",
+        select("#", babet.now()) == 1)
+    ok("DOC TIME babet.time.monotonic keeps strict arity",
+        pcall(babet.time.monotonic, true) == false)
+    ok("DOC TIME babet.time.now keeps strict arity",
+        pcall(babet.time.now, true) == false)
 end
 
 -- =====================================================================
@@ -1530,6 +2820,15 @@ do
     ok("iso(0.5) truncated, same result as iso(0)",
         babet.time.iso(0.5) == "1970-01-01T00:00:00Z",
         "got " .. tostring(babet.time.iso(0.5)))
+    ok("DOC TIME iso(-0.5) floors to the previous second",
+        babet.time.iso(-0.5) == "1969-12-31T23:59:59Z",
+        "got " .. tostring(babet.time.iso(-0.5)))
+    ok("DOC TIME iso rejects a numeric string",
+        pcall(babet.time.iso, "0") == false)
+    ok("DOC TIME iso rejects extra arguments",
+        pcall(babet.time.iso, 0, 1) == false)
+    ok("DOC TIME iso success returns exactly one value",
+        select("#", babet.time.iso(0)) == 1)
 
     -- A concrete known timestamp: 2026-01-01T00:00:00Z = 1767225600
     ok("iso(1767225600) round-trip",
@@ -1611,6 +2910,46 @@ do
     ok("parse_iso ignores fractional seconds",
         babet.time.parse_iso("1970-01-01T00:00:00.123Z") == 0)
 
+    -- Types et arité sont stricts : aucune coercition number -> string.
+    ok("DOC TIME parse_iso rejects a number",
+        pcall(babet.time.parse_iso, 1970) == false)
+    ok("DOC TIME parse_iso rejects extra arguments",
+        pcall(babet.time.parse_iso,
+            "1970-01-01T00:00:00Z", true) == false)
+
+    -- Limites exactes du sous-ensemble ISO accepté.
+    do
+        local v, e = babet.time.parse_iso("0000-01-01T00:00:00Z")
+        ok_fail("DOC TIME parse_iso rejects year 0000", v, e)
+    end
+    do
+        local v, e = babet.time.parse_iso("2016-12-31T23:59:60Z")
+        ok_fail("DOC TIME parse_iso rejects leap seconds", v, e)
+    end
+    do
+        local v, e = babet.time.parse_iso("1970-01-01T00:00:00z")
+        ok_fail("DOC TIME parse_iso requires uppercase Z", v, e)
+    end
+    do
+        local v, e = babet.time.parse_iso("1970-01-01T00:00:00.Z")
+        ok_fail("DOC TIME parse_iso requires digits after decimal point", v, e)
+    end
+    ok("DOC TIME parse_iso accepts offset +23:59",
+        babet.time.parse_iso("1970-01-01T23:59:00+23:59") == 0)
+    do
+        local count = select("#",
+            babet.time.parse_iso("1970-01-01T00:00:00Z"))
+        local value, err = babet.time.parse_iso("1970-01-01T00:00:00Z")
+        ok("DOC TIME parse_iso success returns (integer, nil)",
+            count == 2 and value == 0 and err == nil,
+            "count=" .. tostring(count) .. " err=" .. tostring(err))
+    end
+    do
+        local v, e = babet.time.parse_iso(
+            "1970-01-01T00:00:00Z\0trailing")
+        ok_fail("DOC TIME parse_iso does not truncate embedded NUL", v, e)
+    end
+
     -- Rejections: no timezone.
     do
         local v, e = babet.time.parse_iso("1970-01-01T00:00:00")
@@ -1663,8 +3002,27 @@ do
     end
     ok("parse_duration('00000000000000000001s') == 1 (zéros de tête)",
         babet.time.parse_duration("00000000000000000001s") == 1)
+    ok("DOC TIME parse_duration rejects a number",
+        pcall(babet.time.parse_duration, 5) == false)
+    ok("DOC TIME parse_duration rejects extra arguments",
+        pcall(babet.time.parse_duration, "5s", true) == false)
 
     ok("parse_duration('0s') == 0", babet.time.parse_duration("0s") == 0)
+    ok("DOC TIME parse_duration accepts non-normalized components",
+        babet.time.parse_duration("1h90m") == 9000)
+    ok("DOC TIME parse_duration accepts ordered zero chunks",
+        babet.time.parse_duration("0d0h0m0s") == 0)
+    do
+        local count = select("#", babet.time.parse_duration("1s"))
+        local value, err = babet.time.parse_duration("1s")
+        ok("DOC TIME parse_duration success returns (integer, nil)",
+            count == 2 and value == 1 and err == nil,
+            "count=" .. tostring(count) .. " err=" .. tostring(err))
+    end
+    do
+        local v, e = babet.time.parse_duration("1s\0trailing")
+        ok_fail("DOC TIME parse_duration does not truncate embedded NUL", v, e)
+    end
     ok("parse_duration('1s') == 1", babet.time.parse_duration("1s") == 1)
     ok("parse_duration('5m') == 300", babet.time.parse_duration("5m") == 300)
     ok("parse_duration('2h') == 7200", babet.time.parse_duration("2h") == 7200)
@@ -1687,6 +3045,8 @@ do
         ok_fail("parse_duration duplicate unit -> (nil, err)", v, e)
         v, e = babet.time.parse_duration("1y")
         ok_fail("parse_duration unknown unit -> (nil, err)", v, e)
+        v, e = babet.time.parse_duration("1h 30m")
+        ok_fail("DOC TIME parse_duration rejects whitespace", v, e)
     end
 
     -- ---- format_duration -----------------------------------------------
@@ -1706,6 +3066,21 @@ do
     -- 3.0 accepted (integer value as float).
     ok("format_duration(3.0) == '3s'",
         babet.time.format_duration(3.0) == "3s")
+    ok("DOC TIME format_duration rejects a numeric string",
+        pcall(babet.time.format_duration, "60") == false)
+    ok("DOC TIME format_duration rejects extra arguments",
+        pcall(babet.time.format_duration, 60, true) == false)
+    ok("DOC TIME format_duration success returns exactly one value",
+        select("#", babet.time.format_duration(60)) == 1)
+    do
+        local max_text = babet.time.format_duration(math.maxinteger)
+        ok("DOC TIME format_duration accepts math.maxinteger",
+            type(max_text) == "string" and #max_text > 0,
+            "value=" .. tostring(max_text))
+        ok("DOC TIME max duration round-trips",
+            babet.time.parse_duration(max_text) == math.maxinteger,
+            "value=" .. tostring(max_text))
+    end
 
     -- 3.7 raises (not an integer).
     ok("format_duration(3.7) -> luaL_error",
@@ -1757,6 +3132,14 @@ do
     -- lua_http_request (avant http_perform).
     ok("request(non-table) raises",
         pcall(function() return H.request("not a table") end) == false)
+    ok("DOC 4 get rejects non-string URL",
+        pcall(function() return H.get(42) end) == false)
+    ok("DOC 4 get rejects non-table opts",
+        pcall(function() return H.get("http://127.0.0.1/", "bad") end) == false)
+    ok("DOC 4 post rejects non-string body",
+        pcall(function()
+            return H.post("http://127.0.0.1/", 42)
+        end) == false)
 
     -- Chantier longjmp : ces erreurs runtime de http_perform passent
     -- maintenant en (nil, err) au lieu de luaL_error (cohérent avec
@@ -1776,6 +3159,94 @@ do
     do
         local v, e = H.request({ url = "http://x/", timeout = "x" })
         ok_fail("request{timeout=string} -> (nil, err)", v, e)
+    end
+
+    do
+        local v, e = H.request({
+            url = "http://127.0.0.1:1/", verify = 1,
+        })
+        ok_fail("LOT 4 http.verify non-boolean -> (nil, err)", v, e)
+        ok("  verify error mentions boolean",
+            tostring(e):find("boolean", 1, true) ~= nil,
+            "err=" .. tostring(e))
+
+        v, e = H.request({
+            url = "http://127.0.0.1:1/", follow_redirects = "yes",
+        })
+        ok_fail("LOT 4 http.follow_redirects non-boolean -> (nil, err)", v, e)
+        ok("  follow_redirects error mentions boolean",
+            tostring(e):find("boolean", 1, true) ~= nil,
+            "err=" .. tostring(e))
+
+        for _, bad in ipairs({ 0, -1, 1.5, 2147483649 }) do
+            v, e = H.request({
+                url = "http://127.0.0.1:1/", max_body_size = bad,
+            })
+            ok_fail("LOT 4 http.max_body_size rejected: " .. tostring(bad),
+                v, e)
+        end
+    end
+
+    do
+        local v, e = H.request({ url = "http://127.0.0.1/\0ignored" })
+        ok_fail("LOT 3 http: NUL in URL rejected", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            method = "GET\0POST",
+        })
+        ok_fail("LOT 3 http: NUL in method rejected", v, e)
+
+        v, e = H.request({
+            url = "https://127.0.0.1/",
+            ca_cert = "/tmp/ca.pem\0ignored",
+        })
+        ok_fail("LOT 3 http: NUL in ca_cert rejected", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            headers = { ["X-Test\0Ignored"] = "ok" },
+        })
+        ok_fail("LOT 3 http: NUL in header name rejected", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            headers = { ["X-Test"] = "ok\0ignored" },
+        })
+        ok_fail("LOT 3 http: NUL in header value rejected", v, e)
+
+        v, e = H.get("http://127.0.0.1/\r\nX-Evil: yes")
+        ok_fail("DOC 4 HTTP rejects CR/LF in URL", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            headers = { ["Bad Header"] = "x" },
+        })
+        ok_fail("DOC 4 HTTP rejects invalid header name", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            headers = { ["X-é"] = "x" },
+        })
+        ok_fail("DOC 4 HTTP rejects non-ASCII header name", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            headers = { ["X-Test"] = "ok\r\nX-Evil: yes" },
+        })
+        ok_fail("DOC 4 HTTP rejects CR/LF in header value", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            query = { [{}] = "bad" },
+        })
+        ok_fail("DOC 4 HTTP rejects non-string query key", v, e)
+
+        v, e = H.request({
+            url = "http://127.0.0.1/",
+            query = { bad = {} },
+        })
+        ok_fail("DOC 4 HTTP rejects non scalar query value", v, e)
     end
 
     -- mauvaises VALEURS d'option -> (nil, err), pas d'exception
@@ -1869,20 +3340,97 @@ do
         local SBH = "_babet_http_test"
         babet.rmdirAll(SBH)
         babet.mkdir(SBH)
-        babet.exec("sh", { "-c",
-            "printf 'AB\\000CD' > " .. SBH .. "/probe.bin" })
+
+        local server_file = assert(io.open(SBH .. "/server.py", "wb"))
+        server_file:write([[
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import sys
+import time
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args):
+        pass
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        return self.rfile.read(length) if length else b""
+
+    def _send(self, status, body=b"", headers=()):
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD" and body:
+            self.wfile.write(body)
+
+    def _echo(self):
+        body = self._read_body()
+        self._send(200, body, [
+            ("Content-Type", "application/octet-stream"),
+            ("X-Method", self.command),
+            ("X-Request-Content-Type", self.headers.get("Content-Type", "")),
+            ("X-Request-Number", self.headers.get("X-Number", "")),
+        ])
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/probe.bin":
+            self._send(200, b"AB\x00CD",
+                       [("Content-Type", "application/octet-stream")])
+        elif path == "/multi":
+            self._send(200, b"ok", [
+                ("Content-Type", "text/plain"),
+                ("Set-Cookie", "a=1"),
+                ("Set-Cookie", "b=2"),
+            ])
+        elif path == "/large":
+            self._send(200, b"x" * 4096,
+                       [("Content-Type", "application/octet-stream")])
+        elif path == "/query":
+            self._send(200, self.path.encode("ascii"),
+                       [("Content-Type", "text/plain")])
+        elif path == "/redirect":
+            self._send(302, b"", [("Location", "/probe.bin")])
+        elif path == "/slow":
+            time.sleep(0.5)
+            self._send(200, b"slow", [("Content-Type", "text/plain")])
+        else:
+            self._send(404, b"not found",
+                       [("Content-Type", "text/plain")])
+
+    def do_HEAD(self):
+        self._send(200, b"head-body", [("Content-Type", "text/plain")])
+
+    def do_OPTIONS(self):
+        self._send(204, b"", [("Allow", "GET,HEAD,OPTIONS,POST,PUT,PATCH,DELETE")])
+
+    def do_POST(self):
+        self._echo()
+
+    def do_PUT(self):
+        self._echo()
+
+    def do_PATCH(self):
+        self._echo()
+
+    def do_DELETE(self):
+        self._echo()
+
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+]])
+        server_file:close()
 
         print("[INFO] http: starting local test server...")
         local port = 8000 + (os.time() % 1000)
-        -- Bootstrap borné par timeout (filet de sécurité) ; setsid
-        -- detach the server in a separate session, so the timeout
-        -- du bootstrap ne le tue PAS. exec rend la main dès `echo $!`
-        -- (le serveur a ses 3 flux redirigés -> aucun pipe partagé,
-        -- EOF immédiat) ; le timeout ne sert que de garde-fou ultime.
+        -- Bootstrap borné par timeout ; setsid détache le serveur dans
+        -- une session distincte, avec les trois flux redirigés.
         local boot = babet.exec("sh", { "-c",
-            "cd " .. SBH .. " && { setsid python3 -m http.server "
-            .. port .. " --bind 127.0.0.1 >/dev/null 2>&1 </dev/null & } "
-            .. "; echo $!" }, { timeout = 5 })
+            "cd " .. SBH .. " && { setsid python3 server.py "
+            .. port .. " >/dev/null 2>&1 </dev/null & } ; echo $!"
+        }, { timeout = 5 })
 
         local srv_pid
         if type(boot) == "table" and boot.stdout then
@@ -1941,7 +3489,48 @@ do
                     and type(res.headers["content-type"]) == "string",
                     "ct=" .. tostring(res.headers
                         and res.headers["content-type"]))
+                ok("LOT 4 headers_multi contains single-valued headers",
+                    type(res.headers_multi) == "table"
+                    and type(res.headers_multi["content-type"]) == "table"
+                    and #res.headers_multi["content-type"] == 1,
+                    "headers_multi=" .. tostring(res.headers_multi))
             end
+
+            local multi, multi_err = babet.http.get(base .. "/multi",
+                { timeout = 5 })
+            local cookies = type(multi) == "table"
+                and type(multi.headers_multi) == "table"
+                and multi.headers_multi["set-cookie"] or nil
+            local saw_cookie_a, saw_cookie_b = false, false
+            if type(cookies) == "table" then
+                for _, cookie in ipairs(cookies) do
+                    saw_cookie_a = saw_cookie_a or cookie == "a=1"
+                    saw_cookie_b = saw_cookie_b or cookie == "b=2"
+                end
+            end
+            ok("LOT 4 repeated response headers -> headers_multi",
+                type(multi) == "table" and multi_err == nil
+                and type(multi.headers["set-cookie"]) == "string"
+                and type(cookies) == "table" and #cookies == 2
+                and saw_cookie_a and saw_cookie_b,
+                "err=" .. tostring(multi_err))
+
+            local too_big, too_big_err = babet.http.get(base .. "/large",
+                { timeout = 5, max_body_size = 1024 })
+            ok_fail("LOT 4 HTTP body over max_body_size -> (nil, err)",
+                too_big, too_big_err)
+            ok("  no partial body and explicit max_body_size error",
+                too_big == nil
+                and tostring(too_big_err):find("max_body_size", 1, true) ~= nil,
+                "err=" .. tostring(too_big_err))
+
+            local large_ok, large_err = babet.http.get(base .. "/large",
+                { timeout = 5, max_body_size = 8192 })
+            ok("LOT 4 custom max_body_size permits response",
+                type(large_ok) == "table" and large_err == nil
+                and type(large_ok.body) == "string"
+                and #large_ok.body == 4096,
+                "err=" .. tostring(large_err))
 
             local r404, e404 = babet.http.get(
                 base .. "/nexiste_pas", { timeout = 5 })
@@ -1951,11 +3540,99 @@ do
                 "status=" .. tostring(r404 and r404.status)
                 .. " err=" .. tostring(e404))
 
-            local rq = babet.http.get(base .. "/probe.bin",
+            local rq = babet.http.get(base .. "/query",
                 { timeout = 5, query = { a = "x y", b = 42 } })
-            ok("GET with query -> 200 (encoding did not break the URL)",
-                type(rq) == "table" and rq.status == 200,
-                "status=" .. tostring(rq and rq.status))
+            ok("DOC 4 GET query uses documented normalization",
+                type(rq) == "table" and rq.status == 200
+                and rq.body:find("a=x+y", 1, true) ~= nil
+                and rq.body:find("b=42", 1, true) ~= nil,
+                "body=" .. tostring(rq and rq.body))
+
+            local rq_utf8 = babet.http.get(base .. "/query", {
+                timeout = 5, query = { word = "café" },
+            })
+            ok("DOC 4 GET query percent-encodes UTF-8 bytes",
+                type(rq_utf8) == "table" and rq_utf8.status == 200
+                and rq_utf8.body:find("word=caf%%C3%%A9") ~= nil,
+                "body=" .. tostring(rq_utf8 and rq_utf8.body))
+
+            local rq2 = babet.http.get(
+                base .. "/query?already=hello%20world#ignored", {
+                    timeout = 5, query = { more = "a/b" },
+                })
+            ok("DOC 4 query merges existing query and strips fragment",
+                type(rq2) == "table"
+                and rq2.body:find("already=hello+world", 1, true) ~= nil
+                and rq2.body:find("more=a/b", 1, true) ~= nil
+                and rq2.body:find("ignored", 1, true) == nil,
+                "body=" .. tostring(rq2 and rq2.body))
+
+            local post1, post1_err = babet.http.post(base .. "/echo",
+                "AB\0CD", { timeout = 5, headers = { ["X-Number"] = 42 } })
+            ok("DOC 4 post(url, body, opts) is binary-safe",
+                type(post1) == "table" and post1_err == nil
+                and post1.body == "AB\0CD",
+                "err=" .. tostring(post1_err))
+            ok("DOC 4 body defaults to application/octet-stream",
+                type(post1) == "table"
+                and post1.headers["x-request-content-type"]
+                    == "application/octet-stream")
+            ok("DOC 4 numeric request header is converted to text",
+                type(post1) == "table"
+                and post1.headers["x-request-number"] == "42")
+
+            local post2 = babet.http.post(base .. "/echo", {
+                timeout = 5,
+                body = "from-opts",
+                headers = { ["Content-Type"] = "text/plain" },
+            })
+            ok("DOC 4 post(url, opts) uses opts.body",
+                type(post2) == "table" and post2.body == "from-opts")
+            ok("DOC 4 explicit Content-Type is preserved",
+                type(post2) == "table"
+                and post2.headers["x-request-content-type"] == "text/plain")
+
+            local post3 = babet.http.post(base .. "/echo", "argument", {
+                timeout = 5, body = "ignored-option",
+            })
+            ok("DOC 4 positional POST body overrides opts.body",
+                type(post3) == "table" and post3.body == "argument")
+
+            local put = babet.http.request({
+                url = base .. "/echo", method = "put", body = "payload",
+                timeout = 5,
+            })
+            ok("DOC 4 method is case-insensitive and normalized",
+                type(put) == "table" and put.body == "payload"
+                and put.headers["x-method"] == "PUT")
+
+            local redir = babet.http.get(base .. "/redirect", { timeout = 5 })
+            ok("DOC 4 redirects are not followed by default",
+                type(redir) == "table" and redir.status == 302
+                and redir.headers.location == "/probe.bin")
+            local followed = babet.http.get(base .. "/redirect", {
+                timeout = 5, follow_redirects = true,
+            })
+            ok("DOC 4 follow_redirects=true follows redirect",
+                type(followed) == "table" and followed.status == 200
+                and followed.body == "AB\0CD")
+
+            local head = babet.http.request({
+                url = base .. "/anything", method = "HEAD", timeout = 5,
+            })
+            ok("DOC 4 HEAD returns headers with an empty body",
+                type(head) == "table" and head.status == 200
+                and head.body == "")
+
+            local slow_started = babet.time.monotonic()
+            local slow, slow_err = babet.http.get(base .. "/slow",
+                { timeout = 0.1 })
+            local slow_elapsed = babet.time.monotonic() - slow_started
+            ok_fail("DOC 4 HTTP timeout covers the request", slow, slow_err)
+            ok("  timeout remains bounded",
+                slow == nil and slow_elapsed < 2.0,
+                "elapsed=" .. tostring(slow_elapsed)
+                .. " err=" .. tostring(slow_err))
 
             babet.exec("kill", { srv_pid })
             babet.sleep(100, "ms")
@@ -2300,6 +3977,244 @@ do
         ok_fail("positional + convert: nil return"
             .. " -> (nil, err)", r, e)
     end
+
+    -- ----- audit documentation Argparse -----------------------------
+
+    ok("DOC ARGPARSE metadata renamed to Babet",
+        argparse._VERSION == "babet argparse 1.1.0",
+        "version=" .. tostring(argparse._VERSION))
+
+    do
+        local p = argparse()
+        ok("DOC ARGPARSE constructor default program is 'prog'",
+            p:get_usage():find("Usage: prog [options]", 1, true) == 1)
+    end
+
+    ok("DOC ARGPARSE constructor requires a string program",
+        pcall(function() argparse(42) end) == false)
+    ok("DOC ARGPARSE constructor requires a string description",
+        pcall(function() argparse("prog", false) end) == false)
+    ok("DOC ARGPARSE constructor rejects extra arguments",
+        pcall(function() argparse("prog", "desc", "extra") end) == false)
+    ok("DOC ARGPARSE flag enforces its arity",
+        pcall(function() argparse("prog"):flag() end) == false)
+    ok("DOC ARGPARSE option enforces its arity",
+        pcall(function()
+            argparse("prog"):option("-o", {}, "extra")
+        end) == false)
+    ok("DOC ARGPARSE argument enforces its arity",
+        pcall(function()
+            argparse("prog"):argument("input", {}, "extra")
+        end) == false)
+    ok("DOC ARGPARSE get_usage enforces its arity",
+        pcall(function() argparse("prog"):get_usage("extra") end) == false)
+    ok("DOC ARGPARSE parse enforces its arity",
+        pcall(function() argparse("prog"):parse({}, {}) end) == false)
+
+    ok("DOC ARGPARSE option spec is a strict string",
+        pcall(function() argparse("prog"):flag(42) end) == false)
+    ok("DOC ARGPARSE opts must be a table",
+        pcall(function() argparse("prog"):flag("-v", true) end) == false)
+    ok("DOC ARGPARSE unknown opts fields are rejected",
+        pcall(function()
+            argparse("prog"):flag("-v", { hlep = "typo" })
+        end) == false)
+    ok("DOC ARGPARSE help must be a string",
+        pcall(function()
+            argparse("prog"):flag("-v", { help = 42 })
+        end) == false)
+    ok("DOC ARGPARSE required must be a boolean",
+        pcall(function()
+            argparse("prog"):flag("-v", { required = "false" })
+        end) == false)
+    ok("DOC ARGPARSE dest must be a non-empty string",
+        pcall(function()
+            argparse("prog"):flag("-v", { dest = 42 })
+        end) == false)
+    ok("DOC ARGPARSE flags reject choices",
+        pcall(function()
+            argparse("prog"):flag("-v", { choices = { "x" } })
+        end) == false)
+    ok("DOC ARGPARSE choices must be a table",
+        pcall(function()
+            argparse("prog"):option("-o", { choices = "x" })
+        end) == false)
+    ok("DOC ARGPARSE choices must be dense",
+        pcall(function()
+            argparse("prog"):option("-o", { choices = { [2] = "x" } })
+        end) == false)
+    ok("DOC ARGPARSE choices contain strings only",
+        pcall(function()
+            argparse("prog"):option("-o", { choices = { 1 } })
+        end) == false)
+    ok("DOC ARGPARSE convert must be a function",
+        pcall(function()
+            argparse("prog"):option("-o", { convert = 42 })
+        end) == false)
+
+    ok("DOC ARGPARSE '-h' is reserved",
+        pcall(function() argparse("prog"):flag("-h") end) == false)
+    ok("DOC ARGPARSE '--help' is reserved",
+        pcall(function() argparse("prog"):flag("--help") end) == false)
+    ok("DOC ARGPARSE '-' cannot be declared as an option",
+        pcall(function() argparse("prog"):flag("-") end) == false)
+    ok("DOC ARGPARSE '--' cannot be declared as an option",
+        pcall(function() argparse("prog"):flag("--") end) == false)
+    ok("DOC ARGPARSE option names cannot contain '='",
+        pcall(function() argparse("prog"):flag("--x=y") end) == false)
+    ok("DOC ARGPARSE duplicate name inside one spec is rejected",
+        pcall(function() argparse("prog"):flag("-v -v") end) == false)
+    ok("DOC ARGPARSE duplicate destinations are rejected",
+        pcall(function()
+            argparse("prog")
+                :flag("-a", { dest = "same" })
+                :option("-b", { dest = "same" })
+        end) == false)
+    ok("DOC ARGPARSE help destination is reserved",
+        pcall(function()
+            argparse("prog"):argument("input", { dest = "help" })
+        end) == false)
+    ok("DOC ARGPARSE required positional cannot follow optional",
+        pcall(function()
+            argparse("prog")
+                :argument("first", { required = false })
+                :argument("second")
+        end) == false)
+
+    do
+        local p = argparse("prog"):flag("-a")
+        local caught = pcall(function() p:flag("-b -a") end)
+        ok("DOC ARGPARSE duplicate builder error is raised",
+            caught == false)
+        ok("DOC ARGPARSE failed builder leaves usage intact",
+            p:get_usage():find("-b", 1, true) == nil)
+        local r, e = p:parse({ "-b" })
+        ok_fail("DOC ARGPARSE failed builder leaves no partial alias",
+            r, e)
+    end
+
+    do
+        local p = argparse("prog")
+        local r, e = p:parse("abc")
+        ok_fail("DOC ARGPARSE parse source must be an array", r, e)
+        r, e = p:parse({ 42 })
+        ok_fail("DOC ARGPARSE parse tokens must be strings", r, e)
+        r, e = p:parse({ [1] = "a", [3] = "b" })
+        ok_fail("DOC ARGPARSE parse source rejects holes", r, e)
+    end
+
+    do
+        local p = argparse("prog")
+            :flag("-v")
+            :option("-o")
+            :option("-n", { convert = tonumber })
+            :argument("input")
+
+        local r, e = p:parse({ "file", "-v" })
+        ok_val("DOC ARGPARSE options remain active after positionals", r, e)
+        ok("  option after positional was parsed",
+            r and r.input == "file" and r.v == true)
+
+        r, e = p:parse({ "-o=", "file" })
+        ok_val("DOC ARGPARSE inline empty option value is accepted", r, e)
+        ok("  inline empty value is preserved", r and r.o == "")
+
+        r, e = p:parse({ "-n", "-5", "file" })
+        ok_val("DOC ARGPARSE negative option value is accepted", r, e)
+        ok("  negative option value was converted", r and r.n == -5)
+
+        r, e = p:parse({ "-5" })
+        ok_fail("DOC ARGPARSE negative positional needs '--'", r, e)
+        r, e = p:parse({ "--", "-5" })
+        ok_val("DOC ARGPARSE '--' permits a negative positional", r, e)
+        ok("  negative positional is preserved", r and r.input == "-5")
+
+        r, e = p:parse({ "-" })
+        ok_val("DOC ARGPARSE lone '-' is positional", r, e)
+        ok("  lone '-' is preserved", r and r.input == "-")
+
+        r, e = p:parse({ "file", "--help", "--unknown" })
+        ok_val("DOC ARGPARSE help returns immediately", r, e)
+        ok("  help result has only the help contract",
+            r and r.help == true and type(r.usage) == "string")
+
+        r, e = p:parse({ "--", "--help" })
+        ok_val("DOC ARGPARSE help after '--' is positional", r, e)
+        ok("  literal --help is preserved",
+            r and r.input == "--help" and r.help == nil)
+    end
+
+    do
+        local p = argparse("prog")
+            :flag("-f", { default = "auto" })
+            :option("-o", { required = true, default = "unused" })
+
+        local r, e = p:parse({})
+        ok_fail("DOC ARGPARSE required option beats its default", r, e)
+        r, e = p:parse({ "-o", "yes" })
+        ok_val("DOC ARGPARSE arbitrary flag default is preserved", r, e)
+        ok("  absent flag keeps its default", r and r.f == "auto")
+    end
+
+    do
+        local p = argparse("prog"):option("-o")
+        local r, e = p:parse({ "-o", "a", "-o", "b" })
+        ok_val("DOC ARGPARSE repeated option is accepted", r, e)
+        ok("  repeated option uses the last value", r and r.o == "b")
+    end
+
+    do
+        local choices = { "1", "2" }
+        local p = argparse("prog"):option("-n", {
+            choices = choices,
+            convert = tonumber,
+            default = "raw",
+        })
+        choices[1] = "9"
+
+        local r, e = p:parse({ "-n", "1" })
+        ok_val("DOC ARGPARSE choices are copied by the builder", r, e)
+        ok("  original choices mutation has no effect", r and r.n == 1)
+
+        r, e = p:parse({})
+        ok_val("DOC ARGPARSE default bypasses choices and convert", r, e)
+        ok("  default keeps its original type",
+            r and r.n == "raw" and type(r.n) == "string")
+    end
+
+    do
+        local p = argparse("prog"):option("-x", {
+            convert = function() return false end,
+        })
+        local r, e = p:parse({ "-x", "value" })
+        ok_val("DOC ARGPARSE converter may return false", r, e)
+        ok("  false is a successful converted value",
+            r and r.x == false)
+    end
+
+    do
+        local p = argparse("prog"):option("-o"):flag("-v")
+        local r, e = p:parse({ "-o", "-v" })
+        ok_val("DOC ARGPARSE option-looking token can be a value", r, e)
+        ok("  option-looking value is consumed literally",
+            r and r.o == "-v" and r.v == false)
+
+        r, e = p:parse({ "-o", "--", "-v" })
+        ok_val("DOC ARGPARSE '--' can itself be an option value", r, e)
+        ok("  parsing continues after consumed value",
+            r and r.o == "--" and r.v == true)
+    end
+
+    do
+        local previous_arg = arg
+        arg = { [0] = "internal", [1] = "A", [2] = "B" }
+        local p = argparse("prog"):argument("a"):argument("b")
+        local r, e = p:parse(nil)
+        ok_val("DOC ARGPARSE parse(nil) reads global arg", r, e)
+        ok("  global arg indices 1..n are used",
+            r and r.a == "A" and r.b == "B")
+        arg = previous_arg
+    end
 end
 
 -- =====================================================================
@@ -2312,20 +4227,28 @@ do
     -- ----- contrat de base ------------------------------------------
 
     ok("require returns a table", type(log) == "table")
+    ok("require is cached in the current Lua state",
+        require("logging") == log)
+    ok("module metadata names Babet",
+        log._VERSION == "babet logging 1.1.0"
+        and type(log._DESCRIPTION) == "string")
     ok("level constants exposed",
         log.TRACE == 10 and log.DEBUG == 20 and log.INFO == 30
         and log.WARN == 40 and log.ERROR == 50)
-    ok("log functions exposed",
+    ok("five log functions exposed, no fatal level",
         type(log.trace) == "function"
         and type(log.debug) == "function"
         and type(log.info) == "function"
         and type(log.warn) == "function"
-        and type(log.error) == "function")
+        and type(log.error) == "function"
+        and log.fatal == nil)
     ok("setters/getters exposed",
         type(log.set_level) == "function"
         and type(log.set_output) == "function"
         and type(log.set_color) == "function"
-        and type(log.get_level) == "function")
+        and type(log.get_level) == "function"
+        and type(log.get_output) == "function"
+        and type(log.get_color) == "function")
 
     -- ----- défauts --------------------------------------------------
 
@@ -2333,51 +4256,88 @@ do
     ok("default destination = io.stderr",
         log.get_output() == io.stderr)
     ok("colors OFF by default (opt-in)", log.get_color() == false)
+    ok("getters return exactly one value",
+        select("#", log.get_level()) == 1
+        and select("#", log.get_output()) == 1
+        and select("#", log.get_color()) == 1)
 
     -- ----- write collection: in-memory sink for observation --------
 
     local function make_sink()
-        local s = { written = {} }
+        local s = { written = {}, calls = 0 }
         function s:write(...)
+            self.calls = self.calls + 1
             for i = 1, select("#", ...) do
-                self.written[#self.written + 1] = tostring(select(i, ...))
+                self.written[#self.written + 1] = select(i, ...)
             end
+            return true
         end
 
         function s:joined() return table.concat(self.written) end
 
-        function s:clear() self.written = {} end
+        function s:clear()
+            self.written = {}
+            self.calls = 0
+        end
 
         return s
     end
 
-    -- ----- set_output / format / filtrage ---------------------------
+    -- ----- set_output / format -------------------------------------
 
     do
         local sink = make_sink()
-        log.set_output(sink)
+        ok("set_output returns no values",
+            select("#", log.set_output(sink)) == 0)
+        ok("set_output does not write during validation", sink.calls == 0)
+        ok("get_output returns the exact sink", log.get_output() == sink)
         log.set_level(log.DEBUG)
         log.set_color(false)
 
         sink:clear()
-        log.info("hello world")
+        ok("log function returns no values",
+            select("#", log.info("hello world")) == 0)
         local out = sink:joined()
-        ok("emission produces a line", out:sub(-1) == "\n",
-            "out=" .. out)
+        ok("emission performs one write call", sink.calls == 1)
+        ok("emission produces a newline-terminated line",
+            out:sub(-1) == "\n", "out=" .. out)
         ok("format includes the level [INFO ]",
             out:find("[INFO ]", 1, true) ~= nil, "out=" .. out)
         ok("format includes the message",
             out:find("hello world", 1, true) ~= nil)
-        ok("format starts with ISO timestamp",
+        ok("format starts with a local date/time timestamp",
             out:find("^%d%d%d%d%-%d%d%-%d%d %d%d:%d%d:%d%d ") ~= nil,
             "out=" .. out)
 
         sink:clear()
         log.info("user=", 42, "status=", "ok")
         out = sink:joined()
-        ok("variadic: args joined with space",
+        ok("variadic arguments are joined with spaces",
             out:find("user= 42 status= ok", 1, true) ~= nil,
             "out=" .. out)
+
+        sink:clear()
+        log.info("a", nil, false)
+        ok("nil and booleans are formatted through tostring",
+            sink:joined():find("a nil false", 1, true) ~= nil)
+
+        sink:clear()
+        log.info()
+        out = sink:joined()
+        ok("zero message arguments still emit an empty message line",
+            out:find("[INFO ] \n", 1, true) ~= nil, "out=" .. out)
+
+        sink:clear()
+        log.info("a\0b")
+        out = sink:joined()
+        ok("messages preserve embedded NUL bytes",
+            out:find("a\0b", 1, true) ~= nil)
+
+        sink:clear()
+        log.info("line1\nline2")
+        out = sink:joined()
+        ok("embedded newlines are not escaped",
+            out:find("line1\nline2", 1, true) ~= nil)
     end
 
     -- ----- filtrage par seuil ---------------------------------------
@@ -2390,99 +4350,248 @@ do
 
         sink:clear()
         log.trace("t"); log.debug("d"); log.info("i")
-        ok("seuil=WARN : trace/debug/info silent",
+        ok("threshold WARN filters trace/debug/info",
             sink:joined() == "", "out=" .. sink:joined())
 
         sink:clear()
         log.warn("w"); log.error("e")
         local out = sink:joined()
-        ok("seuil=WARN : warn and error pass",
+        ok("threshold WARN keeps warn and error",
             out:find("[WARN ]", 1, true) ~= nil
             and out:find("[ERROR]", 1, true) ~= nil)
+
+        local tostring_calls = 0
+        local lazy = setmetatable({}, {
+            __tostring = function()
+                tostring_calls = tostring_calls + 1
+                return "lazy"
+            end,
+        })
+        sink:clear()
+        log.set_level(log.ERROR)
+        log.info(lazy)
+        ok("filtered messages do not evaluate tostring",
+            tostring_calls == 0 and sink:joined() == "")
+
+        log.set_level(35)
+        sink:clear()
+        log.info("i"); log.warn("w")
+        ok("custom numeric threshold participates in comparison",
+            sink:joined():find("[INFO ]", 1, true) == nil
+            and sink:joined():find("[WARN ]", 1, true) ~= nil)
+
+        log.set_level(25.5)
+        ok("finite fractional thresholds remain supported",
+            log.get_level() == 25.5)
     end
 
-    -- set_level : accepte string OU number ; case-insensible side string
+    -- ----- set_level ------------------------------------------------
+
     do
-        log.set_level("ERROR")
-        ok("set_level('ERROR') -> ERROR (50)",
+        ok("set_level returns no values",
+            select("#", log.set_level("ERROR")) == 0)
+        ok("set_level is case-insensitive for names",
             log.get_level() == log.ERROR)
         log.set_level("debug")
-        ok("set_level('debug') -> DEBUG",
-            log.get_level() == log.DEBUG)
+        ok("set_level('debug') -> DEBUG", log.get_level() == log.DEBUG)
         log.set_level(log.INFO)
-        ok("set_level(log.INFO) -> INFO",
-            log.get_level() == log.INFO)
+        ok("set_level(log.INFO) -> INFO", log.get_level() == log.INFO)
+
+        local before = log.get_level()
+        ok("set_level rejects NaN",
+            pcall(function() log.set_level(0 / 0) end) == false)
+        ok("set_level rejects +infinity",
+            pcall(function() log.set_level(math.huge) end) == false)
+        ok("set_level rejects -infinity",
+            pcall(function() log.set_level(-math.huge) end) == false)
+        ok("invalid numeric levels leave the threshold unchanged",
+            log.get_level() == before)
+        ok("numeric strings are not coerced to thresholds",
+            pcall(function() log.set_level("30") end) == false)
+        ok("level names are not whitespace-trimmed",
+            pcall(function() log.set_level(" info ") end) == false)
+        ok("set_level rejects unknown names",
+            pcall(function() log.set_level("xxxx") end) == false)
+        ok("set_level rejects unrelated types",
+            pcall(function() log.set_level({}) end) == false)
     end
 
-    -- ----- couleurs : OFF / ON --------------------------------------
+    -- ----- couleurs -------------------------------------------------
 
     do
         local sink = make_sink()
         log.set_output(sink)
         log.set_level(log.TRACE)
 
-        log.set_color(false)
+        ok("set_color returns no values",
+            select("#", log.set_color(false)) == 0)
         sink:clear(); log.warn("zz")
-        ok("color OFF: no ANSI sequence",
+        ok("color OFF emits no ANSI sequence",
             sink:joined():find("\27[", 1, true) == nil,
             "out=" .. sink:joined())
 
         log.set_color(true)
+        ok("get_color reflects enabled state", log.get_color() == true)
+
+        sink:clear(); log.trace("zz")
+        ok("color ON + trace uses dim ANSI",
+            sink:joined():find("\27[2m", 1, true) ~= nil)
+
+        sink:clear(); log.debug("zz")
+        ok("color ON + debug uses cyan ANSI",
+            sink:joined():find("\27[36m", 1, true) ~= nil)
+
         sink:clear(); log.warn("zz")
-        ok("color ON + warn: ANSI sequence present",
-            sink:joined():find("\27[33m", 1, true) ~= nil,
-            "out=" .. sink:joined())
+        ok("color ON + warn uses yellow ANSI",
+            sink:joined():find("\27[33m", 1, true) ~= nil)
 
         sink:clear(); log.error("zz")
-        ok("color ON + error: red ANSI sequence",
+        ok("color ON + error uses red ANSI",
             sink:joined():find("\27[31m", 1, true) ~= nil)
 
         sink:clear(); log.info("zz")
-        ok("color ON + info: NO color (decision G)",
+        ok("color ON + info remains uncolored",
             sink:joined():find("\27[", 1, true) == nil,
             "out=" .. sink:joined())
 
+        sink:clear(); log.warn("zz")
+        ok("colored lines reset ANSI before the newline",
+            sink:joined():find("\27[0m\n", 1, true) ~= nil)
+
         log.set_color(false)
-    end
-
-    -- ----- contrat d'erreur : setters levent sur mauvais usage ------
-
-    do
-        ok("set_level('unknown') -> error()",
-            pcall(function() log.set_level("xxxx") end) == false)
-        ok("set_level({}) -> error()",
-            pcall(function() log.set_level({}) end) == false)
-        ok("set_output(42) -> error()",
-            pcall(function() log.set_output(42) end) == false)
-        ok("set_output({}) without :write -> error()",
-            pcall(function() log.set_output({}) end) == false)
-        ok("set_color('truthy') -> error() (boolean strict)",
+        ok("get_color reflects disabled state", log.get_color() == false)
+        ok("set_color is strict boolean",
             pcall(function() log.set_color("yes") end) == false)
     end
 
-    -- ----- error contract: log.* swallows writes that crash
+    -- ----- validation des sinks ------------------------------------
 
     do
-        local exploding = {}
-        function exploding:write() error("boom") end
+        local sink = make_sink()
+        log.set_output(sink)
 
-        log.set_output(exploding)
+        ok("set_output rejects primitive values",
+            pcall(function() log.set_output(42) end) == false)
+        ok("set_output rejects a table without write",
+            pcall(function() log.set_output({}) end) == false)
+        ok("set_output rejects a non-callable write member",
+            pcall(function() log.set_output({ write = true }) end) == false)
+
+        local inherited = setmetatable({ written = {} }, {
+            __index = {
+                write = function(self, line)
+                    self.written[#self.written + 1] = line
+                end,
+            },
+        })
+        ok("set_output accepts a write method supplied by __index",
+            pcall(function() log.set_output(inherited) end) == true)
+        log.set_level(log.INFO)
+        log.info("inherited")
+        ok("inherited write method is used with colon semantics",
+            #inherited.written == 1
+            and inherited.written[1]:find("inherited", 1, true) ~= nil)
+
+        local hostile = setmetatable({}, {
+            __index = function() error("hostile __index") end,
+        })
+        local before = log.get_output()
+        ok("set_output controls errors raised while looking up write",
+            pcall(function() log.set_output(hostile) end) == false)
+        ok("failed set_output leaves the previous sink installed",
+            log.get_output() == before)
+
+        local db = assert(babet.sqlite.open(":memory:"))
+        ok("set_output rejects userdata without a write method",
+            pcall(function() log.set_output(db) end) == false)
+        db:close()
+
+        log.set_output(sink)
+    end
+
+    -- ----- arités strictes ------------------------------------------
+
+    do
+        ok("set_level requires exactly one argument",
+            pcall(function() log.set_level() end) == false
+            and pcall(function() log.set_level("info", "extra") end)
+                == false)
+        ok("set_output requires exactly one argument",
+            pcall(function() log.set_output() end) == false
+            and pcall(function() log.set_output(io.stderr, "extra") end)
+                == false)
+        ok("set_color requires exactly one argument",
+            pcall(function() log.set_color() end) == false
+            and pcall(function() log.set_color(false, true) end) == false)
+        ok("get_level rejects extra arguments",
+            pcall(function() log.get_level(true) end) == false)
+        ok("get_output rejects extra arguments",
+            pcall(function() log.get_output(true) end) == false)
+        ok("get_color rejects extra arguments",
+            pcall(function() log.get_color(true) end) == false)
+    end
+
+    -- ----- contrat no-throw des fonctions d'émission ----------------
+
+    do
+        local sink = make_sink()
+        log.set_output(sink)
         log.set_level(log.INFO)
         log.set_color(false)
-        local ok_call = pcall(function() log.info("test") end)
-        ok("log.info with raising sink: does NOT propagate the error",
-            ok_call == true)
 
-        -- restore : on rebascule la sortie sur stderr pour ne pas
-        -- polluer les sections suivantes (== arg ===, ===chdir==).
+        local exploding_value = setmetatable({}, {
+            __tostring = function() error("boom tostring") end,
+        })
+        sink:clear()
+        ok("raising __tostring does not escape log.info",
+            pcall(function() log.info(exploding_value) end) == true)
+        ok("failed tostring drops the whole message",
+            sink:joined() == "")
+
+        local old_date = os.date
+        os.date = function() error("boom date") end
+        local date_call_ok = pcall(function() log.info("test") end)
+        os.date = old_date
+        ok("raising os.date does not escape log.info", date_call_ok)
+
+        local exploding_sink = { write = function() error("boom write") end }
+        log.set_output(exploding_sink)
+        ok("raising sink does not escape log.info",
+            pcall(function() log.info("test") end) == true)
+
+        local mutable_sink = make_sink()
+        log.set_output(mutable_sink)
+        mutable_sink.write = nil
+        ok("sink mutated after set_output is still failure-safe",
+            pcall(function() log.info("test") end) == true)
+
         log.set_output(io.stderr)
+        log.set_level(log.INFO)
+        log.set_color(false)
     end
 end
 -- =====================================================================
 print("")
+
 print("=== sys ===")
 
 do
+    -- ----- constantes de version -----------------------------------
+
+    do
+        ok("VERSION is a non-empty string",
+            type(babet.VERSION) == "string" and #babet.VERSION > 0)
+        ok("VERSION components are integers",
+            math.type(babet.VERSION_MAJOR) == "integer"
+            and math.type(babet.VERSION_MINOR) == "integer"
+            and math.type(babet.VERSION_PATCH) == "integer")
+        local rebuilt = string.format("%d.%d.%d",
+            babet.VERSION_MAJOR, babet.VERSION_MINOR, babet.VERSION_PATCH)
+        ok("VERSION matches MAJOR.MINOR.PATCH", babet.VERSION == rebuilt,
+            "VERSION=" .. tostring(babet.VERSION)
+            .. " rebuilt=" .. rebuilt)
+    end
+
     -- ----- pid : entier > 0, jamais d'erreur (POSIX) ----------------
 
     do
@@ -2490,6 +4599,20 @@ do
         ok("pid() -> integer > 0",
             type(p) == "number" and p > 0 and p == math.floor(p),
             "pid=" .. tostring(p))
+    end
+
+    -- Workers are OS threads in the same process: same PID.
+    do
+        local main_pid = babet.pid()
+        local w, err = babet.workers.spawn("return babet.pid()")
+        ok_val("worker spawned for PID check", w, err)
+        if w then
+            local joined, worker_pid = w:join()
+            ok("worker pid() equals main pid()",
+                joined == true and worker_pid == main_pid,
+                "main=" .. tostring(main_pid)
+                .. " worker=" .. tostring(worker_pid))
+        end
     end
 
     -- ----- hostname : string non empty ------------------------------
@@ -2527,6 +4650,18 @@ do
         local p = babet.env("PATH")
         ok("env('PATH') -> non-empty string",
             type(p) == "string" and #p > 0)
+
+
+        local env_nul_ok, env_nul_err = pcall(function()
+            return babet.env("PATH\0ignored")
+        end)
+        ok("LOT 3 env: NUL in name raises cleanly",
+            env_nul_ok == false and type(env_nul_err) == "string"
+            and env_nul_err:find("NUL", 1, true) ~= nil,
+            tostring(env_nul_err))
+
+        local wp, we = babet.which("sh\0ignored")
+        ok_fail("LOT 3 which: NUL in name rejected", wp, we)
     end
 
     -- ----- setenv : tests de MUTATION déplacés avant le premier ----
@@ -2562,16 +4697,22 @@ do
     do
         ok("which() with no arg raises",
             pcall(function() return babet.which() end) == false)
-        -- env(table) raises (les nombres sont coercés en string par
-        -- luaL_checkstring — convention Lua héritée, partagée par
-        -- the entire codebase; so we test with a table, which does not
-        -- peut pas être coercée silencieusement).
+        -- env/which/setenv use luaL_checktype(LUA_TSTRING): numbers
+        -- are rejected rather than coerced to strings.
         ok("env({}) raises",
             pcall(function() return babet.env({}) end) == false)
+        ok("env(42) raises (strict string, no coercion)",
+            pcall(function() return babet.env(42) end) == false)
+        ok("which(42) raises (strict string, no coercion)",
+            pcall(function() return babet.which(42) end) == false)
         ok("setenv() without args raises",
             pcall(function() return babet.setenv() end) == false)
         ok("setenv('X') without value raises",
             pcall(function() return babet.setenv("X") end) == false)
+        ok("setenv(42, 'x') raises (strict name string)",
+            pcall(function() return babet.setenv(42, "x") end) == false)
+        ok("setenv('X', 42) raises (strict value string)",
+            pcall(function() return babet.setenv("X", 42) end) == false)
     end
 end
 
@@ -2587,6 +4728,20 @@ do
     ok("handle is a function", type(S.handle) == "function")
     ok("ignore is a function", type(S.ignore) == "function")
     ok("default is a function", type(S.default) == "function")
+
+    -- Documentation lot 3 : les succès renvoient exactement une
+    -- valeur (`true`), pas un couple `(true, nil)`.
+    local handle_n = select("#", S.handle("USR1", function() end))
+    ok("DOC 3 signal.handle success returns one value", handle_n == 1)
+    S.handle("USR1", nil)
+
+    local ignore_n = select("#", S.ignore("USR1"))
+    ok("DOC 3 signal.ignore success returns one value", ignore_n == 1)
+    local default_n = select("#", S.default("USR1"))
+    ok("DOC 3 signal.default success returns one value", default_n == 1)
+
+    ok("DOC 3 signal name is a strict string",
+        pcall(S.ignore, 15) == false)
 
     -- ----- validation des arguments ---------------------------------
     -- Signal inconnu : luaL_error -> pcall.ok == false
@@ -2607,6 +4762,9 @@ do
         local pok = pcall(S.default, "BOGUS")
         ok("default('BOGUS') raises", not pok)
     end
+
+    ok_raises("LOT 3 signal: NUL in name rejected",
+        function() return S.ignore("USR1\0ignored") end, "NUL")
 
     -- Handler de type incorrect : luaL_error
     do
@@ -2677,6 +4835,41 @@ do
         ok("handle('USR1') without 2nd arg -> raises", not pok)
         ok("  message mentions 'missing handler'",
             type(perr) == "string" and perr:find("missing handler"))
+    end
+
+    -- ----- dispatch différé : ordre fixe et zéro argument -----------
+    do
+        local events = {}
+        local argc = nil
+        S.handle("TERM", function(...)
+            events[#events + 1] = "TERM"
+            argc = select("#", ...)
+        end)
+        S.handle("USR1", function(...)
+            events[#events + 1] = "USR1"
+            argc = math.max(argc or 0, select("#", ...))
+        end)
+
+        -- Les deux signaux arrivent pendant os.execute(), donc avant que
+        -- le hook Lua ne puisse dispatcher. USR1 est envoyé en premier,
+        -- mais la table interne fixe TERM avant USR1.
+        os.execute("kill -USR1 " .. tostring(babet.pid())
+            .. "; kill -TERM " .. tostring(babet.pid()))
+
+        local deadline = babet.monotonic() + 1
+        while #events < 2 and babet.monotonic() < deadline do
+            local accumulator = 0
+            for i = 1, 20000 do accumulator = accumulator + i end
+        end
+
+        ok("DOC 3 signal callbacks receive no arguments", argc == 0,
+            "argc=" .. tostring(argc))
+        ok("DOC 3 signal dispatch uses fixed supported-signal order",
+            events[1] == "TERM" and events[2] == "USR1",
+            "events=" .. table.concat(events, ","))
+
+        S.handle("TERM", nil)
+        S.handle("USR1", nil)
     end
 
     -- ----- hardening: signal.* refused from workers -----------------
@@ -2772,6 +4965,16 @@ do
         ok("open(opts.busy_timeout = 99999999) raises (sanity max)", not pok)
     end
 
+    -- borne exacte documentée : 0..3 600 000 ms
+    do
+        local db = DB.open(":memory:", { busy_timeout = 3600000 })
+        ok("open(opts.busy_timeout = 3600000) accepted", db ~= nil)
+        if db then db:close() end
+
+        local pok = pcall(DB.open, ":memory:", { busy_timeout = 3600001 })
+        ok("open(opts.busy_timeout = 3600001) raises", not pok)
+    end
+
     -- ----- ouverture en mémoire (cas le plus simple) -----------------
     do
         local db, err = DB.open(":memory:")
@@ -2829,6 +5032,11 @@ do
         ok("open(':memory:', wal=true) -> db (silent fallback)",
             db ~= nil, "err=" .. tostring(err))
         if db then db:close() end
+    end
+
+    do
+        local db, err = DB.open(":memory:\0on-disk")
+        ok_fail("LOT 3 sqlite.open: NUL in path rejected", db, err)
     end
 
     -- ----- erreur d'ouverture (chemin invalide) ----------------------
@@ -2926,6 +5134,52 @@ do
         db:close()
     end
 
+    -- ----- LOT 5B : SQL contenant un NUL ----------------------------
+    do
+        local db = DB.open(":memory:")
+        local ev, ee = db:exec(
+            "CREATE TABLE nul_guard(x)\0; INSERT INTO nul_guard VALUES (1)")
+        ok_fail("LOT 5B sqlite.exec rejects NUL in SQL text", ev, ee)
+        ok("  NUL error is explicit",
+            type(ee) == "string" and ee:find("NUL", 1, true) ~= nil,
+            "err=" .. tostring(ee))
+
+        local created = -1
+        for row in db:query([[
+            SELECT COUNT(*) AS n
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'nul_guard'
+        ]]) do
+            created = row.n
+        end
+        ok("  rejected SQL has no executed prefix", created == 0,
+            "created=" .. tostring(created))
+
+        local qi, qe = db:query("SELECT 1 AS x\0; SELECT 2 AS x")
+        ok_fail("LOT 5B sqlite.query rejects NUL in SQL text", qi, qe)
+        ok("  query NUL error is explicit",
+            type(qe) == "string" and qe:find("NUL", 1, true) ~= nil,
+            "err=" .. tostring(qe))
+        db:close()
+    end
+
+    -- ----- SQL vide/commentaire avec params -------------------------
+    do
+        local db = DB.open(":memory:")
+        local ok1, err1 = db:exec("", {})
+        ok("exec('', {}) is a successful no-op", ok1 == true and err1 == nil,
+            "err=" .. tostring(err1))
+        local ok2, err2 = db:exec("-- commentaire seulement", {})
+        ok("exec(comment-only, {}) is a successful no-op",
+            ok2 == true and err2 == nil, "err=" .. tostring(err2))
+
+        local pok, perr = pcall(db.exec, db, "", { 1 })
+        ok("exec('', non-empty params) raises", not pok)
+        ok("  message mentions no statement",
+            type(perr) == "string" and perr:find("no statement", 1, true))
+        db:close()
+    end
+
     -- ----- bind positionnel simple -----------------------------------
     do
         local db = fresh_db_with_check("val = 42")
@@ -3011,6 +5265,15 @@ do
         ok("bind {a=1, zzz='extra'} pour :a seul -> raises", not pok)
         ok("  message mentions 'zzz'",
             type(perr) == "string" and perr:find("zzz"))
+
+        local params_with_nul = { a = 1 }
+        params_with_nul["a\0evil"] = "extra"
+        local pok_nul, perr_nul = pcall(db.exec, db,
+            "INSERT INTO t VALUES (:a)", params_with_nul)
+        ok("LOT 3 sqlite: NUL in named parameter key is not truncated",
+            not pok_nul)
+        ok("  NUL key is reported as an extra parameter",
+            type(perr_nul) == "string" and perr_nul:find("extra param", 1, true))
 
         db:close()
     end
@@ -3118,6 +5381,16 @@ do
         local ok2 = db:exec("INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);")
         ok("multi-statement SANS params -> toujours OK (session 1)",
             ok2 == true)
+
+        local ok3, err3 = db:exec(
+            "INSERT INTO t VALUES (?); -- commentaire final\n", { 3 })
+        ok("LOT 4 exec avec commentaire -- final accepté",
+            ok3 == true and err3 == nil, "err=" .. tostring(err3))
+
+        local ok4, err4 = db:exec(
+            "INSERT INTO t VALUES (?); /* commentaire final */", { 4 })
+        ok("LOT 4 exec avec commentaire /* */ final accepté",
+            ok4 == true and err4 == nil, "err=" .. tostring(err4))
 
         db:close()
     end
@@ -3370,6 +5643,61 @@ do
         db:close()
     end
 
+    -- ----- query vide/commentaire : itérateur déjà épuisé ----------
+    do
+        local db = DB.open(":memory:")
+        local iter, err = db:query("-- commentaire seulement", {})
+        ok("query(comment-only, {}) returns an iterator",
+            type(iter) == "userdata" and err == nil,
+            "err=" .. tostring(err))
+        ok("  iterator is already exhausted", iter() == nil)
+
+        local pok, perr = pcall(db.query, db, "", { x = 1 })
+        ok("query('', non-empty params) raises", not pok)
+        ok("  message mentions no statement",
+            type(perr) == "string" and perr:find("no statement", 1, true))
+        db:close()
+    end
+
+    -- ----- query est réellement paresseux ----------------------------
+    do
+        local db = DB.open(":memory:")
+        db:exec("CREATE TABLE t (x INTEGER)")
+        local iter = assert(db:query("INSERT INTO t VALUES (7)"))
+
+        local before
+        for row in db:query("SELECT COUNT(*) AS n FROM t") do before = row.n end
+        ok("query DML is not stepped before iterator call", before == 0)
+
+        ok("first iterator call executes DML and returns nil", iter() == nil)
+        local after
+        for row in db:query("SELECT COUNT(*) AS n FROM t") do after = row.n end
+        ok("query DML effect visible after iterator call", after == 1)
+        db:close()
+    end
+
+    -- ----- noms de colonnes dupliqués -------------------------------
+    do
+        local db = DB.open(":memory:")
+        local row
+        for r in db:query("SELECT 1 AS x, 2 AS x") do row = r end
+        ok("duplicate column names: last value wins", row.x == 2,
+            "x=" .. tostring(row and row.x))
+        db:close()
+    end
+
+    -- ----- erreur au step de l'itérateur ----------------------------
+    do
+        local db = DB.open(":memory:")
+        db:exec("CREATE TABLE t (x INTEGER CHECK (x > 0))")
+        local iter = assert(db:query("INSERT INTO t VALUES (?)", { -1 }))
+        local pok, perr = pcall(iter)
+        ok("query step error raises", not pok)
+        ok("  message is prefixed with sqlite.query",
+            type(perr) == "string" and perr:find("sqlite.query", 1, true))
+        db:close()
+    end
+
     -- ----- query sur SQL invalide ------------------------------------
     do
         local db = DB.open(":memory:")
@@ -3389,6 +5717,25 @@ do
             iter == nil and type(err) == "string")
         ok("  message mentions 'one statement'",
             type(err) == "string" and err:find("one statement"))
+
+        local iter2, err2 = db:query(
+            "SELECT 42 AS answer; -- commentaire final\n")
+        local row2 = iter2 and iter2()
+        ok("LOT 4 query avec commentaire -- final accepté",
+            type(iter2) == "userdata" and err2 == nil
+            and type(row2) == "table" and row2.answer == 42,
+            "err=" .. tostring(err2))
+        if iter2 then iter2:close() end
+
+        local iter3, err3 = db:query(
+            "SELECT 43 AS answer; /* commentaire final */")
+        local row3 = iter3 and iter3()
+        ok("LOT 4 query avec commentaire /* */ final accepté",
+            type(iter3) == "userdata" and err3 == nil
+            and type(row3) == "table" and row3.answer == 43,
+            "err=" .. tostring(err3))
+        if iter3 then iter3:close() end
+
         db:close()
     end
 
@@ -3511,12 +5858,18 @@ do
             { 42, 3.14, "hello", "\x01\x02\x03" }))
 
         local row
-        for r in db:query("SELECT * FROM t") do row = r end
+        for r in db:query(
+            "SELECT *, typeof(b) AS b_storage_class FROM t") do
+            row = r
+        end
         ok("round-trip integer", row.i == 42)
         ok("round-trip float", math.abs(row.f - 3.14) < 1e-9)
         ok("round-trip text", row.s == "hello")
-        ok("round-trip blob (3 bytes)", #row.b == 3)
-        ok("  blob byte 1 == 1", string.byte(row.b, 1) == 1)
+        ok("string bound in BLOB-affinity column keeps 3 bytes", #row.b == 3)
+        ok("  first byte == 1", string.byte(row.b, 1) == 1)
+        ok("  bound Lua string is stored as SQLite TEXT",
+            row.b_storage_class == "text",
+            "typeof(b)=" .. tostring(row.b_storage_class))
 
         db:close()
     end
@@ -3706,6 +6059,91 @@ b_false = false
         ok("  boolean false", r and r.b_false == false)
     end
 
+    -- ----- nombres : int64 exacts, bases, inf et nan ---------------
+
+    do
+        local r, e = T.decode([[
+max = 9223372036854775807
+min = -9223372036854775808
+hex = 0xDEAD_BEEF
+oct = 0o755
+bin = 0b11010110
+pos_inf = inf
+plus_inf = +inf
+neg_inf = -inf
+not_a_number = nan
+]])
+        ok_val("decode numeric limits and special floats", r, e)
+        ok("  TOML int64 max -> math.maxinteger",
+            r and r.max == math.maxinteger,
+            "max=" .. tostring(r and r.max))
+        ok("  TOML int64 min -> math.mininteger",
+            r and r.min == math.mininteger,
+            "min=" .. tostring(r and r.min))
+        ok("  hexadecimal integer normalized",
+            r and r.hex == 0xDEADBEEF)
+        ok("  octal integer normalized", r and r.oct == 493)
+        ok("  binary integer normalized", r and r.bin == 214)
+        ok("  inf and +inf -> math.huge",
+            r and r.pos_inf == math.huge and r.plus_inf == math.huge)
+        ok("  -inf -> -math.huge", r and r.neg_inf == -math.huge)
+        ok("  nan -> Lua NaN", r and r.not_a_number ~= r.not_a_number)
+
+        local v
+        v, e = T.decode("n = 9223372036854775808")
+        ok_fail("integer above int64 max -> (nil, err)", v, e)
+        v, e = T.decode("n = -9223372036854775809")
+        ok_fail("integer below int64 min -> (nil, err)", v, e)
+    end
+
+    -- ----- clés et chaînes binary-safe -------------------------------
+
+    do
+        local r, e = T.decode([[
+"" = "empty key"
+"a.b" = "literal dot"
+"clé été" = "unicode"
+"a\u0000b" = 7
+nul_value = "x\u0000y"
+]])
+        ok_val("decode quoted, Unicode and NUL keys", r, e)
+        ok("  empty quoted key preserved", r and r[""] == "empty key")
+        ok("  dot in quoted key is not a dotted path",
+            r and r["a.b"] == "literal dot")
+        ok("  Unicode quoted key preserved",
+            r and r["clé été"] == "unicode")
+        ok("  escaped NUL in key is binary-safe",
+            r and r["a\0b"] == 7 and r.a == nil,
+            "nul-key=" .. tostring(r and r["a\0b"]))
+        ok("  escaped NUL in value is binary-safe",
+            r and type(r.nul_value) == "string"
+            and #r.nul_value == 3 and r.nul_value == "x\0y")
+    end
+
+    do
+        local r, e = T.decode([[
+site."google.com" = true
+physical.color = "orange"
+physical.shape = "round"
+]])
+        ok_val("decode dotted keys", r, e)
+        ok("  quoted dotted component preserved",
+            r and r.site and r.site["google.com"] == true)
+        ok("  dotted keys create nested Lua tables",
+            r and r.physical and r.physical.color == "orange"
+            and r.physical.shape == "round")
+    end
+
+    do
+        local src = "ok = 1\n" .. string.char(0) .. "bad = 2\n"
+        local v, e = T.decode(src)
+        ok_fail("raw NUL in TOML text is rejected, not truncated", v, e)
+
+        src = 'msg = "' .. string.char(0xFF) .. '"'
+        v, e = T.decode(src)
+        ok_fail("invalid UTF-8 TOML is rejected", v, e)
+    end
+
     -- ----- array TOML -> séquence Lua 1..n -------------------------
 
     do
@@ -3722,6 +6160,28 @@ mixed = [ "a", "b", "c" ]
             r and type(r.mixed) == "table"
             and #r.mixed == 3
             and r.mixed[1] == "a" and r.mixed[3] == "c")
+    end
+
+    -- ----- tableaux hétérogènes et conteneurs vides ----------------
+
+    do
+        local r, e = T.decode([[
+values = [1, "two", true, { x = 3 }]
+empty_array = []
+empty_table = {}
+]])
+        ok_val("decode heterogeneous and empty containers", r, e)
+        ok("  TOML 1.0 heterogeneous array preserved",
+            r and type(r.values) == "table" and #r.values == 4
+            and r.values[1] == 1 and r.values[2] == "two"
+            and r.values[3] == true
+            and type(r.values[4]) == "table" and r.values[4].x == 3)
+        ok("  empty TOML array -> empty Lua table",
+            r and type(r.empty_array) == "table"
+            and next(r.empty_array) == nil)
+        ok("  empty inline table -> empty Lua table",
+            r and type(r.empty_table) == "table"
+            and next(r.empty_table) == nil)
     end
 
     -- ----- table imbriquée (sections) ------------------------------
@@ -3849,6 +6309,13 @@ x = 2
         ok_fail("decode uppercase boolean -> (nil, err)", v, e)
     end
 
+    -- ----- profil TOML 1.0 : extensions hors profil désactivées -------
+
+    do
+        local v, e = T.decode("short_time = 07:32")
+        ok_fail("optional-seconds extension is rejected", v, e)
+    end
+
     -- ----- mauvais usage : luaL_error (luaL_checktype raises) --------
 
     do
@@ -3860,6 +6327,8 @@ x = 2
             pcall(function() return T.decode({}) end) == false)
         ok("decode(nil) raises",
             pcall(function() return T.decode(nil) end) == false)
+        ok("decode(text, extra) raises",
+            pcall(function() return T.decode("x = 1", true) end) == false)
     end
 end
 
@@ -3885,24 +6354,36 @@ do
             pcall(function() return S.connect("127.0.0.1") end) == false)
         ok("connect({}, 80) raises (host not a string)",
             pcall(function() return S.connect({}, 80) end) == false)
-        -- port = {} : table non coerçable. Une string "80" passerait
-        -- luaL_checkinteger silencieusement (même piège que
-        -- luaL_checkstring with numbers) and would not have raised;
-        -- on doit utiliser un type qui ne peut PAS être coercé.
-        ok("connect('h', {}) raises (port not a number, not coercible)",
-            pcall(function() return S.connect("127.0.0.1", {}) end)
-            == false)
+        ok("DOC 4 connect rejects numeric-string port",
+            pcall(function()
+                return S.connect("127.0.0.1", "80")
+            end) == false)
+        ok("DOC 4 connect rejects float port",
+            pcall(function()
+                return S.connect("127.0.0.1", 80.0)
+            end) == false)
 
         ok("listen() without args raises",
             pcall(function() return S.listen() end) == false)
         ok("listen(host) without port raises",
             pcall(function() return S.listen("127.0.0.1") end) == false)
+        ok("DOC 4 listen rejects numeric-string port",
+            pcall(function()
+                return S.listen("127.0.0.1", "0")
+            end) == false)
+        ok("DOC 4 listen rejects numeric-string backlog",
+            pcall(function()
+                return S.listen("127.0.0.1", 0, "16")
+            end) == false)
     end
 
     -- ----- mauvaises valeurs : (nil, err) --------------------------
 
     do
-        local v, e = S.connect("127.0.0.1", -1)
+        local v, e = S.connect("", 1, 0.1)
+        ok_fail("DOC 4 connect rejects empty host", v, e)
+
+        v, e = S.connect("127.0.0.1", -1)
         ok_fail("connect negative port -> (nil, err)", v, e)
         ok("  message mentions 'port'",
             type(e) == "string" and e:find("port", 1, true) ~= nil)
@@ -3915,6 +6396,17 @@ do
 
         v, e = S.listen("127.0.0.1", 8080, -5)
         ok_fail("listen backlog <= 0 -> (nil, err)", v, e)
+
+        v, e = S.listen("127.0.0.1", 0, 2147483648)
+        ok_fail("LOT 5B listen backlog overflow rejected", v, e)
+        ok("  backlog error mentions range",
+            type(e) == "string" and e:find("range", 1, true) ~= nil,
+            "err=" .. tostring(e))
+
+        v, e = S.connect("127.0.0.1\0ignored", 1, 0.1)
+        ok_fail("LOT 3 socket.connect: NUL in host rejected", v, e)
+        v, e = S.listen("127.0.0.1\0ignored", 0)
+        ok_fail("LOT 3 socket.listen: NUL in host rejected", v, e)
     end
 
     -- ----- échec transport : connect sur port loopback closed -------
@@ -3971,6 +6463,29 @@ do
             ok_val("srv:accept() -> (socket, nil)", peer, perr)
 
             if cli and peer then
+                -- ----- types stricts des méthodes ------------------
+
+                ok("DOC 4 send requires a string",
+                    pcall(function() return cli:send(42) end) == false)
+                ok("DOC 4 recv count requires a Lua integer",
+                    pcall(function() return peer:recv("8") end) == false
+                    and pcall(function() return peer:recv(8.0) end) == false)
+                ok("DOC 4 set_timeout requires a number",
+                    pcall(function() return peer:set_timeout("1") end) == false)
+
+                local timeout_returns = table.pack(peer:set_timeout(2))
+                ok("DOC 4 set_timeout success returns exactly true, nil",
+                    timeout_returns.n == 2
+                    and timeout_returns[1] == true
+                    and timeout_returns[2] == nil)
+
+                local bad_count, bad_count_err = peer:recv(0)
+                ok_fail("DOC 4 recv rejects count <= 0",
+                    bad_count, bad_count_err)
+                bad_count, bad_count_err = peer:recv(16 * 1024 * 1024 + 1)
+                ok_fail("DOC 4 recv enforces 16 MiB cap",
+                    bad_count, bad_count_err)
+
                 -- ----- échange de données : send / recv -----------
 
                 local n, serr = cli:send("hello")
@@ -4121,6 +6636,143 @@ do
                 end
             end
 
+            -- ----- LOT 5B recv_all : garde mémoire --------------------
+
+            do
+                local c5, ce = S.connect("127.0.0.1", port, 2)
+                local p5, pe = srv:accept(2)
+                ok("LOT 5B recv_all limit: paire connectée",
+                    c5 ~= nil and p5 ~= nil,
+                    "connect_err=" .. tostring(ce)
+                    .. " accept_err=" .. tostring(pe))
+                if c5 and p5 then
+                    c5:send(string.rep("R", 8 * 1024))
+                    c5:close()
+                    local limited, limited_err = p5:recv_all(2, 4096)
+                    ok_fail("LOT 5B recv_all stops at max_bytes",
+                        limited, limited_err)
+                    ok("  no partial data and explicit max_bytes error",
+                        limited == nil and type(limited_err) == "string"
+                        and limited_err:find("max_bytes", 1, true) ~= nil,
+                        "err=" .. tostring(limited_err))
+                    p5:close()
+                end
+            end
+
+            do
+                local c6, ce = S.connect("127.0.0.1", port, 2)
+                local p6, pe = srv:accept(2)
+                ok("LOT 5B recv_all custom limit: paire connectée",
+                    c6 ~= nil and p6 ~= nil,
+                    "connect_err=" .. tostring(ce)
+                    .. " accept_err=" .. tostring(pe))
+                if c6 and p6 then
+                    local payload = string.rep("S", 8 * 1024)
+                    c6:send(payload)
+                    c6:close()
+                    local full, full_err = p6:recv_all(2, 16 * 1024)
+                    ok_val("LOT 5B recv_all custom max_bytes permits body",
+                        full, full_err)
+                    ok("  complete custom-limited body returned",
+                        full == payload,
+                        "len=" .. tostring(full and #full))
+                    p6:close()
+                end
+            end
+
+            do
+                local c7 = S.connect("127.0.0.1", port, 2)
+                local p7 = srv:accept(2)
+                if c7 and p7 then
+                    local iv, ie = p7:recv_all(0.1, 0)
+                    ok_fail("LOT 5B recv_all rejects max_bytes <= 0",
+                        iv, ie)
+                    iv, ie = p7:recv_all(0.1, 1.5)
+                    ok_fail("LOT 5B recv_all rejects non-integer max_bytes",
+                        iv, ie)
+                    iv, ie = p7:recv_all(0.1, 2^31 + 1)
+                    ok_fail("LOT 5B recv_all rejects max_bytes > 2 GiB",
+                        iv, ie)
+                    c7:close()
+                    p7:close()
+                else
+                    ok("LOT 5B recv_all invalid max_bytes setup", false)
+                end
+            end
+
+            -- ----- DOC 4 : préservation et ordre du flux --------
+
+            -- recv_line() peut avoir retiré des octets du noyau avant un
+            -- timeout. Ils doivent rester visibles par recv(), pas seulement
+            -- par un prochain recv_line().
+            do
+                local c8 = S.connect("127.0.0.1", port, 2)
+                local p8 = srv:accept(2)
+                ok("DOC 4 recv_line pending: paire connectée",
+                    c8 ~= nil and p8 ~= nil)
+                if c8 and p8 then
+                    c8:send("abc")
+                    local lv, le = p8:recv_line(0.05)
+                    ok("DOC 4 recv_line timeout preserves partial bytes",
+                        lv == nil and le == "timeout")
+                    c8:send("def")
+                    local first = p8:recv(3, 1)
+                    local second = p8:recv(3, 1)
+                    ok("DOC 4 recv after recv_line keeps stream order",
+                        first == "abc" and second == "def",
+                        "first=" .. tostring(first)
+                        .. " second=" .. tostring(second))
+                    c8:close()
+                    p8:close()
+                end
+            end
+
+            -- recv_all() conserve aussi les octets accumulés lors d'un
+            -- timeout ; un nouvel appel peut reprendre sans perte.
+            do
+                local c9 = S.connect("127.0.0.1", port, 2)
+                local p9 = srv:accept(2)
+                ok("DOC 4 recv_all timeout: paire connectée",
+                    c9 ~= nil and p9 ~= nil)
+                if c9 and p9 then
+                    c9:send("hello")
+                    local av, ae = p9:recv_all(0.05, 100)
+                    ok("DOC 4 recv_all timeout returns no partial body",
+                        av == nil and ae == "timeout")
+                    c9:send(" world")
+                    c9:close()
+                    local recovered, recovered_err = p9:recv_all(1, 100)
+                    ok("DOC 4 recv_all retry recovers all buffered bytes",
+                        recovered == "hello world" and recovered_err == nil,
+                        "data=" .. tostring(recovered)
+                        .. " err=" .. tostring(recovered_err))
+                    p9:close()
+                end
+            end
+
+            -- Le dépassement de max_bytes ne rend pas de résultat partiel,
+            -- mais les octets déjà lus restent récupérables avec une limite
+            -- plus grande.
+            do
+                local c10 = S.connect("127.0.0.1", port, 2)
+                local p10 = srv:accept(2)
+                ok("DOC 4 recv_all limit recovery: paire connectée",
+                    c10 ~= nil and p10 ~= nil)
+                if c10 and p10 then
+                    c10:send("abcdef")
+                    c10:close()
+                    local av, ae = p10:recv_all(1, 3)
+                    ok("DOC 4 recv_all max_bytes returns no partial body",
+                        av == nil and type(ae) == "string"
+                        and ae:find("max_bytes", 1, true) ~= nil)
+                    local recovered = p10:recv_all(1, 10)
+                    ok("DOC 4 recv_all larger retry recovers data",
+                        recovered == "abcdef",
+                        "data=" .. tostring(recovered))
+                    p10:close()
+                end
+            end
+
             -- ----- accept with timeout: no client -> timeout --
 
             do
@@ -4141,6 +6793,68 @@ do
         end
     end
 
+    -- Régression LOT 5A : les timeouts positionnels des méthodes
+    -- socket doivent réellement primer sur le timeout par défaut posé
+    -- par set_timeout(). Avant le correctif, ces arguments étaient
+    -- acceptés puis ignorés silencieusement.
+    do
+        local timeout_srv = S.listen("127.0.0.1", 0)
+        ok("LOT 5A socket timeouts: listener créé", timeout_srv ~= nil)
+        if timeout_srv then
+            local addr = timeout_srv:sockname()
+            local timeout_port = addr and tonumber(addr.port)
+
+            timeout_srv:set_timeout(2)
+            local t0 = babet.monotonic()
+            local av, ae = timeout_srv:accept(0.1)
+            local adt = babet.monotonic() - t0
+            ok("LOT 5A accept(timeout) prime sur set_timeout",
+                av == nil and ae == "timeout"
+                and adt >= 0.05 and adt <= 1.5,
+                "err=" .. tostring(ae) .. " dt=" .. tostring(adt))
+
+            local timeout_cli = S.connect("127.0.0.1", timeout_port, 1)
+            local timeout_peer = timeout_srv:accept(1)
+            ok("LOT 5A socket timeouts: paire connectée",
+                timeout_cli ~= nil and timeout_peer ~= nil)
+            if timeout_cli and timeout_peer then
+                timeout_peer:set_timeout(2)
+
+                t0 = babet.monotonic()
+                local rv, re = timeout_peer:recv(8, 0.1)
+                local rdt = babet.monotonic() - t0
+                ok("LOT 5A recv(n, timeout) effectif",
+                    rv == nil and re == "timeout"
+                    and rdt >= 0.05 and rdt <= 1.5,
+                    "err=" .. tostring(re) .. " dt=" .. tostring(rdt))
+
+                t0 = babet.monotonic()
+                local lv, le = timeout_peer:recv_line(0.1)
+                local ldt = babet.monotonic() - t0
+                ok("LOT 5A recv_line(timeout) effectif",
+                    lv == nil and le == "timeout"
+                    and ldt >= 0.05 and ldt <= 1.5,
+                    "err=" .. tostring(le) .. " dt=" .. tostring(ldt))
+
+                t0 = babet.monotonic()
+                local bv, be = timeout_peer:recv_all(0.1)
+                local bdt = babet.monotonic() - t0
+                ok("LOT 5A recv_all(timeout) effectif",
+                    bv == nil and be == "timeout"
+                    and bdt >= 0.05 and bdt <= 1.5,
+                    "err=" .. tostring(be) .. " dt=" .. tostring(bdt))
+
+                local badv, bade = timeout_peer:recv(8, "bad")
+                ok_fail("LOT 5A timeout par appel invalide -> erreur",
+                    badv, bade)
+
+                timeout_cli:close()
+                timeout_peer:close()
+            end
+            timeout_srv:close()
+        end
+    end
+
     -- ----- méthodes sur closed socket : refus propre ----------------
 
     do
@@ -4148,9 +6862,11 @@ do
         if s then
             s:close()
             -- Re-close : doit être idempotent et rendre (true, nil).
-            local ok_close, _ = s:close()
-            ok("close() idempotent (already-closed socket)",
-                ok_close == true)
+            local close_returns = table.pack(s:close())
+            ok("close() idempotent and returns exactly true, nil",
+                close_returns.n == 2
+                and close_returns[1] == true
+                and close_returns[2] == nil)
 
             local v, e = s:accept()
             ok_fail("accept on closed socket -> (nil, err)", v, e)
@@ -4271,11 +6987,18 @@ do
         pcall(function() return S.connect_tls({}, 443) end) == false)
     ok("connect_tls('h', {}) raises (port not a number)",
         pcall(function() return S.connect_tls("h", {}) end) == false)
+    ok("DOC 4 connect_tls rejects numeric-string port",
+        pcall(function() return S.connect_tls("h", "443") end) == false)
+    ok("DOC 4 connect_tls rejects float port",
+        pcall(function() return S.connect_tls("h", 443.0) end) == false)
 
     -- ----- mauvaises valeurs : (nil, err) -------------------------
 
     do
-        local v, e = S.connect_tls("127.0.0.1", -1)
+        local v, e = S.connect_tls("", 443, { timeout = 0.1 })
+        ok_fail("DOC 4 connect_tls rejects empty host", v, e)
+
+        v, e = S.connect_tls("127.0.0.1", -1)
         ok_fail("connect_tls negative port -> (nil, err)", v, e)
         v, e = S.connect_tls("127.0.0.1", 70000)
         ok_fail("connect_tls port > 65535 -> (nil, err)", v, e)
@@ -4314,6 +7037,23 @@ do
 
         v, e = S.connect_tls("127.0.0.1", 443, { timeout = math.huge })
         ok_fail("opts.timeout inf -> (nil, err)", v, e)
+
+
+        v, e = S.connect_tls("127.0.0.1\0ignored", 443,
+            { timeout = 0.1 })
+        ok_fail("LOT 3 TLS: NUL in host rejected", v, e)
+        v, e = S.connect_tls("127.0.0.1", 443,
+            { ca_cert = "/tmp/ca.pem\0ignored" })
+        ok_fail("LOT 3 TLS: NUL in ca_cert rejected", v, e)
+        v, e = S.connect_tls("127.0.0.1", 443,
+            { ca_path = "/tmp/cas\0ignored" })
+        ok_fail("LOT 3 TLS: NUL in ca_path rejected", v, e)
+        v, e = S.connect_tls("127.0.0.1", 443,
+            { hostname = "localhost\0ignored" })
+        ok_fail("LOT 3 TLS: NUL in hostname rejected", v, e)
+        v, e = S.connect_tls("127.0.0.1", 443,
+            { min_version = "1.2\0ignored" })
+        ok_fail("LOT 3 TLS: NUL in min_version rejected", v, e)
     end
 
     -- ----- échec transport : port loopback closed ------------------
@@ -4325,6 +7065,33 @@ do
             type(e) == "string"
             and (e:find("socket: ", 1, true) == 1 or e == "timeout"),
             "err=" .. tostring(e))
+    end
+
+    -- LOT 4 : le handshake ne reçoit plus un budget neuf après TCP ;
+    -- il consomme la deadline de l'opération connect_tls. Ce serveur TCP
+    -- accepte au niveau noyau mais ne parle jamais TLS, ce qui vérifie que
+    -- la deadline parvient bien jusqu'à SSL_connect. La résolution DNS
+    -- n'intervient pas ici (adresse numérique), conformément au contrat.
+    do
+        local stalled = S.listen("127.0.0.1", 0, 1)
+        ok("LOT 4 TLS timeout: listener silencieux créé", stalled ~= nil)
+        if stalled then
+            local name = stalled:sockname()
+            local port = name and tonumber(name.port)
+            local t0 = babet.monotonic()
+            local v, e = S.connect_tls("127.0.0.1", port, {
+                timeout = 0.35,
+                verify = false,
+            })
+            local dt = babet.monotonic() - t0
+            ok("LOT 4 TLS handshake silencieux -> timeout",
+                v == nil and e == "timeout",
+                "err=" .. tostring(e))
+            ok("  timeout TLS borné (0.25 <= dt <= 2)",
+                dt >= 0.25 and dt <= 2,
+                "dt=" .. tostring(dt))
+            stalled:close()
+        end
     end
 
     -- ----- s:starttls() : préconditions --------------------------
@@ -4347,6 +7114,95 @@ do
             lst2:close()
             local v, e = lst2:starttls()
             ok_fail("starttls on closed socket -> (nil, err)", v, e)
+        end
+    end
+
+    -- DOC 4 : les erreurs détectées avant le handshake ne modifient pas
+    -- le flux TCP clair. Les octets plaintext déjà tamponnés doivent être
+    -- consommés avant toute tentative STARTTLS.
+    do
+        local plain_srv = S.listen("127.0.0.1", 0)
+        ok("DOC 4 starttls validation: listener créé", plain_srv ~= nil)
+        if plain_srv then
+            local a = plain_srv:sockname()
+            local p = a and tonumber(a.port)
+            local raw = S.connect("127.0.0.1", p, 1)
+            local plain_peer = plain_srv:accept(1)
+            ok("DOC 4 starttls validation: paire TCP créée",
+                raw ~= nil and plain_peer ~= nil)
+            if raw and plain_peer then
+                local tv, te = raw:starttls({
+                    timeout = 0.1, verify = true,
+                })
+                ok_fail("DOC 4 starttls verify=true requires hostname",
+                    tv, te)
+                plain_peer:send("still-plain")
+                local got = raw:recv(11, 1)
+                ok("DOC 4 pre-handshake validation leaves TCP usable",
+                    got == "still-plain", "got=" .. tostring(got))
+
+                plain_peer:send("abc")
+                local lv, le = raw:recv_line(0.05)
+                ok("DOC 4 starttls pending setup timed out",
+                    lv == nil and le == "timeout")
+                tv, te = raw:starttls({
+                    timeout = 0.1, verify = false,
+                })
+                ok_fail("DOC 4 starttls refuses pending plaintext", tv, te)
+                ok("  pending plaintext error is explicit",
+                    type(te) == "string"
+                    and te:find("pending plaintext", 1, true) ~= nil,
+                    "err=" .. tostring(te))
+                local pending = raw:recv(3, 1)
+                ok("DOC 4 pending plaintext remains readable",
+                    pending == "abc", "pending=" .. tostring(pending))
+
+                raw:close()
+                plain_peer:close()
+            end
+            plain_srv:close()
+        end
+    end
+
+    -- Régression LOT 5A : opts.timeout de starttls doit être utilisé
+    -- pour le handshake lui-même, et tout échec après le début du
+    -- handshake ferme définitivement le socket (flux clair compromis).
+    do
+        local silent_srv = S.listen("127.0.0.1", 0)
+        ok("LOT 5A starttls: listener silencieux créé",
+            silent_srv ~= nil)
+        if silent_srv then
+            local a = silent_srv:sockname()
+            local p = a and tonumber(a.port)
+            local raw = S.connect("127.0.0.1", p, 1)
+            local silent_peer = silent_srv:accept(1)
+            ok("LOT 5A starttls: paire TCP créée",
+                raw ~= nil and silent_peer ~= nil)
+            if raw and silent_peer then
+                raw:set_timeout(2)
+                local t0 = babet.monotonic()
+                local tv, te = raw:starttls({
+                    timeout = 0.2,
+                    verify = false,
+                })
+                local dt = babet.monotonic() - t0
+                ok("LOT 5A starttls utilise opts.timeout",
+                    tv == nil and te == "timeout"
+                    and dt >= 0.1 and dt <= 1.5,
+                    "err=" .. tostring(te) .. " dt=" .. tostring(dt))
+
+                local after, after_err = raw:recv(1, 0.05)
+                ok_fail("LOT 5A starttls échoué ferme le socket",
+                    after, after_err)
+                ok("  erreur post-starttls mentionne closed",
+                    type(after_err) == "string"
+                    and after_err:find("closed", 1, true) ~= nil,
+                    "err=" .. tostring(after_err))
+
+                raw:close()
+                silent_peer:close()
+            end
+            silent_srv:close()
         end
     end
 
@@ -4428,6 +7284,9 @@ do
                         ok_val("TLS s:send('hello-tls\\n') -> n, nil",
                             n, e)
                         ok("  n == 10 (exact length)", n == 10)
+                        local again, again_err = s:starttls({ verify = false })
+                        ok_fail("DOC 4 starttls refuses an active TLS socket",
+                            again, again_err)
                         s:close()
                     end
                 end
@@ -4465,6 +7324,84 @@ do
                         ok_val("TLS verified s:send() -> n, nil", n, e)
                         s:close()
                     end
+                end
+
+                -- ----- Régression LOT 1 : le ca_cert utilisé juste
+                --       avant ne doit PAS rester dans le contexte global.
+                --       Avec l'ancien g_tls_ctx mutable, cette connexion
+                --       sans ca_cert réussissait à tort.
+                do
+                    local s, e = S.connect_tls("127.0.0.1", tls_port,
+                        {
+                            verify = true,
+                            timeout = 5,
+                            hostname = "localhost"
+                        })
+                    ok_fail("LOT 1 TLS: ca_cert non conservé entre "
+                        .. "deux connexions", s, e)
+                    ok("  certificat auto-signé de nouveau refusé",
+                        type(e) == "string"
+                        and (e:find("verify failed", 1, true) ~= nil
+                            or e:find("self", 1, true) ~= nil),
+                        "err=" .. tostring(e))
+                    if s then s:close() end
+                end
+
+                -- ----- DOC 4 : SNI independent de verify ---------
+                -- s_server -servername_fatal rejects a missing or wrong SNI.
+                -- This test is optional on older OpenSSL CLIs that do not
+                -- support the option set.
+                do
+                    local sni_port = tls_port + 1
+                    local sni_cmd = string.format(
+                        'openssl s_server -accept %d -cert %s -key %s '
+                        .. '-cert2 %s -key2 %s -servername expected.test '
+                        .. '-servername_fatal -quiet -naccept 10 -ign_eof '
+                        .. '> /dev/null 2>&1 &',
+                        sni_port, cert_path, key_path, cert_path, key_path)
+                    babet.exec("sh", { "-c", sni_cmd }, { timeout = 3 })
+                    babet.sleep(300, "ms")
+
+                    local sni_up = false
+                    for _ = 1, 5 do
+                        local p = S.connect("127.0.0.1", sni_port, 0.3)
+                        if p then
+                            p:close()
+                            sni_up = true
+                            break
+                        end
+                        babet.sleep(100, "ms")
+                    end
+
+                    if sni_up then
+                        local good, good_err = S.connect_tls(
+                            "127.0.0.1", sni_port, {
+                                verify = false,
+                                hostname = "expected.test",
+                                timeout = 3,
+                            })
+                        ok_val("DOC 4 verify=false still sends requested SNI",
+                            good, good_err)
+                        if good then good:close() end
+
+                        local bad, bad_err = S.connect_tls(
+                            "127.0.0.1", sni_port, {
+                                verify = false,
+                                hostname = "wrong.test",
+                                timeout = 3,
+                            })
+                        ok_fail("DOC 4 wrong SNI is rejected by strict server",
+                            bad, bad_err)
+                        if bad then bad:close() end
+                    else
+                        print("[INFO] tls: s_server SNI strict unavailable, "
+                            .. "test SNI ignoré")
+                    end
+
+                    babet.exec("pkill", {
+                        "-f",
+                        "openssl s_server -accept " .. tostring(sni_port),
+                    }, { timeout = 2 })
                 end
 
                 -- ----- min_version = "1.3" si supporté
@@ -4542,6 +7479,10 @@ do
         pcall(function() return U.exists() end) == false)
     ok("exists(1.5) raises",
         pcall(function() return U.exists(1.5) end) == false)
+    ok("exists('root\\0evil') raises",
+        pcall(function() return U.exists("root\0evil") end) == false)
+    ok("exists(2^33) raises",
+        pcall(function() return U.exists(8589934592) end) == false)
 
     -- root almost certainly exists on any Linux system the tests run on.
     -- We use it as the "guaranteed present" anchor.
@@ -4595,6 +7536,25 @@ do
     ok("exists(missing) == false", U.exists(missing) == false)
     ok("exists(2000000000) == false",
         U.exists(2000000000) == false)
+
+    -- NSS lookups are available from worker-local Lua states too.
+    do
+        local w, err = babet.workers.spawn([[
+            local u, lookup_err = babet.user.get("root")
+            if not u then
+                error(lookup_err)
+            end
+            return u.uid
+        ]])
+        ok_val("user.get() available in a worker", w, err)
+        if w then
+            local joined, uid = w:join()
+            ok("  worker resolved root uid 0",
+                joined == true and uid == 0,
+                "joined=" .. tostring(joined)
+                .. " uid=" .. tostring(uid))
+        end
+    end
 end
 
 -- =====================================================================
@@ -4627,6 +7587,18 @@ do
             pcall(function() return w:add(WDIR, "create") end) == false)
         ok("read({}) raises (timeout not a number, not coercible)",
             pcall(function() return w:read({}) end) == false)
+        ok("new(extra) raises instead of ignoring the argument",
+            pcall(function() return I.new(true) end) == false)
+        ok("add(path, events, opts, extra) raises",
+            pcall(function()
+                return w:add(WDIR, { "create" }, nil, true)
+            end) == false)
+        ok("read(timeout, extra) raises",
+            pcall(function() return w:read(0, true) end) == false)
+        ok("remove(wd, extra) raises",
+            pcall(function() return w:remove(1, true) end) == false)
+        ok("close(extra) raises",
+            pcall(function() return w:close(true) end) == false)
     end
 
     -- ----- bad values: (nil, err) -----------------------------------
@@ -4649,6 +7621,49 @@ do
 
         v, e = w:read(-1)
         ok_fail("read(negative timeout) -> (nil, err)", v, e)
+
+
+        v, e = w:read(1e300)
+        ok_fail("LOT 3 inotify.read: huge timeout rejected", v, e)
+        ok("  huge timeout message mentions 'too large'",
+            type(e) == "string" and e:find("too large", 1, true) ~= nil,
+            tostring(e))
+
+        v, e = w:remove(math.maxinteger)
+        ok_fail("LOT 3 inotify.remove: wd overflow rejected", v, e)
+        ok("  wd overflow message mentions 'range'",
+            type(e) == "string" and e:find("range", 1, true) ~= nil,
+            tostring(e))
+
+        v, e = w:add(WDIR .. "\0ignored", { "create" })
+        ok_fail("LOT 3 inotify.add: NUL in path rejected", v, e)
+        v, e = w:add(WDIR, { "create\0ignored" })
+        ok_fail("LOT 3 inotify.add: NUL in event rejected", v, e)
+
+        v, e = w:add(WDIR, { "create" }, { onlydir = "false" })
+        ok_fail("inotify.add opts.onlydir must be a strict boolean", v, e)
+        ok("  onlydir error mentions boolean",
+            type(e) == "string" and e:find("boolean", 1, true) ~= nil,
+            tostring(e))
+    end
+
+    -- ----- onlydir option -------------------------------------------
+    do
+        local FILE_PATH = WDIR .. "/onlydir-file.txt"
+        local f = assert(io.open(FILE_PATH, "w")); f:close()
+
+        local v, e = w:add(FILE_PATH, { "modify" }, { onlydir = true })
+        ok_fail("add(file, ..., {onlydir=true}) rejects a non-directory", v, e)
+
+        local file_wd, file_err = w:add(FILE_PATH, { "modify" },
+            { onlydir = false })
+        ok_val("add(file, ..., {onlydir=false}) remains valid",
+            file_wd, file_err,
+            function(x) return math.type(x) == "integer" end)
+        if file_wd then
+            ok_act("remove(file watch)", w:remove(file_wd))
+            w:read(0.2) -- consume the kernel-generated ignored event
+        end
     end
 
     -- ----- add a valid watch ----------------------------------------
@@ -4836,8 +7851,13 @@ do
     end
 
     -- ----- close() idempotent + post-close errors -------------------
+    ok("tostring(active watcher) mentions inotify and fd",
+        tostring(w):find("inotify", 1, true) ~= nil
+        and tostring(w):find("fd=", 1, true) ~= nil)
     ok_act("close() -> (true, nil)", w:close())
     ok_act("close() again (idempotent)", w:close())
+    ok("tostring(closed watcher) mentions closed",
+        tostring(w):find("closed", 1, true) ~= nil)
 
     do
         local v, e = w:read(0)
@@ -4847,6 +7867,9 @@ do
 
         local v2, e2 = w:add(WDIR, { "create" })
         ok_fail("add() after close -> (nil, err)", v2, e2)
+
+        local v3, e3 = w:remove(1)
+        ok_fail("remove() after close -> (nil, err)", v3, e3)
     end
 
     babet.rmdirAll(WDIR)
@@ -4904,6 +7927,8 @@ do
         pcall(function() return W.spawn() end) == false)
     ok("spawn({}) raises (code not a string)",
         pcall(function() return W.spawn({}) end) == false)
+    ok("DOC 3 spawn(42) raises (strict code string)",
+        pcall(function() return W.spawn(42) end) == false)
     ok("spawn('code', 42) raises (args not a table)",
         pcall(function() return W.spawn("return 1", 42) end) == false)
     ok("spawn('code', nil, 42) raises (opts not a table)",
@@ -4961,6 +7986,24 @@ do
             and (e:find("nested", 1, true) ~= nil
                 or e:find("cycle", 1, true) ~= nil
                 or e:find("deep", 1, true) ~= nil))
+    end
+
+    -- ----- formes de tables et chaînes transférables -------------
+
+    do
+        local sparse, sparse_err = W.spawn("return 1", { [2] = "x" })
+        ok_fail("DOC 3 workers: sparse args table rejected",
+            sparse, sparse_err)
+
+        local mixed, mixed_err = W.spawn("return 1",
+            { [1] = "x", name = "mixed" })
+        ok_fail("DOC 3 workers: mixed list/map args rejected",
+            mixed, mixed_err)
+
+        local nul_value, nul_value_err = W.spawn("return 1",
+            { value = "a\0b" })
+        ok_fail("DOC 3 workers: NUL string in args rejected",
+            nul_value, nul_value_err)
     end
 
     -- ----- spawn + join : retours simples -------------------------
@@ -5031,11 +8074,32 @@ do
             type(val) == "string"
             and val:find("boom", 1, true) ~= nil)
 
+        w = W.spawn("error({ code = 42 })")
+        jok, val = w:join()
+        ok("LOT 5B worker non-string error has a useful diagnostic",
+            jok == false and type(val) == "string"
+            and (val:find("table:", 1, true) ~= nil
+                 or val:find("type table", 1, true) ~= nil),
+            "ok=" .. tostring(jok) .. " val=" .. tostring(val))
+
         -- Code Lua invalid -> chargement échoue
         w = W.spawn("this is not valid lua %%%")
         jok, val = w:join()
         ok("join: invalid Lua code -> (false, msg)",
             jok == false and type(val) == "string")
+
+        -- Régression lot 2 : une exception C++ produite pendant la
+        -- sérialisation du résultat ne doit jamais sortir de la pthread
+        -- et appeler std::terminate(). nlohmann/json refuse l'UTF-8
+        -- invalide lors de dump(), ce qui fournit un cas reproductible.
+        w = W.spawn("return string.char(0xc0, 0x80)")
+        jok, val = w:join()
+        ok("LOT 2 worker: exception C++ interne -> erreur explicite",
+            jok == false and type(val) == "string"
+            and val:find("unhandled C++ exception", 1, true) ~= nil,
+            "ok=" .. tostring(jok) .. " val=" .. tostring(val))
+        ok("  processus toujours vivant après l'exception worker",
+            babet.pid() > 0)
     end
 
     -- ----- worker.args : argument transmission ---------------
@@ -5064,22 +8128,31 @@ do
     -- ----- poll : running / done / error --------------------------
 
     do
-        -- Worker with short sleep: we catch 'running' before the end,
-        -- puis 'done' après. Race possible : machine rapide peut
-        -- already asee done, on accepte les deux états initialement.
+        -- poll() consomme le résultat dès qu'il renvoie done/error.
+        -- Le premier appel peut déjà voir done sur une machine rapide :
+        -- dans ce cas, on utilise immédiatement sa valeur et on ne poll
+        -- pas une deuxième fois comme si le résultat était encore présent.
         local w = W.spawn(
             "babet.sleep(300, 'ms'); return 'ok'")
-        local state, _ = w:poll()
+        local state, value = w:poll()
         ok("poll right after spawn: 'running' or 'done'",
             state == "running" or state == "done",
             "state=" .. tostring(state))
 
-        babet.sleep(500, "ms")
-        local state2, val2 = w:poll()
-        ok("poll after enough sleep: 'done'",
-            state2 == "done",
-            "state=" .. tostring(state2))
-        ok("  val == 'ok'", val2 == "ok")
+        if state == "running" then
+            babet.sleep(500, "ms")
+            state, value = w:poll()
+        end
+        ok("poll final state: 'done'",
+            state == "done",
+            "state=" .. tostring(state))
+        ok("  val == 'ok'", value == "ok")
+
+        local joined_after_poll, join_err = w:join()
+        ok("DOC 3 join after poll(done) reports already consumed",
+            joined_after_poll == false
+            and type(join_err) == "string"
+            and join_err:find("already consumed", 1, true) ~= nil)
 
         -- poll sur worker en erreur
         local w2 = W.spawn("error('bad')")
@@ -5166,6 +8239,96 @@ do
             sleep_ms, elapsed))
     end
 
+    -- ----- lot 2 : SIGPIPE reste process-wide intact -------------
+    -- Ancien bug : chaque babet.exec() faisait temporairement
+    -- sigaction(SIGPIPE, SIG_IGN). Deux exec concurrents pouvaient
+    -- s'entrelacer ainsi : A sauve le handler, B sauve SIG_IGN,
+    -- A restaure le handler, puis B restaure SIG_IGN définitivement.
+    --
+    -- Les deux shells sont bloqués par des fichiers de libération pour
+    -- imposer exactement cet ordre, sans dépendre du scheduler.
+    do
+        local marker_a = sb("lot2_sigpipe_a_started")
+        local marker_b = sb("lot2_sigpipe_b_started")
+        local release_a = sb("lot2_sigpipe_a_release")
+        local release_b = sb("lot2_sigpipe_b_release")
+
+        local function wait_file(path, timeout)
+            local deadline = babet.monotonic() + timeout
+            while babet.monotonic() < deadline do
+                local exists = babet.fileExists(path)
+                if exists == true then return true end
+                babet.sleep(10, "ms")
+            end
+            return false
+        end
+
+        local pipe_fired = false
+        local handler_ok = babet.signal.handle("PIPE", function()
+            pipe_fired = true
+        end)
+        ok("LOT 2 SIGPIPE: handler installé", handler_ok == true)
+
+        local worker_code = [[
+            local command = "printf x > " .. worker.args.marker
+                .. "; while [ ! -e " .. worker.args.release
+                .. " ]; do sleep 0.01; done"
+            local result, err = babet.exec(
+                "sh", { "-c", command }, { timeout = 5 })
+            if not result then return { ok = false, err = err } end
+            return { ok = result.code == 0, code = result.code }
+        ]]
+
+        local wa = W.spawn(worker_code,
+            { marker = marker_a, release = release_a })
+        local a_started = wa ~= nil and wait_file(marker_a, 2)
+        ok("LOT 2 SIGPIPE: exec A actif", a_started)
+
+        local wb
+        local b_started = false
+        if a_started then
+            wb = W.spawn(worker_code,
+                { marker = marker_b, release = release_b })
+            b_started = wb ~= nil and wait_file(marker_b, 2)
+        end
+        ok("LOT 2 SIGPIPE: exec B actif pendant A", b_started)
+
+        -- A se termine d'abord, puis B : ordre qui laissait SIGPIPE
+        -- définitivement ignoré dans l'ancienne implémentation.
+        babet.touch(release_a)
+        local a_ok, a_result = false, nil
+        if wa then a_ok, a_result = wa:join() end
+
+        babet.touch(release_b)
+        local b_ok, b_result = false, nil
+        if wb then b_ok, b_result = wb:join() end
+
+        ok("LOT 2 SIGPIPE: deux exec concurrents terminés",
+            a_ok == true and type(a_result) == "table" and a_result.ok
+            and b_ok == true and type(b_result) == "table" and b_result.ok)
+
+        -- os.execute est utilisé volontairement : appeler babet.exec ici
+        -- masquerait le bug historique en modifiant lui-même SIGPIPE.
+        if handler_ok == true then
+            os.execute("kill -PIPE " .. tostring(babet.pid()))
+
+            -- Le module signal distribue les callbacks via un hook Lua.
+            -- Cette boucle exécute assez d'instructions pour le déclencher.
+            local dispatch_deadline = babet.monotonic() + 1
+            while not pipe_fired
+                and babet.monotonic() < dispatch_deadline do
+                local accumulator = 0
+                for i = 1, 20000 do accumulator = accumulator + i end
+            end
+        end
+
+        ok("LOT 2 SIGPIPE: handler préservé après exec concurrents",
+            handler_ok == true and pipe_fired == true)
+        if handler_ok == true then
+            babet.signal.handle("PIPE", nil)
+        end
+    end
+
     -- ----- poll after join : "already consumed" -------------------
 
     do
@@ -5181,15 +8344,10 @@ do
     end
 
     -- ============================================================
-    -- Chantier 9-2 : send / recv / close côté parent
+    -- send / recv / close côté parent
     -- ============================================================
-    -- À cette étape le worker ne lit pas son inbox (il reste
-    -- fork-join classique). On valide la mécanique côté parent :
-    --   - send réussit tant que l'inbox a de la place
-    --   - send sur inbox pleine, timeout=0 -> (false, "full")
-    --   - send sur inbox pleine, timeout>0 -> (false, "timeout")
-    --   - recv depuis outbox vide est toujours vide
-    --   - send/recv sur worker mort -> (false, "closed")
+    -- On valide ici la mécanique des queues : capacités, timeouts,
+    -- fermeture, drainage et conventions de retour.
 
     -- ----- send : succès tant qu'il reste de la place -----------
     do
@@ -5280,19 +8438,12 @@ do
         w:join()
     end
 
-    -- ----- send après worker mort -> "closed" -------------------
+    -- ----- le worker ferme automatiquement ses queues ------------
     do
         local w = W.spawn("return 1")
-        w:join() -- worker mort + __gc futur, mais ici on a fait join
-        -- Note : __gc n'a pas tourné, donc les queues ne sont
-        -- fermées que via close() explicite. Le test direct
-        -- send/recv après join sans close devrait toujours marcher
-        -- pour l'inbox (parent peut encore push) et l'outbox vide
-        -- (parent voit "empty"). Mais ce qu'on teste vraiment c'est
-        -- le comportement après close() explicite par le parent.
-        w:close()
-        local sok, serr = w:send("nope")
-        ok("send après w:close() -> (false, 'closed')",
+        w:join()
+        local sok, serr = w:send("nope", 0)
+        ok("DOC 3 send after worker completion -> (false, 'closed')",
             sok == false and serr == "closed",
             "got=(" .. tostring(sok) .. ", " .. tostring(serr) .. ")")
     end
@@ -5317,6 +8468,25 @@ do
             pcall(function() w:recv("abc") end) == false)
         ok("send(value, -1) -> luaL_error",
             pcall(function() w:send("x", -1) end) == false)
+        ok("DOC 3 worker timeout numeric string rejected",
+            pcall(function() w:recv("0.1") end) == false)
+        ok("DOC 3 worker timeout > 24h rejected",
+            pcall(function() w:recv(86400.001) end) == false)
+        w:join()
+    end
+
+    -- Toute durée strictement positive reste une attente bornée, même
+    -- sous la milliseconde. L'ancien floor la transformait en timeout=0.
+    do
+        local w = W.spawn("babet.sleep(200, 'ms'); return true",
+            nil, { inbox_capacity = 1 })
+        local first_ok = w:send("first", 0)
+        local second_ok, second_err = w:send("second", 0.0001)
+        ok("DOC 3 tiny positive worker timeout is not non-blocking",
+            first_ok == true and second_ok == false
+            and second_err == "timeout",
+            "got=(" .. tostring(second_ok) .. ","
+                .. tostring(second_err) .. ")")
         w:join()
     end
 
@@ -5338,11 +8508,59 @@ do
             pcall(function()
                 W.spawn("return 1", nil, { inbox_capacity = 1.5 })
             end) == false)
+        ok("DOC 3 inbox_capacity numeric string rejected",
+            pcall(function()
+                W.spawn("return 1", nil, { inbox_capacity = "2" })
+            end) == false)
+        ok("DOC 3 inbox_capacity > 1000000 rejected",
+            pcall(function()
+                W.spawn("return 1", nil, { inbox_capacity = 1000001 })
+            end) == false)
+        ok("DOC 3 outbox_capacity > 1000000 rejected",
+            pcall(function()
+                W.spawn("return 1", nil, { outbox_capacity = 1000001 })
+            end) == false)
     end
 
     -- ============================================================
     -- Chantier 9-3 : worker.send / worker.recv côté worker
     -- ============================================================
+
+    -- ----- nil est une vraie valeur de message -------------------
+    do
+        local w = W.spawn([[
+            local got, value = worker.recv()
+            return { got = got, value_is_nil = value == nil }
+        ]])
+        local sent, send_err = w:send(nil)
+        local joined, result = w:join()
+        ok("DOC 3 workers can transfer a nil message",
+            sent == true and send_err == nil and joined == true
+            and type(result) == "table" and result.got == true
+            and result.value_is_nil == true)
+    end
+
+    -- ----- close ferme l'inbox, pas l'outbox ----------------------
+    do
+        local w = W.spawn([[
+            worker.send("ready")
+            local got, reason = worker.recv()
+            worker.send({ got = got, reason = reason })
+            return "done"
+        ]])
+        local ready_ok, ready = w:recv(2)
+        local close_result = table.pack(w:close())
+        local report_ok, report = w:recv(2)
+        local joined, result = w:join()
+        ok("DOC 3 job:close returns (true, nil)",
+            close_result.n == 2 and close_result[1] == true
+            and close_result[2] == nil)
+        ok("DOC 3 close keeps outbox drainable",
+            ready_ok == true and ready == "ready"
+            and report_ok == true and type(report) == "table"
+            and report.got == false and report.reason == "closed"
+            and joined == true and result == "done")
+    end
 
     -- ----- Echo persistant (le pattern canonique) ---------------
     do
@@ -5601,6 +8819,237 @@ do
         -- s'en tient aux invariants de structure (already testés ci-dessus).
         print("[INFO] arg: run hors run_tests.sh, "
             .. "vérifications positionnelles ignorées")
+    end
+end
+
+-- =====================================================================
+print("")
+print("=== create-exe: publication atomique (lot 1) ===")
+
+do
+    -- Un exécutable embarqué transmet volontairement --create-exe à son
+    -- propre main.lua au lieu de réactiver le mode constructeur du runtime.
+    -- Relancer /proc/self/exe depuis ce mode exécuterait donc récursivement
+    -- toute cette suite jusqu'au timeout. Le test de publication atomique
+    -- n'a de sens qu'en mode dossier, où arg[-1] désigne le runner Babet.
+    if not (arg and arg[-1] ~= nil) then
+        print("[INFO] LOT 1 create-exe: ignoré en mode embarqué "
+            .. "(testé en mode dossier)")
+    else
+        local function write_all(path, content)
+            local f, err = io.open(path, "wb")
+            if not f then return nil, err end
+            local wrote, write_err = f:write(content)
+            local closed, close_err = f:close()
+            if not wrote then return nil, write_err end
+            if closed == nil then return nil, close_err end
+            return true
+        end
+
+        local function read_all(path)
+            local f = io.open(path, "rb")
+            if not f then return nil end
+            local content = f:read("*a")
+            f:close()
+            return content
+        end
+
+        local function trimmed_stdout(result)
+            if type(result) ~= "table" or type(result.stdout) ~= "string" then
+                return nil
+            end
+            return (result.stdout:gsub("%s+$", ""))
+        end
+
+        -- Attention : `readlink /proc/self/exe` exécuté via babet.exec
+        -- désignerait le binaire `readlink` lui-même. On cible explicitement
+        -- le PID du processus Babet qui exécute ce main.lua.
+        local proc_exe = "/proc/" .. tostring(babet.pid()) .. "/exe"
+        local exe_result = babet.exec("readlink", { "-f", proc_exe })
+        local current_exe = trimmed_stdout(exe_result)
+        if not current_exe or current_exe == "" then
+            ok("LOT 1 create-exe: chemin du binaire courant disponible",
+                false, "readlink " .. proc_exe .. " a échoué")
+        else
+            local root = sb("lot1_atomic")
+            local project = root .. "/project"
+            local output = root .. "/atomic_app"
+            local sentinel = "ANCIEN_EXECUTABLE_INTACT\n"
+
+            babet.rmdirAll(root)
+            babet.mkdir(project)
+            local wrote_main, main_err = write_all(project .. "/main.lua",
+                'print("LOT1_ATOMIC_NEW")\n')
+            ok("LOT 1 create-exe: projet de test créé",
+                wrote_main == true, main_err)
+            local wrote_old, old_err = write_all(output, sentinel)
+            ok("LOT 1 create-exe: ancien output préparé",
+                wrote_old == true, old_err)
+
+            -- RLIMIT_FSIZE limite le fichier à 64 blocs (32 Kio sur Linux).
+            -- Le petit ZIP du projet est créé, puis l'écriture du binaire dans
+            -- le temporaire de mergeFiles échoue avec EFBIG. SIGXFSZ est ignoré
+            -- afin que write(2) rende une erreur capturable au lieu de tuer le
+            -- processus avant les destructeurs RAII.
+            local force_failure_script =
+                'trap "" XFSZ; ulimit -f 64; '
+                .. 'exec "$1" --create-exe "$2" "$3"'
+            local forced = babet.exec("sh", {
+                "-c", force_failure_script, "babet-lot1",
+                current_exe, project, output,
+            }, { timeout = 30 })
+
+            ok("LOT 1 create-exe: échec d'écriture forcé atteint",
+                type(forced) == "table" and forced.code ~= 0
+                and type(forced.stderr) == "string"
+                and forced.stderr:find(
+                    "failed to build executable", 1, true) ~= nil,
+                "code=" .. tostring(forced and forced.code)
+                .. " stderr=" .. tostring(forced and forced.stderr))
+            ok("  ancien output strictement intact après l'échec",
+                read_all(output) == sentinel,
+                "content=" .. tostring(read_all(output)))
+
+            local find_temp_script =
+                'find "$1" -maxdepth 1 -name ".babet-atomic_app.*" -print'
+            local leftovers_after_failure = babet.exec("sh", {
+                "-c", find_temp_script, "babet-lot1", root,
+            }, { timeout = 5 })
+            ok("  aucun temporaire partiel après l'échec",
+                trimmed_stdout(leftovers_after_failure) == "",
+                "files=" .. tostring(trimmed_stdout(leftovers_after_failure)))
+
+            -- Publication réussie : remplace l'ancien output, produit un mode
+            -- 0755, exécute le nouveau main.lua et ne laisse aucun temporaire.
+            local built = babet.exec(current_exe, {
+                "--create-exe", project, output,
+            }, { timeout = 30 })
+            ok("LOT 1 create-exe: remplacement atomique réussi",
+                type(built) == "table" and built.code == 0,
+                "code=" .. tostring(built and built.code)
+                .. " stderr=" .. tostring(built and built.stderr))
+
+            local mode, mode_err = babet.getMode(output)
+            ok("  mode final == 0755",
+                mode == tonumber("755", 8) and mode_err == nil,
+                "mode=" .. tostring(mode) .. " err=" .. tostring(mode_err))
+
+            local launched = babet.exec(output, {}, { timeout = 10 })
+            ok("  nouvel exécutable utilisable",
+                type(launched) == "table" and launched.code == 0
+                and trimmed_stdout(launched) == "LOT1_ATOMIC_NEW",
+                "code=" .. tostring(launched and launched.code)
+                .. " stdout=" .. tostring(launched and launched.stdout)
+                .. " stderr=" .. tostring(launched and launched.stderr))
+
+            local leftovers_after_success = babet.exec("sh", {
+                "-c", find_temp_script, "babet-lot1", root,
+            }, { timeout = 5 })
+            ok("  aucun temporaire après le succès",
+                trimmed_stdout(leftovers_after_success) == "",
+                "files=" .. tostring(trimmed_stdout(leftovers_after_success)))
+
+            babet.rmdirAll(root)
+        end
+    end
+
+end
+
+-- =====================================================================
+print("")
+print("=== embedded ZIP size limit (lot 3) ===")
+
+do
+    -- La construction d'un exécutable n'est disponible qu'en mode dossier.
+    -- Le test produit un module Lua de 16 MiB + quelques octets, très
+    -- compressible, puis vérifie que le binaire embarqué le refuse avant
+    -- toute allocation géante ou compilation Lua.
+    if not (arg and arg[-1] ~= nil) then
+        print("[INFO] LOT 3 ZIP limit: ignoré en mode embarqué "
+            .. "(testé en mode dossier)")
+    else
+        local function write_text(path, content)
+            local f, err = io.open(path, "wb")
+            if not f then return nil, err end
+            local wrote, write_err = f:write(content)
+            local closed, close_err = f:close()
+            if not wrote then return nil, write_err end
+            if closed == nil then return nil, close_err end
+            return true
+        end
+
+        local function write_oversized_module(path)
+            local f, err = io.open(path, "wb")
+            if not f then return nil, err end
+            if not f:write("--") then
+                f:close()
+                return nil, "cannot write module prefix"
+            end
+            local chunk = string.rep("x", 1024)
+            -- 16 MiB + 1 KiB, sans allouer une chaîne de 16 MiB en Lua.
+            for _ = 1, 16 * 1024 + 1 do
+                local wrote, write_err = f:write(chunk)
+                if not wrote then
+                    f:close()
+                    return nil, write_err
+                end
+            end
+            local wrote, write_err = f:write("\nreturn true\n")
+            local closed, close_err = f:close()
+            if not wrote then return nil, write_err end
+            if closed == nil then return nil, close_err end
+            return true
+        end
+
+        local function trimmed_stdout(result)
+            if type(result) ~= "table" or type(result.stdout) ~= "string" then
+                return nil
+            end
+            return (result.stdout:gsub("%s+$", ""))
+        end
+
+        local proc_exe = "/proc/" .. tostring(babet.pid()) .. "/exe"
+        local exe_result = babet.exec("readlink", { "-f", proc_exe })
+        local current_exe = trimmed_stdout(exe_result)
+        local root = sb("lot3_zip_limit")
+        local project = root .. "/project"
+        local output = root .. "/oversized_app"
+
+        babet.rmdirAll(root)
+        babet.mkdir(project)
+
+        local main_ok, main_err = write_text(project .. "/main.lua",
+            'local v = require("huge")\nprint(v)\n')
+        ok("LOT 3 ZIP limit: main.lua created", main_ok == true, main_err)
+
+        local huge_ok, huge_err = write_oversized_module(project .. "/huge.lua")
+        ok("LOT 3 ZIP limit: oversized module created",
+            huge_ok == true, huge_err)
+
+        if not current_exe or current_exe == "" then
+            ok("LOT 3 ZIP limit: current executable resolved", false,
+                "readlink failed")
+        else
+            local built = babet.exec(current_exe, {
+                "--create-exe", project, output,
+            }, { timeout = 60 })
+            ok("LOT 3 ZIP limit: executable built",
+                type(built) == "table" and built.code == 0,
+                "code=" .. tostring(built and built.code)
+                .. " stderr=" .. tostring(built and built.stderr))
+
+            local launched = babet.exec(output, {}, { timeout = 15 })
+            ok("LOT 3 ZIP limit: oversized embedded module rejected",
+                type(launched) == "table" and launched.code ~= 0
+                and type(launched.stderr) == "string"
+                and launched.stderr:find(
+                    "exceeds maximum embedded file size of 16 MiB",
+                    1, true) ~= nil,
+                "code=" .. tostring(launched and launched.code)
+                .. " stderr=" .. tostring(launched and launched.stderr))
+        end
+
+        babet.rmdirAll(root)
     end
 end
 

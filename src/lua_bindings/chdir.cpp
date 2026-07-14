@@ -58,14 +58,9 @@ std::optional<std::string> chdir(const fs::path &path)
  */
 int lua_chdir(lua_State *L)
 {
-    size_t len;
-    const char *path_cstr = luaL_checklstring(L, 1, &len);
-    if (!path_cstr)
-    {
-        return luaL_error(L, "Expected one string argument");
-    }
-
-    fs::path path(std::string_view(path_cstr, len));
+    std::string path_string =
+        luaL_checkstring_without_nul(L, 1, "path");
+    fs::path path(path_string);
 
     // CORRECTIF (option A validée, revue Gemini triée) : le CWD est
     // PROCESS-WIDE — un chdir, même depuis le main thread, change la

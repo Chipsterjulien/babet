@@ -1,91 +1,201 @@
 > **English** | [Français](../../fr/modules/strings.md)
 
-# `babet` strings — string manipulation
+# `babet` strings — splitting strings
 
-A single function : split a string by a separator into a table.
-Predates the sub-namespace convention, lives directly on
-`babet`.
+Babet exposes one string-manipulation function: `babet.split`. It is
+registered directly on the `babet` table, without a sub-namespace, to preserve
+the historical API.
 
-## Why
+## Module contents
 
-Splitting a string by a delimiter is one of the most common
-string operations, and Lua's standard library doesn't have one
-out of the box (`string.gmatch` works but requires pattern
-escaping). A dedicated function is more discoverable and avoids
-the pattern-escaping trap.
+- [API](#strings-api)
+- [Separator mode](#strings-separator)
+  - [Limiting the number of cuts](#strings-max-splits)
+- [Byte mode](#strings-bytes)
+- [Binary strings and NUL bytes](#strings-binary)
+- [Empty subject](#strings-empty)
+- [Error contract](#strings-errors)
+- [Limits and design choices](#strings-limits)
 
+<a id="strings-api"></a>
 ## API
 
-| Function | Returns |
-| --- | --- |
-| `babet.split(s [, sep [, max_splits]])` | `table` (array) of substrings |
-
-- `s` : the string to split. Binary-safe: NUL bytes are preserved.
-- `sep` : optional separator — a **single character**, literal (no
-  patterns). An empty string, or omitting the argument, switches to
-  **character mode**: `s` is split into individual characters. More
-  than one character → raises.
-- `max_splits` : maximum number of cuts, optional (default `-1` =
-  unlimited). The uncut remainder lands in the last element, so `0`
-  returns `{ s }`. Ignored in character mode.
-
-If `sep` doesn't appear in `s`, the result is a one-element table
-containing the whole `s`.
-
-Empty-string edge cases (historical behavior, frozen and tested):
-
-- `babet.split("", sep)` returns `{ "" }` — one empty entry, not an
-  empty table.
-- `babet.split("")` (character mode) returns `{}` — an empty table.
-
-## Quick example
-
 ```lua
-local parts = babet.split("a,b,c,d", ",")
--- parts == { "a", "b", "c", "d" }
-
-local one = babet.split("hello", ",")
--- one == { "hello" }
-
--- Character mode (sep omitted or empty)
-local chars = babet.split("abc")
--- chars == { "a", "b", "c" }
-
--- Bounded number of cuts: remainder in the last element
-local kv = babet.split("key,val,ue", ",", 1)
--- kv == { "key", "val,ue" }
+local parts = babet.split(s [, sep [, max_splits]])
 ```
 
+The function requires **one to three arguments** and returns exactly one value:
+a dense table indexed from `1` to `n`.
+
+| Argument | Type and behavior |
+| --- | --- |
+| `s` | Required Lua string. Numbers are not converted implicitly. Embedded NUL bytes are preserved. |
+| `sep` | Optional Lua string. Omitted or empty: byte mode. Otherwise it must contain exactly **one byte**, used literally. |
+| `max_splits` | Optional Lua integer greater than or equal to `-1`. `-1` means unlimited and `0` prevents every cut. Used only when `sep` contains one byte. |
+
+`nil` is not a placeholder for an optional argument:
+`babet.split("abc", nil)` raises an error. To supply `max_splits` in byte mode,
+pass `""` explicitly as the second argument.
+
+<a id="strings-separator"></a>
+## Separator mode
+
+When `sep` contains exactly one byte, every occurrence of that byte produces a
+cut. The separator is **literal**: it is neither a Lua pattern nor a regular
+expression.
+
+```lua
+babet.split("a,b,c", ",")
+-- { "a", "b", "c" }
+
+babet.split("a.b.c", ".")
+-- { "a", "b", "c" }  -- the dot is not a wildcard
+```
+
+Empty fields are preserved at the beginning, between adjacent separators, and
+at the end:
+
+```lua
+babet.split(",a", ",")
+-- { "", "a" }
+
+babet.split("a,,b", ",")
+-- { "a", "", "b" }
+
+babet.split("a,", ",")
+-- { "a", "" }
+```
+
+If the separator does not occur, the result contains the whole subject:
+
+```lua
+babet.split("hello", ",")
+-- { "hello" }
+```
+
+<a id="strings-max-splits"></a>
+### Limiting the number of cuts
+
+`max_splits` counts **cuts**, not produced elements. The uncut remainder is
+stored verbatim in the last element.
+
+```lua
+babet.split("a,b,c,d", ",", 2)
+-- { "a", "b", "c,d" }
+
+babet.split("a,b,c", ",", 0)
+-- { "a,b,c" }
+
+babet.split("a,b,c", ",", -1)
+-- { "a", "b", "c" }
+```
+
+Any value greater than the number of available separators has the same effect
+as `-1`.
+
+<a id="strings-bytes"></a>
+## Byte mode
+
+If `sep` is omitted or is `""`, the subject is split byte by byte. There is
+therefore **no default space separator**.
+
+```lua
+babet.split("ab c")
+-- { "a", "b", " ", "c" }
+
+babet.split("abc", "")
+-- { "a", "b", "c" }
+```
+
+When supplied in this mode, `max_splits` is still validated but is not used:
+
+```lua
+babet.split("abc", "", 0)
+-- { "a", "b", "c" }
+```
+
+This mode works on **bytes**, not Unicode code points. A multi-byte UTF-8
+character is therefore returned as several one-byte strings:
+
+```lua
+local bytes = babet.split("é")
+-- #bytes == 2 in UTF-8
+-- table.concat(bytes) == "é"
+```
+
+Likewise, a multi-byte UTF-8 separator such as `"é"` is rejected because
+`sep` must contain zero or one byte. Use Lua code (`string.find`,
+`string.gmatch`, and so on) or a dedicated function to split on a multi-byte
+string.
+
+<a id="strings-binary"></a>
+## Binary strings and NUL bytes
+
+The subject, separator, and output elements are handled with their exact Lua
+length. A NUL byte never truncates the data:
+
+```lua
+local parts = babet.split("a\0b,c", ",")
+-- { "a\0b", "c" }
+
+local parts2 = babet.split("a\0b", "\0")
+-- { "a", "b" }
+```
+
+UTF-8 content also stays intact when split with an ASCII byte:
+
+```lua
+babet.split("été:ok", ":")
+-- { "été", "ok" }
+```
+
+<a id="strings-empty"></a>
+## Empty subject
+
+Two different historical behaviors are preserved:
+
+```lua
+babet.split("", ",")
+-- { "" }
+
+babet.split("")
+-- {}
+
+babet.split("", "")
+-- {}
+```
+
+In separator mode, finding zero separators means returning one element with the
+whole subject, even when it is empty. In byte mode, a zero-byte subject
+produces no elements.
+
+<a id="strings-errors"></a>
 ## Error contract
 
-- **Wrong argument types** → raises via `luaL_error`.
-- **`sep` longer than one character** → raises.
-- **`max_splits` not an integer or < -1** → raises.
-- Otherwise always succeeds.
+Every failure is a raised Lua error; `split` has no `(nil, err)` return path.
 
-## Design decisions
+The function raises in particular when:
 
-- **Literal separator, not Lua pattern**. The common case is
-  splitting CSV-like data, where you want `.` to mean a literal
-  dot, not "any character". If you need pattern matching, fall
-  back to `string.gmatch`.
-- **Empty entries are preserved**. `"a,,b"` splits into
-  `{"a", "", "b"}`. Consumers who want to filter empty strings
-  do it in one line of Lua.
-- **`split("", sep)` returns `{ "" }`**. This is the natural
-  consequence of the "empty entries are preserved" rule (zero
-  separators found → one element, the whole string — which happens
-  to be empty). Observable since v1, so frozen rather than changed.
-- **Character mode when `sep` is omitted or empty**. There is no
-  default separator: without one, the only coherent reading of a
-  split is character by character. Note: the split is per **byte**,
-  not per Unicode code point — a multi-byte UTF-8 character will be
-  torn apart.
+- fewer than one or more than three arguments are supplied;
+- `s` is not an actual Lua string;
+- `sep` is present but is not an actual Lua string;
+- `sep` contains more than one byte;
+- `max_splits` is not a Lua integer;
+- `max_splits` is less than `-1`.
 
-## Not in v1
+Implicit number-to-string conversions are not accepted:
 
-- Pattern-based splitting (with escape rules). Use `string.gmatch`
-  if needed.
-- Multi-character separators.
-- `joinTable(t, sep)` mirror — `table.concat` already exists in the
-  stdlib.
+```lua
+babet.split(123, ",")          -- error
+babet.split("123", 2)          -- error
+babet.split("a,b", ",", "1") -- error
+```
+
+<a id="strings-limits"></a>
+## Limits and design choices
+
+- This is not a CSV parser: quoting, escaping, and records are not handled.
+- Multi-byte separators and Lua patterns are not supported.
+- Empty fields are intentionally preserved.
+- No `join` counterpart is exposed because Lua's standard `table.concat`
+  already provides it.

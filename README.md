@@ -32,13 +32,40 @@ Can be used in three modes:
 git clone https://github.com/Chipsterjulien/babet.git
 cd babet
 ./build_local.sh        # downloads deps and compiles (~5 min first time)
-./run_tests.sh          # offline harness — should print 974 PASS / 0 FAIL
+./run_tests.sh          # offline harness — should finish with 0 FAIL
 ./test/babet --help
 ```
 
 The build script vendors and compiles all its dependencies. The only
 prerequisites on your system are a C++23 compiler, CMake, `wget`, and
 `unzip`.
+
+## Pre-release validation
+
+Before tagging a release, run the complete validation with one command:
+
+```sh
+./run_tests.sh --release
+```
+
+Network checks that validate Babet itself are blocking. Google and AUR are advisory by default, so a third-party outage, proxy, or DNS filter does not invalidate a release. To make those probes blocking too:
+
+```sh
+BABET_SMOKE_STRICT_EXTERNAL=1 ./run_tests.sh --release
+```
+
+It automatically runs the ASan/UBSan suite, restores and revalidates the normal build, then runs the network smoke tests against that final binary. The normal build step is still attempted when the sanitizer stage fails, so `test/babet` is not deliberately left instrumented. Internet access is required only for the network stage.
+
+The individual commands remain available for diagnosis:
+
+```sh
+./run_tests.sh --sanitizers
+./run_tests.sh
+./smoke_test_network.sh ./test/babet
+```
+
+Valgrind is optional; ASan and UBSan are the primary memory and undefined
+behaviour checks used by the project.
 
 ## Documentation
 
@@ -74,9 +101,9 @@ to test, not a fix to apply blindly.
 The pine cone illustrations in `docs/assets/` were generated with
 ChatGPT (image model gpt-image-1).
 
-All architectural decisions, the test harness (974 PASS / 0 FAIL
-across 3 modes), and the validation of every change before tagging
-are the author's responsibility. The AI tools accelerated drafting
+All architectural decisions, the comprehensive test harness across folder
+and embedded modes, and the validation of every change before tagging are
+the author's responsibility. The AI tools accelerated drafting
 and exploration; they did not replace human judgement.
 
 ## License

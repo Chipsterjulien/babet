@@ -1,57 +1,53 @@
 #include "remove.hpp"
 #include "lua_utils.hpp"
-#include <filesystem>
+
+#include <cerrno>
+#include <cstring>
 #include <string>
-#include <system_error>
+#include <sys/stat.h>
+#include <unistd.h>
 
-namespace fs = std::filesystem;
+namespace
+{
+std::string system_error(const std::string &prefix, const std::string &path,
+                         int error_number)
+{
+    return prefix + " '" + path + "': " + std::strerror(error_number);
+}
+} // namespace
 
-/**
- * @brief Function to remove a file
- *
- * This function takes a string representing the path of the file,
- * and removes the file.
- *
- * @param path The path of the file to remove
- * @return An error message if any, or an empty string if successful.
- */
-std::string remove_file(const std::string& path) {
-    std::error_code ec;
-
-    // Check if the file exists
-    std::error_code exist_ec;
-    if (!fs::exists(path, exist_ec)) {
-        return "File does not exist: " + path;
+std::string remove_file(const std::string &path)
+{
+    struct stat status
+    {
+    };
+    if (::lstat(path.c_str(), &status) != 0)
+    {
+        return system_error("cannot inspect file", path, errno);
     }
 
-    // Attempt to remove the file
-    if (!fs::remove(path, ec)) {
-        switch (ec.value()) {
-            case static_cast<int>(std::errc::permission_denied):
-                return "Permission denied: " + path;
-            case static_cast<int>(std::errc::no_such_file_or_directory):
-                return "No such file or directory: " + path;
-            default:
-                return "cannot remove file '" + path + "': " + ec.message();
-        }
+    // remove() is deliberately the non-directory primitive. lstat() means a
+    // symlink to a directory, including a dangling symlink, is still removed
+    // as a symlink rather than followed.
+    if (S_ISDIR(status.st_mode))
+    {
+        return "path is a directory; use rmdir or rmdirAll: " + path;
     }
-    return "";
+    if (!S_ISREG(status.st_mode) && !S_ISLNK(status.st_mode))
+    {
+        return "path is neither a regular file nor a symlink: " + path;
+    }
+
+    if (::unlink(path.c_str()) != 0)
+    {
+        return system_error("cannot remove file", path, errno);
+    }
+    return {};
 }
 
-/**
- * @brief Lua-accessible function to remove a file
- *
- * This function is called from Lua and uses the remove_file function to remove a file.
- * It expects to receive a string as an argument.
- * If the argument is not a string, a Lua error is raised.
- *
- * @param L Pointer to the Lua state
- * @return Number of return values on the Lua stack (1: error message or nil).
- */
 int lua_remove_file(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc != 1)
+    if (lua_gettop(L) != 1)
     {
         return luaL_error(L, "Expected one argument");
     }
@@ -60,8 +56,8 @@ int lua_remove_file(lua_State *L)
         return luaL_error(L, "Expected a string as argument");
     }
 
-    const char *path = lua_tostring(L, 1);
-    std::string error_message = remove_file(path);
+    const std::string path = luaL_checkstring_without_nul(L, 1, "path");
+    const std::string error_message = remove_file(path);
     if (error_message.empty())
     {
         return push_ok(L);

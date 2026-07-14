@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(babet VERSION 2.2.1 LANGUAGES CXX C)
+project(babet VERSION 2.3.0 LANGUAGES CXX C)
 
 # Génère src/generated/version.hpp depuis src/version.hpp.in,
 # en injectant les composants de version définis dans project().
@@ -16,6 +16,12 @@ include_directories(${CMAKE_BINARY_DIR}/generated)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
+
+# Validation mémoire/UB optionnelle pour les builds de pré-release.
+# Désactivée par défaut afin de ne rien changer aux builds normaux ni
+# aux binaires distribués. Compatible GCC et Clang.
+option(BABET_ENABLE_SANITIZERS
+       "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
 # External libs provided by build_local.sh
 if(NOT LUA_INCLUDE OR NOT LUA_LIB)
@@ -139,7 +145,30 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(STATUS "32-bit platform detected, linking libatomic")
 endif()
 
-target_link_options(${PROJECT_NAME} PRIVATE
-    -static-libgcc
-    -static-libstdc++
-)
+if(BABET_ENABLE_SANITIZERS)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${PROJECT_NAME} PRIVATE
+            -O1
+            -g
+            -fno-omit-frame-pointer
+            -fno-sanitize-recover=all
+            -fsanitize=address,undefined
+        )
+        target_link_options(${PROJECT_NAME} PRIVATE
+            -fno-sanitize-recover=all
+            -fsanitize=address,undefined
+        )
+        message(STATUS "Babet sanitizers enabled: ASan + UBSan")
+    else()
+        message(FATAL_ERROR
+            "BABET_ENABLE_SANITIZERS requires GCC or Clang")
+    endif()
+else()
+    # Les runtimes statiques sont conservés pour les builds normaux.
+    # Ils sont volontairement désactivés avec les sanitizers, dont les
+    # runtimes doivent rester disponibles dynamiquement pendant les tests.
+    target_link_options(${PROJECT_NAME} PRIVATE
+        -static-libgcc
+        -static-libstdc++
+    )
+endif()

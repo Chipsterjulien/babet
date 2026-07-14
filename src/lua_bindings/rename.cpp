@@ -17,51 +17,45 @@ namespace fs = std::filesystem;
  * @param new_path The new name of the file or directory
  * @return A string with the error message if any, or an empty string if successful.
  */
-std::string rename_file(std::string_view old_path, std::string_view new_path) {
-    std::error_code ec;
-
-    // Check if the old path is empty
-    if (old_path.empty()) {
+std::string rename_file(std::string_view old_path, std::string_view new_path)
+{
+    if (old_path.empty())
+    {
         return "The old path is empty.";
     }
-
-    // Check if the new path is empty
-    if (new_path.empty()) {
+    if (new_path.empty())
+    {
         return "The new path is empty.";
     }
-
-    // Check if the old path exists
-    std::error_code exist_ec;
-    if (!fs::exists(old_path, exist_ec)) {
-        return "Source path does not exist: " + std::string(old_path);
-    }
-
-    // Check if the new path is different from the old path
-    if (old_path == new_path) {
+    if (old_path == new_path)
+    {
         return "The new path must be different from the old path.";
     }
 
-    // Attempt to rename the file or directory
-    try {
-        fs::rename(old_path, new_path, ec);
-    } catch (const fs::filesystem_error& e) {
-        return "Filesystem error: " + std::string(e.what());
+    // Do not pre-check with exists(): it follows symlinks and would reject a
+    // dangling symlink even though rename(2) can rename the directory entry.
+    std::error_code ec;
+    fs::rename(fs::path(old_path), fs::path(new_path), ec);
+    if (!ec)
+    {
+        return {};
     }
 
-    if (ec) {
-        switch (ec.value()) {
-            case static_cast<int>(std::errc::permission_denied):
-                return "Permission denied: " + std::string(old_path);
-            case static_cast<int>(std::errc::no_such_file_or_directory):
-                return "No such file or directory: " + std::string(old_path);
-            case static_cast<int>(std::errc::file_exists):
-                return "File already exists at destination: " + std::string(new_path);
-            default:
-                return "cannot rename '" + std::string(old_path) + "' to '" + std::string(new_path) + "': " + ec.message();
-        }
+    if (ec == std::errc::permission_denied)
+    {
+        return "Permission denied: " + std::string(old_path);
     }
-
-    return "";
+    if (ec == std::errc::no_such_file_or_directory)
+    {
+        return "No such file or directory: " + std::string(old_path);
+    }
+    if (ec == std::errc::file_exists)
+    {
+        return "File already exists at destination: " +
+               std::string(new_path);
+    }
+    return "cannot rename '" + std::string(old_path) + "' to '" +
+           std::string(new_path) + "': " + ec.message();
 }
 
 /**
@@ -86,10 +80,13 @@ int lua_rename(lua_State *L)
         return luaL_error(L, "Expected two strings as arguments");
     }
 
-    const char *old_path = lua_tostring(L, 1);
-    const char *new_path = lua_tostring(L, 2);
+    const std::string_view old_path =
+        luaL_checkstring_view_without_nul(L, 1, "source");
+    const std::string_view new_path =
+        luaL_checkstring_view_without_nul(L, 2, "destination");
 
-    std::string error_message = rename_file(old_path, new_path);
+    std::string error_message =
+        rename_file(std::string(old_path), std::string(new_path));
     if (error_message.empty())
     {
         return push_ok(L);

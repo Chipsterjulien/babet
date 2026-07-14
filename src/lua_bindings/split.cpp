@@ -12,7 +12,7 @@
  *   the uncut remainder lands in the last element.
  *
  * If the delimiter is an empty string, OR OMITTED, the function splits
- * the input string into individual characters ("character mode").
+ * the input string into individual bytes ("byte mode").
  * There is no default delimiter. (Docstring corrigée à l'audit v21 :
  * elle annonçait un espace par défaut, ce qui n'a jamais été le
  * comportement — décision : doc alignée sur le code, API inchangée.)
@@ -34,9 +34,11 @@ int lua_split(lua_State *L)
         return luaL_error(L, "Expected 1 to 3 arguments: string, optional delimiter, and optional max_splits");
     }
 
-    if (!lua_isstring(L, 1))
+    // Lua's lua_isstring() also accepts numbers because they can be
+    // converted to text. The public API requires an actual Lua string.
+    if (lua_type(L, 1) != LUA_TSTRING)
     {
-        return luaL_error(L, "Expected a string as the first argument");
+        return luaL_error(L, "Expected a Lua string as the first argument");
     }
     // CORRECTIF (audit v21) : longueur Lua réelle via luaL_checklstring,
     // plus std::strlen. Les strings Lua peuvent contenir des NUL ;
@@ -52,12 +54,12 @@ int lua_split(lua_State *L)
     bool has_delimiter = false;
     if (argc >= 2)
     {
-        if (!lua_isstring(L, 2))
+        if (lua_type(L, 2) != LUA_TSTRING)
         {
-            return luaL_error(L, "Expected a string as the second argument");
+            return luaL_error(L, "Expected a Lua string as the second argument");
         }
-        const char *delim = luaL_checkstring(L, 2);
-        size_t delim_len = lua_rawlen(L, 2);
+        size_t delim_len = 0;
+        const char *delim = luaL_checklstring(L, 2, &delim_len);
         if (delim_len == 1)
         {
             delimiter = delim[0];
@@ -65,7 +67,7 @@ int lua_split(lua_State *L)
         }
         else if (delim_len > 1)
         {
-            return luaL_error(L, "Delimiter should be a single character or an empty string");
+            return luaL_error(L, "Delimiter should contain zero or one byte");
         }
     }
 
@@ -95,7 +97,7 @@ int lua_split(lua_State *L)
 
     if (!has_delimiter)
     {
-        // Split by characters
+        // Split by bytes (not Unicode code points).
         for (size_t i = 0; i < str_len; ++i)
         {
             lua_pushinteger(L, i + 1);

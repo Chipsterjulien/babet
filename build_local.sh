@@ -8,16 +8,21 @@ set -e
 
 # Parsing des arguments
 RUN_AFTER_BUILD=0
+ENABLE_SANITIZERS=0
 
 for arg in "$@"; do
     case "$arg" in
         --run)
             RUN_AFTER_BUILD=1
             ;;
+        --sanitizers)
+            ENABLE_SANITIZERS=1
+            ;;
         --help|-h)
-            echo "Usage: $0 [--run]"
+            echo "Usage: $0 [--run] [--sanitizers]"
             echo "  (par défaut)   Compile uniquement"
             echo "  --run          Compile puis exécute le binaire sur test/"
+            echo "  --sanitizers   Compile avec ASan + UBSan (GCC/Clang)"
             exit 0
             ;;
         *)
@@ -152,7 +157,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 DOWNLOAD_DIR="${SCRIPT_DIR}/downloads"
 #
-PROJECT_BUILD_DIR="${BUILD_DIR}/project_build"
+if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    PROJECT_BUILD_DIR="${BUILD_DIR}/project_build_sanitizers"
+    CMAKE_SANITIZERS="ON"
+else
+    PROJECT_BUILD_DIR="${BUILD_DIR}/project_build"
+    CMAKE_SANITIZERS="OFF"
+fi
 PROJECT_NAME="babet"
 #
 # LUA_VERSION="5.4.7"
@@ -583,6 +594,10 @@ bash "${SCRIPT_DIR}/tools/embed_lua_module.sh" \
     "${GENERATED_DIR}/embedded_logging.hpp" \
     "logging"
 
+if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    echo "Configuration pré-release : ASan + UBSan activés."
+fi
+
 cmake "$SCRIPT_DIR" \
     -DLUA_LIB="$LUA_LIB" \
     -DLUA_INCLUDE="$LUA_INCLUDE" \
@@ -595,7 +610,8 @@ cmake "$SCRIPT_DIR" \
     -DTOMLPP_INCLUDE="${TOMLPP_INSTALL_DIR}" \
     -DSQLITE_SRC="${SQLITE_C}" \
     -DSQLITE_INCLUDE="${SQLITE_INSTALL_DIR}" \
-    -DGENERATED_INCLUDE="${GENERATED_DIR}"
+    -DGENERATED_INCLUDE="${GENERATED_DIR}" \
+    -DBABET_ENABLE_SANITIZERS="${CMAKE_SANITIZERS}"
 if [ $? -ne 0 ]; then
     echo "Échec de la configuration avec CMake."
     exit 1

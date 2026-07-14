@@ -1,4 +1,5 @@
 #include "listFiles.hpp"
+#include "lua_utils.hpp"
 #include <iostream>
 #include <system_error>
 #include <optional>
@@ -100,7 +101,7 @@ int lua_listFiles(lua_State *L)
     }
 
     // Get the directory path from the first argument
-    const char *path = luaL_checkstring(L, 1);
+    std::string path = luaL_checkstring_without_nul(L, 1, "path");
     bool recursive = lua_gettop(L) >= 2 ? lua_toboolean(L, 2) : false;
 
     // Validate the directory path

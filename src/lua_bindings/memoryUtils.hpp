@@ -17,11 +17,12 @@ int lua_getMemoryUsage(lua_State *L);
 /**
  * @brief Lua binding for getting detailed memory usage.
  *
- * This function collects garbage and returns the memory usage and an estimation
- * of the total memory in bytes.
+ * This function collects garbage and returns the memory usage twice.
+ * The second return value is kept for API stability; Lua does not expose a
+ * separate reliable "total allocated" metric here.
  *
  * @param L The Lua state.
- * @return int Number of return values (2: memory usage in bytes, estimated total memory in bytes).
+ * @return int Number of return values (2: identical memory usage values in bytes).
  * @note Lua usage: memoryUsedBytes, memoryTotalBytes = lua_getDetailedMemoryUsage()
  */
 int lua_getDetailedMemoryUsage(lua_State *L);

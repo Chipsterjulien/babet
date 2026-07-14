@@ -1,291 +1,1227 @@
 > [English](../../en/modules/fs.md) | **Français**
 
-# `babet` fs — système de fichiers
+# FS — fichiers, dossiers, chemins, recherche, copie, permissions et sommes de contrôle
 
-Un ensemble plat d'opérations système de fichiers exposées
-directement sur `babet` (pas de sous-namespace, précède la
-convention). Couvre les besoins quotidiens que `os.*` et `io.*` de
-Lua ne gèrent pas : listing récursif, copie avec attributs,
-hashing, manipulation de chemins, attributs, liens.
+Les fonctions de ce chapitre sont exposées directement dans la table globale
+`babet`. Il n’existe pas de sous-table `babet.fs` : ce namespace plat est
+historique et fait désormais partie de l’API stable.
 
-## Pourquoi
+Le module FS couvre :
 
-`io` et `os` de Lua te donnent `open`, `rename`, `remove`, et c'est
-à peu près tout. Tout ce qui va au-delà — lister un dossier, copie
-récursive, calculer un hash, interroger mtime — demande des
-programmes externes ou du FFI bas niveau. `babet` rassemble ça
-dans un set unique de fonctions qui se comportent de manière
-cohérente (chemins en string, erreurs en `(nil, "...")`).
+- la vérification de l’existence et du type d’un chemin ;
+- la création et la suppression de fichiers et de dossiers ;
+- le changement de répertoire courant ;
+- la manipulation lexicale des chemins ;
+- le listing, l’itération et la recherche récursive ;
+- la copie et le déplacement d’arborescences ;
+- les liens symboliques ;
+- les permissions, propriétaires et groupes Unix ;
+- les sommes de contrôle CRC-32, MD5, SHA et BLAKE2.
 
-Tous les chemins sont acceptés en string. L'expansion du tilde
-(`~/x`) n'est **pas** automatique — l'appelant doit résoudre
-`$HOME` lui-même si besoin. Les fonctions n'expansent jamais les
-globs ; pour filtrer, utilise `babet.find` avec une regex
-`name`/`iname`/`path`.
+## Table des matières du module
 
-## API — Existence, type, attributs
+- [Conventions générales](#fs-conventions)
+- [Vue d’ensemble de l’API](#fs-api-summary)
+- [Existence, type et taille](#fs-predicates)
+  - [`fileExists`](#fileexists)
+  - [`isFile` / `isfile`](#isfile)
+  - [`isDir` / `isdir`](#isdir)
+  - [`fileSize`](#filesize)
+- [Répertoire courant](#fs-cwd)
+  - [`currentDir`](#currentdir)
+  - [`chdir`](#chdir)
+- [Manipulation lexicale des chemins](#fs-paths)
+  - [`getBasename`](#getbasename)
+  - [`getFilename`](#getfilename)
+  - [`getExtension`](#getextension)
+  - [`getPath`](#getpath)
+  - [`joinPath`](#joinpath)
+- [Créer, supprimer, renommer et lier](#fs-actions)
+  - [`touch`](#touch)
+  - [`mkdir`](#mkdir)
+  - [`remove`](#remove)
+  - [`rmdir`](#rmdir)
+  - [`rmdirAll`](#rmdirall)
+  - [`rename`](#rename)
+  - [`link`](#link)
+- [Lister, itérer et rechercher](#fs-list-search)
+  - [`listFiles`](#listfiles)
+  - [`createFileIterator`](#createfileiterator)
+  - [`find`](#find)
+- [Copier et déplacer](#fs-copy-move)
+  - [`copy`](#copy)
+  - [`copyTree`](#copytree)
+  - [`moveTree`](#movetree)
+- [Permissions et attributs Unix](#fs-attributes)
+  - [`getMode` / `setMode`](#getmode-setmode)
+  - [`getAttributes` / `setAttributes`](#getattributes-setattributes)
+  - [`symlinkAttr` / `symlinkattr`](#symlinkattr)
+- [Sommes de contrôle de fichiers](#fs-checksums)
+- [CRC-32 en mémoire](#crc32-memory)
+- [Contrat d’erreur](#fs-errors)
+- [Décisions et limites](#fs-design)
 
-| Fonction                                     | Renvoie                                                                                                                               |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `babet.fileExists(path)`                     | `boolean`                                                                                                                             |
-| `babet.isFile(path)`                         | `boolean` (true seulement pour fichiers réguliers)                                                                                    |
-| `babet.isDir(path)`                          | `boolean`                                                                                                                             |
-| `babet.fileSize(path)`                       | `integer` octets \| `(nil, err)`                                                                                                      |
-| `babet.getAttributes(path)`                  | `table` avec **`mode`, `owner`, `group`** (uniquement) \| `(nil, err)`                                                     |
-| `babet.setAttributes(path, uid, gid, mode?)` | `(true, nil)` \| `(nil, err)` — set owner/group, optionnellement le mode                                                              |
-| `babet.symlinkAttr(path, uid, gid)`          | `(true, nil)` \| `(nil, err)` — change owner/group du lien **lui-même** (lchown, ne suit pas le symlink) ; pendant de `setAttributes` |
-| `babet.getMode(path)`                        | `integer` octal \| `(nil, err)`                                                                                                       |
-| `babet.setMode(path, mode)`                  | `(true, nil)` \| `(nil, err)` — `mode` est un integer (utilise `0x1ed` pour `0755`, ou construis-le avec `tonumber("755", 8)`)        |
+<a id="fs-conventions"></a>
+## Conventions générales
 
-> Canonique : camelCase pour les composés Babet (`isFile`, `isDir`,
-> `symlinkAttr`), minuscules pour les noms hérités de POSIX (`mkdir`,
-> `chdir`, `touch`...). Les anciens noms `isfile`, `isdir` et
-> `symlinkattr` restent des alias **dépréciés** des mêmes fonctions.
+### Chemins
 
-## API — Création, suppression, déplacement
+Les chemins sont des chaînes Lua. Ils peuvent être relatifs ou absolus.
 
-| Fonction                 | Renvoie                                                                                   |
-| ------------------------ | ----------------------------------------------------------------------------------------- |
-| `babet.touch(path)`      | `(true, nil)` \| `(nil, err)` — crée le fichier ou met à jour mtime                       |
-| `babet.mkdir(path)`      | `(true, nil)` \| `(nil, err)` — **toujours récursif** (`mkdir -p` natif), voir ci-dessous |
-| `babet.rmdir(path)`      | `(true, nil)` \| `(nil, err)` — seulement dossiers vides                                  |
-| `babet.rmdirAll(path)`   | `(true, nil)` \| `(nil, err)` — récursif                                                  |
-| `babet.remove(path)`     | `(true, nil)` \| `(nil, err)` — fichier ou symlink                                        |
-| `babet.rename(old, new)` | `(true, nil)` \| `(nil, err)`                                                             |
-| `babet.chdir(path)`      | `(true, nil)` \| `(nil, err)`                                                             |
+Babet ne réalise pas automatiquement :
 
-> `chdir` mute le répertoire courant de TOUT le processus : il est
-> interdit dès qu'un `workers.spawn` a eu lieu (`(nil, err)`,
-> définitif). Voir la note dans [sys](sys.md).
+- l’expansion de `~` ;
+- l’expansion de variables comme `$HOME` ;
+- l’expansion des globs `*.lua` ;
+- la normalisation générale de `.` et `..` dans les fonctions lexicales.
 
-| Fonction                       | Renvoie                                                                                          |
-| ------------------------------ | ------------------------------------------------------------------------------------------------ |
-| `babet.currentDir()`           | `string` (absolu)                                                                                |
-| `babet.link(target, linkpath)` | `(true, nil)` \| `(nil, err)` — crée un lien **symbolique** (toujours ; pas de liens durs en v1) |
-
-### `mkdir` en détail
-
-`babet.mkdir(path)` garantit que le dossier existe à la fin de
-l'appel :
-
-- **Toujours récursif** : les parents manquants sont créés en une
-  seule fois (`mkdir -p` natif — il n'y a **pas** d'option à passer,
-  contrairement à ce qu'une ancienne version de cette page indiquait).
-- **Idempotent** : si le dossier (ou un symlink vers un dossier)
-  existe déjà, succès silencieux.
-- **Erreur claire** si un non-dossier bloque le chemin — un fichier
-  au chemin cible ou au milieu de celui-ci : `(nil, err)` avec
-  « Not a directory ».
+Par exemple :
 
 ```lua
--- crée data/, data/cache/ et data/cache/img/ d'un coup
-assert(babet.mkdir("data/cache/img"))
-
--- le rappeler ne coûte rien : le dossier existe déjà, succès
-assert(babet.mkdir("data/cache/img"))
-
--- un fichier bloque le chemin -> erreur propre
-babet.touch("bloqueur")
-local r, err = babet.mkdir("bloqueur/sous")
--- r == nil, err contient "Not a directory"
+local home = assert(babet.env("HOME"))
+local config = babet.joinPath(home, ".config", "mon-app")
 ```
 
-> Signature héritée : un second paramètre booléen existe encore
-> (`mkdir(path, ignore_if_exists)`) mais il est **déconseillé** : sur
-> Linux, son seul effet observable est de transformer l'erreur « un
-> symlink pendant occupe le chemin » en succès silencieux… sans rien
-> créer. Ne l'utilise pas.
+Un octet NUL dans un chemin est toujours refusé. Selon la fonction, une
+mauvaise signature lève une erreur Lua, tandis qu’une erreur du système de
+fichiers est généralement renvoyée sous la forme `(nil, err)`.
 
-## API — Manipulation de chemins
+### Liens symboliques
 
-Ces fonctions opèrent sur des *strings* de chemin — elles ne
-touchent pas le système de fichiers.
+Il n’existe pas une règle unique valable pour toutes les fonctions :
 
-| Fonction                   | Renvoie                                             | Exemple                            |
-| -------------------------- | --------------------------------------------------- | ---------------------------------- |
-| `babet.getBasename(path)`  | `string` \| `(nil, err)` — dernière composante      | `"/etc/hostname"` → `"hostname"`   |
-| `babet.getPath(path)`      | `string` \| `(nil, err)` — dossier parent (dirname) | `"/etc/hostname"` → `"/etc"`       |
-| `babet.getFilename(path)`  | `string` \| `(nil, err)` — basename sans extension  | `"report.tar.gz"` → `"report.tar"` |
-| `babet.getExtension(path)` | `string` \| `(nil, err)` — extension finale         | `"report.tar.gz"` → `".gz"`        |
+- `isFile`, `isDir`, `fileSize`, `getMode`, `getAttributes` et les checksums
+  suivent un lien valide vers sa cible ;
+- `remove` supprime le lien lui-même, y compris s’il est cassé ;
+- `rmdir` et `rmdirAll` refusent une racine symbolique ;
+- `symlinkAttr` modifie le propriétaire et le groupe du lien lui-même ;
+- `listFiles`, `createFileIterator` et `find` ne descendent pas dans un lien
+  symbolique vers un dossier ;
+- `copyTree` et `moveTree` refusent une racine source ou destination
+  symbolique, mais gèrent les liens présents à l’intérieur de l’arbre.
 
-## API — Listing et recherche
+Chaque fonction détaille ci-dessous son comportement exact.
 
-| Fonction                         | Renvoie                                                  |
-| -------------------------------- | -------------------------------------------------------- |
-| `babet.listFiles(path, recursive?)` | `(table, nil)` \| `(nil, err)` — fichiers réguliers ; `recursive` (booléen, défaut `false`) descend dans les sous-dossiers |
-| `babet.find(path, opts?)`           | **`(table, nil)`** \| `(nil, err)` — table des chemins correspondants (voir opts ci-dessous)                              |
-| `babet.createFileIterator(path)`    | **`(iterator, nil)`** \| `(nil, err)` — userdata avec `:next()` et `:close()`                                             |
+### Ordre des résultats
 
-**`find` renvoie une table de chemins**, pas une fonction : on
-l'itère avec `ipairs`, pas avec `for x in ...`. Toujours **récursif**
-(borne la profondeur avec `mindepth`/`maxdepth`). `opts` accepte :
+`listFiles`, `createFileIterator` et `find` suivent l’ordre fourni par le
+système de fichiers. Cet ordre n’est pas trié et ne doit pas être considéré
+comme stable.
 
-- `name = "..."` — **regex ECMAScript** (pas un glob shell) testée
-  sur le nom de fichier seul. Ex. `name = ".*%.lua$"` en Lua
-  s'écrit `name = ".*\\.lua$"`.
-- `iname = "..."` — comme `name`, insensible à la casse.
-- `path = "..."` — regex ECMAScript testée sur le chemin complet.
-- `type = "f"` / `"d"` — restreint aux fichiers ou aux dossiers.
-- `mindepth = N` / `maxdepth = N` — bornes de profondeur
-  (entiers ; un non-entier lève, cf. contrat).
-
-`createFileIterator` rend un **userdata** à piloter à la main :
+Trie explicitement le résultat lorsque l’ordre compte :
 
 ```lua
-local it = assert(babet.createFileIterator("/etc"))
+local files = assert(babet.listFiles("documents", true))
+table.sort(files)
+```
+
+### Valeurs de retour
+
+La convention la plus fréquente est :
+
+```lua
+local value, err = fonction(...)
+if not value then
+    print(err)
+end
+```
+
+Une action réussie renvoie généralement `(true, nil)`. Quelques fonctions
+pures ou méthodes d’itérateur ont une forme différente ; ces exceptions sont
+signalées dans leur section.
+
+<a id="fs-api-summary"></a>
+## Vue d’ensemble de l’API
+
+### Vérifier et inspecter
+
+| Fonction | Résultat en cas de succès |
+| --- | --- |
+| `babet.fileExists(path)` | `(boolean, nil)` — vrai uniquement pour un fichier régulier |
+| `babet.isFile(path)` | `(boolean, nil)` — même prédicat fonctionnel que `fileExists` |
+| `babet.isDir(path)` | `(boolean, nil)` — vrai pour un dossier |
+| `babet.fileSize(path)` | `(integer, nil)` — taille d’un fichier régulier en octets |
+| `babet.currentDir()` | `(string, nil)` — répertoire courant |
+| `babet.getMode(path)` | `(integer, nil)` — mode Unix `0000..07777` |
+| `babet.getAttributes(path)` | `(table, nil)` — `{mode, owner, group}` |
+
+### Manipuler des chemins
+
+| Fonction | Résultat en cas de succès |
+| --- | --- |
+| `babet.getBasename(path)` | `(string, nil)` |
+| `babet.getFilename(path)` | `(string, nil)` |
+| `babet.getExtension(path)` | `(string, nil)` |
+| `babet.getPath(path)` | `(string, nil)` |
+| `babet.joinPath(a, b, ...)` | `string` |
+| `babet.joinPath({a, b, ...})` | `string` |
+
+### Agir sur le système de fichiers
+
+| Fonction | Résultat en cas de succès |
+| --- | --- |
+| `babet.touch(path)` | `(true, nil)` |
+| `babet.mkdir(path)` | `(true, nil)` — récursif et idempotent |
+| `babet.remove(path)` | `(true, nil)` — fichier régulier ou symlink |
+| `babet.rmdir(path)` | `(true, nil)` — dossier réel et vide |
+| `babet.rmdirAll(path)` | `(true, nil)` — dossier réel, suppression récursive |
+| `babet.rename(source, destination)` | `(true, nil)` |
+| `babet.link(target, linkpath)` | `(true, nil)` — crée un symlink |
+| `babet.chdir(path)` | `(true, nil)` |
+
+### Lister et rechercher
+
+| Fonction | Résultat en cas de succès |
+| --- | --- |
+| `babet.listFiles(path, recursive?)` | `(table, nil)` |
+| `babet.createFileIterator(path, recursive?)` | `(iterator, nil)` |
+| `babet.find(path, opts?)` | `(table, nil)` |
+
+### Copier et déplacer
+
+| Fonction | Résultat en cas de succès |
+| --- | --- |
+| `babet.copy(source, destination)` | `(true, nil)` — un fichier |
+| `babet.copyTree(source, destination, continue_on_error?)` | `(true, nil)` — un arbre |
+| `babet.moveTree(source, destination)` | `(true, nil)` — un arbre |
+
+### Modifier les attributs
+
+| Fonction | Résultat en cas de succès |
+| --- | --- |
+| `babet.setMode(path, mode)` | `(true, nil)` |
+| `babet.setAttributes(path, uid, gid, mode?)` | `(true, nil)` |
+| `babet.symlinkAttr(path, uid, gid)` | `(true, nil)` |
+
+<a id="fs-predicates"></a>
+## Existence, type et taille
+
+<a id="fileexists"></a>
+### `babet.fileExists(path)`
+
+Vérifie si `path` désigne un **fichier régulier**.
+
+```lua
+local exists, err = babet.fileExists("rapport.txt")
+```
+
+Résultats :
+
+- fichier régulier : `(true, nil)` ;
+- dossier, lien cassé ou chemin absent : `(false, nil)` ;
+- lien valide vers un fichier régulier : `(true, nil)` ;
+- véritable erreur d’inspection : `(nil, err)`.
+
+Malgré son nom historique, `fileExists` ne répond pas « vrai » pour tous les
+types de chemins. Pour un dossier, utilise `isDir`.
+
+```lua
+local is_file = assert(babet.fileExists("archive.tar"))
+local is_dir  = assert(babet.isDir("sauvegardes"))
+```
+
+<a id="isfile"></a>
+### `babet.isFile(path)` et `babet.isfile(path)`
+
+`isFile` est le nom canonique. `isfile` est un alias déprécié conservé pour
+compatibilité.
+
+La fonction teste le même type de chemin que `fileExists` : un fichier
+régulier, en suivant un éventuel symlink valide.
+
+```lua
+local regular, err = babet.isFile("programme.lua")
+if err then
+    print("Inspection impossible :", err)
+elseif regular then
+    print("C’est un fichier régulier")
+end
+```
+
+Un chemin inexistant renvoie `(false, nil)` et non une erreur.
+
+<a id="isdir"></a>
+### `babet.isDir(path)` et `babet.isdir(path)`
+
+`isDir` est le nom canonique. `isdir` est un alias déprécié.
+
+```lua
+local directory, err = babet.isDir("assets")
+```
+
+Résultats :
+
+- dossier réel : `(true, nil)` ;
+- lien valide vers un dossier : `(true, nil)` ;
+- fichier, lien cassé ou chemin absent : `(false, nil)` ;
+- erreur d’accès ou d’inspection : `(nil, err)`.
+
+<a id="filesize"></a>
+### `babet.fileSize(path)`
+
+Renvoie la taille d’un fichier régulier en octets.
+
+```lua
+local size, err = babet.fileSize("video.mp4")
+if not size then
+    print("Taille inaccessible :", err)
+else
+    print(size, "octets")
+end
+```
+
+La fonction suit un symlink valide vers un fichier. Elle refuse les dossiers
+et les autres types de fichiers.
+
+```lua
+local size, err = babet.fileSize("documents")
+-- size == nil ; err indique que le chemin n’est pas un fichier régulier
+```
+
+<a id="fs-cwd"></a>
+## Répertoire courant
+
+<a id="currentdir"></a>
+### `babet.currentDir()`
+
+Renvoie le répertoire de travail courant du processus.
+
+```lua
+local cwd, err = babet.currentDir()
+assert(cwd, err)
+print(cwd)
+```
+
+Le résultat est le chemin courant tel que fourni par le système de fichiers,
+généralement absolu.
+
+<a id="chdir"></a>
+### `babet.chdir(path)`
+
+Change le répertoire courant de tout le processus.
+
+```lua
+local previous = assert(babet.currentDir())
+assert(babet.chdir("/tmp"))
+print(assert(babet.currentDir()))
+assert(babet.chdir(previous))
+```
+
+Le chemin est résolu vers sa forme canonique : les composants `.` et `..` et
+les symlinks sont résolus avant le changement.
+
+Le répertoire courant est partagé par tous les threads. Pour cette raison,
+`chdir` est définitivement refusé dès que le premier `babet.workers.spawn()` a
+été effectué, même si le worker est déjà terminé.
+
+```lua
+assert(babet.chdir("/srv/mon-app")) -- à faire avant tout spawn
+local worker = assert(babet.workers.spawn("return true"))
+
+local ok, err = babet.chdir("/tmp")
+-- ok == nil ; err explique que chdir est interdit après workers.spawn
+```
+
+<a id="fs-paths"></a>
+## Manipulation lexicale des chemins
+
+Ces fonctions traitent uniquement des chaînes. Elles ne vérifient pas que le
+chemin existe.
+
+<a id="getbasename"></a>
+### `babet.getBasename(path)`
+
+Renvoie la dernière composante, extension comprise.
+
+```lua
+local name = assert(babet.getBasename("/var/log/app.log"))
+print(name) -- app.log
+```
+
+Un chemin qui ne possède pas de dernière composante exploitable, comme `/`,
+renvoie `(nil, err)`.
+
+<a id="getfilename"></a>
+### `babet.getFilename(path)`
+
+Renvoie la dernière composante sans sa dernière extension.
+
+```lua
+print(assert(babet.getFilename("report.tar.gz"))) -- report.tar
+print(assert(babet.getFilename("README")))        -- README
+```
+
+<a id="getextension"></a>
+### `babet.getExtension(path)`
+
+Renvoie la dernière extension, point compris.
+
+```lua
+print(assert(babet.getExtension("report.tar.gz"))) -- .gz
+```
+
+Un nom sans extension renvoie `(nil, err)`, pas une chaîne vide.
+
+```lua
+local ext, err = babet.getExtension("README")
+-- ext == nil
+```
+
+<a id="getpath"></a>
+### `babet.getPath(path)`
+
+Renvoie le dossier parent lexical.
+
+```lua
+print(assert(babet.getPath("/var/log/app.log"))) -- /var/log
+```
+
+Un nom simple sans composante parent, par exemple `app.log`, renvoie
+`(nil, err)` plutôt que `"."`.
+
+<a id="joinpath"></a>
+### `babet.joinPath(...)`
+
+Deux formes sont acceptées :
+
+```lua
+local path = babet.joinPath("var", "lib", "mon-app", "data.db")
+```
+
+```lua
+local path = babet.joinPath({ "var", "lib", "mon-app", "data.db" })
+```
+
+Il faut au moins deux segments non vides. En cas de succès, `joinPath` renvoie
+**une seule valeur**, la chaîne assemblée. En cas d’échec, elle renvoie
+`(nil, err)`.
+
+La fonction ne fait qu’ajuster le séparateur `/` à la jonction des segments :
+
+```lua
+print(babet.joinPath("/var/", "/log", "app.log"))
+-- /var/log/app.log
+```
+
+Elle ne normalise pas les composants `.` ou `..` et ne traite pas un segment
+absolu ultérieur comme un nouveau point de départ :
+
+```lua
+print(babet.joinPath("base", "..", "autre")) -- base/../autre
+print(babet.joinPath("base", "/autre"))       -- base/autre
+```
+
+Ne mélange pas la forme table et les arguments séparés ; lorsque le premier
+argument est une table, son contenu constitue la liste complète des segments.
+
+<a id="fs-actions"></a>
+## Créer, supprimer, renommer et lier
+
+<a id="touch"></a>
+### `babet.touch(path)`
+
+Crée un fichier vide lorsque le chemin n’existe pas, ou met à jour la date de
+dernière modification d’un chemin existant.
+
+```lua
+assert(babet.touch("cache/ready.flag"))
+```
+
+Le dossier parent doit déjà exister : `touch` ne le crée pas.
+
+```lua
+local ok, err = babet.touch("absent/sous/dossier/fichier.txt")
+-- ok == nil si absent/sous/dossier n’existe pas
+```
+
+Pour créer d’abord les parents :
+
+```lua
+assert(babet.mkdir("cache/images"))
+assert(babet.touch("cache/images/index.dat"))
+```
+
+Sur un chemin existant, la fonction met à jour son horodatage ; elle peut donc
+également toucher un dossier, comme la commande Unix `touch`.
+
+<a id="mkdir"></a>
+### `babet.mkdir(path)`
+
+Crée un dossier avec une sémantique équivalente à `mkdir -p` :
+
+- la création est **toujours récursive** ;
+- les parents manquants sont créés ;
+- rappeler la fonction sur un dossier existant réussit ;
+- un fichier ou un autre non-dossier bloquant le chemin produit `(nil, err)`.
+
+```lua
+assert(babet.mkdir("data/cache/images"))
+-- crée data, data/cache et data/cache/images si nécessaire
+```
+
+```lua
+assert(babet.mkdir("data/cache/images"))
+-- succès également lorsque le dossier existe déjà
+```
+
+Il n’existe **aucune option pour désactiver la récursivité**. Pour exiger que
+le parent existe déjà, vérifie-le avant l’appel :
+
+```lua
+local parent = "data/cache"
+assert(babet.isDir(parent), "le parent doit déjà exister")
+assert(babet.mkdir(babet.joinPath(parent, "images")))
+```
+
+Les nouveaux dossiers utilisent les permissions `0777` filtrées par l’umask
+du processus. Le mode du dossier source n’entre pas en jeu.
+
+<a id="remove"></a>
+### `babet.remove(path)`
+
+Supprime uniquement :
+
+- un fichier régulier ;
+- un lien symbolique, valide ou cassé.
+
+```lua
+assert(babet.remove("temp.txt"))
+```
+
+```lua
+-- le lien est supprimé, pas sa cible
+assert(babet.link("fichier-important.txt", "raccourci"))
+assert(babet.remove("raccourci"))
+```
+
+La fonction refuse les dossiers, FIFO, sockets, devices et autres types
+spéciaux.
+
+```lua
+local ok, err = babet.remove("mon-dossier")
+-- ok == nil ; utiliser rmdir ou rmdirAll
+```
+
+<a id="rmdir"></a>
+### `babet.rmdir(path)`
+
+Supprime un **vrai dossier vide**.
+
+```lua
+assert(babet.mkdir("cache-vide"))
+assert(babet.rmdir("cache-vide"))
+```
+
+La fonction refuse :
+
+- un dossier non vide ;
+- un fichier ;
+- un symlink, même s’il pointe vers un dossier ;
+- un chemin absent.
+
+```lua
+local ok, err = babet.rmdir("dossier-non-vide")
+```
+
+<a id="rmdirall"></a>
+### `babet.rmdirAll(path)`
+
+Supprime récursivement un **vrai dossier racine** et tout son contenu.
+
+```lua
+assert(babet.rmdirAll("build-temp"))
+```
+
+La racine doit exister et être un dossier réel. Un fichier ou un symlink vers
+un dossier est refusé.
+
+Les symlinks situés *à l’intérieur* du dossier supprimé sont supprimés comme
+des entrées ; leur cible extérieure n’est pas parcourue.
+
+```lua
+local is_dir = babet.isDir("build-temp")
+if is_dir then
+    assert(babet.rmdirAll("build-temp"))
+end
+```
+
+<a id="rename"></a>
+### `babet.rename(source, destination)`
+
+Renomme ou déplace une entrée sur le même système de fichiers.
+
+```lua
+assert(babet.rename("ancien.txt", "nouveau.txt"))
+```
+
+La fonction accepte les fichiers, dossiers et symlinks, y compris les liens
+cassés. Elle ne crée pas le dossier parent de destination.
+
+Sous Linux, elle suit la sémantique de `rename(2)` : une destination existante
+peut être remplacée lorsque les types sont compatibles. Une traversée de
+systèmes de fichiers échoue ; `rename` n’effectue pas de fallback copie +
+suppression.
+
+```lua
+local ok, err = babet.rename("/tmp/a.txt", "/autre-montage/a.txt")
+-- peut échouer avec cross-device link
+```
+
+Pour déplacer une arborescence avec fallback cross-filesystem, utilise
+`moveTree`.
+
+<a id="link"></a>
+### `babet.link(target, linkpath)`
+
+Crée toujours un **lien symbolique**, jamais un lien dur.
+
+La cible est enregistrée exactement telle qu’elle est fournie :
+
+```lua
+assert(babet.link("../shared/config.toml", "app/config.toml"))
+```
+
+Une cible relative reste relative, et une cible inexistante est autorisée :
+
+```lua
+assert(babet.link("future-file.txt", "dangling-link"))
+```
+
+Contrairement à `touch` et `copy`, `link` crée récursivement les dossiers
+parents explicites de `linkpath` :
+
+```lua
+assert(babet.link("../../data.db", "a/b/c/database"))
+-- crée a/, a/b/ et a/b/c/ si nécessaire
+```
+
+Le chemin du lien ne doit pas déjà être occupé.
+
+<a id="fs-list-search"></a>
+## Lister, itérer et rechercher
+
+Les trois API ne renvoient pas les chemins sous la même forme :
+
+| Fonction | Forme des chemins renvoyés |
+| --- | --- |
+| `listFiles(root, ...)` | relatifs à `root` |
+| `createFileIterator(root, ...)` | tels que produits depuis `root` : préfixés par le chemin fourni |
+| `find(root, ...)` | tels que produits depuis `root` : préfixés par le chemin fourni |
+
+<a id="listfiles"></a>
+### `babet.listFiles(path, recursive?)`
+
+Renvoie une table séquentielle contenant uniquement les fichiers réguliers.
+Les dossiers ne sont jamais inclus.
+
+#### Listing non récursif — comportement par défaut
+
+```lua
+local files, err = babet.listFiles("assets")
+assert(files, err)
+
+for _, relative_path in ipairs(files) do
+    print(relative_path)
+end
+```
+
+Seuls les fichiers directement contenus dans `assets` sont renvoyés.
+
+#### Listing récursif
+
+```lua
+local files, err = babet.listFiles("assets", true)
+assert(files, err)
+
+table.sort(files)
+for _, relative_path in ipairs(files) do
+    print(relative_path)
+end
+```
+
+Les chemins sont relatifs à la racine demandée :
+
+```text
+logo.png
+icons/open.png
+icons/close.png
+```
+
+et non :
+
+```text
+assets/logo.png
+assets/icons/open.png
+```
+
+#### Symlinks
+
+- un symlink valide vers un fichier régulier est inclus sous le nom du lien ;
+- un lien cassé est ignoré ;
+- un symlink vers un dossier n’est ni inclus comme fichier, ni parcouru ;
+- une boucle de symlinks de dossiers ne provoque donc pas de récursion infinie.
+
+```lua
+local files = assert(babet.listFiles("collection", true))
+-- un lien collection/externe -> /autre/dossier n’est pas suivi
+```
+
+Le second argument est facultatif et vaut `false` par défaut.
+
+<a id="createfileiterator"></a>
+### `babet.createFileIterator(path, recursive?)`
+
+Crée un userdata possédant deux méthodes :
+
+- `iterator:next()` — renvoie le chemin suivant, ou `nil` à la fin ;
+- `iterator:close()` — libère explicitement l’itérateur.
+
+#### Non récursif
+
+```lua
+local iterator, err = babet.createFileIterator("assets")
+assert(iterator, err)
+
 while true do
-    local entry = it:next()   -- chemin suivant, ou nil à la fin
-    if not entry then break end
-    print(entry)
+    local path = iterator:next()
+    if path == nil then
+        break
+    end
+    print(path) -- assets/logo.png, etc.
 end
-it:close()                    -- libère (sinon au GC)
+
+iterator:close()
 ```
 
-## API — Copie
-
-| Fonction                          | Renvoie                                  |
-| --------------------------------- | ---------------------------------------- |
-| `babet.copy(src, dst)`            | `(true, nil)` \| `(nil, err)` — écrase si dst existe |
-| `babet.copyTree(src, dst, continue_on_error?)` | `(true, nil)` \| `(nil, err)` — récursif |
-| `babet.moveTree(src, dst)`        | `(true, nil)` \| `(nil, err)`            |
-
-`copy(src, dst)` prend **exactement deux arguments**, aucune
-option (une ancienne version de cette page annonçait `preserve` /
-`overwrite` : ils n'existent pas ; `copy` écrase la destination si
-elle existe).
-
-`copyTree(src, dst, continue_on_error?)` : le troisième argument
-est un **booléen** (défaut `false`). À `true`, les erreurs par
-entrée sont journalisées sur stderr et la copie continue au lieu
-de s'arrêter à la première.
-
-## API — Hashes et checksums
-
-Empreintes du contenu des fichiers. Résultat en **string hex
-minuscule** sauf mention contraire. Note le suffixe `sum` — ce
-sont les noms enregistrés dans `babet.*`.
-
-| Fonction                    | Algorithme          | Notes                                                                                 |
-| --------------------------- | ------------------- | ------------------------------------------------------------------------------------- |
-| `babet.crc32sum(path)`      | CRC-32 (IEEE 802.3) | **Non cryptographique**. Pour intégrité / détection d'erreur accidentelle uniquement. |
-| `babet.md5sum(path)`        | MD5                 | Legacy. Ne pas utiliser pour la sécurité.                                             |
-| `babet.sha1sum(path)`       | SHA-1               | Legacy. Ne pas utiliser pour la sécurité.                                             |
-| `babet.sha256sum(path)`     | SHA-256             |                                                                                       |
-| `babet.sha384sum(path)`     | SHA-384             |                                                                                       |
-| `babet.sha512sum(path)`     | SHA-512             |                                                                                       |
-| `babet.sha3_256sum(path)`   | SHA3-256            |                                                                                       |
-| `babet.sha3_384sum(path)`   | SHA3-384            |                                                                                       |
-| `babet.sha3_512sum(path)`   | SHA3-512            |                                                                                       |
-| `babet.blake2b512sum(path)` | BLAKE2b-512         |                                                                                       |
-
-Chaque renvoie `string` (hex) ou `(nil, err)`. Le fichier est
-streamé, pas chargé entièrement en RAM. Les fichiers non-réguliers
-(dossiers, sockets, …) sont refusés avec `(nil, "<algo>: not a
-regular file")`.
-
-MD5 et SHA-1 sont exposés pour la compatibilité (Git, systèmes
-legacy) — ne pas les utiliser pour de nouveaux usages
-cryptographiques. **CRC-32 est encore plus loin du cryptographique**
-: un attaquant peut produire des collisions trivialement. À utiliser
-pour de l'intégrité / détection de changement, jamais pour de
-l'authentification.
-
-## API — Checksums en mémoire
-
-Calcule un hash d'octets déjà en mémoire, sans aller-retour par un
-fichier temporaire. Binary-safe (les NUL intégrés sont autorisés).
-
-| Fonction            | Renvoie                                |
-| ------------------- | -------------------------------------- |
-| `babet.crc32(data)` | `string` — 8 caractères hex minuscules |
-
-Ne peut pas échouer à l'exécution (calcul pur). Les mauvais types
-d'argument lèvent via `luaL_error`. Comme `crc32sum`, **non
-cryptographique**.
-
-## Exemples rapides
+#### Récursif
 
 ```lua
--- Prédicats
-if babet.isDir("/etc") and babet.fileExists("/etc/hostname") then
-    print("taille :", babet.fileSize("/etc/hostname"))
+local iterator = assert(babet.createFileIterator("assets", true))
+while true do
+    local path = iterator:next()
+    if not path then break end
+    print(path)
 end
-
--- Manipulation de chemins (string pur)
-local base = babet.getBasename("/var/log/syslog.1")  -- "syslog.1"
-local dir  = babet.getPath("/var/log/syslog.1")      -- "/var/log"
-local ext  = babet.getExtension("/var/log/syslog.1") -- ".1"
-
--- Listing récursif
-for _, entry in ipairs(assert(babet.find("/var/log",
-        { name = ".*\\.log$", type = "f" }))) do
-    print(entry)
-end
-
--- Copie avec attributs
-babet.copyTree("./src", "/tmp/backup")
-
--- Hash d'une tarball de release
-local sha, err = babet.sha256sum("/tmp/babet-1.7.0.tar.gz")
-if sha then print("SHA256 :", sha) end
-
--- Check d'intégrité rapide (NON cryptographique, mais rapide)
-local crc = babet.crc32sum("/tmp/babet-1.7.0.tar.gz")
-print("CRC32 :", crc)                -- ex. "a1b2c3d4"
-
--- CRC32 en mémoire sur des octets arbitraires (binary-safe, NUL OK)
-print(babet.crc32("abc"))         -- "352441c2"
-print(babet.crc32(""))            -- "00000000"
-
--- Owner et permissions
-local mode_755 = tonumber("755", 8)  -- octal -> integer
-assert(babet.setMode("/srv/myapp/run.sh", mode_755))
--- en root seulement :
--- assert(babet.setAttributes("/srv/myapp", 1000, 1000))
+iterator:close()
 ```
 
-## Contrat d'erreur
+Contrairement à son nom, l’objet construit actuellement la liste complète au
+moment de `createFileIterator`. Une erreur d’accès ou de parcours est donc
+renvoyée lors de la création, avant le premier `next()`.
 
-- Toutes les fonctions suivent la convention `(nil, err)` en cas
-  d'échec runtime (fichier inexistant, permission refusée, etc.).
-- Les mauvais **types** d'argument lèvent via `luaL_error`.
-- **`setAttributes(path, uid, gid)`** rejette les UIDs/GIDs négatifs
-  et les valeurs au-dessus du max `uid_t`/`gid_t` (typiquement
-  `2^32 - 1`). Sans ce check de borne haute, une valeur au-dessus
-  de la limite serait silencieusement tronquée — pire cas vers
-  UID 0 (root). Même logique que le module [`user`](user.md).
-- Sécurité des chemins : `copy`, `copyTree`, `moveTree` utilisent
-  `lexically_relative()` et des guards `is_within()` composant par
-  composant pour empêcher des évasions par symlink hors de
-  l'arborescence de destination. Voir [`security`](../security.md).
+Comportement des symlinks :
 
-## Décisions de design
+- lien valide vers un fichier régulier : inclus sous le chemin du lien ;
+- lien cassé, boucle ou cible inaccessible : ignoré ;
+- lien vers un dossier : non parcouru ;
+- véritable erreur d’inspection d’une entrée ou d’avancement du parcours :
+  création en échec avec `(nil, err)`.
 
-- **Namespace plat** : `fileExists` plutôt que `fs.exists`,
-  `getAttributes` plutôt que `fs.attr.get`. Raison purement
-  historique — ces fonctions précèdent la convention par module.
-  Stable maintenant ; renommer casserait tous les scripts.
-- **`get*` / `set*` pour les attributs de chemin**
-  (`getMode`/`setMode`, `getAttributes`/`setAttributes`) mais des
-  verbes nus pour les actions FS (`remove`, `touch`, `mkdir`). Les
-  paires get/set existent parce que les deux directions sont
-  nécessaires ; les autres sont des opérations unidirectionnelles.
-- **La manipulation de chemins est séparée de l'accès FS**.
-  `getBasename`, `getPath`, etc. n'opèrent que sur des strings —
-  elles ne stat pas le chemin. Utilise `fileExists` si tu veux
-  savoir si le chemin existe réellement.
-- **Les hashes ont un suffixe `sum`** pour matcher les outils Unix
-  standard (`md5sum`, `sha256sum`, etc.). Découvrable pour qui
-  est familier de la ligne de commande.
-- **`copy` est mono-fichier, `copyTree` est récursif**. Lua n'a
-  pas la surcharge de fonctions par type, donc les séparer évite
-  l'ambiguïté "est-ce que `copy('dir', 'dir')` voulait dire
-  récursif ?".
+Après `close()`, appeler `next()` lève une erreur Lua. Oublier `close()` n’est
+pas fatal : le garbage collector finit par libérer l’objet.
 
-## Hors v1
+<a id="find"></a>
+### `babet.find(path, opts?)`
 
-- Glob matching en fonction standalone (`babet.glob`). Utilise
-  `find` avec `name = ".*\\.lua$"` (regex) pour le cas courant.
-- I/O asynchrone. Utilise plutôt [`workers`](workers.md) pour le
-  traitement parallèle de fichiers.
-- BLAKE2s (seul BLAKE2b-512 est exposé via OpenSSL EVP).
+Recherche récursivement les entrées d’un dossier et renvoie une table de
+chemins.
+
+Les deux appels suivants sont équivalents :
+
+```lua
+local entries = assert(babet.find("src"))
+local entries = assert(babet.find("src", nil))
+```
+
+Sans option, fichiers **et** dossiers sont inclus. La racine elle-même n’est
+pas incluse.
+
+#### Options
+
+| Option | Type | Défaut | Effet |
+| --- | --- | --- | --- |
+| `type` | string | aucun filtre | `"f"` pour fichiers, `"d"` pour dossiers |
+| `name` | string | absent | regex ECMAScript sur le nom seul, sensible à la casse |
+| `iname` | string | absent | regex ECMAScript sur le nom seul, insensible à la casse |
+| `path` | string | absent | regex ECMAScript recherchée dans le chemin complet |
+| `mindepth` | integer | `0` | profondeur minimale incluse |
+| `maxdepth` | integer | sans limite pratique | profondeur maximale incluse |
+
+Toutes les options présentes sont combinées avec un **ET logique**.
+
+#### Rechercher des fichiers par extension
+
+`name` utilise une correspondance sur le nom complet, pas une recherche de
+sous-chaîne :
+
+```lua
+local lua_files = assert(babet.find("src", {
+    type = "f",
+    name = ".*\\.lua$",
+}))
+```
+
+#### Recherche insensible à la casse
+
+```lua
+local images = assert(babet.find("assets", {
+    type = "f",
+    iname = ".*\\.(png|jpg|jpeg)$",
+}))
+```
+
+#### Filtrer le chemin complet
+
+`path` utilise une recherche dans le chemin complet :
+
+```lua
+local tests = assert(babet.find(".", {
+    type = "f",
+    path = "/tests/",
+}))
+```
+
+#### Limiter la profondeur
+
+La profondeur `0` correspond aux enfants directs de la racine :
+
+```lua
+local direct_children = assert(babet.find("src", {
+    maxdepth = 0,
+}))
+```
+
+Les enfants d’un sous-dossier sont à la profondeur `1` :
+
+```lua
+local one_level_below = assert(babet.find("src", {
+    mindepth = 1,
+    maxdepth = 1,
+}))
+```
+
+`mindepth` filtre uniquement les résultats ; les dossiers moins profonds sont
+tout de même traversés pour atteindre les niveaux demandés.
+
+#### Symlinks et erreurs
+
+Le parcours ne descend pas dans les symlinks de dossiers. Les tests de type
+suivent néanmoins une cible valide : un symlink vers un fichier peut donc
+correspondre à `type = "f"`, et un symlink vers un dossier peut apparaître
+avec `type = "d"` sans que son contenu soit parcouru.
+
+Une regex invalide ou une erreur de parcours fait échouer tout l’appel avec
+`(nil, err)`. Il n’existe pas de mode « continuer malgré les erreurs » pour
+`find`.
+
+<a id="fs-copy-move"></a>
+## Copier et déplacer
+
+<a id="copy"></a>
+### `babet.copy(source, destination)`
+
+Copie un seul fichier avec `std::filesystem::copy_file` et écrase une
+destination fichier existante.
+
+```lua
+assert(babet.copy("config/default.toml", "config/local.toml"))
+```
+
+Le dossier parent de destination doit déjà exister :
+
+```lua
+assert(babet.mkdir("backup/config"))
+assert(babet.copy("config/app.toml", "backup/config/app.toml"))
+```
+
+Comportement important :
+
+- un symlink source valide est suivi et donne un nouveau fichier régulier ;
+- un symlink destination valide est suivi : la cible du lien est écrasée ;
+- un dossier source ou destination n’est pas accepté ;
+- les permissions ordinaires du fichier source sont copiées selon la
+  sémantique du système ; owner, group et horodatages ne sont pas garantis ;
+- l’opération ne bénéficie pas du confinement renforcé de `copyTree`.
+
+Utilise `copyTree` pour une arborescence ou lorsque la destination doit être
+protégée contre les redirections par symlink.
+
+<a id="copytree"></a>
+### `babet.copyTree(source, destination, continue_on_error?)`
+
+Copie récursivement un dossier source dans un dossier destination.
+
+```lua
+assert(babet.copyTree("site", "backup/site"))
+```
+
+#### Valeur par défaut de `continue_on_error`
+
+Le troisième argument est facultatif et vaut **`true` par défaut**.
+
+Cela signifie qu’en cas d’erreur limitée à une entrée :
+
+1. un avertissement est écrit sur `stderr` ;
+2. la copie tente de poursuivre avec les autres entrées ;
+3. l’appel final renvoie `(nil, "completed with warnings ...")`.
+
+Le succès partiel n’est donc jamais présenté comme un succès total.
+
+```lua
+local ok, err = babet.copyTree("source", "destination")
+if not ok then
+    print(err) -- peut signaler des warnings après une copie partielle
+end
+```
+
+#### Mode strict
+
+Passe explicitement `false` pour arrêter la copie à la première erreur :
+
+```lua
+local ok, err = babet.copyTree("source", "destination", false)
+assert(ok, err)
+```
+
+Passe explicitement `true` lorsque tu souhaites rendre le choix visible dans
+le code :
+
+```lua
+local ok, err = babet.copyTree("source", "destination", true)
+```
+
+#### Destination et fusion
+
+- la destination est créée récursivement si elle n’existe pas ;
+- si elle existe, le contenu est fusionné ;
+- les fichiers réguliers existants sont remplacés ;
+- un symlink déjà présent dans la destination, comme composant intermédiaire
+  ou comme fichier final, est refusé ;
+- la destination ne peut pas être située à l’intérieur de la source ;
+- la racine source et la racine destination ne doivent pas être des symlinks.
+
+#### Métadonnées
+
+Lorsqu’un nouveau fichier est créé :
+
+- les bits ordinaires `rwx` du fichier source sont conservés ;
+- `setuid`, `setgid` et sticky sont retirés ;
+- le nouvel inode appartient à l’utilisateur et au groupe déterminés par le
+  système pour le processus appelant ;
+- les horodatages ne sont pas conservés.
+
+Les dossiers créés utilisent `0777` filtré par l’umask. Le mode, owner, group
+et les dates des dossiers sources ne sont pas reproduits.
+
+#### Symlinks internes
+
+Les liens symboliques présents dans l’arbre sont recréés :
+
+- les cibles relatives restent identiques ;
+- les liens cassés restent des liens cassés ;
+- une cible absolue située à l’intérieur de la source est réécrite pour viser
+  l’élément correspondant dans la destination ;
+- une cible absolue extérieure reste inchangée.
+
+Les symlinks de dossiers ne sont jamais parcourus comme des dossiers.
+
+<a id="movetree"></a>
+### `babet.moveTree(source, destination)`
+
+Déplace récursivement une arborescence.
+
+```lua
+assert(babet.moveTree("staging/site", "public/site"))
+```
+
+#### Chemin rapide
+
+Lorsque la destination n’existe pas, que le déplacement reste sur le même
+filesystem et qu’aucun lien absolu interne ne doit être réécrit, Babet renomme
+l’arbre complet. L’opération est alors rapide et conserve les inodes et leurs
+métadonnées.
+
+#### Fusion ou traversée de filesystem
+
+Lorsque la destination existe, que le déplacement traverse un filesystem, ou
+qu’un lien interne doit être réécrit, Babet utilise un fallback entrée par
+entrée :
+
+- scan complet de la source avant la première modification ;
+- création des dossiers de destination ;
+- création des symlinks de destination ;
+- déplacement des autres entrées ;
+- suppression de l’arbre source résiduel.
+
+Dans ce fallback, un fichier copié vers un nouvel inode conserve ses bits
+`rwx` ordinaires, mais pas les bits spéciaux, l’owner, le group ou les dates.
+Les dossiers créés suivent l’umask.
+
+#### Garde-fous
+
+- la source doit être un vrai dossier, pas un symlink ;
+- la destination racine ne doit pas être un symlink ;
+- la destination ne peut pas se trouver dans la source ;
+- un symlink préexistant dans la destination de fusion est refusé ;
+- les liens internes utilisent les mêmes règles de réécriture que `copyTree`.
+
+`moveTree` réduit les risques d’état partiel en scannant l’arbre avant de le
+modifier et en préparant les symlinks en premier. Il n’est toutefois pas une
+transaction générale : une erreur survenant après plusieurs déplacements de
+fichiers peut laisser une partie des entrées dans la source et une partie dans
+la destination. Le message d’erreur doit alors être traité comme nécessitant
+une vérification manuelle des deux arbres.
+
+<a id="fs-attributes"></a>
+## Permissions et attributs Unix
+
+Les modes sont des entiers. Lua ne possède pas de littéral `0o755` : utilise
+une chaîne octale lorsque l’API l’accepte, ou `tonumber("755", 8)`.
+
+```lua
+local mode_755 = tonumber("755", 8)
+```
+
+<a id="getmode-setmode"></a>
+### `babet.getMode(path)` et `babet.setMode(path, mode)`
+
+`getMode` renvoie les permissions ordinaires et les bits spéciaux dans
+l’intervalle `0000..07777`.
+
+```lua
+local mode, err = babet.getMode("run.sh")
+assert(mode, err)
+print(string.format("%04o", mode))
+```
+
+`setMode` accepte deux formes :
+
+```lua
+assert(babet.setMode("run.sh", "755"))
+```
+
+```lua
+assert(babet.setMode("run.sh", tonumber("755", 8)))
+```
+
+Une chaîne est interprétée en base 8. Un nombre est pris comme valeur entière
+directe. Les valeurs non entières, négatives ou supérieures à `07777` sont
+refusées.
+
+Les bits spéciaux peuvent être demandés explicitement :
+
+```lua
+assert(babet.setMode("outil", "4755"))
+local mode = assert(babet.getMode("outil"))
+assert(mode == tonumber("4755", 8))
+```
+
+Ces fonctions suivent un symlink vers sa cible.
+
+<a id="getattributes-setattributes"></a>
+### `babet.getAttributes(path)`
+
+Renvoie uniquement les trois champs suivants :
+
+```lua
+local attrs, err = babet.getAttributes("fichier.txt")
+assert(attrs, err)
+
+print(attrs.mode)  -- integer 0000..07777
+print(attrs.owner) -- UID
+print(attrs.group) -- GID
+```
+
+La table ne contient ni taille, ni mtime, ni type de fichier.
+
+La fonction suit un symlink vers sa cible.
+
+### `babet.setAttributes(path, uid, gid, mode?)`
+
+Modifie le propriétaire et le groupe, puis éventuellement le mode.
+
+Sans mode :
+
+```lua
+local attrs = assert(babet.getAttributes("fichier.txt"))
+assert(babet.setAttributes(
+    "fichier.txt",
+    attrs.owner,
+    attrs.group
+))
+```
+
+Avec mode :
+
+```lua
+assert(babet.setAttributes(
+    "fichier.txt",
+    1000,
+    1000,
+    tonumber("640", 8)
+))
+```
+
+Contrairement à `setMode`, le quatrième argument doit être un **entier** ; une
+chaîne comme `"640"` n’est pas acceptée.
+
+Validation avant modification :
+
+- UID et GID doivent être des entiers non négatifs dans la plage de `uid_t`
+  et `gid_t` ;
+- le mode doit être compris entre `0` et `07777`.
+
+POSIX ne fournit pas d’opération atomique combinant `chown` et `chmod`. Si le
+`chmod` échoue après un `chown` réussi, Babet tente de restaurer l’owner, le
+group et le mode d’origine. Une restauration incomplète est signalée dans le
+message d’erreur.
+
+L’appel suit les symlinks. Les droits nécessaires dépendent du système et de
+l’identité du processus ; changer l’owner exige généralement les privilèges
+root.
+
+<a id="symlinkattr"></a>
+### `babet.symlinkAttr(path, uid, gid)` et `babet.symlinkattr(...)`
+
+`symlinkAttr` est le nom canonique. `symlinkattr` est un alias déprécié.
+
+La fonction applique `lchown` et ne suit donc pas un lien symbolique :
+
+```lua
+assert(babet.symlinkAttr("raccourci", 1000, 1000))
+```
+
+Elle modifie l’UID et le GID du lien lui-même, pas ceux de sa cible. Elle ne
+modifie pas le mode.
+
+UID et GID sont validés comme dans `setAttributes`.
+
+<a id="fs-checksums"></a>
+## Sommes de contrôle de fichiers
+
+Toutes les fonctions suivantes lisent le fichier en flux et renvoient une
+chaîne hexadécimale en minuscules :
+
+| Fonction | Algorithme | Longueur hex | Usage conseillé |
+| --- | --- | ---: | --- |
+| `babet.crc32sum(path)` | CRC-32 IEEE | 8 | détection d’erreurs accidentelles uniquement |
+| `babet.md5sum(path)` | MD5 | 32 | compatibilité legacy, pas sécurité |
+| `babet.sha1sum(path)` | SHA-1 | 40 | compatibilité legacy, pas sécurité |
+| `babet.sha256sum(path)` | SHA-256 | 64 | intégrité cryptographique courante |
+| `babet.sha384sum(path)` | SHA-384 | 96 | intégrité cryptographique |
+| `babet.sha512sum(path)` | SHA-512 | 128 | intégrité cryptographique |
+| `babet.sha3_256sum(path)` | SHA3-256 | 64 | intégrité cryptographique |
+| `babet.sha3_384sum(path)` | SHA3-384 | 96 | intégrité cryptographique |
+| `babet.sha3_512sum(path)` | SHA3-512 | 128 | intégrité cryptographique |
+| `babet.blake2b512sum(path)` | BLAKE2b-512 | 128 | intégrité cryptographique |
+| `babet.blake2s256sum(path)` | BLAKE2s-256 | 64 | intégrité cryptographique |
+
+Exemple :
+
+```lua
+local digest, err = babet.sha256sum("release.tar.gz")
+assert(digest, err)
+print(digest)
+```
+
+Vérification avec une valeur attendue :
+
+```lua
+local expected = "..."
+local actual = assert(babet.sha256sum("release.tar.gz"))
+assert(actual == expected, "checksum incorrect")
+```
+
+Contrat commun :
+
+- seuls les fichiers réguliers sont acceptés ;
+- un symlink valide vers un fichier régulier est suivi ;
+- les dossiers, FIFO, sockets, devices et pseudo-fichiers non réguliers sont
+  refusés ;
+- une erreur de lecture renvoie `(nil, err)` et ne produit jamais le digest
+  trompeur d’un contenu partiel ;
+- le contenu n’est pas chargé entièrement en mémoire.
+
+CRC-32, MD5 et SHA-1 ne doivent pas servir à authentifier des données face à
+un attaquant. Pour un nouveau contrôle d’intégrité, préfère SHA-256, SHA-3 ou
+BLAKE2.
+
+<a id="crc32-memory"></a>
+## CRC-32 en mémoire
+
+### `babet.crc32(data)`
+
+Calcule le CRC-32 d’une chaîne Lua déjà en mémoire. Les chaînes Lua étant
+binary-safe, les octets NUL sont acceptés.
+
+```lua
+print(babet.crc32("abc")) -- 352441c2
+print(babet.crc32(""))    -- 00000000
+```
+
+```lua
+local bytes = "a\0b\0c"
+local digest = babet.crc32(bytes)
+```
+
+En cas de succès, cette fonction renvoie une seule chaîne, sans seconde valeur
+`nil`. Un mauvais nombre ou type d’arguments lève une erreur Lua.
+
+<a id="fs-errors"></a>
+## Contrat d’erreur
+
+### Erreurs Lua levées
+
+Une mauvaise signature ou un type incompatible lève généralement une erreur
+Lua :
+
+```lua
+babet.fileSize({})       -- erreur Lua
+babet.mkdir("a", true)  -- erreur Lua : mkdir accepte exactement un argument
+```
+
+Les chemins contenant un octet NUL sont refusés avant tout appel système.
+
+### Erreurs renvoyées
+
+Les échecs du système de fichiers sont normalement renvoyés :
+
+```lua
+local ok, err = babet.remove("absent.txt")
+if not ok then
+    print(err)
+end
+```
+
+Les prédicats `fileExists`, `isFile` et `isDir` traitent un chemin simplement
+absent comme une réponse normale `(false, nil)`. Une vraie erreur d’inspection
+reste `(nil, err)`.
+
+### Opérations partielles
+
+- `copyTree` en mode continuation peut copier certaines entrées puis renvoyer
+  une erreur de synthèse indiquant des warnings ;
+- `moveTree` peut laisser un état partagé entre source et destination si une
+  erreur survient tard dans le fallback entrée par entrée ;
+- `setAttributes` tente un rollback si la phase `chmod` échoue après `chown`,
+  mais signale explicitement si ce rollback n’est pas complet.
+
+<a id="fs-design"></a>
+## Décisions et limites
+
+- **Namespace plat historique** : `babet.fileExists`, pas
+  `babet.fs.fileExists`.
+- **Noms canoniques** : `isFile`, `isDir` et `symlinkAttr`. Les formes
+  `isfile`, `isdir` et `symlinkattr` sont dépréciées.
+- **`mkdir` toujours récursif** : l’API ne possède pas de variante
+  non récursive.
+- **`copy` pour un fichier, `copyTree` pour un arbre** : aucune surcharge
+  implicite selon le type de la source.
+- **Pas de glob dédié** : utilise `find` avec une regex ECMAScript.
+- **Pas de tri automatique** : appelle `table.sort` lorsqu’un ordre stable est
+  nécessaire.
+- **Pas de préservation complète des métadonnées dans les copies** : les
+  permissions ordinaires des fichiers sont prises en charge, mais pas les
+  propriétaires, groupes, dates ou modes des dossiers.
+- **Pas d’I/O asynchrone** : utilise les [workers](workers.md) pour paralléliser
+  des traitements indépendants.

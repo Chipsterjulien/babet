@@ -23,7 +23,7 @@ git clone https://github.com/Chipsterjulien/babet.git
 cd babet
 ./build_local.sh        # downloads deps and compiles
                         # (~5 min on first run, faster afterwards)
-./run_tests.sh          # offline harness — should print 974 PASS / 0 FAIL
+./run_tests.sh          # offline harness — should finish with 0 FAIL
 ```
 
 The build script downloads each dependency from its upstream source,
@@ -57,6 +57,9 @@ Package a script and its modules into a self-contained binary :
 ./test/babet --create-exe . myapp
 ./myapp        # runs main.lua from the embedded ZIP
 ```
+
+Version-control metadata directories `.git`, `.svn`, and `.hg` are
+automatically excluded at any depth.
 
 Internally, Babet appends a ZIP to its own binary, and reads
 `main.lua` (plus any `require`d module) from that ZIP at runtime.

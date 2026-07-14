@@ -22,12 +22,14 @@
 #include <cmath>
 #include <cstring>
 #include <cerrno>
+#include <climits>
 #include <csignal>
 #include <ctime>
 
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sys/wait.h>
 
 // `environ` est défini par la libc système (POSIX). Il pointe vers
@@ -80,7 +82,14 @@ namespace
                 err = "args must contain only strings";
                 return false;
             }
-            out.push_back(lua_tostring(L, -1));
+            std::string arg;
+            std::string label = "args[" + std::to_string(i) + "]";
+            if (!lua_string_without_nul(L, -1, arg, label, err))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
+            out.push_back(std::move(arg));
             lua_pop(L, 1);
         }
         return true;
@@ -118,7 +127,11 @@ namespace
                 err = "opts.cwd must be a string";
                 return false;
             }
-            cwd = lua_tostring(L, -1);
+            if (!lua_string_without_nul(L, -1, cwd, "opts.cwd", err))
+            {
+                lua_pop(L, 1);
+                return false;
+            }
             has_cwd = true;
         }
         lua_pop(L, 1);
@@ -165,6 +178,15 @@ namespace
             {
                 lua_pop(L, 1);
                 err = "opts.timeout must be greater than 0";
+                return false;
+            }
+            // Borne commune aux API réseau : INT_MAX millisecondes
+            // (~24,8 jours). Elle empêche tout dépassement lors de la
+            // conversion en entier et lors du calcul de la deadline.
+            if (timeout * 1000.0 > static_cast<double>(INT_MAX))
+            {
+                lua_pop(L, 1);
+                err = "opts.timeout too large";
                 return false;
             }
             has_timeout = true;
@@ -233,27 +255,33 @@ namespace
                 // concaténant "KEY=VALUE" : une clé contenant '=' ou '\0',
                 // ou une clé vide, casse la sémantique POSIX (l'enfant
                 // verrait getenv("A") == "B=x" pour env={["A=B"]="x"}).
-                size_t key_len;
-                const char *key = lua_tolstring(L, -2, &key_len);
-                if (key_len == 0)
+                std::string key;
+                std::string value;
+                if (!lua_string_without_nul(L, -2, key,
+                                            "opts.env: key", err))
+                {
+                    lua_pop(L, 3);
+                    return false;
+                }
+                if (key.empty())
                 {
                     lua_pop(L, 3);
                     err = "opts.env: key must not be empty";
                     return false;
                 }
-                if (std::memchr(key, '=', key_len) != nullptr)
+                if (key.find('=') != std::string::npos)
                 {
                     lua_pop(L, 3);
                     err = "opts.env: key must not contain '='";
                     return false;
                 }
-                if (std::memchr(key, '\0', key_len) != nullptr)
+                if (!lua_string_without_nul(L, -1, value,
+                                            "opts.env: value", err))
                 {
                     lua_pop(L, 3);
-                    err = "opts.env: key must not contain NUL byte";
                     return false;
                 }
-                env.emplace_back(lua_tostring(L, -2), lua_tostring(L, -1));
+                env.emplace_back(std::move(key), std::move(value));
                 lua_pop(L, 1); // pop value, keep key pour lua_next
             }
         }
@@ -343,6 +371,148 @@ namespace
         }
     }
 
+    // Écrit dans un fd sans modifier la disposition process-wide de
+    // SIGPIPE. Le signal est bloqué uniquement dans le thread appelant,
+    // le temps de ce write(), puis consommé s'il a été généré par un EPIPE.
+    // Un SIGPIPE déjà pending avant l'appel est préservé.
+    ssize_t write_without_sigpipe(int fd, const void *buf, size_t count)
+    {
+        sigset_t block_set;
+        sigemptyset(&block_set);
+        sigaddset(&block_set, SIGPIPE);
+
+        sigset_t old_mask;
+        const int mask_rc = pthread_sigmask(SIG_BLOCK, &block_set, &old_mask);
+        if (mask_rc != 0)
+        {
+            errno = mask_rc;
+            return -1;
+        }
+
+        sigset_t pending_before_set;
+        bool pending_before = false;
+        if (sigpending(&pending_before_set) == 0)
+        {
+            pending_before = sigismember(&pending_before_set, SIGPIPE) == 1;
+        }
+
+        const ssize_t result = write(fd, buf, count);
+        const int saved_errno = errno;
+
+        if (result < 0 && saved_errno == EPIPE && !pending_before)
+        {
+            struct timespec zero_timeout{};
+            while (sigtimedwait(&block_set, nullptr, &zero_timeout) < 0 &&
+                   errno == EINTR)
+            {
+            }
+        }
+
+        pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
+        errno = saved_errno;
+        return result;
+    }
+
+    enum class ChildWaitResult
+    {
+        reaped,
+        timed_out,
+        error,
+    };
+
+    ChildWaitResult wait_child_until(pid_t pid, int &status,
+                                     long long deadline_ms)
+    {
+        for (;;)
+        {
+            pid_t r = ::waitpid(pid, &status, WNOHANG);
+            if (r == pid)
+            {
+                return ChildWaitResult::reaped;
+            }
+            if (r < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                return ChildWaitResult::error;
+            }
+            if (now_ms() >= deadline_ms)
+            {
+                return ChildWaitResult::timed_out;
+            }
+            struct timespec pause{0, 10 * 1000 * 1000};
+            while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
+            {
+            }
+        }
+    }
+
+    // Termine le groupe enfant sans waitpid bloquant non borné. Le cas
+    // pathologique d'un processus figé en sommeil noyau non interruptible
+    // ne peut pas être résolu par SIGKILL ; on préfère alors rendre la main
+    // plutôt que bloquer Babet pour toujours.
+    bool terminate_and_reap(pid_t pid, int &status)
+    {
+        kill_group(pid, SIGTERM);
+        if (wait_child_until(pid, status, now_ms() + 500) ==
+            ChildWaitResult::reaped)
+        {
+            return true;
+        }
+        kill_group(pid, SIGKILL);
+        return wait_child_until(pid, status, now_ms() + 2000) ==
+               ChildWaitResult::reaped;
+    }
+
+    bool set_nonblocking(int fd, const char *label, std::string &err)
+    {
+        int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            err = std::string("exec: cannot make ") + label +
+                  " non-blocking: " + std::strerror(errno);
+            return false;
+        }
+        return true;
+    }
+
+    int push_exec_result(lua_State *L, const std::string &out_buf,
+                         const std::string &err_buf, int status,
+                         bool status_valid, bool timed_out,
+                         bool out_truncated, bool err_truncated)
+    {
+        int exit_code = -1;
+        if (status_valid)
+        {
+            if (WIFEXITED(status))
+            {
+                exit_code = WEXITSTATUS(status);
+            }
+            else if (WIFSIGNALED(status))
+            {
+                exit_code = 128 + WTERMSIG(status);
+            }
+        }
+
+        lua_newtable(L);
+        lua_pushlstring(L, out_buf.data(), out_buf.size());
+        lua_setfield(L, -2, "stdout");
+        lua_pushlstring(L, err_buf.data(), err_buf.size());
+        lua_setfield(L, -2, "stderr");
+        lua_pushinteger(L, exit_code);
+        lua_setfield(L, -2, "code");
+        lua_pushboolean(L, timed_out ? 1 : 0);
+        lua_setfield(L, -2, "timed_out");
+        lua_pushboolean(L, out_truncated ? 1 : 0);
+        lua_setfield(L, -2, "stdout_truncated");
+        lua_pushboolean(L, err_truncated ? 1 : 0);
+        lua_setfield(L, -2, "stderr_truncated");
+        lua_pushnil(L);
+        return 2;
+    }
+
 } // namespace
 
 int lua_exec(lua_State *L)
@@ -352,9 +522,12 @@ int lua_exec(lua_State *L)
     {
         return luaL_error(L, "Expected a string as first argument (command)");
     }
-    std::string cmd = lua_tostring(L, 1);
-
     std::string err;
+    std::string cmd;
+    if (!lua_string_without_nul(L, 1, cmd, "command", err))
+    {
+        return push_fail(L, err);
+    }
 
     std::vector<std::string> args;
     if (!collect_args(L, 2, cmd, args, err))
@@ -375,6 +548,14 @@ int lua_exec(lua_State *L)
     {
         return push_fail(L, err);
     }
+
+    // La deadline commence avant toute préparation/fork : elle couvre donc
+    // aussi la phase de lancement (chdir + exec), pas seulement les I/O
+    // après exec.
+    const long long deadline = has_timeout
+                                   ? now_ms() + static_cast<long long>(
+                                                    timeout_sec * 1000.0)
+                                   : 0;
 
     // Tableau argv terminé par NULL pour exec.
     std::vector<char *> argv;
@@ -527,13 +708,6 @@ int lua_exec(lua_State *L)
     // l'ancien fcntl explicite n'est plus nécessaire (idempotent
     // de toute façon, mais inutile).
 
-    // Ignorer SIGPIPE le temps de l'appel (voir v2), restauré à la fin.
-    struct sigaction sa_ign, sa_old;
-    std::memset(&sa_ign, 0, sizeof(sa_ign));
-    sa_ign.sa_handler = SIG_IGN;
-    sigemptyset(&sa_ign.sa_mask);
-    sigaction(SIGPIPE, &sa_ign, &sa_old);
-
     // --- fork -------------------------------------------------------
     pid_t pid = fork();
     if (pid < 0)
@@ -543,7 +717,6 @@ int lua_exec(lua_State *L)
         close_pair(pipe_out);
         close_pair(pipe_err);
         close_pair(pipe_exec);
-        sigaction(SIGPIPE, &sa_old, nullptr);
         return push_fail(L, msg);
     }
 
@@ -626,31 +799,117 @@ int lua_exec(lua_State *L)
     close(pipe_exec[1]);
 
     // --- détection d'un échec de lancement --------------------------
-    int launch_errno = 0;
-    ssize_t en;
-    do
-    {
-        en = read(pipe_exec[0], &launch_errno, sizeof(launch_errno));
-    } while (en < 0 && errno == EINTR);
-    close(pipe_exec[0]);
-
-    if (en > 0)
+    // pipe_exec se ferme automatiquement au succès d'exec (CLOEXEC), ou
+    // reçoit errno si chdir/exec échoue. L'attente est non bloquante et
+    // utilise la même deadline absolue que le reste de l'appel.
+    std::string nonblock_error;
+    if (!set_nonblocking(pipe_exec[0], "launch pipe", nonblock_error))
     {
         close(pipe_in[1]);
         close(pipe_out[0]);
         close(pipe_err[0]);
-        int status;
-        // Limite assumée (revue Gemini post-audit v21) : après le
-        // SIGKILL du timeout, ce waitpid bloquant peut ne jamais
-        // rendre la main si l'enfant est gelé en état D
-        // (uninterruptible sleep kernel, ex : NFS mort) — le timeout
-        // n'est donc pas infaillible à 100 %. WNOHANG éviterait le
-        // blocage mais laisserait un zombie ; bloquer est le choix
-        // POSIX propre, documenté ici en connaissance de cause.
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        close(pipe_exec[0]);
+        int ignored_status = 0;
+        terminate_and_reap(pid, ignored_status);
+        return push_fail(L, nonblock_error);
+    }
+
+    int launch_errno = 0;
+    ssize_t launch_bytes = 0;
+    bool launch_timed_out = false;
+    std::string launch_internal_error;
+
+    for (;;)
+    {
+        int timeout_ms = -1;
+        if (has_timeout)
         {
+            long long remaining = deadline - now_ms();
+            timeout_ms = remaining <= 0
+                             ? 0
+                             : (remaining > INT_MAX
+                                    ? INT_MAX
+                                    : static_cast<int>(remaining));
         }
-        sigaction(SIGPIPE, &sa_old, nullptr);
+
+        struct pollfd launch_poll{};
+        launch_poll.fd = pipe_exec[0];
+        launch_poll.events = POLLIN;
+        int pr = ::poll(&launch_poll, 1, timeout_ms);
+        if (pr < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            launch_internal_error =
+                std::string("exec: launch poll failed: ") +
+                std::strerror(errno);
+            break;
+        }
+        if (pr == 0)
+        {
+            launch_timed_out = true;
+            break;
+        }
+
+        launch_bytes =
+            ::read(pipe_exec[0], &launch_errno, sizeof(launch_errno));
+        if (launch_bytes > 0)
+        {
+            if (launch_bytes != static_cast<ssize_t>(sizeof(launch_errno)))
+            {
+                launch_internal_error =
+                    "exec: incomplete launch error received from child";
+            }
+            break;
+        }
+        if (launch_bytes == 0)
+        {
+            break; // CLOEXEC : lancement réussi
+        }
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            continue;
+        }
+        launch_internal_error =
+            std::string("exec: cannot read launch status: ") +
+            std::strerror(errno);
+        break;
+    }
+    close(pipe_exec[0]);
+
+    if (launch_timed_out || !launch_internal_error.empty())
+    {
+        close(pipe_in[1]);
+        close(pipe_out[0]);
+        close(pipe_err[0]);
+        int status = 0;
+        bool reaped = terminate_and_reap(pid, status);
+        if (!launch_internal_error.empty())
+        {
+            if (!reaped)
+            {
+                launch_internal_error +=
+                    " (child could not be reaped within cleanup deadline)";
+            }
+            return push_fail(L, launch_internal_error);
+        }
+        return push_exec_result(L, "", "", status, reaped, true, false,
+                                false);
+    }
+
+    if (launch_bytes > 0)
+    {
+        close(pipe_in[1]);
+        close(pipe_out[0]);
+        close(pipe_err[0]);
+        int status = 0;
+        if (wait_child_until(pid, status, now_ms() + 2000) !=
+            ChildWaitResult::reaped)
+        {
+            terminate_and_reap(pid, status);
+        }
         return push_fail(L, std::string("cannot launch '") + cmd + "': " +
                                 std::strerror(launch_errno));
     }
@@ -659,9 +918,17 @@ int lua_exec(lua_State *L)
     std::string out_buf, err_buf;
     bool out_truncated = false, err_truncated = false;
 
-    fcntl(pipe_out[0], F_SETFL, fcntl(pipe_out[0], F_GETFL) | O_NONBLOCK);
-    fcntl(pipe_err[0], F_SETFL, fcntl(pipe_err[0], F_GETFL) | O_NONBLOCK);
-    fcntl(pipe_in[1], F_SETFL, fcntl(pipe_in[1], F_GETFL) | O_NONBLOCK);
+    if (!set_nonblocking(pipe_out[0], "stdout pipe", nonblock_error) ||
+        !set_nonblocking(pipe_err[0], "stderr pipe", nonblock_error) ||
+        !set_nonblocking(pipe_in[1], "stdin pipe", nonblock_error))
+    {
+        close(pipe_in[1]);
+        close(pipe_out[0]);
+        close(pipe_err[0]);
+        int ignored_status = 0;
+        terminate_and_reap(pid, ignored_status);
+        return push_fail(L, nonblock_error);
+    }
 
     size_t stdin_off = 0;
     bool in_open = has_stdin;
@@ -671,14 +938,12 @@ int lua_exec(lua_State *L)
     }
 
     bool out_open = true, err_open = true;
+    std::string io_internal_error;
 
     // Gestion du timeout : on calcule un instant limite monotone.
     // `timed_out` retient si on a déclenché l'arrêt forcé.
     // `phase_kill` : false = on attend encore SIGTERM, true = SIGTERM déjà
     //   envoyé, on laisse un court délai de grâce avant SIGKILL.
-    const long long deadline = has_timeout
-                                   ? now_ms() + static_cast<long long>(timeout_sec * 1000.0)
-                                   : 0;
     const long long grace_ms = 2000; // délai de grâce après SIGTERM
     long long kill_deadline = 0;
     bool timed_out = false;
@@ -782,7 +1047,9 @@ int lua_exec(lua_State *L)
             {
                 continue;
             }
-            break; // erreur de poll : on arrête
+            io_internal_error =
+                std::string("exec: poll failed: ") + std::strerror(errno);
+            break;
         }
         if (pr == 0)
         {
@@ -820,8 +1087,8 @@ int lua_exec(lua_State *L)
             }
             else
             {
-                ssize_t wn = write(pipe_in[1],
-                                   stdin_data.data() + stdin_off, remaining);
+                ssize_t wn = write_without_sigpipe(
+                    pipe_in[1], stdin_data.data() + stdin_off, remaining);
                 if (wn > 0)
                 {
                     stdin_off += static_cast<size_t>(wn);
@@ -850,57 +1117,86 @@ int lua_exec(lua_State *L)
 
     close(pipe_out[0]);
     close(pipe_err[0]);
-    // pipe_in[1] déjà fermé dans tous les chemins ci-dessus.
+    if (in_open)
+    {
+        close(pipe_in[1]);
+        in_open = false;
+    }
+
+    if (!io_internal_error.empty())
+    {
+        int status = 0;
+        bool reaped = terminate_and_reap(pid, status);
+        if (!reaped)
+        {
+            io_internal_error +=
+                " (child could not be reaped within cleanup deadline)";
+        }
+        return push_fail(L, io_internal_error);
+    }
 
     // --- code de sortie ---------------------------------------------
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-    {
-    }
+    bool status_valid = false;
 
-    sigaction(SIGPIPE, &sa_old, nullptr);
-
-    int exit_code;
-    if (WIFEXITED(status))
+    if (has_timeout && !timed_out)
     {
-        exit_code = WEXITSTATUS(status);
+        // Les trois pipes peuvent être fermés par le child alors qu'il
+        // continue à tourner. Le timeout doit donc aussi borner le waitpid
+        // final, pas seulement la boucle d'I/O.
+        ChildWaitResult wait_result = wait_child_until(pid, status, deadline);
+        if (wait_result == ChildWaitResult::reaped)
+        {
+            status_valid = true;
+        }
+        else if (wait_result == ChildWaitResult::error)
+        {
+            return push_fail(L, std::string("exec: waitpid failed: ") +
+                                    std::strerror(errno));
+        }
+        else
+        {
+            timed_out = true;
+            kill_group(pid, SIGTERM);
+            wait_result = wait_child_until(pid, status, now_ms() + grace_ms);
+            if (wait_result != ChildWaitResult::reaped)
+            {
+                kill_group(pid, SIGKILL);
+                wait_result = wait_child_until(pid, status,
+                                               now_ms() + grace_ms);
+            }
+            status_valid = (wait_result == ChildWaitResult::reaped);
+        }
     }
-    else if (WIFSIGNALED(status))
+    else if (timed_out)
     {
-        exit_code = 128 + WTERMSIG(status);
+        // Ne jamais transformer un timeout demandé en waitpid bloquant
+        // illimité. Le processus a déjà reçu TERM/KILL dans la boucle ;
+        // on lui laisse une dernière fenêtre bornée pour être réapable.
+        ChildWaitResult wait_result =
+            wait_child_until(pid, status, now_ms() + 2000);
+        if (wait_result != ChildWaitResult::reaped)
+        {
+            kill_group(pid, SIGKILL);
+            wait_result = wait_child_until(pid, status, now_ms() + 500);
+        }
+        status_valid = (wait_result == ChildWaitResult::reaped);
     }
     else
     {
-        exit_code = -1;
+        pid_t waited;
+        do
+        {
+            waited = waitpid(pid, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+        status_valid = (waited == pid);
+        if (!status_valid)
+        {
+            return push_fail(L, std::string("exec: waitpid failed: ") +
+                                    std::strerror(errno));
+        }
     }
 
-    // --- table résultat ---------------------------------------------
-    lua_newtable(L);
-
-    lua_pushlstring(L, out_buf.data(), out_buf.size());
-    lua_setfield(L, -2, "stdout");
-
-    lua_pushlstring(L, err_buf.data(), err_buf.size());
-    lua_setfield(L, -2, "stderr");
-
-    lua_pushinteger(L, exit_code);
-    lua_setfield(L, -2, "code");
-
-    // Champ `timed_out` : true si le process a été arrêté pour dépassement
-    // du délai. Permet de distinguer "a fini seul" de "a été tué".
-    lua_pushboolean(L, timed_out ? 1 : 0);
-    lua_setfield(L, -2, "timed_out");
-
-    // Flags de troncature SÉPARÉS par flux : si seul stderr explose, on
-    // sait que stdout est complet (et inversement). La sortie présente
-    // est les PREMIERS octets ; le process, lui, a tourné normalement
-    // (on a continué à drainer), `code` reflète sa vraie fin.
-    lua_pushboolean(L, out_truncated ? 1 : 0);
-    lua_setfield(L, -2, "stdout_truncated");
-
-    lua_pushboolean(L, err_truncated ? 1 : 0);
-    lua_setfield(L, -2, "stderr_truncated");
-
-    lua_pushnil(L); // pas d'erreur
-    return 2;
+    return push_exec_result(L, out_buf, err_buf, status, status_valid,
+                            timed_out, out_truncated, err_truncated);
 }
