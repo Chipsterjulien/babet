@@ -1,43 +1,21 @@
-[ ] Implémenter les fonctions zip, unzip, tar, untar …
+Babet 2.6.0 roadmap
+====================
 
+[ ] Evaluate libarchive and define the multi-format archive API.
+[ ] Add secure TAR inspection and extraction.
+[ ] Add deterministic TAR creation.
+[ ] Add .tar.gz/.tgz, .tar.xz, .tar.bz2 and .tar.zst support.
+[ ] Define safe handling for standalone gzip/xz/bzip2/zstd streams.
+[ ] Replace or complement std::regex in babet.find with bounded matching
+    (RE2 and/or a safe glob mode).
+[ ] Introduce shared strict Lua validation helpers without changing public
+    contracts.
+[ ] Consider archive creation from explicit file lists and exclusion rules.
+[ ] Audit code, tests, FR/EN documentation, examples and PDF manuals before
+    release, using the same standard as 2.5.0.
 
-[x] os.path.join()
-[x] os.path.exists()
-[x] os.path.isdir()
-[x] os.path.isfile()
-[x] os.remove()
-[x] os.rename()
-[x] shutil.copy()
-[x] shutil.move()
-[x] md5sum
-[x] shasum
-[x] Uniformiser et tout mettre en C++ 23
-[x] Utiliser #include <system_error> partout (tout ce qui est avant moveTree.cpp)
-[x] Vérifier que je passe bien le bon nombre de paramètre à la fonction lua avant d'aller plus loin dans le code
-[x] Utiliser return luaL_error(L, "Table must contain only strings"); quand c'est possible au lieu d'avoir 2 lignes de code pour faire la même chose
-[x] Refaire les fonctions du project_core
-[ ] Dette de test post-Chantier 1/2 (à durcir avant ou intercalé entre chantiers) :
-    - http.post(url, opts) sans body : forme à 2 args avec opts en 2e position
-    - URLs malformées subtiles : "http://:8080/", "http:///path", IPv6 brut, ...
-    - argparse : positionnel avec choices (supporté par le code, non couvert par le harnais)
-    - argparse : positionnel avec convert
-    - autres trous d'aveugle révélés à l'usage
-
-[ ] Durcir split_url (http.cpp) : exiger un host non vide dans l'authority
-    (actuellement "http://:8080/" passe le parse et n'échoue qu'au transport ;
-     test n°3 de la dette documente la limite).
-
-[ ] TLS sockets (luapilot.socket.tls_*) :
-    - Prioritaire avant workers (nouvel ordre acté).
-    - Cas d'usage déclenchant : bot IRC sur Libera.Chat port 6697.
-    - OpenSSL déjà lié (réutilisé par http). Cadrage à faire :
-      vérification cert par défaut, SNI + hostname check, TLS 1.2 min,
-      méthode d'élévation (connect_tls direct + starttls sur socket
-      existant pour SMTP/IMAP), gestion SSL_WANT_READ, fermeture propre.
-    - Évaluer un wrapper header-only avant de coder à la main 600+ lignes.
-
-[ ] Workers (concurrence d'I/O, dernier gros chantier de la 1.x) :
-    - À découper en sous-livraisons : spawn/join, channels, pools/map.
-    - Chantier majeur : cadrage substantiel attendu (modèle de threading,
-      partage mémoire, sérialisation des messages, terminaison propre).
-    - À attaquer APRÈS TLS sockets (nouvel ordre acté).
+Deferred ideas retained in notes.md:
+- parent-side PATH resolution followed by execve;
+- worker-to-worker channels;
+- cooperative cancellation design;
+- macOS/BSD portability.

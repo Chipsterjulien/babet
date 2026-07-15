@@ -117,9 +117,9 @@ This restriction prevents data races between threads.
 The four constants describe the Babet binary running the script.
 
 ```lua
-print(babet.VERSION)       -- for example "2.4.0"
+print(babet.VERSION)       -- for example "2.5.0"
 print(babet.VERSION_MAJOR) -- for example 2
-print(babet.VERSION_MINOR) -- for example 4
+print(babet.VERSION_MINOR) -- for example 5
 print(babet.VERSION_PATCH) -- for example 0
 ```
 
@@ -148,7 +148,7 @@ local function version_at_least(major, minor, patch)
     return true
 end
 
-assert(version_at_least(2, 4, 0), "Babet >= 2.4.0 is required")
+assert(version_at_least(2, 5, 0), "Babet >= 2.5.0 is required")
 ```
 
 The following consistency is covered by tests:

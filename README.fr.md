@@ -14,7 +14,7 @@ sous Linux, écrit en C++23. OpenSSL, SQLite, miniz, nlohmann/json,
 cpp-httplib et tomlplusplus sont liés statiquement : un seul binaire, sans
 dépendance système autre que glibc.
 
-Version stable et auditée actuelle : **2.4.0**. Voir le
+Version stable et auditée actuelle : **2.5.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
@@ -27,7 +27,9 @@ Babet s’utilise de trois façons :
 3. **Bibliothèque de bindings** : les scripts disposent notamment de
    `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`,
    `babet.inotify`, `babet.workers`, `babet.user`, `babet.exec`, le streaming
-   `babet.spawn` et le téléchargement direct `babet.http.download`.
+   `babet.spawn`, les pipelines `babet.pipeline` / `babet.spawnPipeline`, les
+   archives ZIP sécurisées `babet.archive` et le téléchargement direct
+   `babet.http.download`.
 
 ## Démarrage rapide
 
@@ -62,6 +64,34 @@ assert(result.saved, "HTTP " .. result.status)
 La réponse est écrite dans un temporaire du même dossier, puis validée
 atomiquement uniquement pour un statut final 2xx. Une destination existante est
 préservée après erreur réseau, TLS, taille, disque ou statut non-2xx.
+
+### Créer, inspecter puis extraire une archive ZIP en sécurité
+
+```lua
+local created, err = babet.archive.create("projet", "projet.zip", {
+    compression_level = 9,
+    overwrite = true,
+})
+assert(created, err)
+
+local info, err = babet.archive.list("upload.zip", {
+    max_entries = 2000,
+    max_total_size = 512 * 1024 * 1024,
+})
+assert(info, err)
+
+local result
+result, err = babet.archive.extract("upload.zip", "restore", {
+    overwrite = false,
+})
+assert(result, err)
+```
+
+La création refuse les symlinks source, objets non pris en charge, noms
+d’entrée dangereux et toute sortie située dans l’arbre source. L’extraction
+refuse les chemins absolus, composants `..`, symlinks ZIP et parents symlinkés.
+L’archive est publiée atomiquement en bloc ; chaque fichier extrait est
+contrôlé puis publié atomiquement.
 
 ## Validation avant une release
 

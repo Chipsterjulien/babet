@@ -16,7 +16,7 @@ in C++23. Embeds OpenSSL, SQLite, miniz, nlohmann/json, cpp-httplib,
 and tomlplusplus statically — one binary, no system dependencies
 beyond glibc.
 
-Current stable and audited release: **2.4.0**. See the
+Current stable and audited release: **2.5.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
@@ -30,8 +30,9 @@ Can be used in three modes:
 3. **As a library of bindings** : Lua scripts get
    `babet.json`, `babet.http`, `babet.sqlite`,
    `babet.socket`, `babet.inotify`, `babet.workers`,
-   `babet.user`, `babet.exec`, the streaming `babet.spawn`, direct-to-file
-   `babet.http.download`, and more.
+   `babet.user`, `babet.exec`, the streaming `babet.spawn`,
+   `babet.pipeline` / `babet.spawnPipeline`, secure ZIP handling through
+   `babet.archive`, direct-to-file `babet.http.download`, and more.
 
 ## Quick start
 
@@ -67,6 +68,34 @@ assert(result.saved, "HTTP " .. result.status)
 The response is written to a same-directory temporary file and atomically
 committed only for a final 2xx status. Existing destinations are preserved on
 network, TLS, size, disk, and non-2xx failures.
+
+### Create, inspect, and extract a ZIP archive securely
+
+```lua
+local created, err = babet.archive.create("project", "project.zip", {
+    compression_level = 9,
+    overwrite = true,
+})
+assert(created, err)
+
+local info, err = babet.archive.list("upload.zip", {
+    max_entries = 2000,
+    max_total_size = 512 * 1024 * 1024,
+})
+assert(info, err)
+
+local result
+result, err = babet.archive.extract("upload.zip", "restore", {
+    overwrite = false,
+})
+assert(result, err)
+```
+
+Creation rejects source symlinks, unsupported filesystem objects, unsafe entry
+names, and an output inside the source tree. Extraction rejects absolute paths,
+`..` components, ZIP symlinks, and symlinked destination parents. Archives are
+published atomically as a whole; extracted files are validated and published
+atomically per file.
 
 ## Pre-release validation
 

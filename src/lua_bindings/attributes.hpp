@@ -1,29 +1,25 @@
 #ifndef ATTRIBUTES_HPP
 #define ATTRIBUTES_HPP
 
-#include <string>
-#include <optional>
-#include <filesystem>
 #include <lua.hpp>
-#include "lua_utils.hpp"
 
 /**
- * @brief Changes the owner, group, and permissions of a file or directory.
+ * Lua binding for babet.setAttributes(path, uid, gid [, mode]).
  *
- * @param path The directory path to change to.
- * @param owner The new owner (UID).
- * @param group The new group (GID).
- * @param mode The new permissions (mode).
- * @return std::optional<std::string> An optional string containing an error message if any, or an empty optional if successful.
- */
-int lua_setattr(lua_State* L);
-
-/**
- * @brief Gets the attributes of a file or directory.
+ * The resolved target is followed once and pinned for owner/group, optional
+ * mode, and rollback operations.
  *
  * @param L The Lua state.
- * @return int Number of return values on the Lua stack.
+ * @return Two Lua values: (true, nil) on success or (nil, error) on failure.
  */
-int lua_getattr(lua_State* L);
+int lua_setattr(lua_State *L);
+
+/**
+ * Lua binding for babet.getAttributes(path).
+ *
+ * @param L The Lua state.
+ * @return Two Lua values: (attributes, nil) or (nil, error).
+ */
+int lua_getattr(lua_State *L);
 
 #endif // ATTRIBUTES_HPP

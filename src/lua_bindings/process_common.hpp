@@ -42,6 +42,44 @@ struct LaunchResult
     bool status_valid = false;
 };
 
+struct PipelineStageSpec
+{
+    std::string command;
+    std::vector<std::string> argv_strings; // argv[0] inclus
+    std::string cwd;
+    bool has_cwd = false;
+    std::vector<std::pair<std::string, std::string>> env_overrides;
+};
+
+struct LaunchedPipelineChild
+{
+    pid_t pid = -1;
+    int stderr_fd = -1;
+};
+
+struct LaunchedPipeline
+{
+    int stdin_fd = -1;
+    int stdout_fd = -1;
+    std::vector<LaunchedPipelineChild> children;
+};
+
+struct PipelineLaunchSpec
+{
+    std::vector<PipelineStageSpec> stages;
+    bool has_deadline = false;
+    long long deadline_ms = 0;
+    const char *error_prefix = "pipeline";
+};
+
+struct PipelineLaunchResult
+{
+    bool success = false;
+    bool timed_out = false;
+    std::string error;
+    LaunchedPipeline pipeline;
+};
+
 // Validation commune de cmd + args. `out` reçoit argv[0] == cmd.
 bool collect_args(lua_State *L, int idx, const std::string &cmd,
                   std::vector<std::string> &out, std::string &err);
@@ -79,6 +117,13 @@ void close_process_fds(LaunchedProcess &process);
 // de chdir/exec via un pipe CLOEXEC. En succès, les trois fds parent sont
 // non-bloquants et appartiennent à l'appelant.
 LaunchResult launch(const LaunchSpec &spec);
+
+// Variante multi-processus : stdout d'une étape est relié directement au stdin
+// de la suivante. Le parent ne conserve que stdin de la première étape,
+// stdout de la dernière et un stderr par étape. En cas d'échec partiel, tous
+// les groupes déjà lancés sont terminés et les enfants directs sont réapés.
+PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec);
+void close_pipeline_fds(LaunchedPipeline &pipeline);
 
 int exit_code_from_status(int status, bool status_valid);
 

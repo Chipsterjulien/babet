@@ -47,12 +47,14 @@ FILE_TO_ANCHOR = {
     "security":        "ch-security",
     "cookbook":        "ch-cookbook",
     "argparse":        "ch-argparse",
+    "archive":         "ch-archive",
     "exec":            "ch-exec",
     "fs":              "ch-fs",
     "http":            "ch-http",
     "inotify":         "ch-inotify",
     "json":            "ch-json",
     "logging":         "ch-logging",
+    "pipeline":        "ch-pipeline",
     "signal":          "ch-signal",
     "socket":          "ch-socket",
     "sqlite":          "ch-sqlite",
@@ -123,7 +125,7 @@ def convert_html_anchors_to_heading_ids(content):
         ### `babet.mkdir(path)` {#mkdir}
     """
     pattern = re.compile(
-        r'^<a id="([A-Za-z0-9_.:-]+)"></a>\n(#{1,6}) (.+)$',
+        r'^<a id="([A-Za-z0-9_.:-]+)"></a>\n(?:[ \t]*\n)*(#{1,6}) (.+)$',
         re.MULTILINE,
     )
 

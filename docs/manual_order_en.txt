@@ -16,8 +16,10 @@ docs/en/security.md
 # Alphabetical order. Reorder freely if you prefer a logical
 # grouping (e.g. networking together, data formats together).
 
+docs/en/modules/archive.md
 docs/en/modules/argparse.md
 docs/en/modules/exec.md
+docs/en/modules/pipeline.md
 docs/en/modules/fs.md
 docs/en/modules/http.md
 docs/en/modules/inotify.md

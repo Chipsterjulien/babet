@@ -32,6 +32,15 @@ Le travail de durcissement dans Babet protège les usages
   pendant l'opération ne peut pas rediriger une écriture vers une cible
   extérieure. Les gardes `is_within()` empêchent en plus de choisir une
   destination résolue dans la source.
+- **Création et extraction ZIP confinées** : `babet.archive` refuse les chemins de source de création et de
+  destination de sortie/extraction lorsqu’ils sont symlinkés, les objets source non pris en charge, les noms
+  source non UTF-8, une sortie dans l’arbre source, les chemins d’entrée absolus,
+  les composants `.`/`..`, les backslashes, les doublons, les symlinks ZIP et
+  les types spéciaux. Les archives à lire sont ouvertes une fois et doivent se
+  résoudre vers un fichier régulier, ce qui écarte notamment les FIFO bloquants.
+  La destination est parcourue avec des descripteurs et
+  `O_NOFOLLOW`; chaque fichier est décompressé dans un temporaire du même
+  répertoire, soumis à des limites anti-bombe, puis publié atomiquement.
 - **Cleanup borné des groupes de processus** dans `babet.exec` couvre aussi
   la phase `chdir`/`exec`, les erreurs internes de polling et le cas où un
   enfant ferme ses pipes tout en continuant à tourner. Au timeout, TERM puis
@@ -41,6 +50,16 @@ Le travail de durcissement dans Babet protège les usages
   de stdout et stderr capturés en mémoire (par défaut 10 MiB
   chacun, configurable), pour qu'un sous-processus emballé ne
   puisse pas OOM le processus Babet.
+- **Mises à jour locales épinglées** : `setAttributes` résout sa cible une
+  seule fois et maintient `chown`, `chmod` et le rollback sur le même inode.
+  `touch` crée avec `O_EXCL`, ne tronque jamais un fichier existant et épingle
+  une cible existante avant de modifier son horodatage.
+- **Staging anonyme et publication épinglée des exécutables** : `--create-exe`
+  supprime le nom de son ZIP temporaire immédiatement après `mkstemp`, puis
+  laisse miniz et la fusion rouvrir l’inode encore vivant via `/proc/self/fd`,
+  jamais par un chemin temporaire remplaçable. La fusion finale épingle le
+  dossier de sortie et publie avec `renameat()` ; modifier un parent symlinké ne
+  peut donc pas rediriger l’exécutable.
 - **Checksums des dépendances** : chaque dépendance embarquée est
   SHA256-pinnée dans `build_local.sh`. Un hash vide refuse la
   build. Un mismatch supprime le fichier téléchargé et sort en
@@ -64,14 +83,19 @@ Le travail de durcissement dans Babet protège les usages
 
 ## Ce contre quoi il *ne protège pas*
 
-- Un script malveillant. Babet n'a pas de sandbox. Si tu fais
-  `exec` sur de l'input utilisateur, tu as une injection shell.
-  Si tu fais `loadstring` sur de l'input utilisateur, tu as une
-  exécution de code arbitraire.
+- Un script malveillant. Babet n’a pas de sandbox. `babet.exec` n’invoque pas
+  de shell, mais laisser une entrée non fiable choisir l’exécutable ou ses
+  arguments peut tout de même permettre l’exécution d’un programme arbitraire
+  ou une injection d’options. Transmettre du texte non fiable à `load` donne
+  une exécution arbitraire de code Lua.
 - Un attaquant déterminé qui a déjà obtenu une exécution de code
   sur la machine qui fait tourner Babet. Le durcissement rend
   les erreurs accidentelles visibles, pas les attaques
   adversariales impossibles.
+- Les expressions régulières non fiables. `babet.find` utilise
+  `std::regex` ; certains motifs ECMAScript peuvent provoquer un backtracking
+  catastrophique. Il faut valider ou prédéfinir les regex plutôt que de les
+  accepter directement depuis une personne non fiable.
 - Les problèmes OS-level (exploits kernel, évasions de
   conteneur, escalade de privilèges). Babet est un binaire
   userland ordinaire.

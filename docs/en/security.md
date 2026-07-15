@@ -29,6 +29,14 @@ accidents and supply-chain tampering :
   during the operation, cannot redirect a write to an outside target. The
   `is_within()` guards additionally reject a destination resolving inside
   the source.
+- **Confined ZIP creation and extraction**: `babet.archive` refuses symlinked creation-source and
+  output/extraction-destination paths, unsupported source objects, non-UTF-8 source names,
+  outputs inside the source tree, absolute archive-entry paths, `.`/`..`
+  components, backslashes, duplicates, ZIP symlinks, and special filesystem
+  types. Input archives are opened once and must resolve to a regular file,
+  excluding blocking FIFO sources. It walks the destination through descriptors with
+  `O_NOFOLLOW`; each file is decompressed into a same-directory temporary,
+  checked against anti-bomb limits, then published atomically.
 - **Bounded process-group cleanup** in `babet.exec` also covers the
   `chdir`/`exec` launch phase, internal polling failures, and children that
   close all pipes while continuing to run. On timeout, TERM then KILL target
@@ -37,6 +45,15 @@ accidents and supply-chain tampering :
 - **Output limits** on `babet.exec` bound the amount of stdout
   and stderr captured into memory (default 10 MiB each, configurable),
   so a runaway subprocess can't OOM the Babet process.
+- **Pinned local metadata updates**: `setAttributes` resolves its target once
+  and keeps `chown`, `chmod`, and rollback attached to the same inode. `touch`
+  creates with `O_EXCL`, never truncates an existing file, and pins an existing
+  target before changing its timestamp.
+- **Anonymous and pinned executable staging**: `--create-exe` unlinks its
+  temporary ZIP immediately after `mkstemp` and lets miniz and the merge step
+  reopen the still-live inode through `/proc/self/fd`, not through a replaceable
+  temp path. The final merge pins the output directory and publishes with
+  `renameat()`, so changing a parent symlink cannot redirect the executable.
 - **Dependency checksums** : every vendored dependency is
   SHA256-pinned in `build_local.sh`. An empty hash refuses to build.
   A mismatch deletes the downloaded file and exits with an error.
@@ -58,12 +75,16 @@ accidents and supply-chain tampering :
 
 ## What it does *not* protect against
 
-- A malicious script. Babet has no sandbox. If you `exec` user
-  input, you have a shell injection. If you `loadstring` user
-  input, you have arbitrary code execution.
+- A malicious script. Babet has no sandbox. `babet.exec` does not invoke a
+  shell, but allowing untrusted input to choose the executable or its arguments
+  can still permit arbitrary program execution or option injection. Passing
+  untrusted text to `load` gives arbitrary Lua code execution.
 - A determined attacker who has obtained code execution on the
   machine running Babet. The hardening makes accidental
   mistakes loud, not adversarial attacks impossible.
+- Untrusted regular expressions. `babet.find` uses C++ `std::regex`; some
+  ECMAScript patterns can trigger catastrophic backtracking. Validate or
+  predefine regexes instead of accepting them directly from an untrusted user.
 - Long-tail OS-level issues (kernel exploits, container escapes,
   privilege escalation). Babet is an ordinary userland binary.
 

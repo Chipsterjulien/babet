@@ -2,6 +2,7 @@
 #include "lua_utils.hpp"
 
 #include <cerrno>
+#include <fcntl.h>
 #include <filesystem>
 #include <limits>
 #include <optional>
@@ -14,6 +15,28 @@ namespace fs = std::filesystem;
 namespace
 {
 constexpr mode_t MODE_MASK = 07777;
+
+class ScopedFd
+{
+  public:
+    explicit ScopedFd(int fd = -1) noexcept : fd_(fd) {}
+
+    ~ScopedFd()
+    {
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+    }
+
+    ScopedFd(const ScopedFd &) = delete;
+    ScopedFd &operator=(const ScopedFd &) = delete;
+
+    int get() const noexcept { return fd_; }
+
+  private:
+    int fd_;
+};
 
 /**
  * @brief Pushes a Lua table {mode, owner, group} on the stack.
@@ -40,28 +63,53 @@ std::string errno_message(int value)
     return std::generic_category().message(value);
 }
 
+std::string proc_fd_path(int fd)
+{
+    return "/proc/self/fd/" + std::to_string(fd);
+}
+
 /**
- * @brief Changes owner/group, then optionally permissions.
+ * @brief Applies a mode to the inode pinned by an O_PATH descriptor.
  *
- * POSIX does not provide an atomic chown+chmod primitive. We therefore
- * validate everything before the first mutation and, if chmod fails after a
- * successful chown, make a best-effort rollback to the exact original
- * owner/group/mode. A rollback failure is included in the returned error so
- * the caller is never told that the operation was cleanly reverted when it
- * was not.
+ * Linux does not provide fchmod() support for O_PATH descriptors, and
+ * fchmodat(..., AT_EMPTY_PATH) is not available on every supported kernel.
+ * /proc/self/fd/<n> is a magic link to the already-open file description: it
+ * therefore keeps the operation bound to the same inode even if the original
+ * pathname is renamed or replaced concurrently.
+ */
+bool chmod_pinned_fd(int fd, mode_t mode)
+{
+    const std::string path = proc_fd_path(fd);
+    return ::chmod(path.c_str(), mode) == 0;
+}
+
+/**
+ * @brief Changes owner/group, then optionally permissions on one pinned inode.
+ *
+ * POSIX does not provide an atomic chown+chmod primitive. The pathname is
+ * resolved once with O_PATH (following the documented final symlink), then
+ * fstat/fchownat/chmod-through-/proc all operate on that same open file
+ * description. If chmod fails after a successful chown, rollback is attempted
+ * on the exact same inode rather than resolving the caller's pathname again.
  */
 std::optional<std::string> set_attributes(const fs::path &path,
                                           uid_t owner,
                                           gid_t group,
                                           std::optional<mode_t> mode)
 {
-    struct stat original{};
-    if (::stat(path.c_str(), &original) != 0)
+    ScopedFd fd(::open(path.c_str(), O_PATH | O_CLOEXEC));
+    if (fd.get() < 0)
     {
         return errno_message(errno);
     }
 
-    if (::chown(path.c_str(), owner, group) != 0)
+    struct stat original{};
+    if (::fstat(fd.get(), &original) != 0)
+    {
+        return errno_message(errno);
+    }
+
+    if (::fchownat(fd.get(), "", owner, group, AT_EMPTY_PATH) != 0)
     {
         return errno_message(errno);
     }
@@ -71,7 +119,7 @@ std::optional<std::string> set_attributes(const fs::path &path,
         return std::nullopt;
     }
 
-    if (::chmod(path.c_str(), *mode) == 0)
+    if (chmod_pinned_fd(fd.get(), *mode))
     {
         return std::nullopt;
     }
@@ -81,11 +129,12 @@ std::optional<std::string> set_attributes(const fs::path &path,
     // chown may clear setuid/setgid bits, hence rollback order is owner/group
     // first, then mode, so the original special bits are restored last.
     const bool owner_restored =
-        (::chown(path.c_str(), original.st_uid, original.st_gid) == 0);
+        (::fchownat(fd.get(), "", original.st_uid, original.st_gid,
+                    AT_EMPTY_PATH) == 0);
     const int rollback_chown_errno = owner_restored ? 0 : errno;
 
     const bool mode_restored =
-        (::chmod(path.c_str(), original.st_mode & MODE_MASK) == 0);
+        chmod_pinned_fd(fd.get(), original.st_mode & MODE_MASK);
     const int rollback_chmod_errno = mode_restored ? 0 : errno;
 
     std::string message = "chmod failed after chown: ";
@@ -120,9 +169,37 @@ int lua_setattr(lua_State *L)
         return luaL_error(L, "Expected three or four arguments");
     }
 
-    const std::string path = luaL_checkstring_without_nul(L, 1, "path");
-    const lua_Integer owner_raw = luaL_checkinteger(L, 2);
-    const lua_Integer group_raw = luaL_checkinteger(L, 3);
+    // Validate every argument that may raise before constructing an owning
+    // C++ string. luaL_error uses a non-local jump and would otherwise bypass
+    // that string's destructor when UID/GID/mode has the wrong Lua type.
+    if (lua_type(L, 1) != LUA_TSTRING)
+    {
+        return luaL_error(L, "path must be a string");
+    }
+    if (!lua_isinteger(L, 2))
+    {
+        return luaL_error(L, "UID must be an integer");
+    }
+    if (!lua_isinteger(L, 3))
+    {
+        return luaL_error(L, "GID must be an integer");
+    }
+    if (argc == 4 && !lua_isinteger(L, 4))
+    {
+        return luaL_error(L, "mode must be an integer");
+    }
+
+    const std::string_view path_view =
+        luaL_checkstring_view_without_nul(L, 1, "path");
+    const lua_Integer owner_raw = lua_tointeger(L, 2);
+    const lua_Integer group_raw = lua_tointeger(L, 3);
+
+    std::optional<mode_t> mode;
+    lua_Integer mode_raw = 0;
+    if (argc == 4)
+    {
+        mode_raw = lua_tointeger(L, 4);
+    }
 
     if (owner_raw < 0 || group_raw < 0)
     {
@@ -137,10 +214,8 @@ int lua_setattr(lua_State *L)
         return push_fail(L, "UID or GID out of range");
     }
 
-    std::optional<mode_t> mode;
     if (argc == 4)
     {
-        const lua_Integer mode_raw = luaL_checkinteger(L, 4);
         if (mode_raw < 0 || mode_raw > static_cast<lua_Integer>(MODE_MASK))
         {
             return push_fail(L, "mode must be an integer between 0 and 07777");
@@ -148,6 +223,7 @@ int lua_setattr(lua_State *L)
         mode = static_cast<mode_t>(mode_raw);
     }
 
+    const std::string path(path_view);
     return push_action_result(
         L, set_attributes(path,
                           static_cast<uid_t>(owner_raw),

@@ -22,9 +22,9 @@ Le module EXEC couvre :
 - une limite de mémoire distincte pour chaque flux de sortie ;
 - l'arrêt du groupe de processus enfant en cas de timeout.
 
-Il ne fournit pas de redirection directe vers un fichier, de pipeline implicite
-ni d'interpréteur de commandes. Les redirections ou pipelines restent à
-construire explicitement dans le script ou via un shell lancé volontairement.
+Il ne fournit pas de redirection directe vers un fichier ni d'interpréteur de
+commandes. Pour relier plusieurs programmes sans shell, utilise
+[`babet.pipeline()` ou `babet.spawnPipeline()`](pipeline.md).
 
 ## Table des matières du module
 
@@ -923,10 +923,10 @@ end
 - Écrire une grosse entrée à un programme qui réémet simultanément beaucoup de
   données exige d'alterner écriture et lecture. Un unique `write_all` avant
   toute lecture peut remplir les pipes dans les deux sens.
-- Il n'existe pas encore d'attente multi-processus ou de callback Lua appelé
-  depuis le C++. Le pilotage reste volontairement explicite et réentrant.
-- stdout et stderr sont toujours séparés. Babet ne les fusionne pas et ne crée
-  pas de pipeline entre deux objets processus.
+- Un objet issu de `babet.spawn()` ne peut pas être raccordé après coup à un
+  autre objet processus. Pour un pipeline linéaire, utilise directement
+  `babet.spawnPipeline()`.
+- stdout et stderr sont toujours séparés. Babet ne les fusionne pas.
 - `close()` et `terminate()` ciblent le groupe de processus créé au lancement.
   Un descendant qui change volontairement de groupe ou de session peut échapper
   à ce contrôle, comme avec `babet.exec`.
@@ -1013,7 +1013,8 @@ au total, plus les allocations du programme et des chaînes Lua.
 - Linux/POSIX uniquement : l'implémentation utilise `fork`, `execvpe`, `poll`,
   les groupes de processus et les signaux.
 - Aucun shell implicite.
-- Aucun pipeline natif entre plusieurs appels `exec`.
+- Un appel `exec` reste une commande unique ; les pipelines natifs utilisent
+  `babet.pipeline()` ou `babet.spawnPipeline()`.
 - Un seul bloc `stdin`, pas de producteur streaming.
 - Capture complète retournée à la fin, pas de callback ligne par ligne.
 - Pas de redirection native de stdin/stdout/stderr vers des fichiers ou fd.

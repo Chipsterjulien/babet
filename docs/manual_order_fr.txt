@@ -18,8 +18,10 @@ docs/fr/security.md
 # regroupement logique (réseau ensemble, formats de données
 # ensemble).
 
+docs/fr/modules/archive.md
 docs/fr/modules/argparse.md
 docs/fr/modules/exec.md
+docs/fr/modules/pipeline.md
 docs/fr/modules/fs.md
 docs/fr/modules/http.md
 docs/fr/modules/inotify.md

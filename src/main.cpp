@@ -1,3 +1,4 @@
+#include "lua_bindings/archive.hpp"
 #include "lua_bindings/attributes.hpp"
 #include "lua_bindings/blake2b.hpp"
 #include "lua_bindings/blake2s.hpp"
@@ -9,6 +10,7 @@
 #include "lua_bindings/deepCopyTable.hpp"
 #include "lua_bindings/exec.hpp"
 #include "lua_bindings/process.hpp"
+#include "lua_bindings/pipeline.hpp"
 #include "lua_bindings/fileExists.hpp"
 #include "lua_bindings/fileSize.hpp"
 #include "lua_bindings/fileUtils.hpp"
@@ -111,6 +113,9 @@ void register_babet(lua_State *L)
     // Processus pilotables en streaming (2.4.0). Enregistre babet.spawn
     // ainsi que la métatable du userdata babet.process.
     register_process(L);
+
+    // Pipelines synchrones et pilotables en streaming (2.5.0).
+    register_pipeline(L);
 
     lua_pushcfunction(L, lua_fileExists);
     lua_setfield(L, -2, "fileExists");
@@ -247,6 +252,10 @@ void register_babet(lua_State *L)
 
     lua_pushcfunction(L, lua_createFileIterator);
     lua_setfield(L, -2, "createFileIterator");
+
+    // Sous-table babet.archive (ZIP sécurisé : création, inspection et extraction).
+    // Même précondition de pile que les autres sous-modules.
+    register_archive(L);
 
     // Sous-table babet.json (encode/decode + sentinels null,
     // empty_array). register_json attend la table babet au sommet de

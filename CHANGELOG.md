@@ -6,6 +6,133 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.5.0] - 2026-07-15
+
+### Release summary
+
+Babet 2.5.0 adds two major audited capabilities while continuing the local
+security hardening started in the 2.3 and 2.4 series:
+
+- shell-free synchronous and streaming process pipelines, with per-stage
+  status, bounded I/O, process-group cleanup, launch rollback, and Lua
+  `<close>` support;
+- secure ZIP creation, inspection, and extraction, with deterministic output,
+  progressive processing, anti-bomb limits, strict path confinement, source
+  mutation detection, and atomic publication;
+- descriptor-pinned filesystem operations for `setAttributes()`, `touch()`,
+  and `--create-exe`, closing the remaining destructive pathname races found
+  during the final review.
+
+Final core validation for this release:
+
+- 2235 PASS / 0 FAIL in folder mode;
+- 2222 PASS / 0 FAIL in embedded mode;
+- 2222 PASS / 0 FAIL in embedded mode through `PATH`;
+- 9/9 runtime modes passed under ASan + UBSan;
+- 9/9 runtime modes passed again with the final normal build.
+
+The release gate additionally runs the local TLS and network smoke tests through
+`./run_tests.sh --release` before the commit is tagged.
+
+### Upgrade and usage notes
+
+- `babet.pipeline()` and `babet.spawnPipeline()` never invoke a shell. Commands
+  and arguments must be passed as separate strings.
+- The pipeline result code is the last stage's code. Inspect `all_succeeded`,
+  `failed_index`, and `stages` when an intermediate failure matters.
+- Streaming process and pipeline users must drain stdout and stderr while the
+  child is active when large output is possible.
+- `babet.archive.create()` is deterministic by default and refuses symlinked or
+  special source entries. Existing archives are inspected as byte-oriented ZIP
+  names; newly created names must be valid UTF-8.
+- `touch()` now refuses a dangling final symlink instead of creating its target.
+- `setAttributes()` requires strict Lua integers for UID, GID, and mode;
+  numeric strings are no longer coerced.
+- ECMAScript regular expressions supplied to `babet.find()` must not come
+  directly from untrusted users because `std::regex` has no execution timeout.
+
+
+### Filesystem race hardening
+
+- `setAttributes()` now pins the resolved target once and applies `fstat`,
+  `chown`, optional `chmod`, and rollback to the same inode, preventing a
+  pathname replacement from redirecting a privileged later phase.
+- Fixed a Lua/C++ `longjmp` leak path by validating the path, UID, GID, and
+  mode before constructing the owned pathname string; these arguments now keep
+  their documented strict Lua types, so numeric strings are not coerced.
+- Reworked `touch()` around a pinned parent, `O_PATH`, and atomic
+  `O_CREAT|O_EXCL`; it no longer has an existence-check/truncating-open race,
+  never truncates a file that appears concurrently, and refuses dangling final
+  symlinks.
+- Documented the catastrophic-backtracking risk of untrusted ECMAScript
+  patterns passed to `babet.find`, and corrected the `setAttributes()` mode
+  examples in the user documentation.
+- `--create-exe` now unlinks its `mkstemp` ZIP immediately and passes the
+  still-open inode to miniz and the merge step through `/proc/self/fd`; the
+  temporary archive can no longer be replaced between creation and reopening.
+  The final merge also pins the output directory, uses a short internal
+  temporary name, and publishes with `renameat()`, so a replaced parent symlink
+  cannot redirect the result and valid near-`NAME_MAX` outputs remain usable.
+
+### Secure ZIP archives
+
+- Added `babet.archive.create()` for progressive directory-to-ZIP creation with deterministic ordering and timestamps, compression levels 0-9, explicit directory entries, bounded source scanning, source-change detection, and atomic whole-archive publication.
+- Creation rejects symlink components and entries, unsupported filesystem objects, outputs inside the source tree, unsafe destination parents, destination symlinks, and unexpected source mutations.
+- Added `babet.archive.list()` to inspect ZIP metadata, entry types, sizes,
+  methods, CRC values, Unix permissions, and paths without extracting.
+- Added `babet.archive.extract()` and `babet.archive.extractFile()` with
+  progressive decompression, configurable anti-bomb limits, CRC validation,
+  same-directory staging files, and atomic per-file publication.
+- Rejected absolute paths, `.`/`..` components, backslashes, drive prefixes,
+  duplicates, file/directory conflicts, ZIP symlinks, encrypted entries, and
+  special filesystem types.
+- Added descriptor-based destination traversal with `openat`, `fstatat`,
+  `O_NOFOLLOW`, and `AT_SYMLINK_NOFOLLOW`, including existing parents and
+  final targets.
+- Added limits for entry count, per-entry size, total expanded size,
+  compression ratio, cumulative entry-name metadata memory, and a 128 MiB cap
+  on internal miniz reader allocations, plus fixed bounds on the implicit
+  directory tree produced by extraction.
+- Updated miniz from 3.1.1 to 3.1.2 so upstream central-directory parsing and
+  decompression fixes are included before exposing untrusted-archive analysis.
+- Added deterministic pure-Lua ZIP fixtures covering binary data, DEFLATE,
+  permissions, CRC corruption, overwrite, cleanup, traversal, symlinks,
+  duplicates, limits, and strict arguments.
+- Final P2-C audit: input archives are opened once through a regular-file
+  descriptor so FIFO sources are rejected without blocking; `create()` now
+  validates emitted UTF-8 names, explicitly enforces the ZIP 1980-2107 timestamp
+  range in non-deterministic mode, and uses temporary names independent of the
+  final basename so near-`NAME_MAX` destinations remain supported.
+
+### Process pipelines
+
+- Added `babet.pipeline()` for shell-free synchronous pipelines with direct
+  stage-to-stage pipes, binary stdin, final stdout capture, separate stderr per
+  stage, bounded capture, a global timeout, and per-stage exit statuses.
+- Added `babet.spawnPipeline()` for progressive binary I/O through the first
+  stdin, final stdout, and every separate stderr stream.
+- Added `read_stdout`, indexed `read_stderr`, partial `write`, idempotent
+  `close_stdin`, `is_running`, `pids`, `wait`, `terminate`, `kill`, and `close`
+  methods, with `__gc` and Lua `<close>` cleanup.
+- A pipeline's global code is the last stage's code, while `all_succeeded`,
+  `failed_index`, and `stages` preserve intermediate failures and signals.
+- Each stage runs in its own process group. Launch failure, timeout, explicit
+  termination, close, and garbage collection clean up all already-created
+  stages and descendants that remain in those groups. Normal completion also
+  removes background descendants before the leader is reaped, without risking
+  a signal being sent to a recycled PID.
+- Refactored synchronous and streaming pipelines onto one shared multi-process
+  launcher in `process_common`, including strict pre-fork validation and
+  bounded partial-launch rollback.
+- Added deterministic regression coverage for binary and partial I/O, large
+  stdin/stdout/stderr volumes, SIGPIPE, intermediate failures, launch errors,
+  timeouts, idempotence, process groups, GC, and Lua `<close>`.
+- Final P1-C audit: strict validation of both APIs and every method, launch
+  timeout coverage during `chdir`/`exec`, rollback of partial launches and their
+  descendants, cleanup of a background child after normal completion,
+  protection when standard descriptors 0/1/2 are closed, and cross-checking of
+  code, tests, French/English documentation, examples, and PDF manuals.
+
 ## [2.4.0] - 2026-07-14
 
 ### Release summary

@@ -151,7 +151,7 @@ assert(babet.setAttributes(
     "/var/lib/my-service",
     account.uid,
     account.gid,
-    "750"
+    tonumber("750", 8)
 ))
 ```
 

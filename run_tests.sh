@@ -68,7 +68,7 @@ if [ ! -f "${BINARY}" ]; then
     exit 1
 fi
 
-# Les tests 6 et 8 injectent une bibliothèque de test avec LD_PRELOAD.
+# Les tests 4, 6 et 8 injectent une bibliothèque de test avec LD_PRELOAD.
 # Pour un binaire ASan, le runtime AddressSanitizer doit rester le premier
 # objet chargé ; sinon le loader arrête le processus avant même main().
 ASAN_RUNTIME=""
@@ -222,7 +222,7 @@ fi
 echo ""
 
 # === Test 4 : --create-exe et symlinks (régression audit v21) =======
-# Deux bugs corrigés dans zip_utils.cpp :
+# Régressions corrigées dans create_executable.cpp et zip_utils.cpp :
 #   a) fs::relative résolvait les symlinks : un module du projet qui
 #      est un symlink vers un fichier HORS du projet (proj/mylib.lua
 #      -> ../shared/mylib.lua) était embarqué sous le nom d'entrée
@@ -234,6 +234,12 @@ echo ""
 #      --create-exe levait une filesystem_error non attrapée ->
 #      std::terminate (abort, code 134) au lieu d'une erreur propre.
 #      Fix : try/catch dans createZipFromDirectory -> message + exit 1.
+#   c) le temporaire de fusion reprenait tout le basename de sortie : une
+#      destination pourtant valide proche de NAME_MAX échouait.
+#      Fix : nom interne court et indépendant de la destination.
+#   d) le parent de sortie pouvait être remplacé entre la création du
+#      temporaire et rename().
+#      Fix : parent épinglé et publication par renameat() sur ce descripteur.
 echo "### Test 4 : --create-exe et symlinks ###"
 modes_total=$((modes_total + 1))
 test4_ok=1
@@ -375,6 +381,101 @@ LUA
         fi
     fi
 
+    # --- 4f : basename de sortie proche de NAME_MAX -----------------
+    # Le temporaire de fusion ne doit pas recopier tout le basename : une
+    # destination valide de 244 octets échouait sinon avec ENAMETOOLONG.
+    LONG_NAME=$(printf 'x%.0s' $(seq 1 244))
+    LONG_BIN="${SYMLINK_ROOT}/${LONG_NAME}"
+    if "${BINARY}" --create-exe "${SYMLINK_ROOT}/proj" "${LONG_BIN}" \
+        > /dev/null 2>&1 \
+        && [ -x "${LONG_BIN}" ]; then
+        long_out=$("${LONG_BIN}" 2>&1)
+        if echo "${long_out}" | grep -q "SYMLINK_OK"; then
+            echo "  -> basename de sortie long : OK"
+        else
+            echo "  -> basename long : ÉCHEC (sortie=${long_out})"
+            test4_ok=0
+        fi
+    else
+        echo "  -> basename long : ÉCHEC (création)"
+        test4_ok=0
+    fi
+
+    # --- 4g : parent de sortie remplacé pendant la fusion -----------
+    # Le hook déplace le symlink de parent au moment du fchmod du temporaire,
+    # donc après l'ouverture du dossier et avant la publication. renameat()
+    # doit rester attaché au parent initialement épinglé.
+    cat > "${SYMLINK_ROOT}/merge_parent_race.c" << 'C'
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+typedef int (*fchmod_fn)(int, mode_t);
+static fchmod_fn real_fchmod_fn = 0;
+static int injected = 0;
+
+__attribute__((constructor))
+static void init_merge_parent_race(void)
+{
+    real_fchmod_fn = (fchmod_fn)dlsym(RTLD_NEXT, "fchmod");
+}
+
+int fchmod(int fd, mode_t mode)
+{
+    if (!real_fchmod_fn)
+    {
+        return -1;
+    }
+
+    if (!injected)
+    {
+        const char *link = getenv("BABET_TEST_MERGE_PARENT_LINK");
+        const char *next = getenv("BABET_TEST_MERGE_NEW_PARENT");
+        if (link && next)
+        {
+            injected = 1;
+            (void)unlink(link);
+            const int symlink_result = symlink(next, link);
+            (void)symlink_result;
+        }
+    }
+
+    return real_fchmod_fn(fd, mode);
+}
+C
+
+    mkdir -p "${SYMLINK_ROOT}/publish_a" "${SYMLINK_ROOT}/publish_b"
+    ln -s "${SYMLINK_ROOT}/publish_a" "${SYMLINK_ROOT}/publish_link"
+    if ! cc -shared -fPIC -O2 "${SYMLINK_ROOT}/merge_parent_race.c" \
+        -ldl -o "${SYMLINK_ROOT}/merge_parent_race.so"; then
+        echo "  -> parent de publication épinglé : ÉCHEC (preload)"
+        test4_ok=0
+    else
+        race_out=$(LD_PRELOAD="$(babet_test_preload \
+                "${SYMLINK_ROOT}/merge_parent_race.so")" \
+            BABET_TEST_MERGE_PARENT_LINK="${SYMLINK_ROOT}/publish_link" \
+            BABET_TEST_MERGE_NEW_PARENT="${SYMLINK_ROOT}/publish_b" \
+            "${BINARY}" --create-exe "${SYMLINK_ROOT}/proj" \
+                "${SYMLINK_ROOT}/publish_link/app" 2>&1)
+        race_rc=$?
+        if [ ${race_rc} -eq 0 ] \
+            && [ -x "${SYMLINK_ROOT}/publish_a/app" ] \
+            && [ ! -e "${SYMLINK_ROOT}/publish_b/app" ]; then
+            published_out=$("${SYMLINK_ROOT}/publish_a/app" 2>&1)
+            if echo "${published_out}" | grep -q "SYMLINK_OK"; then
+                echo "  -> parent de publication épinglé malgré remplacement : OK"
+            else
+                echo "  -> parent épinglé : ÉCHEC (binaire=${published_out})"
+                test4_ok=0
+            fi
+        else
+            echo "  -> parent épinglé : ÉCHEC (rc=${race_rc}, sortie=${race_out})"
+            test4_ok=0
+        fi
+    fi
+
     rm -rf "${SYMLINK_ROOT}"
 fi
 
@@ -505,13 +606,15 @@ else
 fi
 echo ""
 
-# === Test 6 : lancement/nettoyage exec bornés (lot 5A) =============
-# 1) L'ancien code attendait pipe_exec de façon bloquante AVANT sa
-#    deadline : une chdir() enfant bloquée rendait timeout inopérant.
-# 2) Une erreur fatale de poll tombait ensuite dans un waitpid bloquant
-#    sans tuer le child. Le preload reproduit les deux scénarios sans
+# === Test 6 : lancement/nettoyage processus bornés =================
+# 1) Une chdir() enfant artificiellement bloquée vérifie que les délais de
+#    lancement de exec(), pipeline() et spawnPipeline() restent bornés.
+# 2) Les deux pipelines vérifient aussi le rollback d’une étape déjà lancée
+#    lorsque l’étape suivante ne termine pas son lancement à temps.
+# 3) Une erreur fatale de poll vérifie que exec() tue puis récupère l’enfant
+#    sans attendre indéfiniment. Le preload reproduit ces scénarios sans
 #    ajouter de hook de test au binaire de production.
-echo "### Test 6 : exec lancement/nettoyage bornés ###"
+echo "### Test 6 : exec/pipelines lancement et nettoyage bornés ###"
 modes_total=$((modes_total + 1))
 test6_ok=1
 
@@ -604,6 +707,21 @@ int poll(struct pollfd *fds, nfds_t nfds, int timeout)
 }
 C
     cat > "${EXEC_ROOT}/test.lua" << LUA
+local function pid_is_running(pid)
+    local probe = babet.exec("ps", { "-o", "stat=", "-p", tostring(pid) })
+    if type(probe) ~= "table" or probe.code ~= 0 then return false end
+    local state = probe.stdout:match("%S+")
+    return state ~= nil and state:sub(1, 1) ~= "Z"
+end
+
+local function read_pid(path)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local pid = tonumber(f:read("*l"))
+    f:close()
+    return pid
+end
+
 local t0 = babet.monotonic()
 local r, e = babet.exec("true", {}, {
     cwd = "${EXEC_ROOT}/slow_cwd",
@@ -613,8 +731,72 @@ local dt = babet.monotonic() - t0
 if type(r) == "table" and e == nil and r.timed_out == true and dt < 2.0 then
     print("EXEC_PRELAUNCH_TIMEOUT_OK")
 else
-    io.stderr:write("bad result: r=" .. tostring(r)
+    io.stderr:write("bad exec result: r=" .. tostring(r)
         .. " e=" .. tostring(e) .. " dt=" .. tostring(dt) .. "\n")
+    os.exit(1)
+end
+
+local sync_pid_path = "${EXEC_ROOT}/pipeline_sync.pid"
+local sync_descendant_path = "${EXEC_ROOT}/pipeline_sync_descendant.pid"
+local sync_command =
+    "sh -c 'trap \"\" TERM; while :; do sleep 1; done' "
+    .. ">/dev/null 2>&1 & echo \$! > " .. sync_descendant_path
+    .. "; echo \$\$ > " .. sync_pid_path .. "; exec sleep 5"
+t0 = babet.monotonic()
+r, e = babet.pipeline({
+    { "sh", { "-c", sync_command } },
+    { "true", {}, { cwd = "${EXEC_ROOT}/slow_cwd" } },
+}, { timeout = 0.30 })
+dt = babet.monotonic() - t0
+local sync_pid = read_pid(sync_pid_path)
+local sync_descendant = read_pid(sync_descendant_path)
+if r == nil and type(e) == "string"
+    and e:find("launch timed out", 1, true) ~= nil
+    and dt < 2.0 and sync_pid and not pid_is_running(sync_pid)
+    and sync_descendant and not pid_is_running(sync_descendant) then
+    print("PIPELINE_PRELAUNCH_TIMEOUT_OK")
+else
+    io.stderr:write("bad pipeline result: r=" .. tostring(r)
+        .. " e=" .. tostring(e) .. " dt=" .. tostring(dt)
+        .. " pid=" .. tostring(sync_pid)
+        .. " descendant=" .. tostring(sync_descendant) .. "\n")
+    for _, pid in ipairs({ sync_pid, sync_descendant }) do
+        if pid and pid_is_running(pid) then
+            babet.exec("kill", { "-9", tostring(pid) })
+        end
+    end
+    os.exit(1)
+end
+
+local stream_pid_path = "${EXEC_ROOT}/pipeline_stream.pid"
+local stream_descendant_path = "${EXEC_ROOT}/pipeline_stream_descendant.pid"
+local stream_command =
+    "sh -c 'trap \"\" TERM; while :; do sleep 1; done' "
+    .. ">/dev/null 2>&1 & echo \$! > " .. stream_descendant_path
+    .. "; echo \$\$ > " .. stream_pid_path .. "; exec sleep 5"
+t0 = babet.monotonic()
+local pipeline, spawn_err = babet.spawnPipeline({
+    { "sh", { "-c", stream_command } },
+    { "true", {}, { cwd = "${EXEC_ROOT}/slow_cwd" } },
+}, { launch_timeout = 0.30 })
+dt = babet.monotonic() - t0
+local stream_pid = read_pid(stream_pid_path)
+local stream_descendant = read_pid(stream_descendant_path)
+if pipeline == nil and type(spawn_err) == "string"
+    and spawn_err:find("launch timed out", 1, true) ~= nil
+    and dt < 2.0 and stream_pid and not pid_is_running(stream_pid)
+    and stream_descendant and not pid_is_running(stream_descendant) then
+    print("SPAWN_PIPELINE_PRELAUNCH_TIMEOUT_OK")
+else
+    io.stderr:write("bad spawnPipeline result: p=" .. tostring(pipeline)
+        .. " e=" .. tostring(spawn_err) .. " dt=" .. tostring(dt)
+        .. " pid=" .. tostring(stream_pid)
+        .. " descendant=" .. tostring(stream_descendant) .. "\n")
+    for _, pid in ipairs({ stream_pid, stream_descendant }) do
+        if pid and pid_is_running(pid) then
+            babet.exec("kill", { "-9", tostring(pid) })
+        end
+    end
     os.exit(1)
 end
 LUA
@@ -643,10 +825,40 @@ LUA
             "${BINARY}" "${EXEC_ROOT}/test.lua" 2>&1)
         t6_rc=$?
         if [ ${t6_rc} -eq 0 ] \
-            && echo "${t6_out}" | grep -q "EXEC_PRELAUNCH_TIMEOUT_OK"; then
-            echo "  -> timeout inclut chdir/exec : OK"
+            && echo "${t6_out}" | grep -q "EXEC_PRELAUNCH_TIMEOUT_OK" \
+            && echo "${t6_out}" | grep -q "PIPELINE_PRELAUNCH_TIMEOUT_OK" \
+            && echo "${t6_out}" | grep -q "SPAWN_PIPELINE_PRELAUNCH_TIMEOUT_OK"; then
+            echo "  -> timeout de lancement exec/pipeline/spawnPipeline : OK"
+            echo "  -> rollback d'un pipeline partiellement lancé : OK"
         else
             echo "  -> ÉCHEC (rc=${t6_rc}, sortie=${t6_out})"
+            test6_ok=0
+        fi
+
+        CLOSED_STDIO_MARKER="${EXEC_ROOT}/closed_stdio.ok"
+        cat > "${EXEC_ROOT}/test_closed_stdio.lua" << LUA
+local result, err = babet.pipeline({
+    { "cat" },
+    { "sh", { "-c", "cat; printf stage-error >&2" } },
+}, { stdin = "closed-stdio" })
+local good = type(result) == "table" and err == nil
+    and result.stdout == "closed-stdio"
+    and result.stderr[2] == "stage-error"
+local marker = assert(io.open("${CLOSED_STDIO_MARKER}", "w"))
+marker:write(good and "OK" or ("BAD:" .. tostring(err)))
+marker:close()
+if not good then os.exit(1) end
+LUA
+        rm -f "${CLOSED_STDIO_MARKER}"
+        (
+            exec 0<&- 1>&- 2>&-
+            "${BINARY}" "${EXEC_ROOT}/test_closed_stdio.lua"
+        )
+        t6_closed_rc=$?
+        if [ ${t6_closed_rc} -eq 0 ]             && [ "$(cat "${CLOSED_STDIO_MARKER}" 2>/dev/null)" = "OK" ]; then
+            echo "  -> stdin/stdout/stderr fermés avant lancement : OK"
+        else
+            echo "  -> ÉCHEC descripteurs standards fermés (rc=${t6_closed_rc})"
             test6_ok=0
         fi
 
@@ -741,8 +953,8 @@ else
 fi
 echo ""
 
-# === Test 8 : rollback setAttributes après chmod partiel (lot 5B) ===
-echo "### Test 8 : rollback setAttributes ###"
+# === Test 8 : durcissement attributs/touch contre les courses locales ===
+echo "### Test 8 : attributs et touch sans TOCTOU destructrice ###"
 modes_total=$((modes_total + 1))
 test8_ok=1
 
@@ -751,28 +963,44 @@ if [ -z "${ATTR_ROOT}" ] || [ ! -d "${ATTR_ROOT}" ]; then
     echo "  -> ÉCHEC (impossible de créer un dossier temporaire)"
     test8_ok=0
 else
-    ATTR_TARGET="${ATTR_ROOT}/target.txt"
-    printf 'rollback-test\n' > "${ATTR_TARGET}"
-    chmod 0644 "${ATTR_TARGET}"
-
-    cat > "${ATTR_ROOT}/chmod_partial.c" << 'C'
+    cat > "${ATTR_ROOT}/fs_race.c" << 'C'
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 typedef int (*chmod_fn)(const char *, mode_t);
+typedef int (*openat_fn)(int, const char *, int, ...);
+
 static chmod_fn real_chmod_fn = 0;
-static const char *target = 0;
-static int failed_once = 0;
+static openat_fn real_openat_fn = 0;
+static int chmod_injected = 0;
+static int openat_injected = 0;
 
 __attribute__((constructor))
-static void init_chmod_partial(void)
+static void init_fs_race(void)
 {
     real_chmod_fn = (chmod_fn)dlsym(RTLD_NEXT, "chmod");
-    target = getenv("BABET_TEST_CHMOD_TARGET");
+    real_openat_fn = (openat_fn)dlsym(RTLD_NEXT, "openat");
+}
+
+static int proc_fd_targets(const char *proc_path, const char *target)
+{
+    char resolved[4096];
+    const ssize_t length = readlink(proc_path, resolved,
+                                    sizeof(resolved) - 1);
+    if (length < 0)
+    {
+        return 0;
+    }
+    resolved[length] = '\0';
+    return target && strcmp(resolved, target) == 0;
 }
 
 int chmod(const char *path, mode_t mode)
@@ -783,28 +1011,104 @@ int chmod(const char *path, mode_t mode)
         return -1;
     }
 
-    if (!failed_once && target && path && strcmp(path, target) == 0)
+    const char *test_mode = getenv("BABET_TEST_FS_RACE_MODE");
+    const char *target = getenv("BABET_TEST_ATTR_TARGET");
+
+    if (!chmod_injected && test_mode &&
+        strncmp(path, "/proc/self/fd/", 14) == 0 &&
+        proc_fd_targets(path, target))
     {
-        const int rc = real_chmod_fn(path, mode);
-        if (rc == 0)
+        if (strcmp(test_mode, "rollback") == 0)
         {
-            failed_once = 1;
-            errno = EIO;
-            return -1;
+            const int rc = real_chmod_fn(path, mode);
+            if (rc == 0)
+            {
+                chmod_injected = 1;
+                errno = EIO;
+                return -1;
+            }
+            return rc;
         }
-        return rc;
+
+        if (strcmp(test_mode, "replace") == 0)
+        {
+            const char *saved = getenv("BABET_TEST_ATTR_SAVED");
+            const char *victim = getenv("BABET_TEST_ATTR_VICTIM");
+            chmod_injected = 1;
+            if (!saved || !victim || rename(target, saved) != 0 ||
+                symlink(victim, target) != 0)
+            {
+                return -1;
+            }
+        }
     }
 
     return real_chmod_fn(path, mode);
 }
+
+int openat(int dirfd, const char *path, int flags, ...)
+{
+    mode_t mode = 0;
+    if (flags & O_CREAT)
+    {
+        va_list args;
+        va_start(args, flags);
+        mode = (mode_t)va_arg(args, int);
+        va_end(args);
+    }
+
+    if (!real_openat_fn)
+    {
+        errno = ENOSYS;
+        return -1;
+    }
+
+    const char *test_mode = getenv("BABET_TEST_FS_RACE_MODE");
+    const char *name = getenv("BABET_TEST_TOUCH_NAME");
+    if (!openat_injected && test_mode &&
+        strcmp(test_mode, "touch") == 0 && name &&
+        strcmp(path, name) == 0 && (flags & O_PATH) == O_PATH)
+    {
+        openat_injected = 1;
+        const int fd = real_openat_fn(
+            dirfd, path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd >= 0)
+        {
+            static const char payload[] = "race-payload";
+            const ssize_t written = write(fd, payload, sizeof(payload) - 1);
+            (void)written;
+            (void)close(fd);
+        }
+        errno = ENOENT;
+        return -1;
+    }
+
+    if (flags & O_CREAT)
+    {
+        return real_openat_fn(dirfd, path, flags, mode);
+    }
+    return real_openat_fn(dirfd, path, flags);
+}
 C
 
-    cat > "${ATTR_ROOT}/test.lua" << LUA
+    if ! cc -shared -fPIC -O2 "${ATTR_ROOT}/fs_race.c" \
+        -ldl -o "${ATTR_ROOT}/fs_race.so"; then
+        echo "  -> ÉCHEC (compilation du preload)"
+        test8_ok=0
+    else
+        # 8A - un chmod qui a effectivement modifié le mode puis signale une
+        # erreur doit restaurer owner/group/mode sur le même inode.
+        ATTR_TARGET="${ATTR_ROOT}/rollback-target.txt"
+        printf 'rollback-test\n' > "${ATTR_TARGET}"
+        chmod 0644 "${ATTR_TARGET}"
+
+        cat > "${ATTR_ROOT}/rollback.lua" << LUA
 local path = "${ATTR_TARGET}"
 local before, before_err = babet.getAttributes(path)
 assert(type(before) == "table" and before_err == nil)
 
-local ok, err = babet.setAttributes(path, before.owner, before.group, tonumber("600", 8))
+local ok, err = babet.setAttributes(
+    path, before.owner, before.group, tonumber("600", 8))
 local mode, mode_err = babet.getMode(path)
 
 if ok == nil and type(err) == "string"
@@ -812,7 +1116,7 @@ if ok == nil and type(err) == "string"
     and mode == tonumber("644", 8) and mode_err == nil then
     print("SETATTR_ROLLBACK_OK")
 else
-    io.stderr:write("bad result: ok=" .. tostring(ok)
+    io.stderr:write("bad rollback: ok=" .. tostring(ok)
         .. " err=" .. tostring(err)
         .. " mode=" .. tostring(mode)
         .. " mode_err=" .. tostring(mode_err) .. "\n")
@@ -820,20 +1124,99 @@ else
 end
 LUA
 
-    if ! cc -shared -fPIC -O2 "${ATTR_ROOT}/chmod_partial.c" \
-        -ldl -o "${ATTR_ROOT}/chmod_partial.so"; then
-        echo "  -> ÉCHEC (compilation du preload)"
-        test8_ok=0
-    else
-        t8_out=$(LD_PRELOAD="$(babet_test_preload "${ATTR_ROOT}/chmod_partial.so")" \
-            BABET_TEST_CHMOD_TARGET="${ATTR_TARGET}" \
-            "${BINARY}" "${ATTR_ROOT}/test.lua" 2>&1)
+        t8_out=$(LD_PRELOAD="$(babet_test_preload "${ATTR_ROOT}/fs_race.so")" \
+            BABET_TEST_FS_RACE_MODE=rollback \
+            BABET_TEST_ATTR_TARGET="${ATTR_TARGET}" \
+            "${BINARY}" "${ATTR_ROOT}/rollback.lua" 2>&1)
         t8_rc=$?
         if [ ${t8_rc} -eq 0 ] \
             && echo "${t8_out}" | grep -q "SETATTR_ROLLBACK_OK"; then
             echo "  -> chmod partiel : attributs restaurés : OK"
         else
             echo "  -> ÉCHEC rollback (rc=${t8_rc}, sortie=${t8_out})"
+            test8_ok=0
+        fi
+
+        # 8B - remplacement du chemin entre chown et chmod : le descripteur
+        # épinglé doit recevoir le mode, jamais la nouvelle cible du chemin.
+        ATTR_TARGET="${ATTR_ROOT}/race-target.txt"
+        ATTR_SAVED="${ATTR_ROOT}/race-target.saved"
+        ATTR_VICTIM="${ATTR_ROOT}/race-victim.txt"
+        printf 'original\n' > "${ATTR_TARGET}"
+        printf 'victim\n' > "${ATTR_VICTIM}"
+        chmod 0644 "${ATTR_TARGET}" "${ATTR_VICTIM}"
+
+        cat > "${ATTR_ROOT}/replace.lua" << LUA
+local target = "${ATTR_TARGET}"
+local saved = "${ATTR_SAVED}"
+local victim = "${ATTR_VICTIM}"
+local before = assert(babet.getAttributes(target))
+local ok, err = babet.setAttributes(
+    target, before.owner, before.group, tonumber("600", 8))
+local saved_mode = babet.getMode(saved)
+local victim_mode = babet.getMode(victim)
+local link = babet.exec("readlink", { target })
+
+if ok == true and err == nil
+    and saved_mode == tonumber("600", 8)
+    and victim_mode == tonumber("644", 8)
+    and type(link) == "table" and link.code == 0 then
+    print("SETATTR_PINNED_INODE_OK")
+else
+    io.stderr:write("bad pinned result: ok=" .. tostring(ok)
+        .. " err=" .. tostring(err)
+        .. " saved_mode=" .. tostring(saved_mode)
+        .. " victim_mode=" .. tostring(victim_mode) .. "\n")
+    os.exit(1)
+end
+LUA
+
+        t8_out=$(LD_PRELOAD="$(babet_test_preload "${ATTR_ROOT}/fs_race.so")" \
+            BABET_TEST_FS_RACE_MODE=replace \
+            BABET_TEST_ATTR_TARGET="${ATTR_TARGET}" \
+            BABET_TEST_ATTR_SAVED="${ATTR_SAVED}" \
+            BABET_TEST_ATTR_VICTIM="${ATTR_VICTIM}" \
+            "${BINARY}" "${ATTR_ROOT}/replace.lua" 2>&1)
+        t8_rc=$?
+        if [ ${t8_rc} -eq 0 ] \
+            && echo "${t8_out}" | grep -q "SETATTR_PINNED_INODE_OK"; then
+            echo "  -> remplacement concurrent : inode d'origine conservé : OK"
+        else
+            echo "  -> ÉCHEC inode épinglé (rc=${t8_rc}, sortie=${t8_out})"
+            test8_ok=0
+        fi
+
+        # 8C - un fichier créé dans la fenêtre ENOENT/O_CREAT doit être repris
+        # sans O_TRUNC et conserver tous ses octets.
+        TOUCH_NAME="touch-race-target.txt"
+        TOUCH_TARGET="${ATTR_ROOT}/${TOUCH_NAME}"
+        rm -f "${TOUCH_TARGET}"
+        cat > "${ATTR_ROOT}/touch.lua" << LUA
+local path = "${TOUCH_TARGET}"
+local ok, err = babet.touch(path)
+local file = io.open(path, "rb")
+local contents = file and file:read("*a")
+if file then file:close() end
+if ok == true and err == nil and contents == "race-payload" then
+    print("TOUCH_RACE_PRESERVED_OK")
+else
+    io.stderr:write("bad touch race: ok=" .. tostring(ok)
+        .. " err=" .. tostring(err)
+        .. " contents=" .. tostring(contents) .. "\n")
+    os.exit(1)
+end
+LUA
+
+        t8_out=$(LD_PRELOAD="$(babet_test_preload "${ATTR_ROOT}/fs_race.so")" \
+            BABET_TEST_FS_RACE_MODE=touch \
+            BABET_TEST_TOUCH_NAME="${TOUCH_NAME}" \
+            "${BINARY}" "${ATTR_ROOT}/touch.lua" 2>&1)
+        t8_rc=$?
+        if [ ${t8_rc} -eq 0 ] \
+            && echo "${t8_out}" | grep -q "TOUCH_RACE_PRESERVED_OK"; then
+            echo "  -> apparition concurrente : contenu non tronqué : OK"
+        else
+            echo "  -> ÉCHEC course touch (rc=${t8_rc}, sortie=${t8_out})"
             test8_ok=0
         fi
     fi

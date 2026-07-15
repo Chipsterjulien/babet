@@ -1,6 +1,6 @@
 # Notes - known deferred work
 
-This file lists known topics intentionally left outside Babet 2.4.0. They are
+This file lists known topics intentionally left outside Babet 2.5.0. They are
 not hidden defects: each item records the current behavior, the remaining risk,
 and the reason it was not included in the release.
 
@@ -68,20 +68,46 @@ replace inotify, abstract executable-path discovery, and add tested CI targets.
 platforms. A portability patch should be tested on the target OS rather than
 written blind.
 
-## 5. Archive convenience bindings
+## 5. Additional archive formats
 
-**Current state**: Babet internally reads and writes ZIP data for embedded
-executables, but does not expose general-purpose Lua `zip`, `unzip`, `tar`, or
-`untar` helpers.
+**Current state**: Babet exposes secure ZIP creation, inspection, and
+extraction through `babet.archive.create`, `babet.archive.list`,
+`babet.archive.extract`, and `babet.archive.extractFile`. Creation uses a
+symlink-refusing descriptor walk, bounded preflight, deterministic ordering,
+change detection for source files, and atomic whole-archive publication. The
+public extractor has its own path, symlink, permission, overwrite,
+resource-limit, and cleanup rules instead of reusing the embedded-package
+reader blindly.
 
-**Why deferred**: archive extraction has a large security surface (path
-traversal, symlinks, permissions, resource limits). A public API needs its own
-threat model and test campaign instead of reusing the embedded-package code
-without review.
+**Planned for 2.6.0**: TAR, GZIP, XZ, BZIP2, and Zstandard are part of
+the accepted multi-format archive roadmap. The preferred starting point is an
+evaluated libarchive integration rather than separate format implementations.
+
+## 6. Linear-time or otherwise bounded pattern matching
+
+**Current state**: `babet.find()` uses `std::regex` with ECMAScript syntax.
+
+**Remaining risk**: specially crafted expressions can trigger catastrophic
+backtracking and monopolize the calling thread. The 2.5.0 manual explicitly
+forbids passing untrusted patterns directly.
+
+**Planned 2.6.0 work**: evaluate RE2 and a safe glob mode, document syntax
+differences, and preserve compatibility only where it does not reintroduce
+unbounded matching.
+
+## 7. Shared strict Lua argument validators
+
+**Current state**: public bindings have been audited individually for strict
+types, arity, numeric bounds, embedded NUL bytes, and `longjmp` safety.
+
+**Planned 2.6.0 work**: consolidate recurring checks into small shared helpers
+for strict strings, integers, booleans, optional `nil`, and exact arity. This is
+an internal maintainability improvement; public contracts remain the source of
+truth.
 
 ## Validation note
 
-Valgrind is not a release requirement. Babet 2.4.0 is validated with ASan and
+Valgrind is not a release requirement. Babet 2.5.0 is validated with ASan and
 UBSan, followed by a clean normal rebuild and network smoke tests through:
 
 ```sh

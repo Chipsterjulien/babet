@@ -442,7 +442,14 @@ assert(babet.touch("cache/images/index.dat"))
 ```
 
 Sur un chemin existant, la fonction met à jour son horodatage ; elle peut donc
-également toucher un dossier, comme la commande Unix `touch`.
+également toucher un dossier, comme la commande Unix `touch`. Un symlink final
+valide est suivi vers sa cible.
+
+`touch` n’ouvre jamais un chemin existant dans un mode tronquant. Le parent et
+la cible existante sont épinglés avant l’opération : si un fichier apparaît
+pendant une course de création, il est repris sans perdre son contenu. Un
+symlink final pendant est refusé ; Babet ne crée pas sa cible absente à travers
+un chemin de lien encore mutable.
 
 <a id="mkdir"></a>
 ### `babet.mkdir(path)`
@@ -814,6 +821,13 @@ Une regex invalide ou une erreur de parcours fait échouer tout l’appel avec
 `(nil, err)`. Il n’existe pas de mode « continuer malgré les erreurs » pour
 `find`.
 
+Le moteur utilisé est `std::regex` en mode ECMAScript. Certains motifs, par
+exemple des répétitions ambiguës imbriquées, peuvent provoquer un backtracking
+exponentiel. Il ne faut donc pas transmettre directement une regex fournie par
+une personne non fiable dans `name`, `iname` ou `path` : un motif hostile peut
+occuper le thread ou le worker appelant pendant très longtemps. Cet
+avertissement concerne la regex elle-même, pas les noms de fichiers ordinaires.
+
 <a id="fs-copy-move"></a>
 ## Copier et déplacer
 
@@ -1071,14 +1085,18 @@ Validation avant modification :
   et `gid_t` ;
 - le mode doit être compris entre `0` et `07777`.
 
-POSIX ne fournit pas d’opération atomique combinant `chown` et `chmod`. Si le
-`chmod` échoue après un `chown` réussi, Babet tente de restaurer l’owner, le
-group et le mode d’origine. Une restauration incomplète est signalée dans le
-message d’erreur.
+POSIX ne fournit pas d’opération atomique combinant `chown` et `chmod`. Babet
+résout le chemin une seule fois, épingle cette cible, puis effectue la lecture
+des métadonnées, le `chown`, le `chmod` éventuel et tout rollback sur le même
+inode. Un remplacement du chemin pendant l’appel ne peut donc pas rediriger la
+phase suivante vers une nouvelle cible. Si le `chmod` échoue après un `chown`
+réussi, Babet tente de restaurer l’owner, le group et le mode d’origine ; une
+restauration incomplète est signalée dans le message d’erreur.
 
-L’appel suit les symlinks. Les droits nécessaires dépendent du système et de
-l’identité du processus ; changer l’owner exige généralement les privilèges
-root.
+L’appel suit un symlink final, mais la cible sélectionnée au début reste
+épinglée même si le lien est modifié concurremment. Les droits nécessaires
+dépendent du système et de l’identité du processus ; changer l’owner exige
+généralement les privilèges root.
 
 <a id="symlinkattr"></a>
 ### `babet.symlinkAttr(path, uid, gid)` et `babet.symlinkattr(...)`

@@ -1,3 +1,11 @@
+Historical design notes for babet.find
+======================================
+
+The original discussion below guided the current implementation of depth, type,
+name/iname and path filtering. For 2.6.0, the remaining priority is bounded
+pattern matching (RE2 and/or a safe glob mode); `-xdev`/`-mount` can be added if
+a concrete use case appears.
+
 TsT> Chipster find a une tonne d'option mais dans celles les plus utiles a ré-implementer je dirais qu'il y a
 <TsT> 1) le parcours d'arborescence avec limite de profondeur (-mindepth et -maxdepth)
 <TsT> 2) le filtrage de type de fichier (-type)

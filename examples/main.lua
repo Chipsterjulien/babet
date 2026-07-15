@@ -647,6 +647,54 @@ do
     ok_act("touch(sandbox/t1.txt)", babet.touch(sb("t1.txt")))
     ok_act("remove(sandbox/t1.txt)", babet.remove(sb("t1.txt")))
 
+    ;(function()
+        local keep_path = sb("touch_keep.txt")
+        local keep = assert(io.open(keep_path, "wb"))
+        keep:write("payload\0preserved")
+        keep:close()
+        local touch_ok, touch_err = babet.touch(keep_path)
+        local check = assert(io.open(keep_path, "rb"))
+        local contents = check:read("*a")
+        check:close()
+        ok("touch never truncates an existing file",
+            touch_ok == true and touch_err == nil
+            and contents == "payload\0preserved")
+
+        local target_path = sb("touch_target.txt")
+        local target = assert(io.open(target_path, "wb"))
+        target:write("symlink-target")
+        target:close()
+        babet.exec("ln", { "-s", "touch_target.txt", sb("touch_link") })
+        touch_ok, touch_err = babet.touch(sb("touch_link"))
+        check = assert(io.open(target_path, "rb"))
+        contents = check:read("*a")
+        check:close()
+        ok("touch follows a valid symlink without truncating its target",
+            touch_ok == true and touch_err == nil
+            and contents == "symlink-target")
+
+        babet.exec("ln", { "-s", "touch_missing_target",
+            sb("touch_dangling") })
+        local dangling_ok, dangling_err = babet.touch(sb("touch_dangling"))
+        ok_fail("touch safely refuses a dangling symlink",
+            dangling_ok, dangling_err)
+        ok("touch dangling-symlink refusal creates no target",
+            babet.fileExists(sb("touch_missing_target")) == false)
+
+        babet.exec("mkfifo", { sb("touch_fifo") })
+        local before = babet.time.monotonic()
+        touch_ok, touch_err = babet.touch(sb("touch_fifo"))
+        local elapsed = babet.time.monotonic() - before
+        ok("touch handles an existing FIFO without blocking",
+            touch_ok == true and touch_err == nil and elapsed < 1.0,
+            "elapsed=" .. tostring(elapsed) .. " err=" .. tostring(touch_err))
+        babet.exec("rm", { "-f", sb("touch_fifo") })
+
+        babet.mkdir(sb("touch_directory"))
+        ok_act("touch still supports an existing directory",
+            babet.touch(sb("touch_directory")))
+    end)()
+
     r, e = babet.remove(sb("t1.txt")) -- already removed
     ok_fail("remove(already gone) -> (nil, err)", r, e)
 
@@ -1402,6 +1450,58 @@ do
 
     local r2, e3 = babet.setAttributes("/n/existe/pas", 0, 0)
     ok_fail("setAttributes(bad path) -> (nil, err)", r2, e3)
+
+    ;(function()
+        local pinned_path = sb("setattr_mode000.txt")
+        assert(babet.touch(pinned_path))
+        assert(babet.setMode(pinned_path, "000"))
+        local pinned_attrs = assert(babet.getAttributes(pinned_path))
+        local pinned_ok, pinned_err = babet.setAttributes(
+            pinned_path, pinned_attrs.owner, pinned_attrs.group,
+            tonumber("640", 8))
+        local pinned_mode = babet.getMode(pinned_path)
+        ok("setAttributes works on an unreadable mode-000 file",
+            pinned_ok == true and pinned_err == nil
+            and pinned_mode == tonumber("640", 8))
+
+        local symlink_target = sb("setattr_symlink_target.txt")
+        assert(babet.touch(symlink_target))
+        babet.exec("ln", { "-s", "setattr_symlink_target.txt",
+            sb("setattr_symlink") })
+        local target_attrs = assert(babet.getAttributes(symlink_target))
+        local symlink_ok, symlink_err = babet.setAttributes(
+            sb("setattr_symlink"), target_attrs.owner, target_attrs.group,
+            tonumber("600", 8))
+        local target_mode = babet.getMode(symlink_target)
+        ok("setAttributes preserves its documented symlink-following contract",
+            symlink_ok == true and symlink_err == nil
+            and target_mode == tonumber("600", 8))
+
+        local long_path = string.rep("longjmp-allocation-", 64)
+        local function all_rejected(call)
+            for _ = 1, 64 do
+                if pcall(call) then
+                    return false
+                end
+            end
+            return true
+        end
+        ok("setAttributes path/owner type errors survive longjmp stress",
+            all_rejected(function()
+                babet.setAttributes(42, 0, 0)
+            end)
+            and all_rejected(function()
+                babet.setAttributes(long_path, "1000", 0)
+            end))
+        ok("setAttributes group type errors survive longjmp stress",
+            all_rejected(function()
+                babet.setAttributes(long_path, 0, "1000")
+            end))
+        ok("setAttributes mode type errors survive longjmp stress",
+            all_rejected(function()
+                babet.setAttributes(long_path, 0, 0, "640")
+            end))
+    end)()
 
     -- LOT 5B : le mode doit être validé AVANT tout chown/stat utile.
     -- Le chemin inexistant rend le test discriminant : l'ancien code
@@ -2195,6 +2295,875 @@ do
         type(r_pg) == "table" and r_pg.timed_out == true and dt < 10,
         "dt=" .. tostring(dt) .. "s timed_out=" ..
         tostring(r_pg and r_pg.timed_out))
+end
+
+-- =====================================================================
+print("")
+print("=== process pipelines ===")
+
+local function pipeline_test_pid_is_running(pid)
+    local probe = babet.exec("ps", { "-o", "stat=", "-p", tostring(pid) })
+    if type(probe) ~= "table" or probe.code ~= 0 then
+        return false
+    end
+    local state = probe.stdout:match("%S+")
+    return state ~= nil and state:sub(1, 1) ~= "Z"
+end
+
+local function pipeline_test_read_pid(path)
+    local file = io.open(path, "r")
+    if not file then return nil end
+    local pid = tonumber(file:read("*l"))
+    file:close()
+    return pid
+end
+
+do
+    ok("babet.pipeline is a function", type(babet.pipeline) == "function")
+    ok("pipeline without commands raises",
+        pcall(function() babet.pipeline() end) == false)
+    ok("pipeline commands must be a table",
+        pcall(function() babet.pipeline("bad") end) == false)
+    ok_raises("pipeline rejects extra arguments",
+        function() babet.pipeline({}, {}, true) end)
+
+    local max_stages = {}
+    for i = 1, 32 do max_stages[i] = { "true" } end
+    local r, e = babet.pipeline(max_stages)
+    ok("pipeline accepts exactly 32 stages",
+        type(r) == "table" and e == nil and #r.stages == 32)
+    local too_many = {}
+    for i = 1, 33 do too_many[i] = { "true" } end
+    r, e = babet.pipeline(too_many)
+    ok_fail("pipeline rejects more than 32 stages", r, e)
+    r, e = babet.pipeline({ [1] = { "true" }, [3] = { "true" } })
+    ok_fail("pipeline commands must be dense", r, e)
+    r, e = babet.pipeline({ "true", { "cat" } })
+    ok_fail("pipeline stage must be a table", r, e)
+    r, e = babet.pipeline({ { "true", {}, {}, "extra" }, { "cat" } })
+    ok_fail("pipeline stage rejects extra fields", r, e)
+    r, e = babet.pipeline({ { 42 }, { "cat" } })
+    ok_fail("pipeline command must be a string", r, e)
+    r, e = babet.pipeline({ { "" }, { "cat" } })
+    ok_fail("pipeline command must not be empty", r, e)
+    r, e = babet.pipeline({ { "echo", "bad" }, { "cat" } })
+    ok_fail("pipeline args must be a table", r, e)
+    r, e = babet.pipeline({ { "echo", { true } }, { "cat" } })
+    ok_fail("pipeline args contain strings only", r, e)
+    r, e = babet.pipeline({ { "echo", { "x\0bad" } }, { "cat" } })
+    ok_fail("pipeline argument rejects NUL", r, e)
+
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, "bad")
+    ok_fail("pipeline opts must be a table", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { cwd = 42 })
+    ok_fail("pipeline cwd must be a string", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { cwd = "/tmp\0bad" })
+    ok_fail("pipeline cwd rejects NUL", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { env = "bad" })
+    ok_fail("pipeline env must be a table", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { env = { [1] = "bad" } })
+    ok_fail("pipeline env keys must be strings", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { env = { BAD = true } })
+    ok_fail("pipeline env values must be strings", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { env = { [""] = "x" } })
+    ok_fail("pipeline env key must not be empty", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { env = { ["A=B"] = "x" } })
+    ok_fail("pipeline env key rejects '='", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { env = { ["A\0B"] = "x" } })
+    ok_fail("pipeline env key rejects NUL", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { env = { A = "x\0y" } })
+    ok_fail("pipeline env value rejects NUL", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { stdin = true })
+    ok_fail("pipeline stdin must be a string", r, e)
+
+    for _, invalid in ipairs({ 0, -1, math.huge, -math.huge }) do
+        r, e = babet.pipeline({ { "echo" }, { "cat" } }, { timeout = invalid })
+        ok_fail("pipeline rejects invalid timeout " .. tostring(invalid), r, e)
+    end
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { timeout = 0 / 0 })
+    ok_fail("pipeline rejects NaN timeout", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, {
+        timeout = 1000000000001,
+    })
+    ok_fail("pipeline rejects timeout above 10^12 seconds", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { max_output = 1.5 })
+    ok_fail("pipeline max_output must be an integer", r, e)
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { max_output = 0 })
+    ok_fail("pipeline rejects max_output zero", r, e)
+    r, e = babet.pipeline({ { "printf", { "x" } }, { "cat" } }, {
+        max_output = 2147483648,
+    })
+    ok("pipeline accepts max_output at 2 GiB boundary",
+        type(r) == "table" and e == nil and r.stdout == "x")
+    r, e = babet.pipeline({ { "echo" }, { "cat" } }, { max_output = 2147483649 })
+    ok_fail("pipeline rejects max_output above 2 GiB", r, e)
+    r, e = babet.pipeline({ { "echo", {}, { cwd = 42 } }, { "cat" } })
+    ok_fail("pipeline stage cwd must be a string", r, e)
+    r, e = babet.pipeline({ { "echo", {}, { env = "bad" } }, { "cat" } })
+    ok_fail("pipeline stage env must be a table", r, e)
+
+    r, e = babet.pipeline({ { "cat" } })
+    ok_fail("pipeline requires at least two stages", r, e)
+
+    r, e = babet.pipeline({ { "printf", { "hello\nworld\n" } }, { "grep", { "world" } } })
+    ok("pipeline basic stdout", type(r) == "table" and e == nil
+        and r.stdout == "world\n" and r.code == 0
+        and r.all_succeeded == true and r.failed_index == nil
+        and #r.stages == 2 and #r.stderr == 2)
+
+    r, e = babet.pipeline({ { "cat" }, { "tr", { "a-z", "A-Z" } } }, {
+        stdin = "abc\0def\n",
+    })
+    ok("pipeline binary stdin/stdout", type(r) == "table" and e == nil
+        and r.stdout == "ABC\0DEF\n")
+
+    r, e = babet.pipeline({
+        { "sh", { "-c", "printf first 1>&2; printf x" } },
+        { "sh", { "-c", "cat; printf second 1>&2" } },
+    })
+    ok("pipeline separates stderr per stage", type(r) == "table" and e == nil
+        and r.stdout == "x" and r.stderr[1] == "first"
+        and r.stderr[2] == "second")
+
+    r, e = babet.pipeline({
+        { "sh", { "-c", "exit 7" } },
+        { "cat" },
+    })
+    ok("pipeline exposes intermediate failure", type(r) == "table" and e == nil
+        and r.code == 0 and r.all_succeeded == false
+        and r.failed_index == 1 and r.stages[1].code == 7
+        and r.stages[2].code == 0)
+
+    r, e = babet.pipeline({
+        { "printf", { "x\n" } },
+        { "sh", { "-c", "cat >/dev/null; exit 5" } },
+    })
+    ok("pipeline global code is last stage code", type(r) == "table" and e == nil
+        and r.code == 5 and r.failed_index == 2)
+
+    r, e = babet.pipeline({
+        { "pwd", {}, { cwd = "/tmp" } },
+        { "cat" },
+    })
+    ok("pipeline per-stage cwd", type(r) == "table" and e == nil
+        and r.stdout == "/tmp\n")
+
+    r, e = babet.pipeline({
+        { "sh", { "-c", "printf %s \"$BABET_PIPE_VAR\"" }, {
+            env = { BABET_PIPE_VAR = "local" },
+        } },
+        { "cat" },
+    }, { env = { BABET_PIPE_VAR = "global" } })
+    ok("pipeline local env overrides global env", type(r) == "table" and e == nil
+        and r.stdout == "local")
+
+    local pipeline_path_dir = sb("pipeline_path")
+    assert(babet.mkdir(pipeline_path_dir))
+    local pipeline_path_tool = pipeline_path_dir .. "/private-tool"
+    local pipeline_path_file = assert(io.open(pipeline_path_tool, "w"))
+    pipeline_path_file:write("#!/bin/sh\nprintf pipeline-path")
+    pipeline_path_file:close()
+    assert(babet.setMode(pipeline_path_tool, "755"))
+    r, e = babet.pipeline({ { "private-tool" }, { "cat" } }, {
+        env = { PATH = pipeline_path_dir },
+    })
+    ok_fail("pipeline lookup does not use opts.env.PATH", r, e)
+    r, e = babet.pipeline({ { pipeline_path_tool }, { "cat" } }, {
+        env = { PATH = pipeline_path_dir },
+    })
+    ok("pipeline explicit command path uses overridden child environment",
+        type(r) == "table" and e == nil and r.stdout == "pipeline-path")
+
+    r, e = babet.pipeline({
+        { "printf", { "abcdef" } },
+        { "cat" },
+    }, { max_output = 3 })
+    ok("pipeline stdout truncation", type(r) == "table" and e == nil
+        and r.stdout == "abc" and r.stdout_truncated == true)
+
+    r, e = babet.pipeline({
+        { "sh", { "-c", "printf abcdef 1>&2" } },
+        { "cat" },
+    }, { max_output = 3 })
+    ok("pipeline stderr truncation", type(r) == "table" and e == nil
+        and r.stderr[1] == "abc" and r.stderr_truncated[1] == true)
+
+    local large = string.rep("pipeline-large-data\n", 20000)
+    r, e = babet.pipeline({ { "cat" }, { "cat" }, { "cat" } }, {
+        stdin = large,
+        max_output = #large + 1,
+        timeout = 10,
+    })
+    ok("pipeline large data has no deadlock", type(r) == "table" and e == nil
+        and r.stdout == large and r.timed_out == false)
+
+    r, e = babet.pipeline({
+        { "sh", { "-c", "sleep 30 & wait" } },
+        { "cat" },
+    }, { timeout = 0.3 })
+    ok("pipeline timeout kills all process groups", type(r) == "table" and e == nil
+        and r.timed_out == true and r.all_succeeded == false)
+
+    r, e = babet.pipeline({
+        { "yes" },
+        { "head", { "-n", "1" } },
+    }, { timeout = 5, max_output = 1024 })
+    ok("pipeline handles SIGPIPE from upstream", type(r) == "table" and e == nil
+        and r.stdout == "y\n" and r.code == 0
+        and r.stages[1].signaled == true)
+
+    r, e = babet.pipeline({ { "printf", { "x" } }, { "__babet_missing_pipeline__" } })
+    ok_fail("pipeline launch failure is returned", r, e)
+
+    r, e = babet.pipeline({ { "pwd" }, { "cat" } }, { cwd = "/does/not/exist" })
+    ok_fail("pipeline invalid global cwd is returned", r, e)
+
+    r, e = babet.pipeline({ { "echo", { "x" } }, { "cat" } }, { unknown = true })
+    ok_fail("pipeline rejects unknown global option", r, e)
+
+    r, e = babet.pipeline({ { "echo", { "x" }, { unknown = true } }, { "cat" } })
+    ok_fail("pipeline rejects unknown stage option", r, e)
+
+    r, e = babet.pipeline({ { "echo", { [2] = "x" } }, { "cat" } })
+    ok_fail("pipeline args must be dense", r, e)
+
+    r, e = babet.pipeline({ { "echo\0bad" }, { "cat" } })
+    ok_fail("pipeline command rejects NUL", r, e)
+
+    r, e = babet.pipeline({ { "printf", { "ok" } }, { "cat" } })
+    ok("pipeline default result exposes complete non-truncated shape",
+        type(r) == "table" and e == nil and r.stdout == "ok"
+        and r.timed_out == false and r.stdout_truncated == false
+        and #r.stderr_truncated == 2
+        and r.stderr_truncated[1] == false
+        and r.stderr_truncated[2] == false
+        and r.stages[1].launched == true
+        and r.stages[1].exited == true
+        and r.stages[1].signaled == false
+        and r.stages[1].signal == nil)
+
+    local sync_pid_path = sb("pipeline_sync_descendant.pid")
+    os.remove(sync_pid_path)
+    r, e = babet.pipeline({
+        { "sh", { "-c",
+            "sleep 30 >/dev/null 2>&1 & echo $! > " .. sync_pid_path .. "; exit 0" } },
+        { "cat" },
+    }, { timeout = 5 })
+    local sync_descendant_pid = pipeline_test_read_pid(sync_pid_path)
+    local sync_descendant_running = sync_descendant_pid
+        and pipeline_test_pid_is_running(sync_descendant_pid)
+    ok("pipeline normal completion cleans background descendants",
+        type(r) == "table" and e == nil and sync_descendant_pid ~= nil
+        and not sync_descendant_running,
+        "pid=" .. tostring(sync_descendant_pid))
+    if sync_descendant_running then
+        babet.exec("kill", { "-9", tostring(sync_descendant_pid) })
+    end
+end
+
+-- =====================================================================
+print("")
+print("=== pipeline streaming ===")
+
+do
+    local function drain_pipeline(pipeline, stage_count, timeout)
+        local stdout_chunks = {}
+        local stderr_chunks = {}
+        local stderr_closed = {}
+        for i = 1, stage_count do
+            stderr_chunks[i] = {}
+            stderr_closed[i] = false
+        end
+        local stdout_closed = false
+        local deadline = babet.monotonic() + (timeout or 5)
+
+        while not stdout_closed do
+            local data, err = pipeline:read_stdout(65536, 0.01)
+            if data then
+                stdout_chunks[#stdout_chunks + 1] = data
+            elseif err == "closed" then
+                stdout_closed = true
+            elseif err ~= "timeout" then
+                return nil, nil, err
+            end
+
+            for i = 1, stage_count do
+                if not stderr_closed[i] then
+                    data, err = pipeline:read_stderr(i, 65536, 0)
+                    if data then
+                        stderr_chunks[i][#stderr_chunks[i] + 1] = data
+                    elseif err == "closed" then
+                        stderr_closed[i] = true
+                    elseif err ~= "timeout" then
+                        return nil, nil, err
+                    end
+                end
+            end
+
+            if babet.monotonic() >= deadline then
+                return nil, nil, "test timeout"
+            end
+        end
+
+        local pending = true
+        while pending do
+            pending = false
+            for i = 1, stage_count do
+                if not stderr_closed[i] then
+                    pending = true
+                    local data, err = pipeline:read_stderr(i, 65536, 0.01)
+                    if data then
+                        stderr_chunks[i][#stderr_chunks[i] + 1] = data
+                    elseif err == "closed" then
+                        stderr_closed[i] = true
+                    elseif err ~= "timeout" then
+                        return nil, nil, err
+                    end
+                end
+            end
+            if babet.monotonic() >= deadline then
+                return nil, nil, "test timeout"
+            end
+        end
+
+        local stderr_result = {}
+        for i = 1, stage_count do
+            stderr_result[i] = table.concat(stderr_chunks[i])
+        end
+        return table.concat(stdout_chunks), stderr_result, nil
+    end
+
+    local function write_all_and_drain(pipeline, data, stage_count, timeout)
+        local stdout_chunks = {}
+        local stderr_chunks = {}
+        local stderr_closed = {}
+        for i = 1, stage_count do
+            stderr_chunks[i] = {}
+            stderr_closed[i] = false
+        end
+        local stdout_closed = false
+        local stdin_closed = false
+        local offset = 1
+        local deadline = babet.monotonic() + (timeout or 8)
+
+        while not stdout_closed do
+            if offset <= #data then
+                local last = math.min(offset + 32767, #data)
+                local written, err = pipeline:write(data:sub(offset, last), 0.01)
+                if written then
+                    if written == 0 then
+                        return nil, nil, "zero-byte write"
+                    end
+                    offset = offset + written
+                elseif err ~= "timeout" then
+                    return nil, nil, err
+                end
+            elseif not stdin_closed then
+                local closed, close_err = pipeline:close_stdin()
+                if not closed then
+                    return nil, nil, close_err
+                end
+                stdin_closed = true
+            end
+
+            local chunk, read_err = pipeline:read_stdout(65536, 0)
+            if chunk then
+                stdout_chunks[#stdout_chunks + 1] = chunk
+            elseif read_err == "closed" then
+                stdout_closed = true
+            elseif read_err ~= "timeout" then
+                return nil, nil, read_err
+            end
+
+            for i = 1, stage_count do
+                if not stderr_closed[i] then
+                    chunk, read_err = pipeline:read_stderr(i, 65536, 0)
+                    if chunk then
+                        stderr_chunks[i][#stderr_chunks[i] + 1] = chunk
+                    elseif read_err == "closed" then
+                        stderr_closed[i] = true
+                    elseif read_err ~= "timeout" then
+                        return nil, nil, read_err
+                    end
+                end
+            end
+
+            if babet.monotonic() >= deadline then
+                return nil, nil, "test timeout"
+            end
+        end
+
+        local pending = true
+        while pending do
+            pending = false
+            for i = 1, stage_count do
+                if not stderr_closed[i] then
+                    pending = true
+                    local chunk, read_err =
+                        pipeline:read_stderr(i, 65536, 0.01)
+                    if chunk then
+                        stderr_chunks[i][#stderr_chunks[i] + 1] = chunk
+                    elseif read_err == "closed" then
+                        stderr_closed[i] = true
+                    elseif read_err ~= "timeout" then
+                        return nil, nil, read_err
+                    end
+                end
+            end
+            if babet.monotonic() >= deadline then
+                return nil, nil, "test timeout"
+            end
+        end
+
+        local stderr_result = {}
+        for i = 1, stage_count do
+            stderr_result[i] = table.concat(stderr_chunks[i])
+        end
+        return table.concat(stdout_chunks), stderr_result, nil
+    end
+
+    ok("babet.spawnPipeline is a function",
+        type(babet.spawnPipeline) == "function")
+    ok_raises("spawnPipeline without commands raises",
+        function() babet.spawnPipeline() end)
+    ok_raises("spawnPipeline commands must be a table",
+        function() babet.spawnPipeline("bad") end)
+    ok_raises("spawnPipeline rejects extra arguments",
+        function() babet.spawnPipeline({}, {}, true) end)
+
+    local p, e = babet.spawnPipeline({ { "cat" } })
+    ok_fail("spawnPipeline requires at least two stages", p, e)
+
+    local too_many = {}
+    for i = 1, 33 do too_many[i] = { "true" } end
+    p, e = babet.spawnPipeline(too_many)
+    ok_fail("spawnPipeline rejects more than 32 stages", p, e)
+
+    p, e = babet.spawnPipeline({ [1] = { "true" }, [3] = { "true" } })
+    ok_fail("spawnPipeline commands must be dense", p, e)
+    p, e = babet.spawnPipeline({ "true", { "cat" } })
+    ok_fail("spawnPipeline stage must be a table", p, e)
+    p, e = babet.spawnPipeline({ { "true", {}, {}, "extra" }, { "cat" } })
+    ok_fail("spawnPipeline stage rejects extra fields", p, e)
+    p, e = babet.spawnPipeline({ { 42 }, { "cat" } })
+    ok_fail("spawnPipeline command must be a string", p, e)
+    p, e = babet.spawnPipeline({ { "" }, { "cat" } })
+    ok_fail("spawnPipeline command must not be empty", p, e)
+    p, e = babet.spawnPipeline({ { "echo\0bad" }, { "cat" } })
+    ok_fail("spawnPipeline command rejects NUL", p, e)
+    p, e = babet.spawnPipeline({ { "echo", "bad" }, { "cat" } })
+    ok_fail("spawnPipeline args must be a table", p, e)
+    p, e = babet.spawnPipeline({ { "echo", { [2] = "bad" } }, { "cat" } })
+    ok_fail("spawnPipeline args must be dense", p, e)
+    p, e = babet.spawnPipeline({ { "echo", { true } }, { "cat" } })
+    ok_fail("spawnPipeline args contain strings only", p, e)
+    p, e = babet.spawnPipeline({ { "echo", { "x\0bad" } }, { "cat" } })
+    ok_fail("spawnPipeline argument rejects NUL", p, e)
+
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, "bad")
+    ok_fail("spawnPipeline opts must be a table", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, { unknown = true })
+    ok_fail("spawnPipeline rejects unknown global option", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, { cwd = 42 })
+    ok_fail("spawnPipeline cwd must be a string", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+        cwd = "/tmp\0bad",
+    })
+    ok_fail("spawnPipeline cwd rejects NUL", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, { env = "bad" })
+    ok_fail("spawnPipeline env must be a table", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+        env = { [1] = "bad" },
+    })
+    ok_fail("spawnPipeline env keys must be strings", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+        env = { BABET_BAD = true },
+    })
+    ok_fail("spawnPipeline env values must be strings", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+        env = { [""] = "bad" },
+    })
+    ok_fail("spawnPipeline env key must not be empty", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+        env = { ["A=B"] = "bad" },
+    })
+    ok_fail("spawnPipeline env key rejects '='", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+        env = { ["A\0B"] = "bad" },
+    })
+    ok_fail("spawnPipeline env key rejects NUL", p, e)
+    p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+        env = { A = "x\0bad" },
+    })
+    ok_fail("spawnPipeline env value rejects NUL", p, e)
+
+    for _, invalid in ipairs({ "1", 0, -1, 0 / 0, math.huge, 3000000 }) do
+        p, e = babet.spawnPipeline({ { "echo" }, { "cat" } }, {
+            launch_timeout = invalid,
+        })
+        ok_fail("spawnPipeline rejects invalid launch_timeout " .. tostring(invalid),
+            p, e)
+    end
+
+    p, e = babet.spawnPipeline({
+        { "echo", {}, { unknown = true } }, { "cat" },
+    })
+    ok_fail("spawnPipeline rejects unknown stage option", p, e)
+    p, e = babet.spawnPipeline({
+        { "echo", {}, { cwd = true } }, { "cat" },
+    })
+    ok_fail("spawnPipeline stage cwd must be a string", p, e)
+    p, e = babet.spawnPipeline({
+        { "echo", {}, { env = true } }, { "cat" },
+    })
+    ok_fail("spawnPipeline stage env must be a table", p, e)
+    p, e = babet.spawnPipeline({
+        { "printf", { "x" } }, { "__babet_missing_spawn_pipeline__" },
+    })
+    ok("spawnPipeline launch error identifies the failed stage",
+        p == nil and type(e) == "string"
+        and e:find("stage 2", 1, true) ~= nil, tostring(e))
+    p, e = babet.spawnPipeline({ { "pwd" }, { "cat" } }, {
+        cwd = "/does/not/exist",
+    })
+    ok_fail("spawnPipeline invalid cwd is returned", p, e)
+
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c", "cat; printf first-err >&2" } },
+        { "sh", { "-c", "tr a-z A-Z; printf second-err >&2" } },
+    })
+    ok("spawnPipeline returns a userdata", p ~= nil and e == nil, tostring(e))
+    ok("pipeline userdata tostring is informative",
+        tostring(p):find("babet.pipeline_process", 1, true) ~= nil)
+    local pids = p:pids()
+    ok("pipeline pids() returns one PID per stage",
+        type(pids) == "table" and #pids == 2)
+    ok("pipeline pids are positive integers",
+        math.type(pids[1]) == "integer" and pids[1] > 0
+        and math.type(pids[2]) == "integer" and pids[2] > 0)
+    ok("pipeline is_running() initially true", p:is_running() == true)
+    ok("pipeline is_running(stage) initially true",
+        p:is_running(1) == true and p:is_running(2) == true)
+    ok_raises("pipeline pids rejects extra arguments",
+        function() p:pids(true) end)
+    ok_raises("pipeline is_running stage must be an integer",
+        function() p:is_running("1") end)
+    ok_raises("pipeline is_running rejects stage zero",
+        function() p:is_running(0) end)
+    ok_raises("pipeline is_running rejects stage above count",
+        function() p:is_running(3) end)
+    ok_raises("pipeline read_stderr stage must be an integer",
+        function() p:read_stderr("1") end)
+    ok_raises("pipeline read_stderr rejects stage zero",
+        function() p:read_stderr(0) end)
+    ok_raises("pipeline read_stderr rejects stage above count",
+        function() p:read_stderr(3) end)
+
+    local zero_written, zero_err = p:write("", 0)
+    ok("pipeline write empty string returns 0",
+        zero_written == 0 and zero_err == nil)
+    local binary = "hello\0world"
+    local offset = 1
+    local write_error
+    while offset <= #binary do
+        local written
+        written, write_error = p:write(binary:sub(offset), 1)
+        if not written then break end
+        offset = offset + written
+    end
+    ok("pipeline write accepts binary data",
+        offset == #binary + 1 and write_error == nil, tostring(write_error))
+    ok_act("pipeline close_stdin succeeds", p:close_stdin())
+    ok_act("pipeline close_stdin is idempotent", p:close_stdin())
+
+    local out, errs, stream_err = drain_pipeline(p, 2, 5)
+    ok("pipeline stdout is streamed progressively",
+        out == "HELLO\0WORLD" and stream_err == nil, tostring(stream_err))
+    ok("pipeline stderr stage 1 remains separate",
+        errs and errs[1] == "first-err", tostring(errs and errs[1]))
+    ok("pipeline stderr stage 2 remains separate",
+        errs and errs[2] == "second-err", tostring(errs and errs[2]))
+    local result, wait_err = p:wait(2)
+    ok("pipeline wait returns a result table",
+        type(result) == "table" and wait_err == nil)
+    ok("pipeline wait exposes the last-stage code",
+        result and result.code == 0)
+    ok("pipeline wait exposes all_succeeded",
+        result and result.all_succeeded == true
+        and result.failed_index == nil)
+    ok("pipeline wait exposes every stage status",
+        result and #result.stages == 2
+        and result.stages[1].code == 0
+        and result.stages[2].code == 0)
+    local result2, wait_err2 = p:wait(0)
+    ok("pipeline wait is idempotent",
+        result2 and result2.code == 0 and wait_err2 == nil)
+    ok("pipeline is_running() false after wait", p:is_running() == false)
+    local eof_data, eof_err = p:read_stdout(1, 0)
+    ok("pipeline read_stdout after EOF -> closed",
+        eof_data == nil and eof_err == "closed")
+    ok_act("pipeline close succeeds", p:close())
+    ok_act("pipeline close is idempotent", p:close())
+    local closed_write, closed_write_err = p:write("x", 0)
+    ok("pipeline write after close -> closed",
+        closed_write == nil and closed_write_err == "closed")
+
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c", "printf '%s|%s' \"$PWD\" \"$BABET_PIPE_ENV\"" }, {
+            cwd = "/tmp",
+            env = { BABET_PIPE_ENV = "local" },
+        } },
+        { "cat" },
+    }, {
+        cwd = "/",
+        env = { BABET_PIPE_ENV = "global" },
+    })
+    ok("spawnPipeline accepts global and local cwd/env",
+        p ~= nil and e == nil, tostring(e))
+    out, errs, stream_err = drain_pipeline(p, 2, 5)
+    result = p:wait(2)
+    ok("spawnPipeline local cwd/env override global values",
+        out == "/tmp|local" and result.code == 0
+        and errs[1] == "" and errs[2] == "", tostring(out))
+    p:close()
+
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c", "exit 7" } }, { "cat" },
+    })
+    ok("spawnPipeline intermediate-failure fixture",
+        p ~= nil and e == nil, tostring(e))
+    out, errs, stream_err = drain_pipeline(p, 2, 5)
+    result = p:wait(2)
+    ok("pipeline global code remains the last stage code",
+        result and result.code == 0)
+    ok("pipeline wait exposes intermediate failure",
+        result and result.all_succeeded == false
+        and result.failed_index == 1
+        and result.stages[1].code == 7
+        and result.stages[2].code == 0)
+    p:close()
+
+    local stream_pid_path = sb("pipeline_stream_descendant.pid")
+    os.remove(stream_pid_path)
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c",
+            "sleep 30 >/dev/null 2>&1 & echo $! > " .. stream_pid_path .. "; exit 0" } },
+        { "cat" },
+    })
+    ok("spawnPipeline background-descendant fixture",
+        p ~= nil and e == nil, tostring(e))
+    out, errs, stream_err = drain_pipeline(p, 2, 5)
+    result, wait_err = p:wait(2)
+    local stream_descendant_pid = pipeline_test_read_pid(stream_pid_path)
+    local stream_descendant_running = stream_descendant_pid
+        and pipeline_test_pid_is_running(stream_descendant_pid)
+    ok("pipeline wait cleans descendants after direct stage exit",
+        result and wait_err == nil and stream_descendant_pid ~= nil
+        and not stream_descendant_running,
+        "pid=" .. tostring(stream_descendant_pid))
+    if stream_descendant_running then
+        babet.exec("kill", { "-9", tostring(stream_descendant_pid) })
+    end
+    p:close()
+
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c", "sleep 0.3; printf done" } }, { "cat" },
+    })
+    ok("spawnPipeline delayed-output fixture", p ~= nil and e == nil, tostring(e))
+    local t0 = babet.monotonic()
+    local no_data, timeout_err = p:read_stdout(16, 0.03)
+    local elapsed = babet.monotonic() - t0
+    ok("pipeline read_stdout timeout is typed and bounded",
+        no_data == nil and timeout_err == "timeout" and elapsed < 0.5,
+        "err=" .. tostring(timeout_err) .. " dt=" .. tostring(elapsed))
+    local no_wait, no_wait_err = p:wait(0)
+    ok("pipeline wait(0) is non-blocking",
+        no_wait == nil and no_wait_err == "timeout")
+    ok("pipeline wait timeout does not terminate stages",
+        p:is_running() == true)
+    out, errs, stream_err = drain_pipeline(p, 2, 5)
+    result = p:wait(2)
+    ok("pipeline remains usable after read/wait timeouts",
+        out == "done" and result.code == 0 and stream_err == nil,
+        tostring(stream_err))
+    p:close()
+
+    local large = string.rep("stream-pipeline-data\0", 25000)
+    p, e = babet.spawnPipeline({ { "cat" }, { "cat" }, { "cat" } })
+    ok("spawnPipeline large-stdin fixture", p ~= nil and e == nil, tostring(e))
+    out, errs, stream_err = write_all_and_drain(p, large, 3, 10)
+    result = p:wait(3)
+    ok("pipeline large stdin/stdout has no deadlock",
+        out == large and result.code == 0 and stream_err == nil,
+        "out=" .. tostring(out and #out) .. " err=" .. tostring(stream_err))
+    ok("pipeline large binary transfer preserves byte count",
+        out and #out == #large)
+    p:close()
+
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c", "head -c 131072 /dev/zero >&2; printf x" } },
+        { "sh", { "-c", "cat; head -c 131072 /dev/zero >&2" } },
+    })
+    ok("spawnPipeline large-stderr fixture", p ~= nil and e == nil, tostring(e))
+    out, errs, stream_err = drain_pipeline(p, 2, 8)
+    result = p:wait(3)
+    ok("pipeline drains stdout while both stderr streams are large",
+        out == "x" and result.code == 0 and stream_err == nil,
+        tostring(stream_err))
+    ok("pipeline drains large stderr from stage 1",
+        errs and #errs[1] == 131072, tostring(errs and #errs[1]))
+    ok("pipeline drains large stderr from stage 2",
+        errs and #errs[2] == 131072, tostring(errs and #errs[2]))
+    p:close()
+
+    p, e = babet.spawnPipeline({ { "yes" }, { "head", { "-n", "1" } } })
+    ok("spawnPipeline SIGPIPE fixture", p ~= nil and e == nil, tostring(e))
+    out, errs, stream_err = drain_pipeline(p, 2, 5)
+    result = p:wait(2)
+    ok("pipeline handles premature downstream close",
+        out == "y\n" and result.code == 0 and stream_err == nil,
+        tostring(stream_err))
+    ok("pipeline records upstream SIGPIPE/non-zero status",
+        result and result.all_succeeded == false
+        and result.failed_index == 1
+        and result.stages[1].code ~= 0)
+    p:close()
+
+    p, e = babet.spawnPipeline({ { "sleep", { "10" } }, { "cat" } })
+    ok("spawnPipeline kill fixture", p ~= nil and e == nil, tostring(e))
+    result, wait_err = p:kill()
+    ok("pipeline kill returns per-stage signaled statuses",
+        result and wait_err == nil and result.all_succeeded == false
+        and result.stages[1].signaled == true)
+    ok("pipeline kill uses signal-derived codes",
+        result and result.stages[1].code == 137)
+    p:close()
+
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c", "sleep 10 & wait" } }, { "cat" },
+    })
+    ok("spawnPipeline terminate fixture", p ~= nil and e == nil, tostring(e))
+    result, wait_err = p:terminate(0.05)
+    ok("pipeline terminate returns a complete status table",
+        result and wait_err == nil and #result.stages == 2)
+    ok("pipeline terminate makes the pipeline unsuccessful",
+        result and result.all_succeeded == false)
+    p:close()
+
+    p, e = babet.spawnPipeline({
+        { "sh", { "-c", "sleep 10 & wait" } }, { "cat" },
+    })
+    ok("spawnPipeline close-cleanup fixture", p ~= nil and e == nil, tostring(e))
+    pids = p:pids()
+    ok_act("pipeline close terminates active groups", p:close())
+    local groups_dead = true
+    for _, pid in ipairs(pids) do
+        local probe = babet.exec("sh", {
+            "-c", "kill -0 " .. tostring(pid) .. " 2>/dev/null",
+        })
+        groups_dead = groups_dead and type(probe) == "table" and probe.code ~= 0
+    end
+    ok("pipeline close reaps all direct children", groups_dead)
+    ok("closed pipeline reports not running", p:is_running() == false)
+
+    local auto_pids
+    do
+        local auto <close> = assert(babet.spawnPipeline({
+            { "sleep", { "10" } }, { "cat" },
+        }))
+        auto_pids = auto:pids()
+    end
+    local auto_dead = true
+    for _, pid in ipairs(auto_pids) do
+        local probe = babet.exec("sh", {
+            "-c", "kill -0 " .. tostring(pid) .. " 2>/dev/null",
+        })
+        auto_dead = auto_dead and type(probe) == "table" and probe.code ~= 0
+    end
+    ok("pipeline Lua <close> cleans active children", auto_dead)
+
+    local gc_pids
+    do
+        local gc_pipeline = assert(babet.spawnPipeline({
+            { "sleep", { "10" } }, { "cat" },
+        }))
+        gc_pids = gc_pipeline:pids()
+        gc_pipeline = nil
+    end
+    collectgarbage("collect")
+    collectgarbage("collect")
+    local gc_dead = true
+    for _, pid in ipairs(gc_pids) do
+        gc_dead = gc_dead and not pipeline_test_pid_is_running(pid)
+    end
+    ok("pipeline GC cleans active direct children", gc_dead)
+    if not gc_dead then
+        for _, pid in ipairs(gc_pids) do
+            babet.exec("kill", { "-9", tostring(pid) })
+        end
+    end
+
+    p, e = babet.spawnPipeline({ { "cat" }, { "cat" } })
+    ok("spawnPipeline method-validation fixture", p ~= nil and e == nil, tostring(e))
+    ok_raises("pipeline read_stdout rejects extra arguments",
+        function() p:read_stdout(1, 0, true) end)
+    ok_raises("pipeline read_stderr rejects extra arguments",
+        function() p:read_stderr(1, 1, 0, true) end)
+    ok_raises("pipeline write rejects extra arguments",
+        function() p:write("x", 0, true) end)
+    ok_raises("pipeline is_running rejects extra arguments",
+        function() p:is_running(1, true) end)
+    ok_raises("pipeline terminate rejects extra arguments",
+        function() p:terminate(0, true) end)
+    ok_raises("pipeline read_stdout rejects max_bytes <= 0",
+        function() p:read_stdout(0) end)
+    ok_raises("pipeline read_stdout rejects max_bytes > 16 MiB",
+        function() p:read_stdout(16 * 1024 * 1024 + 1) end)
+    ok_raises("pipeline read_stderr rejects max_bytes <= 0",
+        function() p:read_stderr(1, 0) end)
+    ok_raises("pipeline read_stderr rejects max_bytes > 16 MiB",
+        function() p:read_stderr(1, 16 * 1024 * 1024 + 1) end)
+    local bad_read, bad_read_err = p:read_stdout(1, -1)
+    ok("pipeline read_stdout rejects negative timeout cleanly",
+        bad_read == nil and type(bad_read_err) == "string")
+    bad_read, bad_read_err = p:read_stdout(1, 3000000)
+    ok("pipeline read_stdout rejects timeout above INT_MAX ms",
+        bad_read == nil and type(bad_read_err) == "string")
+    bad_read, bad_read_err = p:read_stderr(1, 1, -1)
+    ok("pipeline read_stderr rejects negative timeout cleanly",
+        bad_read == nil and type(bad_read_err) == "string")
+    bad_read, bad_read_err = p:read_stderr(1, 1, 3000000)
+    ok("pipeline read_stderr rejects timeout above INT_MAX ms",
+        bad_read == nil and type(bad_read_err) == "string")
+    ok_raises("pipeline write requires a string",
+        function() p:write(42) end)
+    local bad_write, bad_write_err = p:write("x", -1)
+    ok("pipeline write rejects negative timeout cleanly",
+        bad_write == nil and type(bad_write_err) == "string")
+    bad_write, bad_write_err = p:write("x", 3000000)
+    ok("pipeline write rejects timeout above INT_MAX ms",
+        bad_write == nil and type(bad_write_err) == "string")
+    ok_raises("pipeline close_stdin rejects extra arguments",
+        function() p:close_stdin(true) end)
+    ok_raises("pipeline wait rejects extra arguments",
+        function() p:wait(0, 1) end)
+    local bad_wait, bad_wait_err = p:wait(-1)
+    ok("pipeline wait rejects negative timeout cleanly",
+        bad_wait == nil and type(bad_wait_err) == "string")
+    bad_wait, bad_wait_err = p:wait(3000000)
+    ok("pipeline wait rejects timeout above INT_MAX ms",
+        bad_wait == nil and type(bad_wait_err) == "string")
+    local bad_term, bad_term_err = p:terminate(-1)
+    ok("pipeline terminate rejects negative grace cleanly",
+        bad_term == nil and type(bad_term_err) == "string")
+    bad_term, bad_term_err = p:terminate(3000000)
+    ok("pipeline terminate rejects grace above INT_MAX ms",
+        bad_term == nil and type(bad_term_err) == "string")
+    ok_raises("pipeline kill rejects extra arguments",
+        function() p:kill(true) end)
+    ok_raises("pipeline close rejects extra arguments",
+        function() p:close(true) end)
+    p:close()
 end
 
 -- =====================================================================
@@ -9837,6 +10806,1253 @@ do
         end
     end
 
+end
+
+-- =====================================================================
+print("")
+print("=== secure ZIP archives ===")
+
+do
+    local root = sb("archive")
+    babet.rmdirAll(root)
+    assert(babet.mkdir(root))
+
+    local function write_bytes(path, data)
+        local file, open_err = io.open(path, "wb")
+        if not file then return nil, open_err end
+        local wrote, write_err = file:write(data)
+        local closed, close_err = file:close()
+        if not wrote then return nil, write_err end
+        if closed == nil then return nil, close_err end
+        return true
+    end
+
+    local function read_bytes(path)
+        local file, open_err = io.open(path, "rb")
+        if not file then return nil, open_err end
+        local data = file:read("a")
+        local closed, close_err = file:close()
+        if data == nil then return nil, "cannot read file" end
+        if closed == nil then return nil, close_err end
+        return data
+    end
+
+    local function crc32_number(data)
+        return assert(tonumber(babet.crc32(data), 16))
+    end
+
+    local function zip_mode(type_bits, permissions)
+        return ((type_bits | permissions) & 0xffff) << 16
+    end
+
+    local function make_zip(path, entries)
+        local local_parts = {}
+        local central_parts = {}
+        local local_offset = 0
+        local dos_time = 0
+        local dos_date = 0x21 -- 1980-01-01
+
+        for _, entry in ipairs(entries) do
+            local name = assert(entry.name)
+            local data = entry.data or ""
+            local payload = entry.payload or data
+            local method = entry.method
+            if method == nil then method = entry.payload and 8 or 0 end
+            local flags = entry.flags or 0
+            local crc = entry.crc32
+            if crc == nil then crc = crc32_number(data) end
+            local compressed_size = entry.compressed_size or #payload
+            local expanded_size = entry.size or #data
+            local version_made_by = entry.version_made_by or ((3 << 8) | 20)
+            local external = entry.external_attributes
+            if external == nil then
+                if name:sub(-1) == "/" then
+                    external = zip_mode(0x4000, entry.permissions or tonumber("755", 8)) | 0x10
+                else
+                    external = zip_mode(0x8000, entry.permissions or tonumber("644", 8))
+                end
+            end
+
+            local local_header = string.pack(
+                "<I4I2I2I2I2I2I4I4I4I2I2",
+                0x04034b50, 20, flags, method, dos_time, dos_date,
+                crc, compressed_size, expanded_size, #name, 0)
+            local local_record = local_header .. name .. payload
+            local_parts[#local_parts + 1] = local_record
+
+            local central_header = string.pack(
+                "<I4I2I2I2I2I2I2I4I4I4I2I2I2I2I2I4I4",
+                0x02014b50, version_made_by, 20, flags, method,
+                dos_time, dos_date, crc, compressed_size, expanded_size,
+                #name, 0, 0, 0, 0, external, local_offset)
+            central_parts[#central_parts + 1] = central_header .. name
+            local_offset = local_offset + #local_record
+        end
+
+        local local_blob = table.concat(local_parts)
+        local central_blob = table.concat(central_parts)
+        local eocd = string.pack(
+            "<I4I2I2I2I2I4I4I2",
+            0x06054b50, 0, 0, #entries, #entries,
+            #central_blob, #local_blob, 0)
+        return write_bytes(path, local_blob .. central_blob .. eocd)
+    end
+
+    local function make_empty_zip64(path)
+        local zip64_eocd = string.pack(
+            "<I4I8I2I2I4I4I8I8I8I8",
+            0x06064b50, 44, 45, 45, 0, 0, 0, 0, 0, 0)
+        local locator = string.pack(
+            "<I4I4I8I4", 0x07064b50, 0, 0, 1)
+        local eocd = string.pack(
+            "<I4I2I2I2I2I4I4I2",
+            0x06054b50, 0, 0, 0xffff, 0xffff,
+            0xffffffff, 0xffffffff, 0)
+        return write_bytes(path, zip64_eocd .. locator .. eocd)
+    end
+
+    local function no_archive_temporaries(path)
+        local result = babet.exec("find", {
+            path, "-name", ".babet-archive-*", "-print",
+        }, { timeout = 5 })
+        return type(result) == "table" and result.code == 0
+            and result.stdout == ""
+    end
+
+    local deflated_4096_a =
+        "\xED\xC1\x01\x0D\x00\x00\x00\xC2\xA0\x6C\xEF\x5F" ..
+        "\xCA\x1E\x0E\x28\x00\x00\x00\xE0\xDD\x00"
+
+    ok("archive submodule registered",
+        type(babet.archive) == "table"
+        and type(babet.archive.create) == "function"
+        and type(babet.archive.list) == "function"
+        and type(babet.archive.extract) == "function"
+        and type(babet.archive.extractFile) == "function")
+
+    local archive_worker, archive_worker_err = babet.workers.spawn([[
+        return type(babet.archive) == "table"
+            and type(babet.archive.create) == "function"
+            and type(babet.archive.list) == "function"
+            and type(babet.archive.extract) == "function"
+            and type(babet.archive.extractFile) == "function"
+    ]])
+    ok_val("archive submodule registered in worker states",
+        archive_worker, archive_worker_err)
+    if archive_worker then
+        local joined, available = archive_worker:join()
+        ok("archive functions available in a worker",
+            joined == true and available == true,
+            "joined=" .. tostring(joined)
+            .. " available=" .. tostring(available))
+    end
+
+    local empty_zip = root .. "/empty.zip"
+    assert(make_zip(empty_zip, {}))
+    local empty_list, empty_list_err = babet.archive.list(empty_zip)
+    ok_val("archive.list(empty ZIP)", empty_list, empty_list_err,
+        function(value)
+            return value.count == 0 and value.total_size == 0
+                and #value.entries == 0 and value.zip64 == false
+        end)
+    local empty_out = root .. "/empty-out"
+    local empty_extract, empty_extract_err = babet.archive.extract(
+        empty_zip, empty_out)
+    ok_val("archive.extract(empty ZIP)", empty_extract, empty_extract_err,
+        function(value)
+            return value.files == 0 and value.directories == 0
+                and value.bytes == 0
+        end)
+    ok("archive.extract(empty ZIP) creates destination root",
+        babet.isDir(empty_out) == true)
+
+    local empty_zip64 = root .. "/empty-zip64.zip"
+    assert(make_empty_zip64(empty_zip64))
+    local zip64_list, zip64_list_err = babet.archive.list(empty_zip64)
+    ok_val("archive.list(empty ZIP64)", zip64_list, zip64_list_err,
+        function(value)
+            return value.count == 0 and value.total_size == 0
+                and value.zip64 == true
+        end)
+
+    local valid_zip = root .. "/valid.zip"
+    local valid_entries = {
+        { name = "dir/", permissions = tonumber("711", 8) },
+        { name = "dir/hello.txt", data = "bonjour\n", permissions = tonumber("640", 8) },
+        { name = "binary.bin", data = "\0A\0B", permissions = tonumber("701", 8) },
+        { name = "empty.txt", data = "", permissions = tonumber("600", 8) },
+        {
+            name = "compressed.txt",
+            data = string.rep("A", 4096),
+            payload = deflated_4096_a,
+            method = 8,
+            permissions = tonumber("600", 8),
+        },
+    }
+    local made, make_err = make_zip(valid_zip, valid_entries)
+    ok("archive fixture created", made == true, make_err)
+
+    local listed, list_err = babet.archive.list(valid_zip)
+    ok_val("archive.list(valid)", listed, list_err, function(value)
+        return type(value) == "table"
+            and type(value.entries) == "table"
+            and value.count == 5
+            and value.total_size == 4108
+            and value.archive_size == babet.fileSize(valid_zip)
+            and value.zip64 == false
+    end)
+    ok("archive.list directory metadata",
+        listed and listed.entries[1]
+        and listed.entries[1].name == "dir/"
+        and listed.entries[1].path == "dir"
+        and listed.entries[1].type == "directory"
+        and listed.entries[1].size == 0
+        and listed.entries[1].safe_path == true
+        and listed.entries[1].extractable == true
+        and listed.entries[1].reason == nil
+        and listed.entries[1].unix_mode == tonumber("711", 8))
+    ok("archive.list regular-file metadata",
+        listed and listed.entries[2]
+        and listed.entries[2].name == "dir/hello.txt"
+        and listed.entries[2].type == "file"
+        and listed.entries[2].size == 8
+        and listed.entries[2].compressed_size == 8
+        and listed.entries[2].crc32 == crc32_number("bonjour\n")
+        and listed.entries[2].compression_method == 0
+        and listed.entries[2].encrypted == false
+        and listed.entries[2].supported == true
+        and listed.entries[2].unix_mode == tonumber("640", 8))
+    ok("archive.list DEFLATE metadata",
+        listed and listed.entries[5]
+        and listed.entries[5].size == 4096
+        and listed.entries[5].compressed_size == #deflated_4096_a
+        and listed.entries[5].compression_method == 8
+        and listed.entries[5].extractable == true)
+
+    -- Les noms temporaires internes ne doivent jamais entrer en conflit avec
+    -- un nom de sortie contrôlé par l'archive. Le compteur vaut encore zéro :
+    -- les extractions précédentes ne contenaient aucun fichier.
+    local proc_stat = read_bytes("/proc/self/stat")
+    local self_pid = proc_stat and proc_stat:match("^(%d+)")
+    ok("archive temporary collision fixture can identify current PID",
+        self_pid ~= nil)
+    if self_pid then
+        local temp_prefix = ".babet-archive-" .. self_pid .. "-"
+        local collision_zip = root .. "/temporary-name-collision.zip"
+        assert(make_zip(collision_zip, {
+            { name = temp_prefix .. "1", data = "first" },
+            { name = temp_prefix .. "0", data = "second" },
+        }))
+        local collision_out = root .. "/temporary-name-collision-out"
+        local collision_result, collision_err = babet.archive.extract(
+            collision_zip, collision_out)
+        ok_val("archive staging names never collide with archive outputs",
+            collision_result, collision_err,
+            function(value) return value.files == 2 end)
+        local collision_files = babet.listFiles(collision_out) or {}
+        local collision_seen = {}
+        for _, name in ipairs(collision_files) do collision_seen[name] = true end
+        ok("archive output names resembling staging files are preserved",
+            read_bytes(collision_out .. "/" .. temp_prefix .. "1") == "first"
+            and read_bytes(collision_out .. "/" .. temp_prefix .. "0") == "second"
+            and #collision_files == 2
+            and collision_seen[temp_prefix .. "1"] == true
+            and collision_seen[temp_prefix .. "0"] == true)
+    end
+
+    local extract_dir = root .. "/extract-default"
+    local extracted, extract_err = babet.archive.extract(valid_zip, extract_dir)
+    ok_val("archive.extract(valid)", extracted, extract_err, function(value)
+        return value.files == 4 and value.directories == 1
+            and value.bytes == 4108 and value.path == extract_dir
+    end)
+    ok("archive.extract text content",
+        read_bytes(extract_dir .. "/dir/hello.txt") == "bonjour\n")
+    ok("archive.extract binary and NUL content",
+        read_bytes(extract_dir .. "/binary.bin") == "\0A\0B")
+    ok("archive.extract empty file",
+        read_bytes(extract_dir .. "/empty.txt") == "")
+    ok("archive.extract DEFLATE content",
+        read_bytes(extract_dir .. "/compressed.txt") == string.rep("A", 4096))
+    local default_file_mode = babet.getMode(extract_dir .. "/binary.bin")
+    local default_dir_mode = babet.getMode(extract_dir .. "/dir")
+    ok("archive.extract uses safe default file mode",
+        default_file_mode == tonumber("644", 8), tostring(default_file_mode))
+    ok("archive.extract uses safe default directory mode",
+        default_dir_mode == tonumber("755", 8), tostring(default_dir_mode))
+    ok("archive.extract leaves no staging files",
+        no_archive_temporaries(extract_dir))
+
+    local refused, refused_err = babet.archive.extract(valid_zip, extract_dir)
+    ok_fail("archive.extract refuses overwrite by default", refused, refused_err)
+    ok("archive.extract failed overwrite preserves content",
+        read_bytes(extract_dir .. "/dir/hello.txt") == "bonjour\n")
+
+    local replacement_zip = root .. "/replacement.zip"
+    assert(make_zip(replacement_zip, {
+        { name = "dir/" },
+        { name = "dir/hello.txt", data = "remplacé\n" },
+    }))
+    local replaced, replaced_err = babet.archive.extract(
+        replacement_zip, extract_dir, { overwrite = true })
+    ok_val("archive.extract overwrite=true", replaced, replaced_err,
+        function(value) return value.files == 1 and value.directories == 1 end)
+    ok("archive.extract overwrite replaces atomically",
+        read_bytes(extract_dir .. "/dir/hello.txt") == "remplacé\n")
+
+    local preserve_dir = root .. "/extract-preserve"
+    local preserved, preserved_err = babet.archive.extract(
+        valid_zip, preserve_dir, { preserve_permissions = true })
+    ok_val("archive.extract preserve_permissions", preserved, preserved_err)
+    local preserved_file_mode = babet.getMode(preserve_dir .. "/binary.bin")
+    local preserved_dir_mode = babet.getMode(preserve_dir .. "/dir")
+    ok("archive.extract preserves regular permissions",
+        preserved_file_mode == tonumber("701", 8), tostring(preserved_file_mode))
+    ok("archive.extract preserves directory permissions",
+        preserved_dir_mode == tonumber("711", 8), tostring(preserved_dir_mode))
+
+    local special_zip = root .. "/special-modes.zip"
+    assert(make_zip(special_zip, {
+        { name = "special/", permissions = tonumber("2777", 8) },
+        { name = "special/tool", data = "x", permissions = tonumber("4755", 8) },
+    }))
+    local special_dir = root .. "/special-modes"
+    local special_result, special_err = babet.archive.extract(
+        special_zip, special_dir, { preserve_permissions = true })
+    ok_val("archive.extract strips special permission bits", special_result, special_err)
+    ok("archive directory setgid bit stripped",
+        babet.getMode(special_dir .. "/special") == tonumber("777", 8))
+    ok("archive file setuid bit stripped",
+        babet.getMode(special_dir .. "/special/tool") == tonumber("755", 8))
+
+    local existing_dir = root .. "/existing-dir"
+    assert(babet.mkdir(existing_dir))
+    assert(babet.mkdir(existing_dir .. "/kept"))
+    assert(babet.setMode(existing_dir .. "/kept", "700"))
+    local existing_zip = root .. "/existing-dir.zip"
+    assert(make_zip(existing_zip, {
+        { name = "kept/", permissions = tonumber("777", 8) },
+        { name = "kept/file.txt", data = "ok" },
+    }))
+    local existing_result, existing_err = babet.archive.extract(
+        existing_zip, existing_dir, { preserve_permissions = true })
+    ok_val("archive.extract accepts an existing safe directory", existing_result, existing_err)
+    ok("archive.extract does not chmod pre-existing directories",
+        babet.getMode(existing_dir .. "/kept") == tonumber("700", 8))
+
+    local single_parent = root .. "/single/nested"
+    local single_path = single_parent .. "/renamed.dat"
+    local single, single_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", single_path)
+    ok_val("archive.extractFile extracts and renames one entry", single, single_err,
+        function(value)
+            return value.bytes == 4 and value.path == single_path
+                and value.entry == "binary.bin"
+        end)
+    ok("archive.extractFile content is binary-safe",
+        read_bytes(single_path) == "\0A\0B")
+    ok("archive.extractFile uses basename, not archive path",
+        babet.fileExists(single_parent .. "/binary.bin") == false)
+    local single_again, single_again_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", single_path)
+    ok_fail("archive.extractFile refuses overwrite by default",
+        single_again, single_again_err)
+    local single_overwrite, single_overwrite_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", single_path, { overwrite = true })
+    ok_val("archive.extractFile overwrite=true",
+        single_overwrite, single_overwrite_err)
+
+    local single_mode_path = root .. "/single-mode.bin"
+    local single_mode, single_mode_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", single_mode_path,
+        { preserve_permissions = true })
+    ok_val("archive.extractFile preserve_permissions",
+        single_mode, single_mode_err)
+    ok("archive.extractFile preserves regular permissions",
+        babet.getMode(single_mode_path) == tonumber("701", 8),
+        tostring(babet.getMode(single_mode_path)))
+
+    local missing, missing_err = babet.archive.extractFile(
+        valid_zip, "missing.txt", root .. "/missing.txt")
+    ok_fail("archive.extractFile missing entry", missing, missing_err)
+    local directory_file, directory_file_err = babet.archive.extractFile(
+        valid_zip, "dir/", root .. "/not-a-file")
+    ok_fail("archive.extractFile refuses a directory entry",
+        directory_file, directory_file_err)
+
+    local duplicate_zip = root .. "/duplicate.zip"
+    assert(make_zip(duplicate_zip, {
+        { name = "same.txt", data = "one" },
+        { name = "same.txt", data = "two" },
+    }))
+    local duplicate_list, duplicate_list_err = babet.archive.list(duplicate_zip)
+    ok_val("archive.list reports duplicate names", duplicate_list, duplicate_list_err,
+        function(value) return value.count == 2 end)
+    local duplicate_extract, duplicate_extract_err = babet.archive.extract(
+        duplicate_zip, root .. "/duplicate-out")
+    ok_fail("archive.extract refuses duplicate output paths",
+        duplicate_extract, duplicate_extract_err)
+    local duplicate_one, duplicate_one_err = babet.archive.extractFile(
+        duplicate_zip, "same.txt", root .. "/ambiguous.txt")
+    ok_fail("archive.extractFile refuses an ambiguous duplicate name",
+        duplicate_one, duplicate_one_err)
+
+    local conflict_zip = root .. "/conflict.zip"
+    assert(make_zip(conflict_zip, {
+        { name = "node", data = "file" },
+        { name = "node/child.txt", data = "child" },
+    }))
+    local conflict, conflict_err = babet.archive.extract(
+        conflict_zip, root .. "/conflict-out")
+    ok_fail("archive.extract refuses file/directory path conflicts",
+        conflict, conflict_err)
+
+    local unsafe_zip = root .. "/unsafe.zip"
+    local long_name = string.rep("a", 4097)
+    assert(make_zip(unsafe_zip, {
+        { name = "../escape.txt", data = "x" },
+        { name = "/absolute.txt", data = "x" },
+        { name = "dir\\windows.txt", data = "x" },
+        { name = "C:/drive.txt", data = "x" },
+        { name = "D:drive-relative.txt", data = "x" },
+        { name = "a//empty.txt", data = "x" },
+        { name = "a/./dot.txt", data = "x" },
+        { name = "a/../parent.txt", data = "x" },
+        { name = long_name, data = "x" },
+        { name = "safe.txt", data = "safe" },
+    }))
+    local unsafe_list, unsafe_list_err = babet.archive.list(unsafe_zip)
+    ok_val("archive.list inspects unsafe paths without extracting",
+        unsafe_list, unsafe_list_err, function(value) return value.count == 10 end)
+    ok("archive.list marks traversal unsafe",
+        unsafe_list and unsafe_list.entries[1].safe_path == false
+        and unsafe_list.entries[1].extractable == false
+        and type(unsafe_list.entries[1].reason) == "string")
+    ok("archive.list marks absolute paths unsafe",
+        unsafe_list and unsafe_list.entries[2].safe_path == false)
+    ok("archive.list marks backslashes unsafe",
+        unsafe_list and unsafe_list.entries[3].safe_path == false)
+    ok("archive.list marks drive prefixes unsafe",
+        unsafe_list and unsafe_list.entries[4].safe_path == false
+        and unsafe_list.entries[5].safe_path == false)
+    ok("archive.list marks empty components unsafe",
+        unsafe_list and unsafe_list.entries[6].safe_path == false)
+    ok("archive.list marks dot components unsafe",
+        unsafe_list and unsafe_list.entries[7].safe_path == false
+        and unsafe_list.entries[8].safe_path == false)
+    ok("archive.list marks oversized names unsafe",
+        unsafe_list and unsafe_list.entries[9].safe_path == false)
+    local unsafe_out = root .. "/unsafe-out"
+    local unsafe_extract, unsafe_extract_err = babet.archive.extract(
+        unsafe_zip, unsafe_out)
+    ok_fail("archive.extract refuses unsafe archive paths",
+        unsafe_extract, unsafe_extract_err)
+    ok("archive path validation happens before destination creation",
+        babet.fileExists(unsafe_out) == false)
+    local selected_unsafe, selected_unsafe_err = babet.archive.extractFile(
+        unsafe_zip, "../escape.txt", root .. "/selected-unsafe.txt")
+    ok_fail("archive.extractFile refuses a selected unsafe entry",
+        selected_unsafe, selected_unsafe_err)
+    local selected_safe, selected_safe_err = babet.archive.extractFile(
+        unsafe_zip, "safe.txt", root .. "/selected-safe.txt")
+    ok_val("archive.extractFile may select a safe entry from a mixed archive",
+        selected_safe, selected_safe_err)
+    ok("selected safe entry content", read_bytes(root .. "/selected-safe.txt") == "safe")
+
+    local nul_name_zip = root .. "/nul-name.zip"
+    assert(make_zip(nul_name_zip, {
+        { name = "visible.txt\0hidden.txt", data = "x" },
+    }))
+    local nul_name, nul_name_err = babet.archive.list(nul_name_zip)
+    ok_fail("archive.list refuses an embedded NUL in a ZIP entry name",
+        nul_name, nul_name_err)
+    ok("archive embedded-NUL diagnostic is explicit",
+        type(nul_name_err) == "string"
+        and nul_name_err:find("embedded NUL", 1, true) ~= nil,
+        tostring(nul_name_err))
+
+    local symlink_zip = root .. "/symlink-entry.zip"
+    assert(make_zip(symlink_zip, {
+        {
+            name = "link",
+            data = "target.txt",
+            external_attributes = zip_mode(0xA000, tonumber("777", 8)),
+        },
+    }))
+    local symlink_list, symlink_list_err = babet.archive.list(symlink_zip)
+    ok_val("archive.list identifies a ZIP symlink", symlink_list, symlink_list_err)
+    ok("ZIP symlink is never extractable",
+        symlink_list and symlink_list.entries[1].type == "symlink"
+        and symlink_list.entries[1].extractable == false)
+    local symlink_entry, symlink_entry_err = babet.archive.extract(
+        symlink_zip, root .. "/symlink-entry-out")
+    ok_fail("archive.extract refuses ZIP symlink entries",
+        symlink_entry, symlink_entry_err)
+
+    local symlink_file, symlink_file_err = babet.archive.extractFile(
+        symlink_zip, "link", root .. "/symlink-as-file")
+    ok_fail("archive.extractFile refuses a ZIP symlink entry",
+        symlink_file, symlink_file_err)
+
+    local mac_symlink_zip = root .. "/mac-symlink-entry.zip"
+    assert(make_zip(mac_symlink_zip, {
+        {
+            name = "mac-link",
+            data = "target.txt",
+            version_made_by = ((19 << 8) | 20),
+            external_attributes = zip_mode(0xA000, tonumber("777", 8)),
+        },
+    }))
+    local mac_symlink_list, mac_symlink_list_err =
+        babet.archive.list(mac_symlink_zip)
+    ok_val("archive.list identifies a macOS ZIP symlink",
+        mac_symlink_list, mac_symlink_list_err)
+    ok("macOS ZIP symlink is never extractable",
+        mac_symlink_list
+        and mac_symlink_list.entries[1].type == "symlink"
+        and mac_symlink_list.entries[1].extractable == false)
+
+    local special_type_zip = root .. "/special-type.zip"
+    assert(make_zip(special_type_zip, {
+        {
+            name = "fifo",
+            data = "",
+            external_attributes = zip_mode(0x1000, tonumber("644", 8)),
+        },
+    }))
+    local special_type_list, special_type_list_err = babet.archive.list(special_type_zip)
+    ok_val("archive.list identifies unsupported filesystem types",
+        special_type_list, special_type_list_err)
+    ok("unsupported filesystem type is not extractable",
+        special_type_list and special_type_list.entries[1].type == "unsupported"
+        and special_type_list.entries[1].extractable == false)
+    local special_type, special_type_err = babet.archive.extract(
+        special_type_zip, root .. "/special-type-out")
+    ok_fail("archive.extract refuses unsupported filesystem types",
+        special_type, special_type_err)
+
+    local encrypted_zip = root .. "/encrypted.zip"
+    assert(make_zip(encrypted_zip, {
+        { name = "secret.txt", data = "secret", flags = 1 },
+    }))
+    local encrypted_list, encrypted_list_err = babet.archive.list(encrypted_zip)
+    ok_val("archive.list reports encryption", encrypted_list, encrypted_list_err)
+    ok("encrypted entry is not extractable",
+        encrypted_list and encrypted_list.entries[1].encrypted == true
+        and encrypted_list.entries[1].extractable == false)
+    local encrypted, encrypted_err = babet.archive.extract(
+        encrypted_zip, root .. "/encrypted-out")
+    ok_fail("archive.extract refuses encrypted entries", encrypted, encrypted_err)
+
+    local unsupported_zip = root .. "/unsupported-method.zip"
+    assert(make_zip(unsupported_zip, {
+        { name = "method.bin", data = "abc", method = 99 },
+    }))
+    local unsupported_list, unsupported_list_err = babet.archive.list(unsupported_zip)
+    ok_val("archive.list reports unsupported compression",
+        unsupported_list, unsupported_list_err)
+    ok("unsupported compression is not extractable",
+        unsupported_list and unsupported_list.entries[1].supported == false
+        and unsupported_list.entries[1].extractable == false)
+    local unsupported, unsupported_err = babet.archive.extract(
+        unsupported_zip, root .. "/unsupported-out")
+    ok_fail("archive.extract refuses unsupported compression",
+        unsupported, unsupported_err)
+
+    local ratio_zip = root .. "/ratio.zip"
+    assert(make_zip(ratio_zip, {
+        {
+            name = "ratio.txt", data = string.rep("A", 4096),
+            payload = deflated_4096_a, method = 8,
+        },
+    }))
+    local ratio_default, ratio_default_err = babet.archive.list(ratio_zip)
+    ok_val("archive default compression ratio accepts normal DEFLATE",
+        ratio_default, ratio_default_err)
+    local ratio_limited, ratio_limited_err = babet.archive.list(
+        ratio_zip, { max_compression_ratio = 100 })
+    ok_fail("archive max_compression_ratio rejects suspicious expansion",
+        ratio_limited, ratio_limited_err)
+
+    local limited, limited_err = babet.archive.list(valid_zip, { max_entries = 4 })
+    ok_fail("archive max_entries enforced", limited, limited_err)
+    limited, limited_err = babet.archive.list(valid_zip, { max_entry_size = 4095 })
+    ok_fail("archive max_entry_size enforced", limited, limited_err)
+    limited, limited_err = babet.archive.list(valid_zip, { max_total_size = 4107 })
+    ok_fail("archive max_total_size enforced", limited, limited_err)
+    local exact_limits, exact_limits_err = babet.archive.list(valid_zip, {
+        max_entries = 5,
+        max_entry_size = 4096,
+        max_total_size = 4108,
+    })
+    ok_val("archive anti-bomb integer limits are inclusive at the boundary",
+        exact_limits, exact_limits_err,
+        function(value) return value.count == 5 and value.total_size == 4108 end)
+
+    local limited_out = root .. "/limited-out"
+    limited, limited_err = babet.archive.extract(
+        valid_zip, limited_out, { max_entries = 4 })
+    ok_fail("archive.extract applies anti-bomb limits before writing",
+        limited, limited_err)
+    ok("archive.extract limit failure creates no destination",
+        babet.fileExists(limited_out) == false)
+    limited, limited_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", root .. "/limited-single.bin",
+        { max_total_size = 4 })
+    ok_fail("archive.extractFile applies limits to the whole archive",
+        limited, limited_err)
+
+    local corrupt_zip = root .. "/corrupt.zip"
+    local bad_data = "corrupted"
+    assert(make_zip(corrupt_zip, {
+        { name = "folder/", data = "" },
+        { name = "folder/good.txt", data = "good" },
+        {
+            name = "folder/bad.txt",
+            data = bad_data,
+            crc32 = (crc32_number(bad_data) + 1) & 0xffffffff,
+        },
+    }))
+    local corrupt_out = root .. "/corrupt-out"
+    local corrupt, corrupt_err = babet.archive.extract(corrupt_zip, corrupt_out)
+    ok_fail("archive extraction detects corrupt data/CRC", corrupt, corrupt_err)
+    ok("corrupt extraction publishes no earlier staged file",
+        babet.fileExists(corrupt_out .. "/folder/good.txt") == false)
+    ok("corrupt extraction publishes no bad file",
+        babet.fileExists(corrupt_out .. "/folder/bad.txt") == false)
+    ok("corrupt extraction removes staging files",
+        no_archive_temporaries(corrupt_out))
+    ok("corrupt extraction removes newly created empty subdirectories",
+        babet.fileExists(corrupt_out .. "/folder") == false)
+
+    local not_zip = root .. "/not-a-zip.bin"
+    assert(write_bytes(not_zip, "not a ZIP archive"))
+    local invalid, invalid_err = babet.archive.list(not_zip)
+    ok_fail("archive.list rejects malformed ZIP", invalid, invalid_err)
+    invalid, invalid_err = babet.archive.list(root .. "/missing.zip")
+    ok_fail("archive.list rejects missing archive", invalid, invalid_err)
+
+    invalid, invalid_err = babet.archive.list(root)
+    ok_fail("archive.list rejects a directory as archive source",
+        invalid, invalid_err)
+
+    local archive_fifo = root .. "/archive-input-fifo"
+    local archive_fifo_created = babet.exec("mkfifo", { archive_fifo })
+    ok("archive reader FIFO fixture created",
+        type(archive_fifo_created) == "table" and archive_fifo_created.code == 0)
+    local fifo_started = babet.time.monotonic()
+    invalid, invalid_err = babet.archive.list(archive_fifo)
+    local fifo_elapsed = babet.time.monotonic() - fifo_started
+    ok_fail("archive.list rejects a FIFO as archive source",
+        invalid, invalid_err)
+    ok("archive.list rejects a FIFO without blocking",
+        fifo_elapsed < 2, tostring(fifo_elapsed))
+    babet.exec("rm", { "-f", archive_fifo })
+
+    local archive_input_link = root .. "/archive-input-link.zip"
+    local archive_link_created = babet.exec("ln", {
+        "-s", "valid.zip", archive_input_link,
+    })
+    ok("archive reader symlink fixture created",
+        type(archive_link_created) == "table" and archive_link_created.code == 0)
+    local linked_archive, linked_archive_err = babet.archive.list(archive_input_link)
+    ok_val("archive.list follows a read-only symlink to a regular ZIP",
+        linked_archive, linked_archive_err,
+        function(value) return value.count == 5 end)
+
+    local outside = root .. "/outside"
+    local symlink_dest = root .. "/symlink-dest"
+    assert(babet.mkdir(outside))
+    assert(babet.mkdir(symlink_dest))
+    assert(write_bytes(outside .. "/sentinel.txt", "unchanged"))
+    local ln_parent = babet.exec("ln", {
+        "-s", "../outside", symlink_dest .. "/dir",
+    })
+    ok("archive symlink-parent fixture created",
+        type(ln_parent) == "table" and ln_parent.code == 0,
+        ln_parent and ln_parent.stderr)
+    local parent_attack, parent_attack_err = babet.archive.extract(
+        valid_zip, symlink_dest, { overwrite = true })
+    ok_fail("archive.extract refuses a symlinked destination parent",
+        parent_attack, parent_attack_err)
+    ok("symlinked parent cannot redirect extraction outside",
+        read_bytes(outside .. "/sentinel.txt") == "unchanged"
+        and babet.fileExists(outside .. "/hello.txt") == false)
+
+    local root_link = root .. "/root-link"
+    local ln_root = babet.exec("ln", { "-s", "outside", root_link })
+    ok("archive symlink-root fixture created",
+        type(ln_root) == "table" and ln_root.code == 0)
+    local root_attack, root_attack_err = babet.archive.extract(
+        valid_zip, root_link, { overwrite = true })
+    ok_fail("archive.extract refuses a symlink in destination root",
+        root_attack, root_attack_err)
+
+    local leaf_dest = root .. "/leaf-dest"
+    assert(babet.mkdir(leaf_dest))
+    assert(write_bytes(outside .. "/leaf.txt", "outside"))
+    local ln_leaf = babet.exec("ln", {
+        "-s", "../outside/leaf.txt", leaf_dest .. "/binary.bin",
+    })
+    ok("archive symlink-leaf fixture created",
+        type(ln_leaf) == "table" and ln_leaf.code == 0)
+    local leaf_attack, leaf_attack_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", leaf_dest .. "/binary.bin",
+        { overwrite = true })
+    ok_fail("archive.extractFile refuses a symlink destination",
+        leaf_attack, leaf_attack_err)
+    ok("symlink destination target remains unchanged",
+        read_bytes(outside .. "/leaf.txt") == "outside")
+
+    local empty_destination, empty_destination_err =
+        babet.archive.extract(valid_zip, "")
+    ok_fail("archive.extract rejects an empty destination",
+        empty_destination, empty_destination_err)
+
+    local bad, bad_err = babet.archive.list(valid_zip, "bad")
+    ok_fail("archive.list opts must be a table", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { overwrite = true })
+    ok_fail("archive.list rejects extraction-only options", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { unknown = true })
+    ok_fail("archive.list rejects unknown options", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { [1] = true })
+    ok_fail("archive options require string keys", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        overwrite = 1,
+    })
+    ok_fail("archive overwrite option is strictly boolean", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        preserve_permissions = "yes",
+    })
+    ok_fail("archive preserve_permissions option is strictly boolean", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { max_entries = 1.0 })
+    ok_fail("archive integer limits reject floating-point numbers", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { max_entries = 0 })
+    ok_fail("archive integer limits reject zero", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { max_entries = 100001 })
+    ok_fail("archive max_entries hard ceiling enforced", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, {
+        max_compression_ratio = 0.5,
+    })
+    ok_fail("archive ratio rejects values below one", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, {
+        max_compression_ratio = 0 / 0,
+    })
+    ok_fail("archive ratio rejects NaN", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, {
+        max_compression_ratio = math.huge,
+    })
+    ok_fail("archive ratio rejects infinity", bad, bad_err)
+
+    ok_raises("archive.list enforces arity",
+        function() return babet.archive.list() end,
+        "expects 1 or 2 arguments")
+    ok_raises("archive.list rejects excess arguments",
+        function() return babet.archive.list(valid_zip, nil, true) end,
+        "expects 1 or 2 arguments")
+    ok_raises("archive.extract enforces arity",
+        function() return babet.archive.extract(valid_zip) end,
+        "expects 2 or 3 arguments")
+    ok_raises("archive.extract rejects excess arguments",
+        function()
+            return babet.archive.extract(valid_zip, root .. "/x", nil, true)
+        end,
+        "expects 2 or 3 arguments")
+    ok_raises("archive.extractFile enforces arity",
+        function() return babet.archive.extractFile(valid_zip, "x") end,
+        "expects 3 or 4 arguments")
+    ok_raises("archive.extractFile rejects excess arguments",
+        function()
+            return babet.archive.extractFile(
+                valid_zip, "binary.bin", root .. "/x", nil, true)
+        end,
+        "expects 3 or 4 arguments")
+    ok_raises("archive.list rejects non-string path",
+        function() return babet.archive.list({}) end)
+    ok_raises("archive.list rejects NUL in archive path",
+        function() return babet.archive.list(valid_zip .. "\0ignored") end,
+        "NUL")
+    ok_raises("archive.extract rejects NUL in destination",
+        function()
+            return babet.archive.extract(valid_zip, root .. "\0ignored")
+        end,
+        "NUL")
+    ok_raises("archive.extractFile rejects NUL in entry name",
+        function()
+            return babet.archive.extractFile(
+                valid_zip, "binary.bin\0ignored", root .. "/nul")
+        end,
+        "NUL")
+    ok_raises("archive.extractFile rejects NUL in destination",
+        function()
+            return babet.archive.extractFile(
+                valid_zip, "binary.bin", root .. "/nul\0ignored")
+        end,
+        "NUL")
+
+
+    ;(function()
+    -- archive.create ---------------------------------------------------
+    local create_source = root .. "/create-source"
+    assert(babet.mkdir(create_source .. "/nested/empty"))
+    assert(write_bytes(create_source .. "/alpha.txt", "alpha\n"))
+    assert(write_bytes(create_source .. "/nested/binary.bin", "A\0B\255C"))
+    assert(write_bytes(create_source .. "/nested/repeated.txt",
+        string.rep("compress-me-", 2048)))
+
+    local worker_create_code = [[
+local result, err = babet.archive.create(worker.args.source, worker.args.destination)
+if not result then error(err) end
+return result.files
+]]
+    local create_worker_a, create_worker_a_err = babet.workers.spawn(
+        worker_create_code,
+        { source = create_source, destination = root .. "/worker-a.zip" })
+    local create_worker_b, create_worker_b_err = babet.workers.spawn(
+        worker_create_code,
+        { source = create_source, destination = root .. "/worker-b.zip" })
+    ok("archive.create starts safely in concurrent workers",
+        create_worker_a ~= nil and create_worker_a_err == nil
+        and create_worker_b ~= nil and create_worker_b_err == nil)
+    local worker_a_ok, worker_a_files = create_worker_a:join()
+    local worker_b_ok, worker_b_files = create_worker_b:join()
+    ok("archive.create succeeds concurrently in worker states",
+        worker_a_ok == true and worker_a_files == 3
+        and worker_b_ok == true and worker_b_files == 3)
+    ok("concurrent deterministic archive.create outputs are identical",
+        read_bytes(root .. "/worker-a.zip") == read_bytes(root .. "/worker-b.zip"))
+
+    local created_zip = root .. "/created.zip"
+    local created, created_err = babet.archive.create(
+        create_source, created_zip)
+    ok_val("archive.create creates a ZIP from a directory",
+        created, created_err, function(value)
+            return value.files == 3 and value.directories == 2
+                and value.bytes == 6 + 5 + #(string.rep("compress-me-", 2048))
+                and value.path == created_zip
+                and value.compression_level == 6
+                and value.deterministic == true
+        end)
+    ok("archive.create publishes the destination", babet.isFile(created_zip) == true)
+    local created_mode, created_mode_err = babet.getMode(created_zip)
+    ok("archive.create publishes archives with mode 0644",
+        created_mode == tonumber("644", 8) and created_mode_err == nil,
+        tostring(created_mode_err))
+
+    local created_list, created_list_err = babet.archive.list(created_zip)
+    ok_val("archive.create output is readable by archive.list",
+        created_list, created_list_err,
+        function(value) return value.count == 5 end)
+    ok("archive.create orders entries deterministically",
+        created_list
+        and created_list.entries[1].name == "alpha.txt"
+        and created_list.entries[2].name == "nested/"
+        and created_list.entries[3].name == "nested/binary.bin"
+        and created_list.entries[4].name == "nested/empty/"
+        and created_list.entries[5].name == "nested/repeated.txt")
+    ok("archive.create does not copy source permission metadata",
+        created_list and created_list.entries[1].unix_mode == nil)
+    ok("archive.create uses DEFLATE by default for compressible files",
+        created_list and created_list.entries[5].compression_method == 8,
+        tostring(created_list and created_list.entries[5].compression_method))
+    local created_raw = read_bytes(created_zip)
+    local dos_time_lo, dos_time_hi, dos_date_lo, dos_date_hi
+    if created_raw then
+        dos_time_lo, dos_time_hi, dos_date_lo, dos_date_hi =
+            string.byte(created_raw, 11, 14)
+    end
+    ok("archive.create deterministic timestamp is timezone-independent",
+        dos_time_lo == 0 and dos_time_hi == 0
+        and dos_date_lo == 33 and dos_date_hi == 0,
+        string.format("%s,%s,%s,%s", tostring(dos_time_lo),
+            tostring(dos_time_hi), tostring(dos_date_lo),
+            tostring(dos_date_hi)))
+
+    local create_roundtrip = root .. "/create-roundtrip"
+    local roundtrip, roundtrip_err = babet.archive.extract(
+        created_zip, create_roundtrip)
+    ok_val("archive.create output extracts successfully", roundtrip, roundtrip_err)
+    ok("archive.create round-trip preserves text",
+        read_bytes(create_roundtrip .. "/alpha.txt") == "alpha\n")
+    ok("archive.create round-trip preserves binary bytes",
+        read_bytes(create_roundtrip .. "/nested/binary.bin") == "A\0B\255C")
+    ok("archive.create round-trip preserves empty directories",
+        babet.isDir(create_roundtrip .. "/nested/empty") == true)
+
+    local deterministic_a = root .. "/deterministic-a.zip"
+    local deterministic_b = root .. "/deterministic-b.zip"
+    local da, da_err = babet.archive.create(create_source, deterministic_a)
+    local db, db_err = babet.archive.create(create_source, deterministic_b)
+    ok_val("archive.create deterministic fixture A", da, da_err)
+    ok_val("archive.create deterministic fixture B", db, db_err)
+    ok("archive.create is byte-for-byte deterministic by default",
+        read_bytes(deterministic_a) == read_bytes(deterministic_b))
+    local timestamp_source = root .. "/timestamp-source"
+    assert(babet.mkdir(timestamp_source))
+    assert(write_bytes(timestamp_source .. "/stamp.txt", "timestamp"))
+    local timestamp_set = babet.exec("touch", {
+        "-m", "-t", "200102030405.06", timestamp_source .. "/stamp.txt",
+    })
+    ok("archive.create source timestamp fixture created",
+        type(timestamp_set) == "table" and timestamp_set.code == 0,
+        timestamp_set and timestamp_set.stderr)
+    local nondeterministic_zip = root .. "/nondeterministic.zip"
+    local nondeterministic, nondeterministic_err = babet.archive.create(
+        timestamp_source, nondeterministic_zip, { deterministic = false })
+    ok_val("archive.create accepts deterministic=false",
+        nondeterministic, nondeterministic_err,
+        function(value) return value.deterministic == false end)
+    local nondeterministic_raw = read_bytes(nondeterministic_zip)
+    local nd_time_lo, nd_time_hi, nd_date_lo, nd_date_hi
+    if nondeterministic_raw then
+        nd_time_lo, nd_time_hi, nd_date_lo, nd_date_hi =
+            string.byte(nondeterministic_raw, 11, 14)
+    end
+    ok("archive.create deterministic=false stores the exact source timestamp",
+        nd_time_lo == 0xA3 and nd_time_hi == 0x20
+        and nd_date_lo == 0x43 and nd_date_hi == 0x2A,
+        string.format("%s,%s,%s,%s", tostring(nd_time_lo),
+            tostring(nd_time_hi), tostring(nd_date_lo), tostring(nd_date_hi)))
+
+    local old_timestamp_source = root .. "/old-timestamp-source"
+    assert(babet.mkdir(old_timestamp_source))
+    assert(write_bytes(old_timestamp_source .. "/old.txt", "old"))
+    local old_timestamp_set = babet.exec("touch", {
+        "-m", "-t", "197001010000.00", old_timestamp_source .. "/old.txt",
+    })
+    ok("archive.create pre-1980 timestamp fixture created",
+        type(old_timestamp_set) == "table" and old_timestamp_set.code == 0,
+        old_timestamp_set and old_timestamp_set.stderr)
+    local old_timestamp_zip = root .. "/old-timestamp.zip"
+    local old_timestamp, old_timestamp_err = babet.archive.create(
+        old_timestamp_source, old_timestamp_zip, { deterministic = false })
+    ok_fail("archive.create rejects source timestamps outside the ZIP range",
+        old_timestamp, old_timestamp_err)
+    ok("archive.create timestamp-range failure leaves no output",
+        babet.fileExists(old_timestamp_zip) == false)
+    local old_deterministic, old_deterministic_err = babet.archive.create(
+        old_timestamp_source, root .. "/old-deterministic.zip")
+    ok_val("archive.create deterministic mode ignores unrepresentable source times",
+        old_deterministic, old_deterministic_err)
+
+    local stored_zip = root .. "/stored.zip"
+    local stored, stored_err = babet.archive.create(create_source, stored_zip, {
+        compression_level = 0,
+        include_directories = false,
+    })
+    ok_val("archive.create accepts compression_level=0",
+        stored, stored_err, function(value)
+            return value.compression_level == 0 and value.directories == 0
+        end)
+    local stored_list, stored_list_err = babet.archive.list(stored_zip)
+    ok_val("archive.create stored archive is readable", stored_list, stored_list_err)
+    ok("archive.create compression_level=0 stores files",
+        stored_list and stored_list.entries[3].compression_method == 0,
+        tostring(stored_list and stored_list.entries[3].compression_method))
+    ok("archive.create include_directories=false omits directory entries",
+        stored_list and stored_list.count == 3
+        and stored_list.entries[1].name == "alpha.txt"
+        and stored_list.entries[2].name == "nested/binary.bin"
+        and stored_list.entries[3].name == "nested/repeated.txt")
+    local implicit_out = root .. "/implicit-directories"
+    local implicit, implicit_err = babet.archive.extract(stored_zip, implicit_out)
+    ok_val("archive without directory entries still extracts", implicit, implicit_err)
+    ok("implicit directories are created during extraction",
+        read_bytes(implicit_out .. "/nested/binary.bin") == "A\0B\255C")
+
+    assert(write_bytes(root .. "/overwrite.zip", "sentinel"))
+    local refused_create, refused_create_err = babet.archive.create(
+        create_source, root .. "/overwrite.zip")
+    ok_fail("archive.create refuses overwrite by default",
+        refused_create, refused_create_err)
+    ok("archive.create refusal preserves existing destination",
+        read_bytes(root .. "/overwrite.zip") == "sentinel")
+    local overwritten, overwritten_err = babet.archive.create(
+        create_source, root .. "/overwrite.zip", { overwrite = true })
+    ok_val("archive.create overwrite=true replaces atomically",
+        overwritten, overwritten_err)
+    ok("archive.create overwrite result is a valid ZIP",
+        type(babet.archive.list(root .. "/overwrite.zip")) == "table")
+
+    local empty_source = root .. "/empty-source"
+    assert(babet.mkdir(empty_source))
+    local empty_created, empty_created_err = babet.archive.create(
+        empty_source, root .. "/empty-created.zip")
+    ok_val("archive.create supports an empty source directory",
+        empty_created, empty_created_err,
+        function(value) return value.files == 0 and value.directories == 0 end)
+    local empty_created_list = babet.archive.list(root .. "/empty-created.zip")
+    ok("archive.create empty source produces an empty ZIP",
+        type(empty_created_list) == "table" and empty_created_list.count == 0)
+
+    local inside, inside_err = babet.archive.create(
+        create_source, create_source .. "/inside.zip")
+    ok_fail("archive.create refuses an output inside the source",
+        inside, inside_err)
+    ok("archive.create inside-source refusal leaves no output",
+        babet.fileExists(create_source .. "/inside.zip") == false)
+
+    local source_link = root .. "/create-source-link"
+    local make_source_link = babet.exec("ln", { "-s", "create-source", source_link })
+    ok("archive.create source symlink fixture created",
+        type(make_source_link) == "table" and make_source_link.code == 0)
+    local linked_source, linked_source_err = babet.archive.create(
+        source_link, root .. "/linked-source.zip")
+    ok_fail("archive.create refuses a symlink source root",
+        linked_source, linked_source_err)
+
+    local entry_link = babet.exec("ln", {
+        "-s", "alpha.txt", create_source .. "/entry-link",
+    })
+    ok("archive.create source-entry symlink fixture created",
+        type(entry_link) == "table" and entry_link.code == 0)
+    local linked_entry, linked_entry_err = babet.archive.create(
+        create_source, root .. "/linked-entry.zip")
+    ok_fail("archive.create refuses symlink entries",
+        linked_entry, linked_entry_err)
+    babet.remove(create_source .. "/entry-link")
+
+    local fifo_created = babet.exec("mkfifo", { create_source .. "/pipe" })
+    ok("archive.create FIFO fixture created",
+        type(fifo_created) == "table" and fifo_created.code == 0)
+    local fifo_archive, fifo_archive_err = babet.archive.create(
+        create_source, root .. "/fifo.zip")
+    ok_fail("archive.create refuses unsupported filesystem types",
+        fifo_archive, fifo_archive_err)
+    babet.exec("rm", { "-f", create_source .. "/pipe" })
+
+    assert(write_bytes(create_source .. "/unsafe\\name", "bad"))
+    local unsafe_name, unsafe_name_err = babet.archive.create(
+        create_source, root .. "/unsafe-name.zip")
+    ok_fail("archive.create refuses backslashes in source entry names",
+        unsafe_name, unsafe_name_err)
+    babet.remove(create_source .. "/unsafe\\name")
+    assert(write_bytes(create_source .. "/C:drive", "bad"))
+    local drive_name, drive_name_err = babet.archive.create(
+        create_source, root .. "/drive-name.zip")
+    ok_fail("archive.create refuses drive-prefixed source entry names",
+        drive_name, drive_name_err)
+    babet.remove(create_source .. "/C:drive")
+
+    local unicode_source = root .. "/unicode-create-source"
+    assert(babet.mkdir(unicode_source))
+    local unicode_name = "café-雪.txt"
+    assert(write_bytes(unicode_source .. "/" .. unicode_name, "unicode"))
+    local unicode_zip = root .. "/unicode-create.zip"
+    local unicode_created, unicode_created_err = babet.archive.create(
+        unicode_source, unicode_zip)
+    ok_val("archive.create accepts valid UTF-8 source entry names",
+        unicode_created, unicode_created_err)
+    local unicode_list, unicode_list_err = babet.archive.list(unicode_zip)
+    ok_val("archive.create preserves valid UTF-8 entry names",
+        unicode_list, unicode_list_err,
+        function(value)
+            return value.count == 1 and value.entries[1].name == unicode_name
+        end)
+
+    local invalid_utf8_name = "invalid-\255.txt"
+    assert(write_bytes(create_source .. "/" .. invalid_utf8_name, "bad"))
+    local invalid_utf8_zip = root .. "/invalid-utf8-create.zip"
+    local invalid_utf8, invalid_utf8_err = babet.archive.create(
+        create_source, invalid_utf8_zip)
+    ok_fail("archive.create refuses invalid UTF-8 source entry names",
+        invalid_utf8, invalid_utf8_err)
+    ok("archive.create invalid UTF-8 diagnostic is explicit",
+        type(invalid_utf8_err) == "string"
+        and invalid_utf8_err:find("UTF%-8") ~= nil,
+        tostring(invalid_utf8_err))
+    ok("archive.create invalid UTF-8 failure leaves no output",
+        babet.fileExists(invalid_utf8_zip) == false)
+    babet.remove(create_source .. "/" .. invalid_utf8_name)
+
+    local deep_source = root .. "/deep-create-source"
+    local deep_leaf = deep_source .. string.rep("/d", 257)
+    assert(babet.mkdir(deep_leaf))
+    local deep_create, deep_create_err = babet.archive.create(
+        deep_source, root .. "/deep-create.zip")
+    ok_fail("archive.create enforces its internal source-depth limit",
+        deep_create, deep_create_err)
+
+    local destination_target = root .. "/destination-target.zip"
+    assert(write_bytes(destination_target, "outside"))
+    local destination_link = root .. "/destination-link.zip"
+    local make_destination_link = babet.exec("ln", {
+        "-s", "destination-target.zip", destination_link,
+    })
+    ok("archive.create destination symlink fixture created",
+        type(make_destination_link) == "table" and make_destination_link.code == 0)
+    local symlink_destination, symlink_destination_err = babet.archive.create(
+        create_source, destination_link, { overwrite = true })
+    ok_fail("archive.create refuses a destination symlink",
+        symlink_destination, symlink_destination_err)
+    ok("archive.create never writes through destination symlinks",
+        read_bytes(destination_target) == "outside")
+
+    local parent_target = root .. "/parent-target"
+    assert(babet.mkdir(parent_target))
+    local parent_link = root .. "/parent-link"
+    local make_parent_link = babet.exec("ln", { "-s", "parent-target", parent_link })
+    ok("archive.create destination-parent symlink fixture created",
+        type(make_parent_link) == "table" and make_parent_link.code == 0)
+    local parent_attack, parent_attack_err = babet.archive.create(
+        create_source, parent_link .. "/attack.zip")
+    ok_fail("archive.create refuses symlinked destination parents",
+        parent_attack, parent_attack_err)
+    ok("archive.create symlink-parent refusal writes nothing outside",
+        babet.fileExists(parent_target .. "/attack.zip") == false)
+
+    local missing_parent, missing_parent_err = babet.archive.create(
+        create_source, root .. "/missing-parent/out.zip")
+    ok_fail("archive.create requires an existing destination parent",
+        missing_parent, missing_parent_err)
+    local dotdot_destination, dotdot_destination_err = babet.archive.create(
+        create_source, root .. "/sub/../dotdot.zip")
+    ok_fail("archive.create rejects '..' in destination parents",
+        dotdot_destination, dotdot_destination_err)
+    local dotdot_source, dotdot_source_err = babet.archive.create(
+        root .. "/other/../create-source", root .. "/dotdot-source.zip")
+    ok_fail("archive.create rejects '..' in source paths",
+        dotdot_source, dotdot_source_err)
+    assert(babet.mkdir(root .. "/destination-directory"))
+    local directory_destination, directory_destination_err = babet.archive.create(
+        create_source, root .. "/destination-directory", { overwrite = true })
+    ok_fail("archive.create refuses a directory destination",
+        directory_destination, directory_destination_err)
+
+    local limit, limit_err = babet.archive.create(
+        create_source, root .. "/limit-entry.zip", { max_file_size = 4 })
+    ok_fail("archive.create enforces max_file_size before writing", limit, limit_err)
+    ok("archive.create max_file_size failure leaves no output",
+        babet.fileExists(root .. "/limit-entry.zip") == false)
+    limit, limit_err = babet.archive.create(
+        create_source, root .. "/limit-total.zip", { max_total_size = 5 })
+    ok_fail("archive.create enforces max_total_size before writing", limit, limit_err)
+    limit, limit_err = babet.archive.create(
+        create_source, root .. "/limit-count.zip", { max_entries = 2 })
+    ok_fail("archive.create enforces max_entries before writing", limit, limit_err)
+    local exact_create_limits, exact_create_limits_err = babet.archive.create(
+        create_source, root .. "/exact-create-limits.zip", {
+            max_entries = 5,
+            max_file_size = #(string.rep("compress-me-", 2048)),
+            max_total_size = 6 + 5 + #(string.rep("compress-me-", 2048)),
+        })
+    ok_val("archive.create size and entry limits are inclusive at the boundary",
+        exact_create_limits, exact_create_limits_err)
+
+    local long_destination_name = string.rep("z", 240) .. ".zip"
+    local long_destination = root .. "/" .. long_destination_name
+    local long_created, long_created_err = babet.archive.create(
+        create_source, long_destination)
+    ok_val("archive.create supports a valid near-NAME_MAX destination name",
+        long_created, long_created_err)
+    ok("archive.create near-NAME_MAX output is readable",
+        babet.archive.list(long_destination) ~= nil)
+
+    local create_temp_check = babet.exec("find", {
+        root, "-maxdepth", "1", "-name", ".babet-create-*", "-print",
+    }, { timeout = 5 })
+    ok("archive.create leaves no temporary files after success or failure",
+        type(create_temp_check) == "table" and create_temp_check.code == 0
+        and create_temp_check.stdout == "",
+        tostring(create_temp_check and create_temp_check.stdout))
+
+    local nil_options_zip = root .. "/nil-options.zip"
+    local nil_options_result = table.pack(
+        babet.archive.create(create_source, nil_options_zip, nil))
+    ok("archive.create accepts explicit nil options and returns exactly two values",
+        nil_options_result.n == 2 and type(nil_options_result[1]) == "table"
+        and nil_options_result[2] == nil)
+    local list_return_contract = table.pack(babet.archive.list(nil_options_zip, nil))
+    ok("archive.list accepts explicit nil options and returns exactly two values",
+        list_return_contract.n == 2 and type(list_return_contract[1]) == "table"
+        and list_return_contract[2] == nil)
+
+    local create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", "bad")
+    ok_fail("archive.create opts must be a table", create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { unknown = true })
+    ok_fail("archive.create rejects unknown options", create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { [1] = true })
+    ok_fail("archive.create option keys must be strings", create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { compression_level = 1.0 })
+    ok_fail("archive.create compression_level is a strict integer",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { compression_level = -1 })
+    ok_fail("archive.create rejects negative compression levels",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { compression_level = 10 })
+    ok_fail("archive.create rejects compression levels above 9",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { overwrite = 1 })
+    ok_fail("archive.create overwrite is strictly boolean",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { deterministic = 1 })
+    ok_fail("archive.create deterministic is strictly boolean",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { include_directories = 1 })
+    ok_fail("archive.create include_directories is strictly boolean",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { max_file_size = 1.0 })
+    ok_fail("archive.create size limits require strict integers",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { max_file_size = 0 })
+    ok_fail("archive.create limits reject zero", create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { max_entries = 100001 })
+    ok_fail("archive.create max_entries hard ceiling enforced",
+        create_bad, create_bad_err)
+
+    ok_raises("archive.create enforces arity",
+        function() return babet.archive.create(create_source) end,
+        "expects 2 or 3 arguments")
+    ok_raises("archive.create rejects excess arguments",
+        function()
+            return babet.archive.create(create_source, root .. "/x.zip", nil, true)
+        end,
+        "expects 2 or 3 arguments")
+    ok_raises("archive.create source is a strict string",
+        function() return babet.archive.create({}, root .. "/x.zip") end)
+    ok_raises("archive.create destination is a strict string",
+        function() return babet.archive.create(create_source, {}) end)
+    ok_raises("archive.create rejects NUL in source",
+        function()
+            return babet.archive.create(create_source .. "\0ignored", root .. "/x.zip")
+        end,
+        "NUL")
+    ok_raises("archive.create rejects NUL in destination",
+        function()
+            return babet.archive.create(create_source, root .. "/x.zip\0ignored")
+        end,
+        "NUL")
+    local empty_source_arg, empty_source_arg_err = babet.archive.create(
+        "", root .. "/empty-source-arg.zip")
+    ok_fail("archive.create rejects an empty source path",
+        empty_source_arg, empty_source_arg_err)
+    local empty_destination_arg, empty_destination_arg_err = babet.archive.create(
+        create_source, "")
+    ok_fail("archive.create rejects an empty destination path",
+        empty_destination_arg, empty_destination_arg_err)
+    local missing_source, missing_source_err = babet.archive.create(
+        root .. "/missing-source", root .. "/missing-source.zip")
+    ok_fail("archive.create rejects a missing source directory",
+        missing_source, missing_source_err)
+    local file_source, file_source_err = babet.archive.create(
+        create_source .. "/alpha.txt", root .. "/file-source.zip")
+    ok_fail("archive.create rejects a regular-file source",
+        file_source, file_source_err)
+    end)()
+
+    babet.rmdirAll(root)
 end
 
 -- =====================================================================

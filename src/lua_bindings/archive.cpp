@@ -1,0 +1,3179 @@
+#include "archive.hpp"
+#include "lua_utils.hpp"
+
+#include <miniz.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <cmath>
+#include <cstddef>
+#include <cstdlib>
+#include <cstdint>
+#include <cstdio>
+#include <ctime>
+#include <cstring>
+#include <filesystem>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <dirent.h>
+
+namespace fs = std::filesystem;
+
+namespace
+{
+constexpr std::uint64_t DEFAULT_MAX_ENTRIES = 10000;
+constexpr std::uint64_t DEFAULT_MAX_ENTRY_SIZE = 256ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t DEFAULT_MAX_TOTAL_SIZE = 1024ULL * 1024ULL * 1024ULL;
+constexpr double DEFAULT_MAX_COMPRESSION_RATIO = 1000.0;
+constexpr std::size_t MAX_ARCHIVE_PATH_BYTES = 4096;
+
+constexpr std::uint64_t HARD_MAX_ENTRIES = 100000;
+constexpr std::uint64_t HARD_MAX_ENTRY_SIZE = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t HARD_MAX_TOTAL_SIZE = 64ULL * 1024ULL * 1024ULL * 1024ULL;
+constexpr double HARD_MAX_COMPRESSION_RATIO = 1000000000.0;
+constexpr std::uint64_t HARD_MAX_TOTAL_NAME_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr std::size_t HARD_MAX_OUTPUT_DIRECTORIES = 100000;
+constexpr std::size_t HARD_MAX_CREATE_DEPTH = 256;
+constexpr std::uint64_t HARD_MAX_SCANNED_SOURCE_NODES = 100000;
+constexpr std::uint64_t HARD_MAX_OUTPUT_DIRECTORY_PATH_BYTES =
+    64ULL * 1024ULL * 1024ULL;
+constexpr std::size_t HARD_MAX_MINIZ_ALLOCATED_BYTES =
+    128ULL * 1024ULL * 1024ULL;
+
+constexpr mode_t DEFAULT_FILE_MODE = 0644;
+constexpr mode_t DEFAULT_DIRECTORY_MODE = 0755;
+constexpr mode_t STAGING_DIRECTORY_MODE = 0700;
+constexpr mode_t STAGING_FILE_MODE = 0600;
+
+std::atomic<unsigned long long> archive_temp_counter{0};
+
+struct ArchiveOptions
+{
+    std::uint64_t max_entries = DEFAULT_MAX_ENTRIES;
+    std::uint64_t max_entry_size = DEFAULT_MAX_ENTRY_SIZE;
+    std::uint64_t max_total_size = DEFAULT_MAX_TOTAL_SIZE;
+    double max_compression_ratio = DEFAULT_MAX_COMPRESSION_RATIO;
+    bool overwrite = false;
+    bool preserve_permissions = false;
+};
+
+enum class EntryKind
+{
+    regular,
+    directory,
+    symlink,
+    unsupported,
+};
+
+struct ArchiveEntry
+{
+    mz_uint index = 0;
+    std::string name;
+    std::string normalized;
+    EntryKind kind = EntryKind::unsupported;
+    std::uint64_t compressed_size = 0;
+    std::uint64_t size = 0;
+    std::uint32_t crc32 = 0;
+    std::uint16_t method = 0;
+    std::uint16_t version_made_by = 0;
+    std::uint32_t external_attributes = 0;
+    mode_t unix_mode = 0;
+    bool encrypted = false;
+    bool supported = false;
+    bool safe_path = false;
+    std::string path_error;
+};
+
+struct ArchiveScan
+{
+    std::vector<ArchiveEntry> entries;
+    std::uint64_t total_size = 0;
+    std::uint64_t archive_size = 0;
+    bool zip64 = false;
+};
+
+std::string errno_message(std::string_view action, const fs::path &path,
+                          int error_number)
+{
+    std::string result(action);
+    result += " '";
+    result += path.string();
+    result += "': ";
+    result += std::strerror(error_number);
+    return result;
+}
+
+struct MinizAllocationState
+{
+    std::size_t used = 0;
+    std::size_t limit = HARD_MAX_MINIZ_ALLOCATED_BYTES;
+};
+
+struct alignas(std::max_align_t) MinizAllocationHeader
+{
+    std::size_t block_size = 0;
+};
+
+bool checked_allocation_size(std::size_t items, std::size_t item_size,
+                             std::size_t &payload,
+                             std::size_t &block_size) noexcept
+{
+    if (item_size != 0 &&
+        items > std::numeric_limits<std::size_t>::max() / item_size)
+    {
+        return false;
+    }
+    payload = items * item_size;
+    if (payload == 0)
+    {
+        payload = 1;
+    }
+    if (payload > std::numeric_limits<std::size_t>::max() -
+                      sizeof(MinizAllocationHeader))
+    {
+        return false;
+    }
+    block_size = sizeof(MinizAllocationHeader) + payload;
+    return true;
+}
+
+void *bounded_miniz_alloc(void *opaque, std::size_t items,
+                          std::size_t item_size) noexcept
+{
+    auto *state = static_cast<MinizAllocationState *>(opaque);
+    std::size_t payload = 0;
+    std::size_t block_size = 0;
+    if (state == nullptr || state->used > state->limit ||
+        !checked_allocation_size(items, item_size, payload, block_size) ||
+        block_size > state->limit - state->used)
+    {
+        return nullptr;
+    }
+
+    auto *header = static_cast<MinizAllocationHeader *>(
+        std::malloc(block_size));
+    if (header == nullptr)
+    {
+        return nullptr;
+    }
+    header->block_size = block_size;
+    state->used += block_size;
+    return header + 1;
+}
+
+void bounded_miniz_free(void *opaque, void *address) noexcept
+{
+    if (address == nullptr)
+    {
+        return;
+    }
+    auto *state = static_cast<MinizAllocationState *>(opaque);
+    auto *header = static_cast<MinizAllocationHeader *>(address) - 1;
+    if (state != nullptr)
+    {
+        state->used = header->block_size <= state->used
+                          ? state->used - header->block_size
+                          : 0;
+    }
+    std::free(header);
+}
+
+void *bounded_miniz_realloc(void *opaque, void *address,
+                            std::size_t items,
+                            std::size_t item_size) noexcept
+{
+    if (address == nullptr)
+    {
+        return bounded_miniz_alloc(opaque, items, item_size);
+    }
+    if (items == 0 || item_size == 0)
+    {
+        bounded_miniz_free(opaque, address);
+        return nullptr;
+    }
+
+    auto *state = static_cast<MinizAllocationState *>(opaque);
+    auto *old_header = static_cast<MinizAllocationHeader *>(address) - 1;
+    const std::size_t old_size = old_header->block_size;
+    std::size_t payload = 0;
+    std::size_t new_size = 0;
+    if (state == nullptr || old_size > state->used ||
+        state->used > state->limit ||
+        !checked_allocation_size(items, item_size, payload, new_size))
+    {
+        return nullptr;
+    }
+    if (new_size > old_size && new_size - old_size > state->limit - state->used)
+    {
+        return nullptr;
+    }
+
+    auto *new_header = static_cast<MinizAllocationHeader *>(
+        std::realloc(old_header, new_size));
+    if (new_header == nullptr)
+    {
+        return nullptr;
+    }
+    state->used = state->used - old_size + new_size;
+    new_header->block_size = new_size;
+    return new_header + 1;
+}
+
+std::string miniz_error(mz_zip_archive &zip, std::string_view action,
+                        const std::string &path)
+{
+    const mz_zip_error code = mz_zip_peek_last_error(&zip);
+    const char *detail = mz_zip_get_error_string(code);
+    std::string result = "archive: ";
+    result.append(action);
+    result += " '";
+    result += path;
+    result += "'";
+    if (detail != nullptr && *detail != '\0')
+    {
+        result += ": ";
+        result += detail;
+    }
+    return result;
+}
+
+class ArchiveReader
+{
+public:
+    ArchiveReader() = default;
+    ~ArchiveReader()
+    {
+        if (opened_)
+        {
+            mz_zip_reader_end(&zip_);
+        }
+        if (file_ != nullptr)
+        {
+            std::fclose(file_);
+        }
+    }
+
+    ArchiveReader(const ArchiveReader &) = delete;
+    ArchiveReader &operator=(const ArchiveReader &) = delete;
+
+    bool open(const std::string &path, std::string &err)
+    {
+        struct stat path_stat{};
+        if (::stat(path.c_str(), &path_stat) != 0)
+        {
+            err = "archive: " + errno_message("cannot inspect ZIP archive",
+                                                path, errno);
+            return false;
+        }
+        if (!S_ISREG(path_stat.st_mode))
+        {
+            err = "archive: ZIP archive source is not a regular file: '" +
+                  path + "'";
+            return false;
+        }
+
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0)
+        {
+            err = "archive: " + errno_message("cannot open ZIP archive", path,
+                                                errno);
+            return false;
+        }
+
+        struct stat st{};
+        if (::fstat(fd, &st) != 0)
+        {
+            const int e = errno;
+            ::close(fd);
+            err = "archive: " + errno_message("cannot inspect ZIP archive", path,
+                                                e);
+            return false;
+        }
+        if (!S_ISREG(st.st_mode))
+        {
+            ::close(fd);
+            err = "archive: ZIP archive source is not a regular file: '" +
+                  path + "'";
+            return false;
+        }
+
+        FILE *file = ::fdopen(fd, "rb");
+        if (file == nullptr)
+        {
+            const int e = errno;
+            ::close(fd);
+            err = "archive: " + errno_message("cannot open ZIP archive stream",
+                                                path, e);
+            return false;
+        }
+
+        mz_zip_zero_struct(&zip_);
+        allocation_state_ = {};
+        zip_.m_pAlloc = bounded_miniz_alloc;
+        zip_.m_pFree = bounded_miniz_free;
+        zip_.m_pRealloc = bounded_miniz_realloc;
+        zip_.m_pAlloc_opaque = &allocation_state_;
+        if (!mz_zip_reader_init_cfile(&zip_, file, 0, 0))
+        {
+            err = miniz_error(zip_, "cannot open ZIP archive", path);
+            if (zip_.m_pState != nullptr)
+            {
+                mz_zip_reader_end(&zip_);
+            }
+            std::fclose(file);
+            return false;
+        }
+        file_ = file;
+        opened_ = true;
+        path_ = path;
+        return true;
+    }
+
+    mz_zip_archive &zip() { return zip_; }
+    const std::string &path() const { return path_; }
+
+private:
+    mz_zip_archive zip_{};
+    MinizAllocationState allocation_state_{};
+    FILE *file_ = nullptr;
+    bool opened_ = false;
+    std::string path_;
+};
+
+void raw_getfield(lua_State *L, int idx, const char *name)
+{
+    idx = lua_absindex(L, idx);
+    lua_pushstring(L, name);
+    lua_rawget(L, idx);
+}
+
+bool validate_option_keys(lua_State *L, int idx, bool extraction,
+                          std::string &err)
+{
+    if (lua_isnoneornil(L, idx))
+    {
+        return true;
+    }
+    if (lua_type(L, idx) != LUA_TTABLE)
+    {
+        err = "archive options must be a table";
+        return false;
+    }
+
+    static const std::unordered_set<std::string> common = {
+        "max_entries", "max_entry_size", "max_total_size",
+        "max_compression_ratio"};
+    static const std::unordered_set<std::string> extract = {
+        "max_entries", "max_entry_size", "max_total_size",
+        "max_compression_ratio", "overwrite", "preserve_permissions"};
+    const auto &allowed = extraction ? extract : common;
+
+    idx = lua_absindex(L, idx);
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0)
+    {
+        if (lua_type(L, -2) != LUA_TSTRING)
+        {
+            lua_pop(L, 2);
+            err = "archive option keys must be strings";
+            return false;
+        }
+        size_t length = 0;
+        const char *data = lua_tolstring(L, -2, &length);
+        const std::string key(data, length);
+        if (!allowed.contains(key))
+        {
+            lua_pop(L, 2);
+            err = "unknown archive option: " + key;
+            return false;
+        }
+        lua_pop(L, 1);
+    }
+    return true;
+}
+
+bool parse_positive_integer(lua_State *L, int table_index, const char *field,
+                            std::uint64_t hard_max, std::uint64_t &value,
+                            std::string &err)
+{
+    raw_getfield(L, table_index, field);
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 1);
+        return true;
+    }
+    if (!lua_isinteger(L, -1))
+    {
+        lua_pop(L, 1);
+        err = std::string("opts.") + field + " must be an integer";
+        return false;
+    }
+    const lua_Integer parsed = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (parsed < 1 || static_cast<unsigned long long>(parsed) > hard_max)
+    {
+        err = std::string("opts.") + field + " must be between 1 and " +
+              std::to_string(hard_max);
+        return false;
+    }
+    value = static_cast<std::uint64_t>(parsed);
+    return true;
+}
+
+bool parse_strict_boolean(lua_State *L, int table_index, const char *field,
+                          bool &value, std::string &err)
+{
+    raw_getfield(L, table_index, field);
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 1);
+        return true;
+    }
+    if (lua_type(L, -1) != LUA_TBOOLEAN)
+    {
+        lua_pop(L, 1);
+        err = std::string("opts.") + field + " must be a boolean";
+        return false;
+    }
+    value = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+    return true;
+}
+
+bool collect_options(lua_State *L, int idx, bool extraction,
+                     ArchiveOptions &options, std::string &err)
+{
+    if (!validate_option_keys(L, idx, extraction, err))
+    {
+        return false;
+    }
+    if (lua_isnoneornil(L, idx))
+    {
+        return true;
+    }
+    idx = lua_absindex(L, idx);
+
+    if (!parse_positive_integer(L, idx, "max_entries", HARD_MAX_ENTRIES,
+                                options.max_entries, err) ||
+        !parse_positive_integer(L, idx, "max_entry_size",
+                                HARD_MAX_ENTRY_SIZE,
+                                options.max_entry_size, err) ||
+        !parse_positive_integer(L, idx, "max_total_size",
+                                HARD_MAX_TOTAL_SIZE,
+                                options.max_total_size, err))
+    {
+        return false;
+    }
+
+    raw_getfield(L, idx, "max_compression_ratio");
+    if (!lua_isnil(L, -1))
+    {
+        if (lua_type(L, -1) != LUA_TNUMBER)
+        {
+            lua_pop(L, 1);
+            err = "opts.max_compression_ratio must be a number";
+            return false;
+        }
+        const double ratio = lua_tonumber(L, -1);
+        lua_pop(L, 1);
+        if (!std::isfinite(ratio) || ratio < 1.0 ||
+            ratio > HARD_MAX_COMPRESSION_RATIO)
+        {
+            err = "opts.max_compression_ratio must be finite and between 1 and 1000000000";
+            return false;
+        }
+        options.max_compression_ratio = ratio;
+    }
+    else
+    {
+        lua_pop(L, 1);
+    }
+
+    if (extraction &&
+        (!parse_strict_boolean(L, idx, "overwrite", options.overwrite, err) ||
+         !parse_strict_boolean(L, idx, "preserve_permissions",
+                               options.preserve_permissions, err)))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool read_archive_filename(mz_zip_archive &zip, mz_uint index,
+                           std::string &name, std::string &err)
+{
+    const mz_uint required =
+        mz_zip_reader_get_filename(&zip, index, nullptr, 0);
+    if (required == 0)
+    {
+        err = "archive: cannot read entry name at index " +
+              std::to_string(index + 1);
+        return false;
+    }
+
+    std::vector<char> buffer(static_cast<std::size_t>(required) + 1, '\0');
+    const mz_uint copied = mz_zip_reader_get_filename(
+        &zip, index, buffer.data(), static_cast<mz_uint>(buffer.size()));
+    if (copied == 0)
+    {
+        err = "archive: cannot read entry name at index " +
+              std::to_string(index + 1);
+        return false;
+    }
+
+    const std::size_t length = strnlen(buffer.data(), buffer.size());
+    if (length == buffer.size())
+    {
+        err = "archive: unterminated entry name at index " +
+              std::to_string(index + 1);
+        return false;
+    }
+    if (copied != length + 1)
+    {
+        err = "archive: entry name contains an embedded NUL byte at index " +
+              std::to_string(index + 1);
+        return false;
+    }
+    name.assign(buffer.data(), length);
+    return true;
+}
+
+EntryKind detect_entry_kind(const mz_zip_archive_file_stat &stat,
+                            mode_t &unix_mode)
+{
+    unix_mode = 0;
+    const unsigned host_system = stat.m_version_made_by >> 8U;
+    if (host_system == 3U || host_system == 19U) // Unix or macOS.
+    {
+        unix_mode = static_cast<mode_t>((stat.m_external_attr >> 16U) & 0xFFFFU);
+        const mode_t type = unix_mode & S_IFMT;
+        if (type == S_IFLNK)
+        {
+            return EntryKind::symlink;
+        }
+        if (type == S_IFDIR)
+        {
+            return EntryKind::directory;
+        }
+        if (type != 0 && type != S_IFREG)
+        {
+            return EntryKind::unsupported;
+        }
+    }
+
+    if (stat.m_is_directory)
+    {
+        return EntryKind::directory;
+    }
+    return EntryKind::regular;
+}
+
+bool is_valid_utf8(std::string_view value) noexcept
+{
+    const auto continuation = [](unsigned char byte)
+    {
+        return byte >= 0x80U && byte <= 0xBFU;
+    };
+
+    std::size_t i = 0;
+    while (i < value.size())
+    {
+        const unsigned char first = static_cast<unsigned char>(value[i]);
+        if (first <= 0x7FU)
+        {
+            ++i;
+            continue;
+        }
+        if (first >= 0xC2U && first <= 0xDFU)
+        {
+            if (i + 1 >= value.size() ||
+                !continuation(static_cast<unsigned char>(value[i + 1])))
+            {
+                return false;
+            }
+            i += 2;
+            continue;
+        }
+        if (first >= 0xE0U && first <= 0xEFU)
+        {
+            if (i + 2 >= value.size())
+            {
+                return false;
+            }
+            const unsigned char second =
+                static_cast<unsigned char>(value[i + 1]);
+            const unsigned char third =
+                static_cast<unsigned char>(value[i + 2]);
+            if (!continuation(third) ||
+                (first == 0xE0U && (second < 0xA0U || second > 0xBFU)) ||
+                (first == 0xEDU && (second < 0x80U || second > 0x9FU)) ||
+                (first != 0xE0U && first != 0xEDU &&
+                 !continuation(second)))
+            {
+                return false;
+            }
+            i += 3;
+            continue;
+        }
+        if (first >= 0xF0U && first <= 0xF4U)
+        {
+            if (i + 3 >= value.size())
+            {
+                return false;
+            }
+            const unsigned char second =
+                static_cast<unsigned char>(value[i + 1]);
+            const unsigned char third =
+                static_cast<unsigned char>(value[i + 2]);
+            const unsigned char fourth =
+                static_cast<unsigned char>(value[i + 3]);
+            if (!continuation(third) || !continuation(fourth) ||
+                (first == 0xF0U && (second < 0x90U || second > 0xBFU)) ||
+                (first == 0xF4U && (second < 0x80U || second > 0x8FU)) ||
+                (first != 0xF0U && first != 0xF4U &&
+                 !continuation(second)))
+            {
+                return false;
+            }
+            i += 4;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool validate_entry_path(const std::string &name, EntryKind kind,
+                         std::string &normalized, std::string &reason)
+{
+    normalized.clear();
+    reason.clear();
+
+    if (name.empty())
+    {
+        reason = "empty entry name";
+        return false;
+    }
+    if (name.size() > MAX_ARCHIVE_PATH_BYTES)
+    {
+        reason = "entry name exceeds 4096 bytes";
+        return false;
+    }
+    if (name.find('\0') != std::string::npos)
+    {
+        reason = "entry name contains a NUL byte";
+        return false;
+    }
+    if (name.find('\\') != std::string::npos)
+    {
+        reason = "entry name contains a backslash";
+        return false;
+    }
+    if (name.front() == '/')
+    {
+        reason = "absolute entry path";
+        return false;
+    }
+
+    const bool trailing_slash = name.back() == '/';
+    if (trailing_slash && kind != EntryKind::directory)
+    {
+        reason = "non-directory entry name ends with '/'";
+        return false;
+    }
+
+    std::size_t start = 0;
+    bool first = true;
+    while (start < name.size())
+    {
+        const std::size_t slash = name.find('/', start);
+        const std::size_t end = slash == std::string::npos ? name.size() : slash;
+        const std::string_view component(name.data() + start, end - start);
+
+        if (component.empty())
+        {
+            if (slash == name.size() - 1 && kind == EntryKind::directory)
+            {
+                break;
+            }
+            reason = "entry path contains an empty component";
+            return false;
+        }
+        if (component == "." || component == "..")
+        {
+            reason = "entry path contains '.' or '..'";
+            return false;
+        }
+        if (first && component.size() >= 2 && component[1] == ':' &&
+            ((component[0] >= 'A' && component[0] <= 'Z') ||
+             (component[0] >= 'a' && component[0] <= 'z')))
+        {
+            reason = "entry path uses a drive prefix";
+            return false;
+        }
+
+        if (!normalized.empty())
+        {
+            normalized.push_back('/');
+        }
+        normalized.append(component);
+        first = false;
+
+        if (slash == std::string::npos)
+        {
+            break;
+        }
+        start = slash + 1;
+    }
+
+    if (normalized.empty())
+    {
+        reason = "empty normalized entry path";
+        return false;
+    }
+    return true;
+}
+
+std::string entry_kind_name(EntryKind kind)
+{
+    switch (kind)
+    {
+    case EntryKind::regular:
+        return "file";
+    case EntryKind::directory:
+        return "directory";
+    case EntryKind::symlink:
+        return "symlink";
+    case EntryKind::unsupported:
+        return "unsupported";
+    }
+    return "unsupported";
+}
+
+std::string extraction_rejection_reason(const ArchiveEntry &entry)
+{
+    if (!entry.safe_path)
+    {
+        return entry.path_error;
+    }
+    if (entry.encrypted)
+    {
+        return "encrypted entries are not supported";
+    }
+    if (!entry.supported)
+    {
+        return "compression method is not supported";
+    }
+    if (entry.kind == EntryKind::symlink)
+    {
+        return "symlink entries are refused";
+    }
+    if (entry.kind == EntryKind::unsupported)
+    {
+        return "unsupported filesystem entry type";
+    }
+    return {};
+}
+
+bool scan_archive(ArchiveReader &reader, const ArchiveOptions &options,
+                  ArchiveScan &scan, std::string &err)
+{
+    mz_zip_archive &zip = reader.zip();
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    if (static_cast<std::uint64_t>(count) > options.max_entries)
+    {
+        err = "archive: entry count exceeds max_entries (" +
+              std::to_string(count) + " > " +
+              std::to_string(options.max_entries) + ")";
+        return false;
+    }
+
+    scan.archive_size = mz_zip_get_archive_size(&zip);
+    scan.zip64 = mz_zip_is_zip64(&zip) != 0;
+    scan.entries.reserve(count);
+
+    std::uint64_t total = 0;
+    std::uint64_t total_name_bytes = 0;
+    for (mz_uint index = 0; index < count; ++index)
+    {
+        mz_zip_archive_file_stat stat{};
+        if (!mz_zip_reader_file_stat(&zip, index, &stat))
+        {
+            err = miniz_error(zip, "cannot inspect ZIP entry", reader.path());
+            return false;
+        }
+
+        ArchiveEntry entry;
+        entry.index = index;
+        if (!read_archive_filename(zip, index, entry.name, err))
+        {
+            return false;
+        }
+        if (entry.name.size() > HARD_MAX_TOTAL_NAME_BYTES - total_name_bytes)
+        {
+            err = "archive: cumulative entry-name size exceeds the internal 64 MiB metadata limit";
+            return false;
+        }
+        total_name_bytes += entry.name.size();
+        entry.kind = detect_entry_kind(stat, entry.unix_mode);
+        entry.compressed_size = stat.m_comp_size;
+        entry.size = stat.m_uncomp_size;
+        entry.crc32 = stat.m_crc32;
+        entry.method = stat.m_method;
+        entry.version_made_by = stat.m_version_made_by;
+        entry.external_attributes = stat.m_external_attr;
+        entry.encrypted = stat.m_is_encrypted != 0;
+        entry.supported = stat.m_is_supported != 0;
+        entry.safe_path = validate_entry_path(entry.name, entry.kind,
+                                              entry.normalized,
+                                              entry.path_error);
+
+        if (entry.kind != EntryKind::directory)
+        {
+            if (entry.size > options.max_entry_size)
+            {
+                err = "archive: entry '" + entry.name +
+                      "' exceeds max_entry_size (" +
+                      std::to_string(entry.size) + " > " +
+                      std::to_string(options.max_entry_size) + ")";
+                return false;
+            }
+            if (entry.size > 0)
+            {
+                if (entry.compressed_size == 0)
+                {
+                    err = "archive: entry '" + entry.name +
+                          "' has a zero compressed size and a non-zero expanded size";
+                    return false;
+                }
+                const long double ratio =
+                    static_cast<long double>(entry.size) /
+                    static_cast<long double>(entry.compressed_size);
+                if (ratio > static_cast<long double>(
+                                options.max_compression_ratio))
+                {
+                    err = "archive: entry '" + entry.name +
+                          "' exceeds max_compression_ratio";
+                    return false;
+                }
+            }
+            if (entry.size > options.max_total_size - total)
+            {
+                err = "archive: total expanded size exceeds max_total_size";
+                return false;
+            }
+            total += entry.size;
+        }
+        scan.entries.push_back(std::move(entry));
+    }
+    scan.total_size = total;
+    return true;
+}
+
+bool validate_selected_entries(const std::vector<const ArchiveEntry *> &entries,
+                               std::string &err)
+{
+    std::unordered_set<std::string> explicit_paths;
+    std::unordered_set<std::string> directories;
+    std::unordered_set<std::string> files;
+    std::uint64_t directory_path_bytes = 0;
+
+    auto remember_directory = [&](const std::string &path) -> bool
+    {
+        const auto [unused, inserted] = directories.insert(path);
+        (void)unused;
+        if (!inserted)
+        {
+            return true;
+        }
+        if (directories.size() > HARD_MAX_OUTPUT_DIRECTORIES)
+        {
+            err = "archive: output tree exceeds the internal 100000-directory limit";
+            return false;
+        }
+        if (directory_path_bytes > HARD_MAX_OUTPUT_DIRECTORY_PATH_BYTES ||
+            path.size() > HARD_MAX_OUTPUT_DIRECTORY_PATH_BYTES -
+                              directory_path_bytes)
+        {
+            err = "archive: cumulative output-directory paths exceed the internal 64 MiB limit";
+            return false;
+        }
+        directory_path_bytes += path.size();
+        return true;
+    };
+
+    for (const ArchiveEntry *entry : entries)
+    {
+        const std::string rejection = extraction_rejection_reason(*entry);
+        if (!rejection.empty())
+        {
+            err = "archive: entry '" + entry->name + "' cannot be extracted: " +
+                  rejection;
+            return false;
+        }
+
+        if (!explicit_paths.insert(entry->normalized).second)
+        {
+            err = "archive: duplicate output path '" + entry->normalized + "'";
+            return false;
+        }
+
+        std::size_t pos = 0;
+        while ((pos = entry->normalized.find('/', pos)) != std::string::npos)
+        {
+            const std::string prefix = entry->normalized.substr(0, pos);
+            if (files.contains(prefix))
+            {
+                err = "archive: path conflict between file '" + prefix +
+                      "' and entry '" + entry->normalized + "'";
+                return false;
+            }
+            if (!remember_directory(prefix))
+            {
+                return false;
+            }
+            ++pos;
+        }
+
+        if (entry->kind == EntryKind::directory)
+        {
+            if (files.contains(entry->normalized))
+            {
+                err = "archive: path conflict at '" + entry->normalized + "'";
+                return false;
+            }
+            if (!remember_directory(entry->normalized))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (directories.contains(entry->normalized))
+            {
+                err = "archive: path conflict at '" + entry->normalized + "'";
+                return false;
+            }
+            files.insert(entry->normalized);
+        }
+    }
+    return true;
+}
+
+int duplicate_cloexec(int fd)
+{
+#ifdef F_DUPFD_CLOEXEC
+    return ::fcntl(fd, F_DUPFD_CLOEXEC, 3);
+#else
+    int result = ::dup(fd);
+    if (result >= 0)
+    {
+        const int flags = ::fcntl(result, F_GETFD, 0);
+        if (flags >= 0)
+        {
+            ::fcntl(result, F_SETFD, flags | FD_CLOEXEC);
+        }
+    }
+    return result;
+#endif
+}
+
+struct StagedFile
+{
+    fs::path relative;
+    std::string temporary;
+};
+
+struct ExtractCallbackState
+{
+    int fd = -1;
+    std::uint64_t expected = 0;
+    std::uint64_t written = 0;
+    int error_number = 0;
+};
+
+size_t extract_write_callback(void *opaque, mz_uint64 file_offset,
+                              const void *buffer, size_t size)
+{
+    auto *state = static_cast<ExtractCallbackState *>(opaque);
+    if (state->written > state->expected ||
+        file_offset != state->written ||
+        size > state->expected - state->written)
+    {
+        state->error_number = EFBIG;
+        return 0;
+    }
+
+    const char *data = static_cast<const char *>(buffer);
+    std::size_t offset = 0;
+    while (offset < size)
+    {
+        const ssize_t result = ::pwrite(
+            state->fd, data + offset, size - offset,
+            static_cast<off_t>(file_offset + offset));
+        if (result > 0)
+        {
+            offset += static_cast<std::size_t>(result);
+            continue;
+        }
+        if (result < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        state->error_number = result < 0 ? errno : EIO;
+        return 0;
+    }
+    state->written += size;
+    return size;
+}
+
+class SecureArchiveDestination
+{
+public:
+    SecureArchiveDestination() = default;
+    ~SecureArchiveDestination()
+    {
+        cleanup_staged();
+        cleanup_created_directories();
+        if (root_fd_ >= 0)
+        {
+            ::close(root_fd_);
+        }
+    }
+
+    SecureArchiveDestination(const SecureArchiveDestination &) = delete;
+    SecureArchiveDestination &operator=(const SecureArchiveDestination &) = delete;
+
+    bool open_root(const fs::path &root, std::string &err)
+    {
+        display_root_ = root.empty() ? fs::path(".") : root;
+        const fs::path normalized = display_root_.lexically_normal();
+        const bool absolute = normalized.is_absolute();
+        int current = ::open(absolute ? "/" : ".",
+                             O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (current < 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot open destination traversal root",
+                absolute ? fs::path("/") : fs::path("."), errno);
+            return false;
+        }
+
+        const fs::path components = absolute ? normalized.relative_path()
+                                             : normalized;
+        for (const fs::path &component_path : components)
+        {
+            const std::string component = component_path.string();
+            if (component.empty() || component == ".")
+            {
+                continue;
+            }
+
+            struct stat st{};
+            if (::fstatat(current, component.c_str(), &st,
+                          AT_SYMLINK_NOFOLLOW) != 0)
+            {
+                if (errno != ENOENT)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot inspect destination root component",
+                        display_root_, e);
+                    return false;
+                }
+                if (::mkdirat(current, component.c_str(),
+                              DEFAULT_DIRECTORY_MODE) != 0 &&
+                    errno != EEXIST)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot create destination root component",
+                        display_root_, e);
+                    return false;
+                }
+                if (::fstatat(current, component.c_str(), &st,
+                              AT_SYMLINK_NOFOLLOW) != 0)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot inspect created destination root component",
+                        display_root_, e);
+                    return false;
+                }
+            }
+            if (S_ISLNK(st.st_mode))
+            {
+                ::close(current);
+                err = "archive: destination root contains a symlink component: '" +
+                      display_root_.string() + "'";
+                return false;
+            }
+            if (!S_ISDIR(st.st_mode))
+            {
+                ::close(current);
+                err = "archive: destination root component is not a directory: '" +
+                      display_root_.string() + "'";
+                return false;
+            }
+
+            int next = ::openat(current, component.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                    O_NOFOLLOW);
+            if (next < 0)
+            {
+                const int e = errno;
+                ::close(current);
+                err = "archive: " + errno_message(
+                    "cannot securely open destination root component",
+                    display_root_, e);
+                return false;
+            }
+            ::close(current);
+            current = next;
+        }
+
+        root_fd_ = current;
+        return true;
+    }
+
+    bool preflight(const fs::path &relative, EntryKind kind, bool overwrite,
+                   std::string &err)
+    {
+        reserved_output_paths_.insert(relative.generic_string());
+
+        int parent_fd = -1;
+        std::string leaf;
+        bool parent_missing = false;
+        if (!open_parent(relative, false, parent_fd, leaf, parent_missing, err))
+        {
+            return false;
+        }
+        if (parent_missing)
+        {
+            return true;
+        }
+
+        struct stat st{};
+        if (::fstatat(parent_fd, leaf.c_str(), &st,
+                      AT_SYMLINK_NOFOLLOW) != 0)
+        {
+            const int e = errno;
+            ::close(parent_fd);
+            if (e == ENOENT)
+            {
+                return true;
+            }
+            err = "archive: " + errno_message(
+                "cannot inspect destination entry", display_root_ / relative,
+                e);
+            return false;
+        }
+        ::close(parent_fd);
+
+        if (S_ISLNK(st.st_mode))
+        {
+            err = "archive: destination entry must not be a symlink: '" +
+                  (display_root_ / relative).string() + "'";
+            return false;
+        }
+        if (kind == EntryKind::directory)
+        {
+            if (!S_ISDIR(st.st_mode))
+            {
+                err = "archive: destination entry is not a directory: '" +
+                      (display_root_ / relative).string() + "'";
+                return false;
+            }
+            return true;
+        }
+        if (!S_ISREG(st.st_mode))
+        {
+            err = "archive: destination entry is not a regular file: '" +
+                  (display_root_ / relative).string() + "'";
+            return false;
+        }
+        if (!overwrite)
+        {
+            err = "archive: destination entry already exists: '" +
+                  (display_root_ / relative).string() + "'";
+            return false;
+        }
+        return true;
+    }
+
+    bool ensure_directory(const fs::path &relative, mode_t desired_mode,
+                          std::string &err, bool set_desired_mode = true)
+    {
+        int current = duplicate_cloexec(root_fd_);
+        if (current < 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot duplicate destination root descriptor", display_root_,
+                errno);
+            return false;
+        }
+
+        fs::path traversed;
+        for (const fs::path &component_path : relative)
+        {
+            const std::string component = component_path.string();
+            traversed /= component_path;
+            struct stat st{};
+            bool created = false;
+            if (::fstatat(current, component.c_str(), &st,
+                          AT_SYMLINK_NOFOLLOW) != 0)
+            {
+                if (errno != ENOENT)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot inspect destination directory",
+                        display_root_ / traversed, e);
+                    return false;
+                }
+                if (::mkdirat(current, component.c_str(),
+                              STAGING_DIRECTORY_MODE) != 0)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot create destination directory",
+                        display_root_ / traversed, e);
+                    return false;
+                }
+                created = true;
+                if (::fstatat(current, component.c_str(), &st,
+                              AT_SYMLINK_NOFOLLOW) != 0)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot inspect created destination directory",
+                        display_root_ / traversed, e);
+                    return false;
+                }
+            }
+            if (S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode))
+            {
+                ::close(current);
+                err = "archive: destination directory path is unsafe: '" +
+                      (display_root_ / traversed).string() + "'";
+                return false;
+            }
+
+            int next = ::openat(current, component.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                    O_NOFOLLOW);
+            if (next < 0)
+            {
+                const int e = errno;
+                ::close(current);
+                err = "archive: " + errno_message(
+                    "cannot securely open destination directory",
+                    display_root_ / traversed, e);
+                return false;
+            }
+            ::close(current);
+            current = next;
+
+            if (created)
+            {
+                const std::string key = traversed.generic_string();
+                created_directories_.push_back(traversed);
+                desired_directory_modes_[key] = DEFAULT_DIRECTORY_MODE;
+            }
+        }
+        ::close(current);
+
+        const std::string final_key = relative.generic_string();
+        if (set_desired_mode && desired_directory_modes_.contains(final_key))
+        {
+            desired_directory_modes_[final_key] = desired_mode;
+        }
+        return true;
+    }
+
+    bool stage_file(mz_zip_archive &zip, const ArchiveEntry &entry,
+                    mode_t mode, std::string &err)
+    {
+        const fs::path relative(entry.normalized);
+        const fs::path parent = relative.parent_path();
+        if (!parent.empty() &&
+            !ensure_directory(parent, DEFAULT_DIRECTORY_MODE, err, false))
+        {
+            return false;
+        }
+
+        int parent_fd = -1;
+        std::string leaf;
+        bool missing = false;
+        if (!open_parent(relative, true, parent_fd, leaf, missing, err))
+        {
+            return false;
+        }
+
+        struct stat existing{};
+        if (::fstatat(parent_fd, leaf.c_str(), &existing,
+                      AT_SYMLINK_NOFOLLOW) != 0 &&
+            errno != ENOENT)
+        {
+            const int e = errno;
+            ::close(parent_fd);
+            err = "archive: " + errno_message(
+                "cannot inspect destination file", display_root_ / relative,
+                e);
+            return false;
+        }
+
+        std::string temporary;
+        int temp_fd = -1;
+        int filesystem_collisions = 0;
+        while (filesystem_collisions < 64)
+        {
+            const unsigned long long id = archive_temp_counter.fetch_add(
+                1, std::memory_order_relaxed);
+            temporary = ".babet-archive-" + std::to_string(::getpid()) +
+                        "-" + std::to_string(id);
+            const fs::path temporary_relative = parent / temporary;
+            if (reserved_output_paths_.contains(
+                    temporary_relative.generic_string()))
+            {
+                continue;
+            }
+
+            temp_fd = ::openat(parent_fd, temporary.c_str(),
+                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                                   O_NOFOLLOW,
+                               STAGING_FILE_MODE);
+            if (temp_fd >= 0 || errno != EEXIST)
+            {
+                break;
+            }
+            ++filesystem_collisions;
+        }
+        if (temp_fd < 0)
+        {
+            const int e = errno;
+            ::close(parent_fd);
+            err = "archive: " + errno_message(
+                "cannot create temporary extraction file",
+                display_root_ / relative, e);
+            return false;
+        }
+
+        ExtractCallbackState state;
+        state.fd = temp_fd;
+        state.expected = entry.size;
+        const mz_bool extracted = mz_zip_reader_extract_to_callback(
+            &zip, entry.index, extract_write_callback, &state, 0);
+        if (!extracted || state.written != entry.size)
+        {
+            const int callback_error = state.error_number;
+            ::close(temp_fd);
+            ::unlinkat(parent_fd, temporary.c_str(), 0);
+            ::close(parent_fd);
+            if (callback_error != 0)
+            {
+                err = "archive: " + errno_message(
+                    "cannot write extracted file", display_root_ / relative,
+                    callback_error);
+            }
+            else
+            {
+                err = miniz_error(zip, "cannot extract ZIP entry", entry.name);
+            }
+            return false;
+        }
+
+        if (::fchmod(temp_fd, mode & 0777) != 0)
+        {
+            const int e = errno;
+            ::close(temp_fd);
+            ::unlinkat(parent_fd, temporary.c_str(), 0);
+            ::close(parent_fd);
+            err = "archive: " + errno_message(
+                "cannot set extracted file permissions",
+                display_root_ / relative, e);
+            return false;
+        }
+        if (::close(temp_fd) != 0)
+        {
+            const int e = errno;
+            ::unlinkat(parent_fd, temporary.c_str(), 0);
+            ::close(parent_fd);
+            err = "archive: " + errno_message(
+                "cannot close temporary extraction file",
+                display_root_ / relative, e);
+            return false;
+        }
+        ::close(parent_fd);
+
+        staged_.push_back(StagedFile{relative, temporary});
+        return true;
+    }
+
+    bool publish(bool overwrite, std::string &err)
+    {
+        for (std::size_t i = 0; i < staged_.size(); ++i)
+        {
+            StagedFile &file = staged_[i];
+            int parent_fd = -1;
+            std::string leaf;
+            bool missing = false;
+            if (!open_parent(file.relative, false, parent_fd, leaf, missing,
+                             err) ||
+                missing)
+            {
+                if (err.empty())
+                {
+                    err = "archive: destination parent disappeared while publishing '" +
+                          (display_root_ / file.relative).string() + "'";
+                }
+                return false;
+            }
+
+            if (overwrite)
+            {
+                struct stat existing{};
+                if (::fstatat(parent_fd, leaf.c_str(), &existing,
+                              AT_SYMLINK_NOFOLLOW) == 0)
+                {
+                    if (S_ISLNK(existing.st_mode) ||
+                        !S_ISREG(existing.st_mode))
+                    {
+                        ::close(parent_fd);
+                        err = "archive: destination changed to an unsafe type while publishing: '" +
+                              (display_root_ / file.relative).string() + "'";
+                        return false;
+                    }
+                }
+                else if (errno != ENOENT)
+                {
+                    const int e = errno;
+                    ::close(parent_fd);
+                    err = "archive: " + errno_message(
+                        "cannot inspect destination while publishing",
+                        display_root_ / file.relative, e);
+                    return false;
+                }
+
+                if (::renameat(parent_fd, file.temporary.c_str(), parent_fd,
+                               leaf.c_str()) != 0)
+                {
+                    const int e = errno;
+                    ::close(parent_fd);
+                    err = "archive: " + errno_message(
+                        "cannot publish extracted file",
+                        display_root_ / file.relative, e);
+                    return false;
+                }
+            }
+            else
+            {
+                if (::linkat(parent_fd, file.temporary.c_str(), parent_fd,
+                             leaf.c_str(), 0) != 0)
+                {
+                    const int e = errno;
+                    ::close(parent_fd);
+                    err = "archive: " + errno_message(
+                        "cannot publish extracted file without overwriting",
+                        display_root_ / file.relative, e);
+                    return false;
+                }
+                if (::unlinkat(parent_fd, file.temporary.c_str(), 0) != 0)
+                {
+                    const int e = errno;
+                    ::close(parent_fd);
+                    err = "archive: " + errno_message(
+                        "cannot remove extraction staging link",
+                        display_root_ / file.relative, e);
+                    return false;
+                }
+            }
+            ::close(parent_fd);
+            file.temporary.clear();
+        }
+        return true;
+    }
+
+    bool finalize_directory_modes(std::string &err)
+    {
+        std::vector<fs::path> paths = created_directories_;
+        std::sort(paths.begin(), paths.end(), [](const fs::path &a,
+                                                 const fs::path &b)
+                  { return a.native().size() > b.native().size(); });
+
+        for (const fs::path &relative : paths)
+        {
+            int fd = open_directory(relative, err);
+            if (fd < 0)
+            {
+                return false;
+            }
+            const auto it = desired_directory_modes_.find(
+                relative.generic_string());
+            const mode_t mode = it == desired_directory_modes_.end()
+                                    ? DEFAULT_DIRECTORY_MODE
+                                    : it->second;
+            if (::fchmod(fd, mode & 0777) != 0)
+            {
+                const int e = errno;
+                ::close(fd);
+                err = "archive: " + errno_message(
+                    "cannot set extracted directory permissions",
+                    display_root_ / relative, e);
+                return false;
+            }
+            ::close(fd);
+        }
+        return true;
+    }
+
+    void commit()
+    {
+        staged_.clear();
+        created_directories_.clear();
+        desired_directory_modes_.clear();
+        reserved_output_paths_.clear();
+    }
+
+private:
+    bool open_parent(const fs::path &relative, bool create,
+                     int &parent_fd, std::string &leaf,
+                     bool &parent_missing, std::string &err)
+    {
+        parent_fd = -1;
+        parent_missing = false;
+        leaf = relative.filename().string();
+        if (root_fd_ < 0 || relative.empty() || leaf.empty())
+        {
+            err = "archive: invalid destination-relative path '" +
+                  relative.string() + "'";
+            return false;
+        }
+
+        int current = duplicate_cloexec(root_fd_);
+        if (current < 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot duplicate destination root descriptor", display_root_,
+                errno);
+            return false;
+        }
+
+        fs::path traversed;
+        for (const fs::path &component_path : relative.parent_path())
+        {
+            const std::string component = component_path.string();
+            traversed /= component_path;
+            struct stat st{};
+            if (::fstatat(current, component.c_str(), &st,
+                          AT_SYMLINK_NOFOLLOW) != 0)
+            {
+                if (errno == ENOENT && !create)
+                {
+                    ::close(current);
+                    parent_missing = true;
+                    return true;
+                }
+                if (errno != ENOENT)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot inspect destination path component",
+                        display_root_ / traversed, e);
+                    return false;
+                }
+                if (::mkdirat(current, component.c_str(),
+                              STAGING_DIRECTORY_MODE) != 0)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot create destination path component",
+                        display_root_ / traversed, e);
+                    return false;
+                }
+                created_directories_.push_back(traversed);
+                desired_directory_modes_[traversed.generic_string()] =
+                    DEFAULT_DIRECTORY_MODE;
+                if (::fstatat(current, component.c_str(), &st,
+                              AT_SYMLINK_NOFOLLOW) != 0)
+                {
+                    const int e = errno;
+                    ::close(current);
+                    err = "archive: " + errno_message(
+                        "cannot inspect created destination path component",
+                        display_root_ / traversed, e);
+                    return false;
+                }
+            }
+            if (S_ISLNK(st.st_mode) || !S_ISDIR(st.st_mode))
+            {
+                ::close(current);
+                err = "archive: destination contains a symlink or non-directory component: '" +
+                      (display_root_ / traversed).string() + "'";
+                return false;
+            }
+            int next = ::openat(current, component.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                    O_NOFOLLOW);
+            if (next < 0)
+            {
+                const int e = errno;
+                ::close(current);
+                err = "archive: " + errno_message(
+                    "cannot securely open destination path component",
+                    display_root_ / traversed, e);
+                return false;
+            }
+            ::close(current);
+            current = next;
+        }
+        parent_fd = current;
+        return true;
+    }
+
+    int open_directory(const fs::path &relative, std::string &err) const
+    {
+        int current = duplicate_cloexec(root_fd_);
+        if (current < 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot duplicate destination root descriptor", display_root_,
+                errno);
+            return -1;
+        }
+        fs::path traversed;
+        for (const fs::path &component_path : relative)
+        {
+            traversed /= component_path;
+            const std::string component = component_path.string();
+            int next = ::openat(current, component.c_str(),
+                                O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                    O_NOFOLLOW);
+            if (next < 0)
+            {
+                const int e = errno;
+                ::close(current);
+                err = "archive: " + errno_message(
+                    "cannot securely open extracted directory",
+                    display_root_ / traversed, e);
+                return -1;
+            }
+            ::close(current);
+            current = next;
+        }
+        return current;
+    }
+
+    void cleanup_staged() noexcept
+    {
+        for (StagedFile &file : staged_)
+        {
+            if (file.temporary.empty())
+            {
+                continue;
+            }
+            int parent_fd = -1;
+            std::string leaf;
+            bool missing = false;
+            std::string ignored;
+            if (open_parent(file.relative, false, parent_fd, leaf, missing,
+                            ignored) &&
+                !missing)
+            {
+                ::unlinkat(parent_fd, file.temporary.c_str(), 0);
+                ::close(parent_fd);
+            }
+        }
+    }
+
+    void cleanup_created_directories() noexcept
+    {
+        std::vector<fs::path> paths = created_directories_;
+        std::sort(paths.begin(), paths.end(), [](const fs::path &a,
+                                                 const fs::path &b)
+                  { return a.native().size() > b.native().size(); });
+        for (const fs::path &relative : paths)
+        {
+            int parent_fd = -1;
+            std::string leaf;
+            bool missing = false;
+            std::string ignored;
+            if (open_parent(relative, false, parent_fd, leaf, missing,
+                            ignored) &&
+                !missing)
+            {
+                ::unlinkat(parent_fd, leaf.c_str(), AT_REMOVEDIR);
+                ::close(parent_fd);
+            }
+        }
+    }
+
+    int root_fd_ = -1;
+    fs::path display_root_;
+    std::vector<StagedFile> staged_;
+    std::vector<fs::path> created_directories_;
+    std::unordered_map<std::string, mode_t> desired_directory_modes_;
+    std::unordered_set<std::string> reserved_output_paths_;
+};
+
+void push_u64(lua_State *L, std::uint64_t value);
+
+struct ArchiveCreateOptions
+{
+    std::uint64_t max_entries = DEFAULT_MAX_ENTRIES;
+    std::uint64_t max_file_size = DEFAULT_MAX_ENTRY_SIZE;
+    std::uint64_t max_total_size = DEFAULT_MAX_TOTAL_SIZE;
+    int compression_level = MZ_DEFAULT_LEVEL;
+    bool overwrite = false;
+    bool deterministic = true;
+    bool include_directories = true;
+};
+
+enum class CreateEntryKind
+{
+    regular,
+    directory,
+};
+
+struct CreateEntry
+{
+    fs::path relative;
+    CreateEntryKind kind = CreateEntryKind::regular;
+    std::uint64_t size = 0;
+    dev_t device = 0;
+    ino_t inode = 0;
+    timespec modified{};
+    timespec changed{};
+};
+
+class ScopedFd
+{
+public:
+    explicit ScopedFd(int fd = -1) noexcept : fd_(fd) {}
+    ~ScopedFd()
+    {
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+    }
+    ScopedFd(const ScopedFd &) = delete;
+    ScopedFd &operator=(const ScopedFd &) = delete;
+    ScopedFd(ScopedFd &&other) noexcept : fd_(other.release()) {}
+    ScopedFd &operator=(ScopedFd &&other) noexcept
+    {
+        if (this != &other)
+        {
+            reset(other.release());
+        }
+        return *this;
+    }
+    int get() const noexcept { return fd_; }
+    int release() noexcept
+    {
+        const int result = fd_;
+        fd_ = -1;
+        return result;
+    }
+    void reset(int fd = -1) noexcept
+    {
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+        fd_ = fd;
+    }
+
+private:
+    int fd_ = -1;
+};
+
+class ScopedFile
+{
+public:
+    explicit ScopedFile(FILE *file = nullptr) noexcept : file_(file) {}
+    ~ScopedFile()
+    {
+        if (file_ != nullptr)
+        {
+            std::fclose(file_);
+        }
+    }
+    ScopedFile(const ScopedFile &) = delete;
+    ScopedFile &operator=(const ScopedFile &) = delete;
+    FILE *get() const noexcept { return file_; }
+    FILE *release() noexcept
+    {
+        FILE *result = file_;
+        file_ = nullptr;
+        return result;
+    }
+
+private:
+    FILE *file_ = nullptr;
+};
+
+bool same_timespec(const timespec &a, const timespec &b) noexcept
+{
+    return a.tv_sec == b.tv_sec && a.tv_nsec == b.tv_nsec;
+}
+
+bool validate_create_option_keys(lua_State *L, int idx, std::string &err)
+{
+    if (lua_isnoneornil(L, idx))
+    {
+        return true;
+    }
+    if (lua_type(L, idx) != LUA_TTABLE)
+    {
+        err = "archive create options must be a table";
+        return false;
+    }
+    static const std::unordered_set<std::string> allowed = {
+        "max_entries", "max_file_size", "max_total_size",
+        "compression_level", "overwrite", "deterministic",
+        "include_directories"};
+    idx = lua_absindex(L, idx);
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0)
+    {
+        if (lua_type(L, -2) != LUA_TSTRING)
+        {
+            lua_pop(L, 2);
+            err = "archive create option keys must be strings";
+            return false;
+        }
+        size_t length = 0;
+        const char *data = lua_tolstring(L, -2, &length);
+        const std::string key(data, length);
+        if (!allowed.contains(key))
+        {
+            lua_pop(L, 2);
+            err = "unknown archive create option: " + key;
+            return false;
+        }
+        lua_pop(L, 1);
+    }
+    return true;
+}
+
+bool collect_create_options(lua_State *L, int idx,
+                            ArchiveCreateOptions &options,
+                            std::string &err)
+{
+    if (!validate_create_option_keys(L, idx, err))
+    {
+        return false;
+    }
+    if (lua_isnoneornil(L, idx))
+    {
+        return true;
+    }
+    idx = lua_absindex(L, idx);
+    if (!parse_positive_integer(L, idx, "max_entries", HARD_MAX_ENTRIES,
+                                options.max_entries, err) ||
+        !parse_positive_integer(L, idx, "max_file_size",
+                                HARD_MAX_ENTRY_SIZE,
+                                options.max_file_size, err) ||
+        !parse_positive_integer(L, idx, "max_total_size",
+                                HARD_MAX_TOTAL_SIZE,
+                                options.max_total_size, err) ||
+        !parse_strict_boolean(L, idx, "overwrite", options.overwrite, err) ||
+        !parse_strict_boolean(L, idx, "deterministic",
+                              options.deterministic, err) ||
+        !parse_strict_boolean(L, idx, "include_directories",
+                              options.include_directories, err))
+    {
+        return false;
+    }
+
+    raw_getfield(L, idx, "compression_level");
+    if (!lua_isnil(L, -1))
+    {
+        if (!lua_isinteger(L, -1))
+        {
+            lua_pop(L, 1);
+            err = "opts.compression_level must be an integer";
+            return false;
+        }
+        const lua_Integer level = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        if (level < 0 || level > 9)
+        {
+            err = "opts.compression_level must be between 0 and 9";
+            return false;
+        }
+        options.compression_level = static_cast<int>(level);
+    }
+    else
+    {
+        lua_pop(L, 1);
+    }
+    return true;
+}
+
+bool is_dot_component(const fs::path &component)
+{
+    return component.empty() || component == ".";
+}
+
+bool open_directory_without_symlinks(const fs::path &path, ScopedFd &result,
+                                     std::string_view label,
+                                     std::string &err)
+{
+    if (path.empty())
+    {
+        err = "archive: " + std::string(label) + " must not be empty";
+        return false;
+    }
+    ScopedFd current(::open(path.is_absolute() ? "/" : ".",
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    if (current.get() < 0)
+    {
+        err = "archive: " + errno_message("cannot open", path, errno);
+        return false;
+    }
+
+    const fs::path components = path.is_absolute() ? path.relative_path() : path;
+    fs::path traversed = path.is_absolute() ? fs::path("/") : fs::path(".");
+    for (const fs::path &component_path : components)
+    {
+        if (is_dot_component(component_path))
+        {
+            continue;
+        }
+        if (component_path == "..")
+        {
+            err = "archive: " + std::string(label) +
+                  " must not contain '..' components";
+            return false;
+        }
+        const std::string component = component_path.string();
+        struct stat st{};
+        if (::fstatat(current.get(), component.c_str(), &st,
+                      AT_SYMLINK_NOFOLLOW) != 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot inspect " + std::string(label), traversed / component_path,
+                errno);
+            return false;
+        }
+        if (S_ISLNK(st.st_mode))
+        {
+            err = "archive: " + std::string(label) +
+                  " contains a symlink component: '" +
+                  (traversed / component_path).string() + "'";
+            return false;
+        }
+        if (!S_ISDIR(st.st_mode))
+        {
+            err = "archive: " + std::string(label) +
+                  " component is not a directory: '" +
+                  (traversed / component_path).string() + "'";
+            return false;
+        }
+        ScopedFd next(::openat(current.get(), component.c_str(),
+                               O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                   O_NOFOLLOW));
+        if (next.get() < 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot securely open " + std::string(label),
+                traversed / component_path, errno);
+            return false;
+        }
+        current = std::move(next);
+        traversed /= component_path;
+    }
+    result = std::move(current);
+    return true;
+}
+
+bool path_is_within(const fs::path &candidate, const fs::path &root,
+                    bool &within, std::string &err)
+{
+    std::error_code candidate_error;
+    std::error_code root_error;
+    const fs::path normalized_candidate =
+        fs::absolute(candidate, candidate_error).lexically_normal();
+    const fs::path normalized_root =
+        fs::absolute(root, root_error).lexically_normal();
+    if (candidate_error || root_error)
+    {
+        const std::error_code &failure = candidate_error ? candidate_error
+                                                         : root_error;
+        err = "archive: cannot resolve source and destination paths: " +
+              failure.message();
+        return false;
+    }
+
+    auto ci = normalized_candidate.begin();
+    auto ri = normalized_root.begin();
+    for (; ri != normalized_root.end(); ++ri, ++ci)
+    {
+        if (ci == normalized_candidate.end() || *ci != *ri)
+        {
+            within = false;
+            return true;
+        }
+    }
+    within = true;
+    return true;
+}
+
+bool fixed_deterministic_time(MZ_TIME_T &result, std::string &err)
+{
+    std::tm local_time{};
+    local_time.tm_year = 1980 - 1900;
+    local_time.tm_mon = 0;
+    local_time.tm_mday = 1;
+    local_time.tm_hour = 0;
+    local_time.tm_min = 0;
+    local_time.tm_sec = 0;
+    local_time.tm_isdst = -1;
+    const std::time_t timestamp = std::mktime(&local_time);
+    if (timestamp == static_cast<std::time_t>(-1) ||
+        local_time.tm_year != 1980 - 1900 || local_time.tm_mon != 0 ||
+        local_time.tm_mday != 1 || local_time.tm_hour != 0 ||
+        local_time.tm_min != 0 || local_time.tm_sec != 0)
+    {
+        err = "archive: cannot represent the deterministic ZIP timestamp";
+        return false;
+    }
+    result = static_cast<MZ_TIME_T>(timestamp);
+    return true;
+}
+
+bool validate_source_zip_timestamp(const CreateEntry &entry,
+                                   std::string &err)
+{
+    const std::time_t timestamp = entry.modified.tv_sec;
+    std::tm local_time{};
+    if (::localtime_r(&timestamp, &local_time) == nullptr)
+    {
+        err = "archive: cannot represent source modification time in ZIP entry '" +
+              entry.relative.generic_string() + "'";
+        return false;
+    }
+    const int year = local_time.tm_year + 1900;
+    if (year < 1980 || year > 2107)
+    {
+        err = "archive: source modification time is outside the ZIP range "
+              "1980-2107: '" + entry.relative.generic_string() + "'";
+        return false;
+    }
+    return true;
+}
+
+bool create_requires_zip64(const std::vector<CreateEntry> &entries,
+                           std::uint64_t total_size) noexcept
+{
+    constexpr std::uint64_t conservative_size_threshold =
+        3ULL * 1024ULL * 1024ULL * 1024ULL;
+    if (total_size > conservative_size_threshold ||
+        entries.size() >= 65535)
+    {
+        return true;
+    }
+    return std::any_of(entries.begin(), entries.end(),
+                       [](const CreateEntry &entry)
+                       {
+                           return entry.kind == CreateEntryKind::regular &&
+                                  entry.size >= 0xFFFFFFFFULL;
+                       });
+}
+
+bool checked_add_total(std::uint64_t current, std::uint64_t added,
+                       std::uint64_t limit, std::uint64_t &result)
+{
+    if (added > limit || current > limit - added)
+    {
+        return false;
+    }
+    result = current + added;
+    return true;
+}
+
+bool scan_create_directory(int directory_fd, const fs::path &relative,
+                           std::size_t depth,
+                           const ArchiveCreateOptions &options,
+                           std::vector<CreateEntry> &entries,
+                           std::uint64_t &total_size,
+                           std::uint64_t &total_name_bytes,
+                           std::uint64_t &scanned_nodes,
+                           std::string &err)
+{
+    const int duplicate = ::openat(directory_fd, ".",
+                                   O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                       O_NOFOLLOW);
+    if (duplicate < 0)
+    {
+        err = "archive: cannot open source directory stream: " +
+              std::string(std::strerror(errno));
+        return false;
+    }
+    DIR *raw_directory = ::fdopendir(duplicate);
+    if (raw_directory == nullptr)
+    {
+        const int e = errno;
+        ::close(duplicate);
+        err = "archive: cannot read source directory: " +
+              std::string(std::strerror(e));
+        return false;
+    }
+
+    std::vector<std::string> names;
+    errno = 0;
+    while (dirent *entry = ::readdir(raw_directory))
+    {
+        const std::string name(entry->d_name);
+        if (name != "." && name != "..")
+        {
+            if (scanned_nodes >= HARD_MAX_SCANNED_SOURCE_NODES)
+            {
+                ::closedir(raw_directory);
+                err = "archive: source tree exceeds the internal 100000-node scan limit";
+                return false;
+            }
+            ++scanned_nodes;
+            names.push_back(name);
+        }
+        errno = 0;
+    }
+    const int read_error = errno;
+    ::closedir(raw_directory);
+    if (read_error != 0)
+    {
+        err = "archive: cannot enumerate source directory: " +
+              std::string(std::strerror(read_error));
+        return false;
+    }
+    std::sort(names.begin(), names.end());
+
+    for (const std::string &name : names)
+    {
+        struct stat st{};
+        if (::fstatat(directory_fd, name.c_str(), &st,
+                      AT_SYMLINK_NOFOLLOW) != 0)
+        {
+            err = "archive: cannot inspect source entry '" +
+                  (relative / name).generic_string() + "': " +
+                  std::strerror(errno);
+            return false;
+        }
+        const fs::path child = relative / name;
+        const std::string child_name = child.generic_string();
+        if (child_name.empty() || child_name.size() > MAX_ARCHIVE_PATH_BYTES)
+        {
+            err = "archive: source entry path is empty or exceeds 4096 bytes: '" +
+                  child_name + "'";
+            return false;
+        }
+        if (!is_valid_utf8(child_name))
+        {
+            err = "archive: source entry path contains invalid UTF-8 bytes";
+            return false;
+        }
+        std::string normalized_name;
+        std::string path_reason;
+        const EntryKind path_kind = S_ISDIR(st.st_mode)
+                                        ? EntryKind::directory
+                                        : EntryKind::regular;
+        if (!validate_entry_path(child_name, path_kind, normalized_name,
+                                 path_reason) ||
+            normalized_name != child_name)
+        {
+            err = "archive: unsafe source entry path '" + child_name +
+                  "': " + path_reason;
+            return false;
+        }
+        if (S_ISLNK(st.st_mode))
+        {
+            err = "archive: source contains a symlink entry: '" +
+                  child.generic_string() + "'";
+            return false;
+        }
+        if (S_ISDIR(st.st_mode))
+        {
+            if (options.include_directories)
+            {
+                if (entries.size() >= options.max_entries)
+                {
+                    err = "archive: source exceeds opts.max_entries";
+                    return false;
+                }
+                std::uint64_t updated_names = 0;
+                if (!checked_add_total(total_name_bytes, child_name.size(),
+                                       HARD_MAX_TOTAL_NAME_BYTES,
+                                       updated_names))
+                {
+                    err = "archive: source entry names exceed the internal 64 MiB limit";
+                    return false;
+                }
+                total_name_bytes = updated_names;
+                CreateEntry item;
+                item.relative = child;
+                item.kind = CreateEntryKind::directory;
+                item.device = st.st_dev;
+                item.inode = st.st_ino;
+                item.modified = st.st_mtim;
+                item.changed = st.st_ctim;
+                entries.push_back(std::move(item));
+            }
+            ScopedFd child_fd(::openat(directory_fd, name.c_str(),
+                                       O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                           O_NOFOLLOW));
+            if (child_fd.get() < 0)
+            {
+                err = "archive: cannot securely open source directory '" +
+                      child.generic_string() + "': " +
+                      std::strerror(errno);
+                return false;
+            }
+            if (depth >= HARD_MAX_CREATE_DEPTH)
+            {
+                err = "archive: source tree exceeds the internal depth limit of 256";
+                return false;
+            }
+            if (!scan_create_directory(child_fd.get(), child, depth + 1,
+                                       options, entries, total_size,
+                                       total_name_bytes, scanned_nodes, err))
+            {
+                return false;
+            }
+            continue;
+        }
+        if (!S_ISREG(st.st_mode))
+        {
+            err = "archive: unsupported source entry type: '" +
+                  child.generic_string() + "'";
+            return false;
+        }
+        if (st.st_size < 0 ||
+            static_cast<std::uint64_t>(st.st_size) > options.max_file_size)
+        {
+            err = "archive: source file exceeds opts.max_file_size: '" +
+                  child.generic_string() + "'";
+            return false;
+        }
+        if (entries.size() >= options.max_entries)
+        {
+            err = "archive: source exceeds opts.max_entries";
+            return false;
+        }
+        std::uint64_t updated_total = 0;
+        if (!checked_add_total(total_size,
+                               static_cast<std::uint64_t>(st.st_size),
+                               options.max_total_size, updated_total))
+        {
+            err = "archive: source exceeds opts.max_total_size";
+            return false;
+        }
+        total_size = updated_total;
+        std::uint64_t updated_names = 0;
+        if (!checked_add_total(total_name_bytes, child_name.size(),
+                               HARD_MAX_TOTAL_NAME_BYTES, updated_names))
+        {
+            err = "archive: source entry names exceed the internal 64 MiB limit";
+            return false;
+        }
+        total_name_bytes = updated_names;
+        CreateEntry item;
+        item.relative = child;
+        item.kind = CreateEntryKind::regular;
+        item.size = static_cast<std::uint64_t>(st.st_size);
+        item.device = st.st_dev;
+        item.inode = st.st_ino;
+        item.modified = st.st_mtim;
+        item.changed = st.st_ctim;
+        entries.push_back(std::move(item));
+    }
+    return true;
+}
+
+bool open_source_entry(int root_fd, const CreateEntry &entry,
+                       ScopedFd &result, std::string &err)
+{
+    ScopedFd current(::fcntl(root_fd, F_DUPFD_CLOEXEC, 3));
+    if (current.get() < 0)
+    {
+        err = "archive: cannot duplicate source root descriptor: " +
+              std::string(std::strerror(errno));
+        return false;
+    }
+    std::vector<fs::path> components;
+    for (const fs::path &component : entry.relative)
+    {
+        components.push_back(component);
+    }
+    for (std::size_t i = 0; i < components.size(); ++i)
+    {
+        const std::string name = components[i].string();
+        const bool leaf = i + 1 == components.size();
+        const int flags = leaf
+                              ? O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                              : O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW;
+        ScopedFd next(::openat(current.get(), name.c_str(), flags));
+        if (next.get() < 0)
+        {
+            err = "archive: cannot securely open source entry '" +
+                  entry.relative.generic_string() + "': " +
+                  std::strerror(errno);
+            return false;
+        }
+        current = std::move(next);
+    }
+    struct stat st{};
+    if (::fstat(current.get(), &st) != 0)
+    {
+        err = "archive: cannot inspect opened source entry '" +
+              entry.relative.generic_string() + "': " +
+              std::strerror(errno);
+        return false;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_dev != entry.device ||
+        st.st_ino != entry.inode || st.st_size < 0 ||
+        static_cast<std::uint64_t>(st.st_size) != entry.size ||
+        !same_timespec(st.st_mtim, entry.modified) ||
+        !same_timespec(st.st_ctim, entry.changed))
+    {
+        err = "archive: source entry changed during archive creation: '" +
+              entry.relative.generic_string() + "'";
+        return false;
+    }
+    result = std::move(current);
+    return true;
+}
+
+class AtomicArchiveOutput
+{
+public:
+    ~AtomicArchiveOutput()
+    {
+        cleanup();
+    }
+
+    bool open(const fs::path &destination, bool overwrite, std::string &err)
+    {
+        destination_ = destination;
+        leaf_ = destination.filename().string();
+        if (destination.empty() || leaf_.empty() || leaf_ == "." ||
+            leaf_ == "..")
+        {
+            err = "archive: destination must name a ZIP file";
+            return false;
+        }
+        fs::path parent = destination.parent_path();
+        if (parent.empty())
+        {
+            parent = ".";
+        }
+        if (!open_directory_without_symlinks(parent, parent_fd_,
+                                             "destination parent", err))
+        {
+            return false;
+        }
+        struct stat existing{};
+        if (::fstatat(parent_fd_.get(), leaf_.c_str(), &existing,
+                      AT_SYMLINK_NOFOLLOW) == 0)
+        {
+            if (S_ISLNK(existing.st_mode))
+            {
+                err = "archive: destination must not be a symlink: '" +
+                      destination.string() + "'";
+                return false;
+            }
+            if (!S_ISREG(existing.st_mode))
+            {
+                err = "archive: destination is not a regular file: '" +
+                      destination.string() + "'";
+                return false;
+            }
+            if (!overwrite)
+            {
+                err = "archive: destination already exists: '" +
+                      destination.string() + "'";
+                return false;
+            }
+        }
+        else if (errno != ENOENT)
+        {
+            err = "archive: " + errno_message("cannot inspect destination",
+                                               destination, errno);
+            return false;
+        }
+        overwrite_ = overwrite;
+
+        for (unsigned attempt = 0; attempt < 128; ++attempt)
+        {
+            const unsigned long long serial =
+                archive_temp_counter.fetch_add(1, std::memory_order_relaxed);
+            temporary_ = ".babet-create-" +
+                         std::to_string(static_cast<long long>(::getpid())) +
+                         "-" + std::to_string(serial);
+            if (temporary_ == leaf_)
+            {
+                continue;
+            }
+            const int fd = ::openat(parent_fd_.get(), temporary_.c_str(),
+                                    O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC |
+                                        O_NOFOLLOW,
+                                    STAGING_FILE_MODE);
+            if (fd >= 0)
+            {
+                temp_fd_.reset(fd);
+                return true;
+            }
+            if (errno != EEXIST)
+            {
+                err = "archive: " + errno_message(
+                    "cannot create temporary archive", parent / temporary_,
+                    errno);
+                return false;
+            }
+        }
+        err = "archive: cannot allocate a unique temporary archive name";
+        return false;
+    }
+
+    int fd() const noexcept { return temp_fd_.get(); }
+
+    bool publish(std::string &err)
+    {
+        if (::fchmod(temp_fd_.get(), DEFAULT_FILE_MODE) != 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot set archive permissions", destination_, errno);
+            return false;
+        }
+        if (::fsync(temp_fd_.get()) != 0)
+        {
+            err = "archive: " + errno_message("cannot sync archive",
+                                               destination_, errno);
+            return false;
+        }
+        if (overwrite_)
+        {
+            if (::renameat(parent_fd_.get(), temporary_.c_str(),
+                           parent_fd_.get(), leaf_.c_str()) != 0)
+            {
+                err = "archive: " + errno_message(
+                    "cannot atomically publish archive", destination_, errno);
+                return false;
+            }
+        }
+        else
+        {
+            if (::linkat(parent_fd_.get(), temporary_.c_str(),
+                         parent_fd_.get(), leaf_.c_str(), 0) != 0)
+            {
+                err = "archive: " + errno_message(
+                    "cannot publish archive without overwriting",
+                    destination_, errno);
+                return false;
+            }
+            if (::unlinkat(parent_fd_.get(), temporary_.c_str(), 0) != 0)
+            {
+                const int e = errno;
+                ::unlinkat(parent_fd_.get(), leaf_.c_str(), 0);
+                err = "archive: " + errno_message(
+                    "cannot remove temporary archive link", destination_, e);
+                return false;
+            }
+        }
+        temporary_.clear();
+        if (::fsync(parent_fd_.get()) != 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot sync archive destination directory", destination_,
+                errno);
+            return false;
+        }
+        return true;
+    }
+
+private:
+    void cleanup() noexcept
+    {
+        if (!temporary_.empty() && parent_fd_.get() >= 0)
+        {
+            ::unlinkat(parent_fd_.get(), temporary_.c_str(), 0);
+        }
+    }
+
+    fs::path destination_;
+    std::string leaf_;
+    std::string temporary_;
+    ScopedFd parent_fd_;
+    ScopedFd temp_fd_;
+    bool overwrite_ = false;
+};
+
+class ArchiveWriter
+{
+public:
+    ~ArchiveWriter()
+    {
+        if (initialized_)
+        {
+            mz_zip_writer_end(&zip_);
+        }
+    }
+
+    bool init(FILE *file, bool zip64, std::string &err)
+    {
+        mz_zip_zero_struct(&zip_);
+        allocation_state_ = {};
+        zip_.m_pAlloc = bounded_miniz_alloc;
+        zip_.m_pFree = bounded_miniz_free;
+        zip_.m_pRealloc = bounded_miniz_realloc;
+        zip_.m_pAlloc_opaque = &allocation_state_;
+        const mz_uint flags = zip64 ? MZ_ZIP_FLAG_WRITE_ZIP64 : 0;
+        if (!mz_zip_writer_init_cfile(&zip_, file, flags))
+        {
+            err = miniz_error(zip_, "cannot initialize ZIP writer", "output");
+            return false;
+        }
+        initialized_ = true;
+        return true;
+    }
+
+    bool add_directory(const std::string &name, const MZ_TIME_T *timestamp,
+                       std::string &err)
+    {
+        static constexpr unsigned char empty_payload = 0;
+        if (!mz_zip_writer_add_mem_ex_v2(
+                &zip_, name.c_str(), &empty_payload, 0, nullptr, 0,
+                MZ_NO_COMPRESSION, 0, 0,
+                const_cast<MZ_TIME_T *>(timestamp), nullptr, 0, nullptr, 0))
+        {
+            err = miniz_error(zip_, "cannot add directory entry", name);
+            return false;
+        }
+        return true;
+    }
+
+    bool add_file(const std::string &name, FILE *source,
+                  std::uint64_t size, const MZ_TIME_T *timestamp,
+                  int compression_level, std::string &err)
+    {
+        if (!mz_zip_writer_add_cfile(
+                &zip_, name.c_str(), source, size, timestamp, nullptr, 0,
+                static_cast<mz_uint>(compression_level), nullptr, 0, nullptr,
+                0))
+        {
+            err = miniz_error(zip_, "cannot add source file", name);
+            return false;
+        }
+        return true;
+    }
+
+    bool finalize_and_end(std::string &err)
+    {
+        if (!mz_zip_writer_finalize_archive(&zip_))
+        {
+            err = miniz_error(zip_, "cannot finalize ZIP archive", "output");
+            return false;
+        }
+        if (!mz_zip_writer_end(&zip_))
+        {
+            initialized_ = false;
+            err = "archive: cannot close ZIP writer";
+            return false;
+        }
+        initialized_ = false;
+        return true;
+    }
+
+private:
+    mz_zip_archive zip_{};
+    MinizAllocationState allocation_state_{};
+    bool initialized_ = false;
+};
+
+bool source_file_unchanged(int fd, const CreateEntry &entry,
+                           std::string &err)
+{
+    struct stat st{};
+    if (::fstat(fd, &st) != 0)
+    {
+        err = "archive: cannot re-inspect source entry '" +
+              entry.relative.generic_string() + "': " +
+              std::strerror(errno);
+        return false;
+    }
+    if (!S_ISREG(st.st_mode) || st.st_dev != entry.device ||
+        st.st_ino != entry.inode || st.st_size < 0 ||
+        static_cast<std::uint64_t>(st.st_size) != entry.size ||
+        !same_timespec(st.st_mtim, entry.modified) ||
+        !same_timespec(st.st_ctim, entry.changed))
+    {
+        err = "archive: source entry changed during archive creation: '" +
+              entry.relative.generic_string() + "'";
+        return false;
+    }
+    return true;
+}
+
+int lua_archive_create(lua_State *L)
+{
+    const int top = lua_gettop(L);
+    if (top < 2 || top > 3)
+    {
+        return luaL_error(L, "archive.create expects 2 or 3 arguments");
+    }
+    const std::string_view source_view =
+        luaL_checkstring_view_without_nul(L, 1, "source directory");
+    const std::string_view destination_view =
+        luaL_checkstring_view_without_nul(L, 2, "archive destination");
+
+    ArchiveCreateOptions options;
+    std::string err;
+    if (!collect_create_options(L, 3, options, err))
+    {
+        return push_fail(L, err);
+    }
+    if (source_view.empty())
+    {
+        return push_fail(L, "archive: source directory must not be empty");
+    }
+    if (destination_view.empty())
+    {
+        return push_fail(L, "archive: archive destination must not be empty");
+    }
+
+    const fs::path source{std::string(source_view)};
+    const fs::path destination{std::string(destination_view)};
+    bool destination_inside_source = false;
+    if (!path_is_within(destination, source, destination_inside_source, err))
+    {
+        return push_fail(L, err);
+    }
+    if (destination_inside_source)
+    {
+        return push_fail(L,
+                         "archive: archive destination must not be inside the source directory");
+    }
+
+    ScopedFd source_fd;
+    if (!open_directory_without_symlinks(source, source_fd,
+                                         "source directory", err))
+    {
+        return push_fail(L, err);
+    }
+
+    std::vector<CreateEntry> entries;
+    std::uint64_t total_size = 0;
+    std::uint64_t total_name_bytes = 0;
+    std::uint64_t scanned_nodes = 0;
+    if (!scan_create_directory(source_fd.get(), fs::path(), 0, options,
+                               entries, total_size, total_name_bytes,
+                               scanned_nodes, err))
+    {
+        return push_fail(L, err);
+    }
+    std::sort(entries.begin(), entries.end(),
+              [](const CreateEntry &a, const CreateEntry &b)
+              { return a.relative.generic_string() <
+                       b.relative.generic_string(); });
+
+    MZ_TIME_T fixed_time{};
+    if (options.deterministic)
+    {
+        if (!fixed_deterministic_time(fixed_time, err))
+        {
+            return push_fail(L, err);
+        }
+    }
+    else
+    {
+        for (const CreateEntry &entry : entries)
+        {
+            if (!validate_source_zip_timestamp(entry, err))
+            {
+                return push_fail(L, err);
+            }
+        }
+    }
+    const bool write_zip64 = create_requires_zip64(entries, total_size);
+
+    AtomicArchiveOutput output;
+    if (!output.open(destination, options.overwrite, err))
+    {
+        return push_fail(L, err);
+    }
+    const int stream_fd = ::dup(output.fd());
+    if (stream_fd < 0)
+    {
+        return push_fail(L, "archive: cannot duplicate temporary archive descriptor: " +
+                                std::string(std::strerror(errno)));
+    }
+    ScopedFile output_file(::fdopen(stream_fd, "w+b"));
+    if (output_file.get() == nullptr)
+    {
+        const int e = errno;
+        ::close(stream_fd);
+        return push_fail(L, "archive: cannot open temporary archive stream: " +
+                                std::string(std::strerror(e)));
+    }
+
+    ArchiveWriter writer;
+    if (!writer.init(output_file.get(), write_zip64, err))
+    {
+        return push_fail(L, err);
+    }
+    std::uint64_t files = 0;
+    std::uint64_t directories = 0;
+    for (const CreateEntry &entry : entries)
+    {
+        std::string archive_name = entry.relative.generic_string();
+        if (entry.kind == CreateEntryKind::directory)
+        {
+            archive_name += "/";
+            const MZ_TIME_T timestamp = options.deterministic
+                                            ? fixed_time
+                                            : static_cast<MZ_TIME_T>(entry.modified.tv_sec);
+            if (!writer.add_directory(archive_name, &timestamp, err))
+            {
+                return push_fail(L, err);
+            }
+            ++directories;
+            continue;
+        }
+
+        ScopedFd input_fd;
+        if (!open_source_entry(source_fd.get(), entry, input_fd, err))
+        {
+            return push_fail(L, err);
+        }
+        const int file_stream_fd = ::dup(input_fd.get());
+        if (file_stream_fd < 0)
+        {
+            return push_fail(L, "archive: cannot duplicate source file descriptor: " +
+                                    std::string(std::strerror(errno)));
+        }
+        ScopedFile input_file(::fdopen(file_stream_fd, "rb"));
+        if (input_file.get() == nullptr)
+        {
+            const int e = errno;
+            ::close(file_stream_fd);
+            return push_fail(L, "archive: cannot open source file stream: " +
+                                    std::string(std::strerror(e)));
+        }
+        const MZ_TIME_T timestamp = options.deterministic
+                                        ? fixed_time
+                                        : static_cast<MZ_TIME_T>(entry.modified.tv_sec);
+        if (!writer.add_file(archive_name, input_file.get(), entry.size,
+                             &timestamp, options.compression_level, err) ||
+            !source_file_unchanged(input_fd.get(), entry, err))
+        {
+            return push_fail(L, err);
+        }
+        ++files;
+    }
+    if (!writer.finalize_and_end(err))
+    {
+        return push_fail(L, err);
+    }
+    if (std::fflush(output_file.get()) != 0)
+    {
+        return push_fail(L, "archive: cannot flush temporary archive: " +
+                                std::string(std::strerror(errno)));
+    }
+    if (!output.publish(err))
+    {
+        return push_fail(L, err);
+    }
+
+    lua_newtable(L);
+    push_u64(L, files);
+    lua_setfield(L, -2, "files");
+    push_u64(L, directories);
+    lua_setfield(L, -2, "directories");
+    push_u64(L, total_size);
+    lua_setfield(L, -2, "bytes");
+    lua_pushlstring(L, destination_view.data(), destination_view.size());
+    lua_setfield(L, -2, "path");
+    lua_pushinteger(L, options.compression_level);
+    lua_setfield(L, -2, "compression_level");
+    lua_pushboolean(L, options.deterministic);
+    lua_setfield(L, -2, "deterministic");
+    lua_pushnil(L);
+    return 2;
+}
+
+mode_t file_mode_for_entry(const ArchiveEntry &entry,
+                           const ArchiveOptions &options)
+{
+    if (!options.preserve_permissions || entry.unix_mode == 0)
+    {
+        return DEFAULT_FILE_MODE;
+    }
+    return entry.unix_mode & 0777;
+}
+
+mode_t directory_mode_for_entry(const ArchiveEntry &entry,
+                                const ArchiveOptions &options)
+{
+    if (!options.preserve_permissions || entry.unix_mode == 0)
+    {
+        return DEFAULT_DIRECTORY_MODE;
+    }
+    return entry.unix_mode & 0777;
+}
+
+void push_u64(lua_State *L, std::uint64_t value)
+{
+    lua_pushinteger(L, static_cast<lua_Integer>(value));
+}
+
+void push_list_result(lua_State *L, const ArchiveScan &scan)
+{
+    lua_newtable(L);
+    lua_createtable(L, static_cast<int>(scan.entries.size()), 0);
+    for (std::size_t i = 0; i < scan.entries.size(); ++i)
+    {
+        const ArchiveEntry &entry = scan.entries[i];
+        lua_newtable(L);
+        lua_pushlstring(L, entry.name.data(), entry.name.size());
+        lua_setfield(L, -2, "name");
+        lua_pushlstring(L, entry.normalized.data(), entry.normalized.size());
+        lua_setfield(L, -2, "path");
+        const std::string type = entry_kind_name(entry.kind);
+        lua_pushlstring(L, type.data(), type.size());
+        lua_setfield(L, -2, "type");
+        push_u64(L, entry.size);
+        lua_setfield(L, -2, "size");
+        push_u64(L, entry.compressed_size);
+        lua_setfield(L, -2, "compressed_size");
+        lua_pushinteger(L, entry.crc32);
+        lua_setfield(L, -2, "crc32");
+        lua_pushinteger(L, entry.method);
+        lua_setfield(L, -2, "compression_method");
+        lua_pushboolean(L, entry.encrypted);
+        lua_setfield(L, -2, "encrypted");
+        lua_pushboolean(L, entry.supported);
+        lua_setfield(L, -2, "supported");
+        lua_pushboolean(L, entry.safe_path);
+        lua_setfield(L, -2, "safe_path");
+        const std::string rejection = extraction_rejection_reason(entry);
+        lua_pushboolean(L, rejection.empty());
+        lua_setfield(L, -2, "extractable");
+        if (rejection.empty())
+        {
+            lua_pushnil(L);
+        }
+        else
+        {
+            lua_pushlstring(L, rejection.data(), rejection.size());
+        }
+        lua_setfield(L, -2, "reason");
+        if (entry.unix_mode != 0)
+        {
+            lua_pushinteger(L, entry.unix_mode & 07777);
+        }
+        else
+        {
+            lua_pushnil(L);
+        }
+        lua_setfield(L, -2, "unix_mode");
+        lua_seti(L, -2, static_cast<lua_Integer>(i + 1));
+    }
+    lua_setfield(L, -2, "entries");
+    push_u64(L, scan.entries.size());
+    lua_setfield(L, -2, "count");
+    push_u64(L, scan.total_size);
+    lua_setfield(L, -2, "total_size");
+    push_u64(L, scan.archive_size);
+    lua_setfield(L, -2, "archive_size");
+    lua_pushboolean(L, scan.zip64);
+    lua_setfield(L, -2, "zip64");
+}
+
+int lua_archive_list(lua_State *L)
+{
+    const int top = lua_gettop(L);
+    if (top < 1 || top > 2)
+    {
+        return luaL_error(L, "archive.list expects 1 or 2 arguments");
+    }
+    const std::string archive_path =
+        luaL_checkstring_without_nul(L, 1, "archive path");
+
+    ArchiveOptions options;
+    std::string err;
+    if (!collect_options(L, 2, false, options, err))
+    {
+        return push_fail(L, err);
+    }
+
+    ArchiveReader reader;
+    if (!reader.open(archive_path, err))
+    {
+        return push_fail(L, err);
+    }
+    ArchiveScan scan;
+    if (!scan_archive(reader, options, scan, err))
+    {
+        return push_fail(L, err);
+    }
+
+    push_list_result(L, scan);
+    lua_pushnil(L);
+    return 2;
+}
+
+int lua_archive_extract(lua_State *L)
+{
+    const int top = lua_gettop(L);
+    if (top < 2 || top > 3)
+    {
+        return luaL_error(L, "archive.extract expects 2 or 3 arguments");
+    }
+    const std::string_view archive_path_view =
+        luaL_checkstring_view_without_nul(L, 1, "archive path");
+    const std::string_view destination_view =
+        luaL_checkstring_view_without_nul(L, 2, "destination");
+    if (destination_view.empty())
+    {
+        return push_fail(L, "archive: destination must not be empty");
+    }
+
+    const std::string archive_path(archive_path_view);
+    const std::string destination(destination_view);
+
+    ArchiveOptions options;
+    std::string err;
+    if (!collect_options(L, 3, true, options, err))
+    {
+        return push_fail(L, err);
+    }
+
+    ArchiveReader reader;
+    if (!reader.open(archive_path, err))
+    {
+        return push_fail(L, err);
+    }
+    ArchiveScan scan;
+    if (!scan_archive(reader, options, scan, err))
+    {
+        return push_fail(L, err);
+    }
+
+    std::vector<const ArchiveEntry *> selected;
+    selected.reserve(scan.entries.size());
+    for (const ArchiveEntry &entry : scan.entries)
+    {
+        selected.push_back(&entry);
+    }
+    if (!validate_selected_entries(selected, err))
+    {
+        return push_fail(L, err);
+    }
+
+    SecureArchiveDestination output;
+    if (!output.open_root(destination, err))
+    {
+        return push_fail(L, err);
+    }
+    for (const ArchiveEntry *entry : selected)
+    {
+        if (!output.preflight(fs::path(entry->normalized), entry->kind,
+                              options.overwrite, err))
+        {
+            return push_fail(L, err);
+        }
+    }
+
+    std::uint64_t files = 0;
+    std::uint64_t directories = 0;
+    std::uint64_t bytes = 0;
+    for (const ArchiveEntry *entry : selected)
+    {
+        if (entry->kind != EntryKind::directory)
+        {
+            continue;
+        }
+        if (!output.ensure_directory(
+                fs::path(entry->normalized),
+                directory_mode_for_entry(*entry, options), err))
+        {
+            return push_fail(L, err);
+        }
+        ++directories;
+    }
+    for (const ArchiveEntry *entry : selected)
+    {
+        if (entry->kind != EntryKind::regular)
+        {
+            continue;
+        }
+        if (!output.stage_file(reader.zip(), *entry,
+                               file_mode_for_entry(*entry, options), err))
+        {
+            return push_fail(L, err);
+        }
+        ++files;
+        bytes += entry->size;
+    }
+    if (!output.publish(options.overwrite, err) ||
+        !output.finalize_directory_modes(err))
+    {
+        return push_fail(L, err);
+    }
+    output.commit();
+
+    lua_newtable(L);
+    push_u64(L, files);
+    lua_setfield(L, -2, "files");
+    push_u64(L, directories);
+    lua_setfield(L, -2, "directories");
+    push_u64(L, bytes);
+    lua_setfield(L, -2, "bytes");
+    lua_pushlstring(L, destination.data(), destination.size());
+    lua_setfield(L, -2, "path");
+    lua_pushnil(L);
+    return 2;
+}
+
+int lua_archive_extract_file(lua_State *L)
+{
+    const int top = lua_gettop(L);
+    if (top < 3 || top > 4)
+    {
+        return luaL_error(L, "archive.extractFile expects 3 or 4 arguments");
+    }
+    const std::string_view archive_path_view =
+        luaL_checkstring_view_without_nul(L, 1, "archive path");
+    const std::string_view requested_view =
+        luaL_checkstring_view_without_nul(L, 2, "archive entry");
+    const std::string_view destination_view =
+        luaL_checkstring_view_without_nul(L, 3, "destination");
+
+    const std::string archive_path(archive_path_view);
+    const std::string requested(requested_view);
+    const std::string destination(destination_view);
+
+    ArchiveOptions options;
+    std::string err;
+    if (!collect_options(L, 4, true, options, err))
+    {
+        return push_fail(L, err);
+    }
+
+    ArchiveReader reader;
+    if (!reader.open(archive_path, err))
+    {
+        return push_fail(L, err);
+    }
+    ArchiveScan scan;
+    if (!scan_archive(reader, options, scan, err))
+    {
+        return push_fail(L, err);
+    }
+
+    const ArchiveEntry *selected = nullptr;
+    for (const ArchiveEntry &entry : scan.entries)
+    {
+        if (entry.name == requested)
+        {
+            if (selected != nullptr)
+            {
+                return push_fail(L, "archive: requested entry is ambiguous because it appears more than once");
+            }
+            selected = &entry;
+        }
+    }
+    if (selected == nullptr)
+    {
+        return push_fail(L, "archive: entry not found: '" + requested + "'");
+    }
+    std::vector<const ArchiveEntry *> selected_entries = {selected};
+    if (!validate_selected_entries(selected_entries, err))
+    {
+        return push_fail(L, err);
+    }
+    if (selected->kind != EntryKind::regular)
+    {
+        return push_fail(L, "archive: extractFile only accepts a regular file entry");
+    }
+
+    const fs::path destination_path(destination);
+    const fs::path leaf = destination_path.filename();
+    if (destination_path.empty() || leaf.empty() || leaf == "." ||
+        leaf == "..")
+    {
+        return push_fail(L, "archive: destination must name a regular file");
+    }
+    fs::path parent = destination_path.parent_path();
+    if (parent.empty())
+    {
+        parent = ".";
+    }
+
+    ArchiveEntry mapped = *selected;
+    mapped.normalized = leaf.string();
+    SecureArchiveDestination output;
+    if (!output.open_root(parent, err) ||
+        !output.preflight(leaf, EntryKind::regular, options.overwrite, err) ||
+        !output.stage_file(reader.zip(), mapped,
+                           file_mode_for_entry(*selected, options), err) ||
+        !output.publish(options.overwrite, err) ||
+        !output.finalize_directory_modes(err))
+    {
+        return push_fail(L, err);
+    }
+    output.commit();
+
+    lua_newtable(L);
+    push_u64(L, selected->size);
+    lua_setfield(L, -2, "bytes");
+    lua_pushlstring(L, destination.data(), destination.size());
+    lua_setfield(L, -2, "path");
+    lua_pushlstring(L, selected->name.data(), selected->name.size());
+    lua_setfield(L, -2, "entry");
+    lua_pushnil(L);
+    return 2;
+}
+
+} // namespace
+
+void register_archive(lua_State *L)
+{
+    lua_newtable(L);
+
+    lua_pushcfunction(L, lua_archive_create);
+    lua_setfield(L, -2, "create");
+
+    lua_pushcfunction(L, lua_archive_list);
+    lua_setfield(L, -2, "list");
+
+    lua_pushcfunction(L, lua_archive_extract);
+    lua_setfield(L, -2, "extract");
+
+    lua_pushcfunction(L, lua_archive_extract_file);
+    lua_setfield(L, -2, "extractFile");
+
+    lua_setfield(L, -2, "archive");
+}

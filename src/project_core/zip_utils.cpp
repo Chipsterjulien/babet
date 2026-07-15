@@ -5,13 +5,13 @@
 #include <fstream>
 #include <filesystem>
 #include <system_error>
+#include <stdexcept>
 #include <cerrno>
 #include <exception>
 #include <array>
 #include <vector>
 #include <cstring>
 #include <cstdlib>
-#include <utility>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -49,26 +49,28 @@ namespace
         int fd_;
     };
 
-    class TempPathGuard
+    class TempEntryGuard
     {
     public:
-        explicit TempPathGuard(std::string path)
-            : path_(std::move(path)) {}
+        TempEntryGuard(int directory_fd, const char *name) noexcept
+            : directory_fd_(directory_fd), name_(name) {}
 
-        ~TempPathGuard()
+        ~TempEntryGuard()
         {
-            if (!active_)
+            if (active_)
             {
-                return;
+                (void)::unlinkat(directory_fd_, name_, 0);
             }
-            std::error_code ignored;
-            fs::remove(path_, ignored);
         }
 
-        void release() { active_ = false; }
+        TempEntryGuard(const TempEntryGuard &) = delete;
+        TempEntryGuard &operator=(const TempEntryGuard &) = delete;
+
+        void release() noexcept { active_ = false; }
 
     private:
-        std::string path_;
+        int directory_fd_;
+        const char *name_;
         bool active_ = true;
     };
 
@@ -309,19 +311,17 @@ void mergeFiles(const std::string &exe, const std::string &zip,
 {
     // Les deux entrées sont ouvertes avant toute création temporaire. Une
     // erreur de lecture ne touche donc jamais l'ancien output.
-    UniqueFd exe_fd(::open(exe.c_str(), O_RDONLY));
+    UniqueFd exe_fd(::open(exe.c_str(), O_RDONLY | O_CLOEXEC));
     if (exe_fd.get() < 0)
     {
         throw_errno("open " + exe, errno);
     }
-    set_cloexec(exe_fd.get(), exe);
 
-    UniqueFd zip_fd(::open(zip.c_str(), O_RDONLY));
+    UniqueFd zip_fd(::open(zip.c_str(), O_RDONLY | O_CLOEXEC));
     if (zip_fd.get() < 0)
     {
         throw_errno("open " + zip, errno);
     }
-    set_cloexec(zip_fd.get(), zip);
 
     fs::path output_path(output);
     fs::path parent = output_path.parent_path();
@@ -330,32 +330,77 @@ void mergeFiles(const std::string &exe, const std::string &zip,
         parent = ".";
     }
 
-    // Temporaire dans le MÊME dossier que la sortie : rename(2) pourra
-    // remplacer l'ancien binaire atomiquement, sans risque EXDEV.
-    std::string base_name = output_path.filename().string();
-    if (base_name.empty())
+    const std::string base_name = output_path.filename().string();
+    if (base_name.empty() || base_name == "." || base_name == "..")
     {
-        base_name = "output";
+        throw std::invalid_argument(
+            "output path must name a regular directory entry");
     }
-    std::string temp_template =
-        (parent / (".babet-" + base_name + ".XXXXXX")).string();
+
+    // Épingler le parent une seule fois empêche un remplacement concurrent
+    // d'un composant symlinké de rediriger la publication vers un autre
+    // répertoire. O_PATH n'exige pas le droit de lecture du dossier : seuls
+    // les droits de parcours et d'écriture nécessaires à mkstemp/renameat
+    // restent applicables.
+    UniqueFd parent_fd(
+        ::open(parent.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC));
+    if (parent_fd.get() < 0)
+    {
+        throw_errno("open output directory " + parent.string(), errno);
+    }
+
+    // Défense en profondeur pour le contrat « ne jamais écraser le binaire
+    // Babet en cours ». Le contrôle historique effectué par l'appelant reste
+    // utile pour un diagnostic précoce, mais celui-ci est réalisé sur le
+    // parent désormais épinglé et ne peut donc pas être contourné en changeant
+    // un symlink dans le chemin du dossier.
+    struct stat executable_stat{};
+    if (::fstat(exe_fd.get(), &executable_stat) != 0)
+    {
+        throw_errno("fstat " + exe, errno);
+    }
+
+    struct stat output_stat{};
+    if (::fstatat(parent_fd.get(), base_name.c_str(), &output_stat, 0) == 0)
+    {
+        if (output_stat.st_dev == executable_stat.st_dev &&
+            output_stat.st_ino == executable_stat.st_ino)
+        {
+            throw std::runtime_error(
+                "output must not overwrite the running Babet executable");
+        }
+    }
+    else if (errno != ENOENT)
+    {
+        throw_errno("inspect output " + output, errno);
+    }
+
+    // Le nom interne est volontairement court et indépendant du basename de
+    // sortie. Une destination valide proche de NAME_MAX ne doit pas échouer
+    // uniquement parce que le temporaire ajoutait un préfixe et un suffixe.
+    // /proc/self/fd/<n> maintient mkstemp dans le parent déjà épinglé.
+    const std::string parent_proc =
+        "/proc/self/fd/" + std::to_string(parent_fd.get());
+    std::string temp_template = parent_proc + "/.babet-output-XXXXXX";
     std::vector<char> temp_buffer(temp_template.begin(),
                                   temp_template.end());
     temp_buffer.push_back('\0');
 
-    int raw_temp_fd = ::mkstemp(temp_buffer.data());
+    const int raw_temp_fd = ::mkstemp(temp_buffer.data());
     if (raw_temp_fd < 0)
     {
         throw_errno("create temporary output in " + parent.string(), errno);
     }
 
-    std::string temp_path(temp_buffer.data());
-    TempPathGuard temp_guard(temp_path);
     UniqueFd temp_fd(raw_temp_fd);
-    set_cloexec(temp_fd.get(), temp_path);
+    const char *temp_name = std::strrchr(temp_buffer.data(), '/');
+    temp_name = temp_name ? temp_name + 1 : temp_buffer.data();
+    TempEntryGuard temp_guard(parent_fd.get(), temp_name);
+    const std::string temp_display(temp_name);
+    set_cloexec(temp_fd.get(), temp_display);
 
-    copy_fd_contents(exe_fd.get(), temp_fd.get(), exe, temp_path);
-    copy_fd_contents(zip_fd.get(), temp_fd.get(), zip, temp_path);
+    copy_fd_contents(exe_fd.get(), temp_fd.get(), exe, temp_display);
+    copy_fd_contents(zip_fd.get(), temp_fd.get(), zip, temp_display);
 
     // Le mode final est posé AVANT le rename, mais seulement après que le
     // contenu complet a été écrit. Un temporaire partiel reste ainsi privé
@@ -363,26 +408,27 @@ void mergeFiles(const std::string &exe, const std::string &zip,
     // intact.
     if (::fchmod(temp_fd.get(), 0755) != 0)
     {
-        throw_errno("chmod " + temp_path, errno);
+        throw_errno("chmod " + temp_display, errno);
     }
 
     // Garantit que les écritures du fichier temporaire ont été remises au
     // noyau avant publication. Si fsync échoue, l'ancien output reste intact.
     if (::fsync(temp_fd.get()) != 0)
     {
-        throw_errno("fsync " + temp_path, errno);
+        throw_errno("fsync " + temp_display, errno);
     }
 
     // Fermer avant rename simplifie aussi les diagnostics sur certains FS.
-    int fd_to_close = temp_fd.release();
+    const int fd_to_close = temp_fd.release();
     if (::close(fd_to_close) != 0)
     {
-        throw_errno("close " + temp_path, errno);
+        throw_errno("close " + temp_display, errno);
     }
 
-    if (::rename(temp_path.c_str(), output.c_str()) != 0)
+    if (::renameat(parent_fd.get(), temp_name,
+                   parent_fd.get(), base_name.c_str()) != 0)
     {
-        throw_errno("rename " + temp_path + " to " + output, errno);
+        throw_errno("rename temporary output to " + output, errno);
     }
 
     temp_guard.release();

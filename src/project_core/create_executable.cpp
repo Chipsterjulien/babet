@@ -9,6 +9,7 @@
 #include <cstdlib> // mkstemp
 #include <cstring> // strerror
 #include <cerrno>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -16,38 +17,28 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    // Garde RAII : supprime le fichier temporaire sur TOUS les chemins
-    // de sortie (succès, exception, return d'erreur précoce). Évite la
-    // classe de bug "oubli d'unlink sur un chemin d'erreur" — un échec
-    // de createZipFromDirectory laissait sinon traîner le fichier que
-    // mkstemp vient de créer. Non-copiable (même discipline que les
-    // autres RAII du projet, ex. EVP_MD_CTX_RAII).
-    //
-    // Un échec du unlink n'invalide pas un binaire correctement produit
-    // (cohérent avec le comportement historique : warning, pas d'échec).
-    class TempFileGuard
+class ScopedFd
+{
+  public:
+    explicit ScopedFd(int fd = -1) noexcept : fd_(fd) {}
+
+    ~ScopedFd()
     {
-    public:
-        explicit TempFileGuard(std::string path) : path_(std::move(path)) {}
-
-        ~TempFileGuard()
+        if (fd_ >= 0)
         {
-            std::error_code ec;
-            fs::remove(path_, ec);
-            if (ec)
-            {
-                std::cerr << "Warning: failed to remove temporary file '"
-                          << path_ << "' - " << ec.message() << std::endl;
-            }
+            ::close(fd_);
         }
+    }
 
-        TempFileGuard(const TempFileGuard &) = delete;
-        TempFileGuard &operator=(const TempFileGuard &) = delete;
+    ScopedFd(const ScopedFd &) = delete;
+    ScopedFd &operator=(const ScopedFd &) = delete;
 
-    private:
-        std::string path_;
-    };
-}
+    int get() const noexcept { return fd_; }
+
+  private:
+    int fd_;
+};
+} // namespace
 
 bool createExecutableWithDir(const std::string &dir, const std::string &output)
 {
@@ -83,45 +74,49 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
         return false;
     }
 
-    // Création ATOMIQUE du temporaire via mkstemp : nom imprévisible +
-    // O_EXCL + permissions 0600. Ferme le trou du nom prévisible
-    // ("babet_<pid>.zip"), qui sur une machine partagée permettait à
-    // un attaquant de pré-créer le fichier / d'y poser un symlink.
+    // Création atomique du temporaire via mkstemp : O_EXCL et permissions
+    // 0600. Le nom n'est utilisé que le temps de créer l'inode. Il est ensuite
+    // supprimé immédiatement de l'arborescence ; le fichier reste vivant grâce
+    // au descripteur ouvert et sera détruit automatiquement à sa fermeture.
     //
-    // fs::temp_directory_path() respecte déjà $TMPDIR puis /tmp : on
-    // garde cette base, mkstemp ne consulte pas TMPDIR de lui-même.
-    //
-    // Pas d'extension .zip : mkstemp exige un template finissant par
-    // XXXXXX (sinon il faudrait mkstemps, moins portable). Le fichier
-    // n'est qu'un intermédiaire concaténé dans le binaire final, son
-    // nom n'a aucun impact fonctionnel.
-    //
-    // TOCTOU résiduelle assumée : createZipFromDirectory/mergeFiles
-    // réouvrent par CHEMIN, il reste donc une micro-fenêtre entre
-    // mkstemp et la réouverture. Bénigne : fichier créé par nous, 0600,
-    // nom aléatoire (ni pré-créable via O_EXCL, ni devinable). La
-    // fermer totalement imposerait que zip_utils accepte un fd
-    // (refonte séparée, hors périmètre de ce durcissement).
+    // createZipFromDirectory() et mergeFiles() attendent encore un chemin.
+    // /proc/self/fd/<n> est un magic link Linux vers le descripteur déjà ouvert :
+    // leurs réouvertures restent donc attachées au même inode anonyme. Il ne
+    // subsiste plus de fenêtre permettant de remplacer le temporaire par un
+    // symlink ou un autre fichier entre mkstemp, miniz et la fusion finale.
     std::string tmpl = (tempDir / "babet_XXXXXX").string();
     std::vector<char> tmplBuf(tmpl.begin(), tmpl.end());
     tmplBuf.push_back('\0');
 
-    int fd = ::mkstemp(tmplBuf.data());
-    if (fd < 0)
+    const int raw_temp_fd = ::mkstemp(tmplBuf.data());
+    if (raw_temp_fd < 0)
     {
         std::cerr << "Error: cannot create temporary file - "
                   << std::strerror(errno) << std::endl;
         return false;
     }
-    // createZipFromDirectory rouvrira le fichier par son chemin : on n'a
-    // pas besoin du fd, on le ferme (le fichier reste sur disque).
-    ::close(fd);
+    ScopedFd temp_zip_fd(raw_temp_fd);
 
-    std::string zipFileName(tmplBuf.data());
+    const int fd_flags = ::fcntl(temp_zip_fd.get(), F_GETFD);
+    if (fd_flags < 0 ||
+        ::fcntl(temp_zip_fd.get(), F_SETFD, fd_flags | FD_CLOEXEC) < 0)
+    {
+        const int saved_errno = errno;
+        (void)::unlink(tmplBuf.data());
+        std::cerr << "Error: cannot protect temporary file descriptor - "
+                  << std::strerror(saved_errno) << std::endl;
+        return false;
+    }
 
-    // À partir d'ici le fichier existe : le garde en assure la
-    // suppression quel que soit le chemin de sortie.
-    TempFileGuard tempZipGuard(zipFileName);
+    if (::unlink(tmplBuf.data()) != 0)
+    {
+        std::cerr << "Error: cannot unlink temporary file - "
+                  << std::strerror(errno) << std::endl;
+        return false;
+    }
+
+    const std::string zipFileName =
+        "/proc/self/fd/" + std::to_string(temp_zip_fd.get());
 
     // CORRECTIF (revue ChatGPT post-v2.2.0, vérifié) : chemin absolu
     // de l'output transmis au zippage pour exclusion — un output de
@@ -142,8 +137,7 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
     // getExecutablePath() et mergeFiles() peuvent tous deux lever une
     // exception (lecture de /proc/self/exe, erreurs d'I/O). On les
     // englobe dans un seul try et on attrape std::exception largement.
-    // Le nettoyage du temporaire est assuré par tempZipGuard, pas besoin
-    // de fs::remove explicite ici.
+    // Le ZIP temporaire est anonyme et sera détruit par ScopedFd.
     try
     {
         std::string exe = getExecutablePath();

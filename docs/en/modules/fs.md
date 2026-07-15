@@ -436,7 +436,14 @@ assert(babet.touch("cache/images/index.dat"))
 ```
 
 For an existing path, the function updates its timestamp; like the Unix
-`touch` command, it can therefore also touch a directory.
+`touch` command, it can therefore also touch a directory. A valid final
+symlink is followed to its target.
+
+`touch` never opens an existing path with a truncating mode. The parent and
+existing target are pinned before the operation, so a file that appears during
+a concurrent create race is reused without losing its contents. A dangling
+final symlink is refused: Babet does not create the missing target through a
+mutable symlink path.
 
 <a id="mkdir"></a>
 ### `babet.mkdir(path)`
@@ -801,6 +808,12 @@ traversed.
 An invalid regex or traversal error fails the entire call with `(nil, err)`.
 There is no “continue after errors” mode for `find`.
 
+The regex engine is `std::regex` in ECMAScript mode. It may use exponential
+backtracking for some patterns, such as nested ambiguous repetitions. Do not
+pass an untrusted, user-supplied regex directly to `name`, `iname`, or `path`;
+a hostile pattern can keep the calling thread or worker busy for a very long
+time. This warning concerns the regex itself, not ordinary filenames.
+
 <a id="fs-copy-move"></a>
 ## Copy and move
 
@@ -1050,12 +1063,18 @@ Validation before mutation:
 - UID and GID must be non-negative integers in the `uid_t` and `gid_t` range;
 - mode must be between `0` and `07777`.
 
-POSIX provides no atomic operation combining `chown` and `chmod`. If `chmod`
-fails after a successful `chown`, Babet attempts to restore the original
-owner, group, and mode. An incomplete rollback is reported in the error.
+POSIX provides no atomic operation combining `chown` and `chmod`. Babet
+resolves the path once, pins that target, and performs the initial metadata
+read, `chown`, optional `chmod`, and any rollback on the same inode. Replacing
+the pathname during the call therefore cannot redirect the later phase to a
+new target. If `chmod` fails after a successful `chown`, Babet attempts to
+restore the original owner, group, and mode; an incomplete rollback is reported
+in the error.
 
-The call follows symlinks. Required privileges depend on the system and
-process identity; changing owner normally requires root privileges.
+The call follows a final symlink, but the target selected when the operation
+starts remains pinned even if the link is changed concurrently. Required
+privileges depend on the system and process identity; changing owner normally
+requires root privileges.
 
 <a id="symlinkattr"></a>
 ### `babet.symlinkAttr(path, uid, gid)` and `babet.symlinkattr(...)`

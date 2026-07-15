@@ -204,13 +204,13 @@ OPENSSL_URLS=(
     "https://web.archive.org/web/2025id_/${OPENSSL_URL}"
 )
 #
-MINIZ_VERSION="3.1.1"
+MINIZ_VERSION="3.1.2"
 MINIZ_DIR="miniz-${MINIZ_VERSION}"
 MINIZ_ZIP="${MINIZ_DIR}.zip"
 MINIZ_URL="https://github.com/richgel999/miniz/releases/download/${MINIZ_VERSION}/${MINIZ_ZIP}"
 # Calcule :
-#   wget -qO- https://github.com/richgel999/miniz/releases/download/3.1.1/miniz-3.1.1.zip | sha256sum
-MINIZ_SHA256="cb28402bb2af93bdc331b60d16807e89727d1712a2d0a7ba0cac79a3e406fe40"
+#   wget -qO- https://github.com/richgel999/miniz/releases/download/3.1.2/miniz-3.1.2.zip | sha256sum
+MINIZ_SHA256="f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a"
 MINIZ_BUILD_DIR="${BUILD_DIR}/miniz"
 MINIZ_INSTALL_DIR="${MINIZ_BUILD_DIR}/${MINIZ_DIR}"
 MINIZ_C="${MINIZ_INSTALL_DIR}/miniz.c"

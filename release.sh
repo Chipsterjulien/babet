@@ -9,7 +9,7 @@
 #   3. strip du binaire
 #   4. sha256 du binaire strippé
 #   5. tarball babet-<version>-linux-<arch>.tar.gz
-#      (contient : babet, README.md, README_fr.md, LICENSE, notes.md)
+#      (contient : babet, README, changelogs, LICENSE et notes.md)
 #   6. sha256 du tarball
 #
 # Sortie : tout dans le répertoire dist/ à la racine du projet.
@@ -89,6 +89,11 @@ if [[ -z "${VERSION}" ]]; then
     fi
 fi
 
+if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERREUR: version invalide '${VERSION}' (format attendu: X.Y.Z)" >&2
+    exit 1
+fi
+
 echo "=========================================="
 echo "  Babet release builder"
 echo "  Version : ${VERSION}"
@@ -121,6 +126,16 @@ fi
 if [[ ! -f "${BUILT_BINARY}" ]]; then
     echo "ERREUR: binaire introuvable à ${BUILT_BINARY}" >&2
     echo "  Lance avec --build pour rebuild, ou exécute build_local.sh d'abord." >&2
+    exit 1
+fi
+
+EXPECTED_VERSION_OUTPUT="${PROJECT_NAME} ${VERSION}"
+ACTUAL_VERSION_OUTPUT="$("${BUILT_BINARY}" --version 2>/dev/null || true)"
+if [[ "${ACTUAL_VERSION_OUTPUT}" != "${EXPECTED_VERSION_OUTPUT}" ]]; then
+    echo "ERREUR: le binaire ne correspond pas à la version de release." >&2
+    echo "  attendu : ${EXPECTED_VERSION_OUTPUT}" >&2
+    echo "  obtenu  : ${ACTUAL_VERSION_OUTPUT:-<aucune sortie>}" >&2
+    echo "  Recompile avec ./release.sh --build --version ${VERSION}." >&2
     exit 1
 fi
 
@@ -165,6 +180,8 @@ TARBALL_FILE="${DIST_DIR}/${TARBALL_BASENAME}.tar.gz"
 INCLUDE_FILES=("${PROJECT_NAME}")
 [[ -f "${SCRIPT_DIR}/README.md" ]]    && INCLUDE_FILES+=("README.md")    || echo "      WARN: README.md absent" >&2
 [[ -f "${SCRIPT_DIR}/README_fr.md" ]] && INCLUDE_FILES+=("README_fr.md")
+[[ -f "${SCRIPT_DIR}/CHANGELOG.md" ]] && INCLUDE_FILES+=("CHANGELOG.md")
+[[ -f "${SCRIPT_DIR}/CHANGELOG.fr.md" ]] && INCLUDE_FILES+=("CHANGELOG.fr.md")
 [[ -f "${SCRIPT_DIR}/LICENSE" ]]      && INCLUDE_FILES+=("LICENSE")      || { echo "ERREUR: LICENSE introuvable à la racine" >&2 ; exit 1; }
 [[ -f "${SCRIPT_DIR}/notes.md" ]]     && INCLUDE_FILES+=("notes.md")
 

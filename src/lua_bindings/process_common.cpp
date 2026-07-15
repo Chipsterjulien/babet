@@ -5,6 +5,8 @@
 #include "process_common.hpp"
 #include "lua_utils.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <climits>
 #include <csignal>
@@ -25,10 +27,44 @@ namespace babet_process
 namespace
 {
 
+int move_fd_above_standard_streams(int &fd)
+{
+    if (fd > STDERR_FILENO)
+    {
+        return 0;
+    }
+#ifdef F_DUPFD_CLOEXEC
+    const int replacement = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+#else
+    const int replacement = ::fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
+#endif
+    if (replacement < 0)
+    {
+        return -1;
+    }
+#ifndef F_DUPFD_CLOEXEC
+    const int flags = ::fcntl(replacement, F_GETFD);
+    if (flags < 0 ||
+        ::fcntl(replacement, F_SETFD, flags | FD_CLOEXEC) < 0)
+    {
+        const int saved = errno;
+        ::close(replacement);
+        errno = saved;
+        return -1;
+    }
+#endif
+    ::close(fd);
+    fd = replacement;
+    return 0;
+}
+
 int make_pipe(int p[2])
 {
 #ifdef O_CLOEXEC
-    return ::pipe2(p, O_CLOEXEC);
+    if (::pipe2(p, O_CLOEXEC) != 0)
+    {
+        return -1;
+    }
 #else
     if (::pipe(p) != 0)
     {
@@ -46,8 +82,20 @@ int make_pipe(int p[2])
         errno = saved;
         return -1;
     }
-    return 0;
 #endif
+
+    if (move_fd_above_standard_streams(p[0]) != 0 ||
+        move_fd_above_standard_streams(p[1]) != 0)
+    {
+        const int saved = errno;
+        ::close(p[0]);
+        ::close(p[1]);
+        p[0] = -1;
+        p[1] = -1;
+        errno = saved;
+        return -1;
+    }
+    return 0;
 }
 
 void close_pair(int p[2])
@@ -74,6 +122,69 @@ std::string prefixed(const char *prefix, const std::string &message)
     }
     result += message;
     return result;
+}
+
+
+[[noreturn]] void report_launch_failure_and_exit(int fd,
+                                                  int error_number) noexcept
+{
+    const auto *data = reinterpret_cast<const unsigned char *>(&error_number);
+    size_t offset = 0;
+    while (offset < sizeof(error_number))
+    {
+        const ssize_t written =
+            ::write(fd, data + offset, sizeof(error_number) - offset);
+        if (written > 0)
+        {
+            offset += static_cast<size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        break;
+    }
+    _exit(127);
+}
+
+void build_environment(
+    const std::vector<std::pair<std::string, std::string>> &overrides,
+    std::vector<std::string> &strings,
+    std::vector<char *> &envp)
+{
+    std::unordered_set<std::string> override_keys;
+    for (const auto &kv : overrides)
+    {
+        override_keys.insert(kv.first);
+    }
+
+    if (environ != nullptr)
+    {
+        for (char **e = environ; *e != nullptr; ++e)
+        {
+            std::string entry(*e);
+            const auto eq = entry.find('=');
+            if (eq != std::string::npos &&
+                override_keys.count(entry.substr(0, eq)) > 0)
+            {
+                continue;
+            }
+            strings.push_back(std::move(entry));
+        }
+    }
+
+    for (const auto &kv : overrides)
+    {
+        strings.push_back(kv.first + "=" + kv.second);
+    }
+
+    envp.reserve(strings.size() + 1);
+    for (std::string &entry : strings)
+    {
+        envp.push_back(entry.data());
+    }
+    envp.push_back(nullptr);
 }
 
 } // namespace
@@ -397,42 +508,9 @@ LaunchResult launch(const LaunchSpec &spec)
     }
     argv.push_back(nullptr);
 
-    std::unordered_set<std::string> override_keys;
-    for (const auto &kv : spec.env_overrides)
-    {
-        override_keys.insert(kv.first);
-    }
-
     std::vector<std::string> env_strings;
-    if (environ != nullptr)
-    {
-        for (char **e = environ; *e != nullptr; ++e)
-        {
-            std::string entry(*e);
-            const auto eq = entry.find('=');
-            if (eq != std::string::npos &&
-                override_keys.count(entry.substr(0, eq)) > 0)
-            {
-                continue;
-            }
-            env_strings.push_back(std::move(entry));
-        }
-    }
-    for (const auto &kv : spec.env_overrides)
-    {
-        std::string entry = kv.first;
-        entry.push_back('=');
-        entry.append(kv.second);
-        env_strings.push_back(std::move(entry));
-    }
-
     std::vector<char *> envp;
-    envp.reserve(env_strings.size() + 1);
-    for (std::string &entry : env_strings)
-    {
-        envp.push_back(entry.data());
-    }
-    envp.push_back(nullptr);
+    build_environment(spec.env_overrides, env_strings, envp);
 
     int pipe_in[2] = {-1, -1};
     int pipe_out[2] = {-1, -1};
@@ -485,10 +563,7 @@ LaunchResult launch(const LaunchSpec &spec)
             ::dup2(pipe_out[1], STDOUT_FILENO) < 0 ||
             ::dup2(pipe_err[1], STDERR_FILENO) < 0)
         {
-            const int e = errno;
-            const ssize_t ignored = ::write(pipe_exec[1], &e, sizeof(e));
-            (void)ignored;
-            _exit(127);
+            report_launch_failure_and_exit(pipe_exec[1], errno);
         }
 
         close_pair(pipe_in);
@@ -498,10 +573,7 @@ LaunchResult launch(const LaunchSpec &spec)
 
         if (spec.has_cwd && ::chdir(spec.cwd.c_str()) != 0)
         {
-            const int e = errno;
-            const ssize_t ignored = ::write(pipe_exec[1], &e, sizeof(e));
-            (void)ignored;
-            _exit(127);
+            report_launch_failure_and_exit(pipe_exec[1], errno);
         }
 
 #ifdef __GLIBC__
@@ -511,10 +583,7 @@ LaunchResult launch(const LaunchSpec &spec)
         ::execvp(spec.command.c_str(), argv.data());
 #endif
 
-        const int e = errno;
-        const ssize_t ignored = ::write(pipe_exec[1], &e, sizeof(e));
-        (void)ignored;
-        _exit(127);
+        report_launch_failure_and_exit(pipe_exec[1], errno);
     }
 
     ::setpgid(pid, pid);
@@ -655,6 +724,438 @@ LaunchResult launch(const LaunchSpec &spec)
 
     result.success = true;
     result.process = process;
+    return result;
+}
+
+
+void close_pipeline_fds(LaunchedPipeline &pipeline)
+{
+    close_fd(pipeline.stdin_fd);
+    close_fd(pipeline.stdout_fd);
+    for (auto &child : pipeline.children)
+    {
+        close_fd(child.stderr_fd);
+    }
+}
+
+PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
+{
+    PipelineLaunchResult result;
+    const size_t count = spec.stages.size();
+    if (count < 2)
+    {
+        result.error = prefixed(spec.error_prefix,
+                                "at least two stages are required");
+        return result;
+    }
+
+    struct PreparedStage
+    {
+        std::vector<char *> argv;
+        std::vector<std::string> env_strings;
+        std::vector<char *> envp;
+    };
+
+    // Toutes les allocations sont faites avant le premier fork().
+    std::vector<PreparedStage> prepared(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const PipelineStageSpec &stage = spec.stages[i];
+        if (stage.command.empty() || stage.argv_strings.empty())
+        {
+            result.error = prefixed(
+                spec.error_prefix,
+                "stage " + std::to_string(i + 1) +
+                    " has an empty command or argv");
+            return result;
+        }
+        prepared[i].argv.reserve(stage.argv_strings.size() + 1);
+        for (const std::string &arg : stage.argv_strings)
+        {
+            prepared[i].argv.push_back(const_cast<char *>(arg.c_str()));
+        }
+        prepared[i].argv.push_back(nullptr);
+        build_environment(stage.env_overrides,
+                          prepared[i].env_strings,
+                          prepared[i].envp);
+    }
+
+    auto make_pipe_vector = [](size_t n) {
+        std::vector<std::array<int, 2>> pipes(n);
+        for (auto &pipe : pipes)
+        {
+            pipe[0] = -1;
+            pipe[1] = -1;
+        }
+        return pipes;
+    };
+
+    int input[2] = {-1, -1};
+    int output[2] = {-1, -1};
+    auto links = make_pipe_vector(count - 1);
+    auto stderrs = make_pipe_vector(count);
+    auto launch_pipes = make_pipe_vector(count);
+
+    auto close_all_raw_pipes = [&]() {
+        close_pair(input);
+        close_pair(output);
+        for (auto &pipe : links)
+        {
+            close_pair(pipe.data());
+        }
+        for (auto &pipe : stderrs)
+        {
+            close_pair(pipe.data());
+        }
+        for (auto &pipe : launch_pipes)
+        {
+            close_pair(pipe.data());
+        }
+    };
+
+    auto create_pipe = [&](int pipe[2], const char *kind) -> bool {
+        if (make_pipe(pipe) == 0)
+        {
+            return true;
+        }
+        result.error = prefixed(
+            spec.error_prefix,
+            std::string("cannot create ") + kind + " pipe: " +
+                std::strerror(errno));
+        return false;
+    };
+
+    if (!create_pipe(input, "stdin") || !create_pipe(output, "stdout"))
+    {
+        close_all_raw_pipes();
+        return result;
+    }
+    for (auto &pipe : links)
+    {
+        if (!create_pipe(pipe.data(), "pipeline"))
+        {
+            close_all_raw_pipes();
+            return result;
+        }
+    }
+    for (auto &pipe : stderrs)
+    {
+        if (!create_pipe(pipe.data(), "stderr"))
+        {
+            close_all_raw_pipes();
+            return result;
+        }
+    }
+    for (auto &pipe : launch_pipes)
+    {
+        if (!create_pipe(pipe.data(), "launch"))
+        {
+            close_all_raw_pipes();
+            return result;
+        }
+    }
+
+    LaunchedPipeline launched;
+    launched.children.reserve(count);
+
+    auto terminate_and_reap_all = [&](long long term_ms,
+                                      long long kill_ms) -> bool {
+        for (const auto &child : launched.children)
+        {
+            kill_group(child.pid, SIGTERM);
+        }
+
+        // Ne pas récupérer les leaders pendant la période de grâce : leur PID
+        // continue d’ancrer le groupe et empêche qu’un SIGKILL ultérieur vise
+        // un identifiant recyclé. Cela garantit aussi la suppression d’un
+        // descendant qui ignorerait SIGTERM après la sortie du leader direct.
+        const long long term_deadline = now_ms() + term_ms;
+        while (now_ms() < term_deadline)
+        {
+            const long long remaining = term_deadline - now_ms();
+            struct timespec pause{
+                static_cast<time_t>(remaining / 1000),
+                static_cast<long>((remaining % 1000) * 1000000LL)};
+            while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
+            {
+            }
+        }
+
+        for (const auto &child : launched.children)
+        {
+            kill_group(child.pid, SIGKILL);
+        }
+
+        std::vector<unsigned char> reaped(launched.children.size(), 0);
+        size_t remaining = launched.children.size();
+        const long long kill_deadline = now_ms() + kill_ms;
+        while (remaining > 0)
+        {
+            for (size_t i = 0; i < launched.children.size(); ++i)
+            {
+                if (reaped[i])
+                {
+                    continue;
+                }
+                int status = 0;
+                const pid_t r = ::waitpid(launched.children[i].pid,
+                                          &status, WNOHANG);
+                if (r == launched.children[i].pid ||
+                    (r < 0 && errno == ECHILD))
+                {
+                    reaped[i] = 1;
+                    --remaining;
+                }
+                else if (r < 0 && errno != EINTR)
+                {
+                    reaped[i] = 1;
+                    --remaining;
+                }
+            }
+            if (remaining == 0 || now_ms() >= kill_deadline)
+            {
+                break;
+            }
+            struct timespec pause{0, 10 * 1000 * 1000};
+            while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
+            {
+            }
+        }
+        return remaining == 0;
+    };
+
+    for (size_t i = 0; i < count; ++i)
+    {
+        const pid_t pid = ::fork();
+        if (pid < 0)
+        {
+            result.error = prefixed(
+                spec.error_prefix,
+                "fork() failed for stage " + std::to_string(i + 1) +
+                    ": " + std::strerror(errno));
+            close_all_raw_pipes();
+            close_pipeline_fds(launched);
+            if (!terminate_and_reap_all(500, 2000))
+            {
+                result.error +=
+                    " (some children could not be reaped during cleanup)";
+            }
+            return result;
+        }
+
+        if (pid == 0)
+        {
+            ::setpgid(0, 0);
+            const int in_fd = i == 0 ? input[0] : links[i - 1][0];
+            const int out_fd = i + 1 == count ? output[1] : links[i][1];
+
+            if (::dup2(in_fd, STDIN_FILENO) < 0 ||
+                ::dup2(out_fd, STDOUT_FILENO) < 0 ||
+                ::dup2(stderrs[i][1], STDERR_FILENO) < 0)
+            {
+                report_launch_failure_and_exit(launch_pipes[i][1], errno);
+            }
+
+            close_pair(input);
+            close_pair(output);
+            for (auto &pipe : links)
+            {
+                close_pair(pipe.data());
+            }
+            for (auto &pipe : stderrs)
+            {
+                close_pair(pipe.data());
+            }
+            for (size_t k = 0; k < launch_pipes.size(); ++k)
+            {
+                close_fd(launch_pipes[k][0]);
+                if (k != i)
+                {
+                    close_fd(launch_pipes[k][1]);
+                }
+            }
+
+            const PipelineStageSpec &stage = spec.stages[i];
+            if (stage.has_cwd && ::chdir(stage.cwd.c_str()) != 0)
+            {
+                report_launch_failure_and_exit(launch_pipes[i][1], errno);
+            }
+
+#ifdef __GLIBC__
+            ::execvpe(stage.command.c_str(), prepared[i].argv.data(),
+                      prepared[i].envp.data());
+#else
+            environ = prepared[i].envp.data();
+            ::execvp(stage.command.c_str(), prepared[i].argv.data());
+#endif
+            report_launch_failure_and_exit(launch_pipes[i][1], errno);
+        }
+
+        ::setpgid(pid, pid);
+        launched.children.push_back({pid, stderrs[i][0]});
+        stderrs[i][0] = -1;
+        close_fd(launch_pipes[i][1]);
+    }
+
+    close_fd(input[0]);
+    close_fd(output[1]);
+    for (auto &pipe : links)
+    {
+        close_pair(pipe.data());
+    }
+    for (auto &pipe : stderrs)
+    {
+        close_fd(pipe[1]);
+    }
+
+    bool launch_failed = false;
+    for (size_t i = 0; i < count && !launch_failed; ++i)
+    {
+        std::string nonblock_error;
+        if (!set_nonblocking(launch_pipes[i][0], spec.error_prefix,
+                             "launch pipe", nonblock_error))
+        {
+            result.error = std::move(nonblock_error);
+            launch_failed = true;
+            break;
+        }
+
+        int launch_errno = 0;
+        size_t offset = 0;
+        bool eof = false;
+        while (!eof && offset < sizeof(launch_errno))
+        {
+            int timeout_ms = -1;
+            if (spec.has_deadline)
+            {
+                const long long remaining = spec.deadline_ms - now_ms();
+                timeout_ms = remaining <= 0
+                                 ? 0
+                                 : (remaining > INT_MAX
+                                        ? INT_MAX
+                                        : static_cast<int>(remaining));
+            }
+
+            struct pollfd pfd{};
+            pfd.fd = launch_pipes[i][0];
+            pfd.events = POLLIN;
+            const int pr = ::poll(&pfd, 1, timeout_ms);
+            if (pr < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                result.error = prefixed(
+                    spec.error_prefix,
+                    "launch poll failed: " + std::string(std::strerror(errno)));
+                launch_failed = true;
+                break;
+            }
+            if (pr == 0)
+            {
+                result.timed_out = true;
+                launch_failed = true;
+                break;
+            }
+
+            const ssize_t n = ::read(
+                launch_pipes[i][0],
+                reinterpret_cast<unsigned char *>(&launch_errno) + offset,
+                sizeof(launch_errno) - offset);
+            if (n > 0)
+            {
+                offset += static_cast<size_t>(n);
+                continue;
+            }
+            if (n == 0)
+            {
+                eof = true;
+                break;
+            }
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                continue;
+            }
+            result.error = prefixed(
+                spec.error_prefix,
+                "cannot read launch status: " +
+                    std::string(std::strerror(errno)));
+            launch_failed = true;
+            break;
+        }
+
+        close_fd(launch_pipes[i][0]);
+        if (!launch_failed && offset > 0)
+        {
+            if (offset != sizeof(launch_errno))
+            {
+                result.error = prefixed(
+                    spec.error_prefix,
+                    "incomplete launch error received from stage " +
+                        std::to_string(i + 1));
+            }
+            else
+            {
+                result.error = prefixed(
+                    spec.error_prefix,
+                    "stage " + std::to_string(i + 1) + " cannot launch '" +
+                        spec.stages[i].command + "': " +
+                        std::strerror(launch_errno));
+            }
+            launch_failed = true;
+        }
+    }
+
+    for (auto &pipe : launch_pipes)
+    {
+        close_fd(pipe[0]);
+    }
+
+    if (launch_failed)
+    {
+        close_fd(input[1]);
+        close_fd(output[0]);
+        close_pipeline_fds(launched);
+        if (!terminate_and_reap_all(500, 2000) && !result.timed_out)
+        {
+            result.error +=
+                " (some children could not be reaped during cleanup)";
+        }
+        return result;
+    }
+
+    std::string nonblock_error;
+    if (!set_nonblocking(input[1], spec.error_prefix, "stdin pipe",
+                         nonblock_error) ||
+        !set_nonblocking(output[0], spec.error_prefix, "stdout pipe",
+                         nonblock_error))
+    {
+        result.error = std::move(nonblock_error);
+        close_fd(input[1]);
+        close_fd(output[0]);
+        close_pipeline_fds(launched);
+        terminate_and_reap_all(500, 2000);
+        return result;
+    }
+    for (auto &child : launched.children)
+    {
+        if (!set_nonblocking(child.stderr_fd, spec.error_prefix,
+                             "stderr pipe", nonblock_error))
+        {
+            result.error = std::move(nonblock_error);
+            close_fd(input[1]);
+            close_fd(output[0]);
+            close_pipeline_fds(launched);
+            terminate_and_reap_all(500, 2000);
+            return result;
+        }
+    }
+
+    launched.stdin_fd = input[1];
+    launched.stdout_fd = output[0];
+    result.success = true;
+    result.pipeline = std::move(launched);
     return result;
 }
 

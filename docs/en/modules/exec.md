@@ -22,9 +22,9 @@ EXEC covers:
 - enforcing a separate memory limit for each output stream;
 - terminating the child's process group after a timeout.
 
-It does not provide direct file redirection, implicit pipelines, or an implicit
-command interpreter. Redirection and pipelines must be built explicitly by the
-script or through a deliberately launched shell.
+It does not provide direct file redirection or an implicit command interpreter.
+To connect several programs without a shell, use
+[`babet.pipeline()` or `babet.spawnPipeline()`](pipeline.md).
 
 ## Module contents
 
@@ -903,10 +903,9 @@ end
 - Sending large input to a program that simultaneously emits large output
   requires alternating writes and reads. A single `write_all` before any read
   can fill pipes in both directions.
-- There is no multi-process wait or C++-driven Lua callback yet. Control remains
-  explicit and reentrant by design.
-- stdout and stderr remain separate. Babet does not merge them or create a
-  pipeline between two process objects.
+- A `babet.spawn()` object cannot be connected after launch to another process
+  object. For a linear pipeline, use `babet.spawnPipeline()` directly.
+- stdout and stderr remain separate. Babet does not merge them.
 - `close()` and `terminate()` target the process group created at launch. A
   descendant that deliberately changes process group or session may escape,
   just as with `babet.exec`.
@@ -991,7 +990,8 @@ output in total, in addition to application and Lua-string allocations.
 - Linux/POSIX only: the implementation uses `fork`, `execvpe`, `poll`, process
   groups, and signals.
 - No implicit shell.
-- No native pipeline between several `exec` calls.
+- One `exec` call still represents one command; native pipelines use
+  `babet.pipeline()` or `babet.spawnPipeline()`.
 - One complete stdin string, no streaming producer.
 - Complete capture returned at the end, no line callback.
 - No native stdin/stdout/stderr redirection to files or descriptors.
