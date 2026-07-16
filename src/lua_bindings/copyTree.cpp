@@ -301,12 +301,18 @@ copy_directory(const fs::path &source, const fs::path &destination,
 
 int lua_copyTree(lua_State *L)
 {
-    if (lua_gettop(L) < 2 || !lua_isstring(L, 1) ||
-        !lua_isstring(L, 2))
+    if (!lua_arity_between(L, 2, 3) ||
+        !lua_is_strict_string(L, 1) ||
+        !lua_is_strict_string(L, 2))
     {
         return luaL_error(
             L,
-            "Expected at least two string arguments: source and destination paths");
+            "Expected two string arguments and an optional boolean");
+    }
+    if (!lua_is_optional_strict_boolean(L, 3))
+    {
+        return luaL_error(L,
+                          "continue_on_error must be a boolean or nil");
     }
 
     const std::string_view src_path =
@@ -315,7 +321,7 @@ int lua_copyTree(lua_State *L)
         luaL_checkstring_view_without_nul(L, 2, "destination");
 
     bool continue_on_error = true;
-    if (lua_gettop(L) >= 3)
+    if (lua_is_strict_boolean(L, 3))
     {
         continue_on_error = lua_toboolean(L, 3);
     }

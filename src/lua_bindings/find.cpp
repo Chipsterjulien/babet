@@ -1,6 +1,9 @@
 #include "find.hpp"
 #include "lua_utils.hpp"
-#include <regex>
+#include "project_core/safe_glob.hpp"
+#include <re2/re2.h>
+#include <memory>
+#include <cstdint>
 #include <limits>
 #include <system_error>
 #include <algorithm>
@@ -11,6 +14,7 @@
 #include <iostream>
 #include <optional>
 #include <functional>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -27,52 +31,136 @@ namespace
         lua_Integer mindepth = 0;
         lua_Integer maxdepth = std::numeric_limits<lua_Integer>::max();
         std::string type;
-        std::string name;  // ECMAScript regex (e.g. ".*\\.cpp$")
+        std::string name;  // RE2 regex, full match on the basename
         std::string iname; // idem, case-insensitive
-        std::string path;  // ECMAScript regex, searched on the full path
+        std::string path;  // RE2 regex, searched on the full path
+        std::string glob;       // bounded glob on the complete basename
+        std::string iglob;      // idem, ASCII case-insensitive
+        std::string path_glob;  // bounded glob on the complete generic path
+        std::string path_iglob; // idem, ASCII case-insensitive
     };
 
-    struct CompiledRegexes
+    constexpr std::size_t kMaxRegexPatternBytes = 4096;
+    constexpr std::int64_t kRegexMaxMemoryBytes = 1LL << 20;
+
+    struct CompiledMatchers
     {
-        std::optional<std::regex> name;
-        std::optional<std::regex> iname;
-        std::optional<std::regex> path;
+        std::unique_ptr<re2::RE2> name;
+        std::unique_ptr<re2::RE2> iname;
+        std::unique_ptr<re2::RE2> path;
+        std::optional<babet::safe_glob::Pattern> glob;
+        std::optional<babet::safe_glob::Pattern> iglob;
+        std::optional<babet::safe_glob::Pattern> path_glob;
+        std::optional<babet::safe_glob::Pattern> path_iglob;
     };
 
     std::optional<std::string>
-    compile_regexes(const FindOptions &options, CompiledRegexes &compiled)
+    compile_regexes(const FindOptions &options, CompiledMatchers &compiled)
     {
-        try
+        auto compile_one = [](const std::string &source,
+                              bool case_insensitive,
+                              std::unique_ptr<re2::RE2> &destination,
+                              const char *option_name)
+            -> std::optional<std::string>
         {
-            if (!options.name.empty())
+            if (source.empty())
             {
-                compiled.name.emplace(options.name,
-                                      std::regex_constants::ECMAScript);
+                return std::nullopt;
             }
-            if (!options.iname.empty())
+
+            if (source.size() > kMaxRegexPatternBytes)
             {
-                compiled.iname.emplace(
-                    options.iname,
-                    std::regex_constants::ECMAScript |
-                        std::regex_constants::icase);
+                return std::string("find: '") + option_name +
+                       "' regular expression exceeds the 4096-byte limit";
             }
-            if (!options.path.empty())
+
+            // Linux paths are byte strings and may contain non-UTF-8 bytes.
+            // Latin-1 makes RE2 operate on every byte without rejecting such
+            // filenames. The explicit memory budget bounds each compiled
+            // expression and its DFA caches; RE2 falls back to its linear-time
+            // NFA when the budget is exhausted.
+            re2::RE2::Options regex_options;
+            regex_options.set_encoding(re2::RE2::Options::EncodingLatin1);
+            regex_options.set_case_sensitive(!case_insensitive);
+            regex_options.set_log_errors(false);
+            regex_options.set_max_mem(kRegexMaxMemoryBytes);
+
+            auto regex = std::make_unique<re2::RE2>(source, regex_options);
+            if (!regex->ok())
             {
-                compiled.path.emplace(options.path,
-                                      std::regex_constants::ECMAScript);
+                std::string message = std::string("find: invalid regular expression for '") +
+                                      option_name + "': " + regex->error();
+                if (!regex->error_arg().empty())
+                {
+                    message += " near '" + regex->error_arg() + "'";
+                }
+                return message;
             }
-        }
-        catch (const std::regex_error &error)
+
+            destination = std::move(regex);
+            return std::nullopt;
+        };
+
+        if (auto error = compile_one(options.name, false, compiled.name,
+                                     "name"))
         {
-            return "find: invalid regular expression: " +
-                   std::string(error.what());
+            return error;
         }
-        return std::nullopt;
+        if (auto error = compile_one(options.iname, true, compiled.iname,
+                                     "iname"))
+        {
+            return error;
+        }
+        return compile_one(options.path, false, compiled.path, "path");
+    }
+
+    std::optional<std::string>
+    compile_globs(const FindOptions &options, CompiledMatchers &compiled)
+    {
+        auto compile_one = [](const std::string &source,
+                              bool case_insensitive,
+                              std::optional<babet::safe_glob::Pattern> &dest,
+                              const char *option_name)
+            -> std::optional<std::string>
+        {
+            if (source.empty())
+            {
+                return std::nullopt;
+            }
+
+            babet::safe_glob::Pattern pattern;
+            if (auto error = babet::safe_glob::compile(
+                    source, case_insensitive, pattern))
+            {
+                return std::string("find: invalid '") + option_name +
+                       "': " + *error;
+            }
+            dest.emplace(std::move(pattern));
+            return std::nullopt;
+        };
+
+        if (auto error = compile_one(options.glob, false, compiled.glob,
+                                     "glob"))
+        {
+            return error;
+        }
+        if (auto error = compile_one(options.iglob, true, compiled.iglob,
+                                     "iglob"))
+        {
+            return error;
+        }
+        if (auto error = compile_one(options.path_glob, false,
+                                     compiled.path_glob, "path_glob"))
+        {
+            return error;
+        }
+        return compile_one(options.path_iglob, true, compiled.path_iglob,
+                           "path_iglob");
     }
 
     bool matches_options(const fs::directory_entry &entry,
                          const FindOptions &options,
-                         const CompiledRegexes &compiled)
+                         const CompiledMatchers &compiled)
     {
         if (!options.type.empty())
         {
@@ -84,171 +172,121 @@ namespace
         }
 
         if (compiled.name &&
-            !std::regex_match(entry.path().filename().string(),
-                              *compiled.name))
+            !re2::RE2::FullMatch(entry.path().filename().string(),
+                                 *compiled.name))
         {
             return false;
         }
         if (compiled.iname &&
-            !std::regex_match(entry.path().filename().string(),
-                              *compiled.iname))
+            !re2::RE2::FullMatch(entry.path().filename().string(),
+                                 *compiled.iname))
         {
             return false;
         }
         if (compiled.path &&
-            !std::regex_search(entry.path().string(), *compiled.path))
+            !re2::RE2::PartialMatch(entry.path().string(), *compiled.path))
         {
             return false;
+        }
+
+        if (compiled.glob || compiled.iglob)
+        {
+            const std::string basename = entry.path().filename().string();
+            if (compiled.glob && !compiled.glob->matches(basename))
+            {
+                return false;
+            }
+            if (compiled.iglob && !compiled.iglob->matches(basename))
+            {
+                return false;
+            }
+        }
+
+        if (compiled.path_glob || compiled.path_iglob)
+        {
+            const std::string generic_path = entry.path().generic_string();
+            if (compiled.path_glob &&
+                !compiled.path_glob->matches(generic_path))
+            {
+                return false;
+            }
+            if (compiled.path_iglob &&
+                !compiled.path_iglob->matches(generic_path))
+            {
+                return false;
+            }
         }
         return true;
     }
 
-    // CORRECTIF Gemini (longjmp/C++) : parse_options NE FAIT PLUS de
-    // luaL_error elle-même. Si elle le faisait, le longjmp aurait
-    // contourné le destructeur de FindOptions (4 std::string), fuyant
-    // leur mémoire. À la place, elle retourne un bool : true si OK
-    // (out est rempli), false si erreur (err pointe vers un literal
-    // C-string statiquement alloué, donc sûr à propager sans
-    // ownership). Le caller décide alors quoi faire — par exemple
-    // push_fail() qui ne fait PAS de longjmp.
-    //
-    // Les literals de message sont stockés dans la section .rodata
-    // du binaire, leur durée de vie est celle du programme, donc on
-    // peut les passer par pointeur sans copie ni risque.
+    // Option parsing is deliberately non-throwing from Lua's point of
+    // view: no luaL_error is called while FindOptions owns C++ strings.
+    // Validation failures are returned as text and become (nil, err) in the
+    // public binding, so every C++ destructor still runs normally.
     bool parse_options(lua_State *L, int index, FindOptions &out,
-                       const char *&err)
+                       std::string &err)
     {
-        auto assign_string = [&](int stack_index, std::string &dest,
-                                 const char *nul_error) -> bool
+        index = lua_absindex(L, index);
+
+        auto read_optional_integer = [&](const char *field,
+                                         lua_Integer &destination) -> bool
         {
-            size_t len = 0;
-            const char *data = lua_tolstring(L, stack_index, &len);
-            if (std::memchr(data, '\0', len) != nullptr)
+            lua_getfield(L, index, field);
+            if (!lua_is_optional_strict_integer(L, -1))
             {
-                err = nul_error;
-                return false;
-            }
-            dest.assign(data, len);
-            return true;
-        };
-
-        // CORRECTIF (revue ChatGPT post-v2.2.0, vérifié) :
-        // lua_isinteger, plus lua_isnumber. find(".", {maxdepth=1.5})
-        // passait le test isnumber puis lua_tointeger rendait 0 —
-        // la demande devenait silencieusement maxdepth = 0 (élagage
-        // total). Un nombre non entier est désormais une erreur
-        // explicite, pas une troncature muette. (Idem mindepth.)
-        lua_getfield(L, index, "mindepth");
-        if (lua_isinteger(L, -1))
-        {
-            out.mindepth = lua_tointeger(L, -1);
-        }
-        else if (!lua_isnil(L, -1))
-        {
-            lua_pop(L, 1);
-            err = "find: 'mindepth' must be an integer";
-            return false;
-        }
-        lua_pop(L, 1);
-
-        lua_getfield(L, index, "maxdepth");
-        if (lua_isinteger(L, -1))
-        {
-            out.maxdepth = lua_tointeger(L, -1);
-        }
-        else if (!lua_isnil(L, -1))
-        {
-            lua_pop(L, 1);
-            err = "find: 'maxdepth' must be an integer";
-            return false;
-        }
-        lua_pop(L, 1);
-
-        lua_getfield(L, index, "type");
-        if (lua_isstring(L, -1))
-        {
-            if (!assign_string(-1, out.type,
-                               "find: 'type' must not contain NUL byte"))
-            {
+                err = std::string("find: '") + field +
+                      "' must be an integer";
                 lua_pop(L, 1);
                 return false;
             }
-        }
-        else if (!lua_isnil(L, -1))
-        {
+            if (lua_is_strict_integer(L, -1))
+            {
+                destination = lua_tointeger(L, -1);
+            }
             lua_pop(L, 1);
-            err = "find: 'type' must be a string";
+            return true;
+        };
+
+        auto read_optional_string = [&](const char *field,
+                                        std::string &destination) -> bool
+        {
+            lua_getfield(L, index, field);
+            if (lua_is_none_or_nil(L, -1))
+            {
+                lua_pop(L, 1);
+                return true;
+            }
+
+            const std::string label = std::string("find: '") + field + "'";
+            const bool ok = lua_string_without_nul(
+                L, -1, destination, label, err);
+            lua_pop(L, 1);
+            return ok;
+        };
+
+        // A non-integer depth must never be truncated silently by
+        // lua_tointeger().  Both fields retain their documented lua_Integer
+        // range and default values.
+        if (!read_optional_integer("mindepth", out.mindepth) ||
+            !read_optional_integer("maxdepth", out.maxdepth) ||
+            !read_optional_string("type", out.type))
+        {
             return false;
         }
-        lua_pop(L, 1);
 
-        // CORRECTIF (revue ChatGPT post-v2.2.0) : valider la VALEUR
-        // de type, pas seulement son genre. Toute string autre que
-        // "f"/"d" était acceptée et revenait à ne poser aucun
-        // filtre : find(".", { type = "file" }) rendait tout, en
-        // silence. (Nota : lua_isstring accepte aussi les nombres
-        // par coercition — type = 42 devient "42" et tombe ici.)
         if (!out.type.empty() && out.type != "f" && out.type != "d")
         {
             err = "find: 'type' must be \"f\" or \"d\"";
             return false;
         }
 
-        lua_getfield(L, index, "name");
-        if (lua_isstring(L, -1))
-        {
-            if (!assign_string(-1, out.name,
-                               "find: 'name' must not contain NUL byte"))
-            {
-                lua_pop(L, 1);
-                return false;
-            }
-        }
-        else if (!lua_isnil(L, -1))
-        {
-            lua_pop(L, 1);
-            err = "find: 'name' must be a string";
-            return false;
-        }
-        lua_pop(L, 1);
-
-        lua_getfield(L, index, "iname");
-        if (lua_isstring(L, -1))
-        {
-            if (!assign_string(-1, out.iname,
-                               "find: 'iname' must not contain NUL byte"))
-            {
-                lua_pop(L, 1);
-                return false;
-            }
-        }
-        else if (!lua_isnil(L, -1))
-        {
-            lua_pop(L, 1);
-            err = "find: 'iname' must be a string";
-            return false;
-        }
-        lua_pop(L, 1);
-
-        lua_getfield(L, index, "path");
-        if (lua_isstring(L, -1))
-        {
-            if (!assign_string(-1, out.path,
-                               "find: 'path' must not contain NUL byte"))
-            {
-                lua_pop(L, 1);
-                return false;
-            }
-        }
-        else if (!lua_isnil(L, -1))
-        {
-            lua_pop(L, 1);
-            err = "find: 'path' must be a string";
-            return false;
-        }
-        lua_pop(L, 1);
-
-        return true;
+        return read_optional_string("name", out.name) &&
+               read_optional_string("iname", out.iname) &&
+               read_optional_string("path", out.path) &&
+               read_optional_string("glob", out.glob) &&
+               read_optional_string("iglob", out.iglob) &&
+               read_optional_string("path_glob", out.path_glob) &&
+               read_optional_string("path_iglob", out.path_iglob);
     }
 
     std::optional<std::string> find(
@@ -278,10 +316,14 @@ namespace
             return "path is not a directory: " + root.string();
         }
 
-        CompiledRegexes compiled;
+        CompiledMatchers compiled;
         if (auto regex_error = compile_regexes(options, compiled); regex_error)
         {
             return regex_error;
+        }
+        if (auto glob_error = compile_globs(options, compiled); glob_error)
+        {
+            return glob_error;
         }
 
         try
@@ -361,17 +403,17 @@ namespace
 int lua_find(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1)
+    if (!lua_arity_between(L, 1, 2))
     {
-        return luaL_error(L, "Expected at least one argument");
+        return luaL_error(L, "Expected one or two arguments");
     }
 
-    if (!lua_isstring(L, 1))
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected a string as the first argument");
     }
 
-    if (argc >= 2 && !lua_isnoneornil(L, 2) && !lua_istable(L, 2))
+    if (!lua_is_none_or_nil(L, 2) && !lua_istable(L, 2))
     {
         return luaL_error(
             L, "Expected a table or nil as the second argument");
@@ -388,7 +430,7 @@ int lua_find(lua_State *L)
         // luaL_error. On reçoit (ok, err_msg) et on remonte l'erreur via
         // push_fail() qui ne fait PAS de longjmp — donc FindOptions se
         // détruira proprement à la sortie de cette fonction.
-        const char *parse_err = nullptr;
+        std::string parse_err;
         if (!parse_options(L, 2, options, parse_err))
         {
             return push_fail(L, parse_err);

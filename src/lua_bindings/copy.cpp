@@ -17,7 +17,7 @@
  */
 int lua_copy_file(lua_State *L)
 {
-    if (lua_gettop(L) != 2 || !lua_isstring(L, 1) || !lua_isstring(L, 2))
+    if (!lua_arity_is(L, 2) || !lua_is_strict_string(L, 1) || !lua_is_strict_string(L, 2))
     {
         return luaL_error(L, "Expected two string arguments: source and destination paths");
     }

@@ -10,13 +10,14 @@ Des binaires précompilés pour x86_64, aarch64 (RPi4) et armv6l
 
 ## Compilation depuis les sources
 
-Babet embarque toutes ses dépendances (Lua, OpenSSL, SQLite,
-miniz, nlohmann/json, cpp-httplib, tomlplusplus), donc les seuls
+Babet embarque toutes ses dépendances (Lua, OpenSSL, SQLite, miniz,
+libarchive, zlib, XZ Utils/liblzma, bzip2/libbz2, Zstandard/libzstd,
+RE2, Abseil, nlohmann/json, cpp-httplib, tomlplusplus), donc les seuls
 prérequis sur ton système sont :
 
 - un compilateur C++23 (GCC ou Clang récent)
-- CMake (≥ 3.20)
-- `wget` et `unzip`
+- CMake (≥ 3.22)
+- `wget`, `unzip` et `xz`
 
 ```sh
 git clone https://github.com/Chipsterjulien/babet.git
@@ -26,11 +27,12 @@ cd babet
 ./run_tests.sh          # harness offline — doit terminer avec 0 FAIL
 ```
 
-Le script de build télécharge chaque dépendance depuis sa source
-upstream, vérifie son SHA256, puis compile statiquement. Si la
-source upstream est temporairement indisponible (`lua.org` a
-notamment connu des pannes), le script bascule sur la Wayback
-Machine d'Internet Archive — le check SHA256 reste appliqué.
+Le script de build télécharge chaque dépendance depuis une source amont
+épinglée, vérifie son SHA256, puis la compile statiquement. Plusieurs
+bibliothèques disposent d’un miroir ou d’une URL de secours explicite. Lorsqu’il
+n’existe aucun miroir, le script indique le nom exact de l’archive à déposer
+manuellement dans `downloads/` ; le même contrôle SHA256 reste appliqué avant
+l’extraction.
 
 Le binaire produit est dans `test/babet`.
 
@@ -105,7 +107,7 @@ dont le nom commence légitimement par `-` peuvent toujours être
 passés via `./-dirname` (convention POSIX).
 
 ```sh
-babet --version    # babet 2.5.0
+babet --version    # babet 2.6.0
 babet --help       # usage complet
 babet --bogus      # Unknown option: --bogus
                       # Try 'babet --help' for more information.

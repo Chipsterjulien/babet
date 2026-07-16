@@ -33,7 +33,7 @@ namespace
     // usage = faute de programmeur, pas runtime).
     void check_no_args(lua_State *L, const char *fname)
     {
-        if (lua_gettop(L) != 0)
+        if (!lua_arity_is(L, 0))
         {
             luaL_error(L,
                        "babet.%s: no arguments expected", fname);

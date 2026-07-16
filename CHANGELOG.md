@@ -6,6 +6,161 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.6.0] - 2026-07-16
+
+### Release summary
+
+Babet 2.6.0 adds secure multi-format TAR support, bounded filename matching,
+and consistent strict validation across the public Lua bindings while
+preserving the audited 2.5.0 contracts for ZIP and existing APIs.
+
+- bumped the source version to 2.6.0;
+- added a reproducible static integration of libarchive 3.8.8 from the
+  official distribution verified with SHA-256;
+- initially limited libarchive to its core and uncompressed TAR, then enabled
+  gzip through a separately pinned static zlib, xz through a separately
+  pinned static XZ Utils/liblzma, bzip2 through a separately pinned static
+  libbz2, and zstd through a separately pinned static libzstd;
+- added an early runtime check that the linked libarchive headers and library
+  match;
+- added the libarchive licence notice to binary distributions;
+- extended `babet.archive.list()` with content-based detection of uncompressed
+  TAR archives while keeping miniz as the unchanged ZIP backend;
+- added progressive TAR metadata and data scanning through libarchive, with
+  entry-count, per-entry-size, total-size, pathname-memory, and truncation
+  checks;
+- exposed canonical archive-level `format` and `compression` fields, plus TAR
+  entry types, link targets, sparse metadata, and explicit `nil` values for
+  ZIP-only CRC/compression fields;
+- added secure complete extraction of uncompressed TAR archives while keeping
+  miniz as the unchanged ZIP extraction backend;
+- added a two-pass TAR extraction plan: Babet scans the whole pinned archive,
+  validates paths, limits, duplicates, conflicts, and destination types, then
+  rereads the same descriptor and compares every header before staging data;
+- reused the descriptor-confined destination layer, mode-`0600` same-directory
+  temporaries, bounded writes, atomic per-file publication, cleanup, workers,
+  and safe permission policy for TAR;
+- deliberately refuses TAR sparse files, symlinks, hard links, FIFOs, sockets,
+  devices, and unsupported types before any file is published;
+- extended `babet.archive.extractFile()` to uncompressed TAR with exact raw-name
+  selection, whole-archive limits, a verified second pass, streamed discard of
+  unselected data, and the existing confined atomic destination layer;
+- allows a safe TAR regular file to be selected even when unrelated entries
+  have unsafe paths, special types, or sparse maps, while still rejecting a
+  selected sparse file and malformed data anywhere in the archive;
+- extended `babet.archive.create()` to deterministic uncompressed TAR output
+  through libarchive's restricted POSIX pax writer, while keeping miniz as the
+  unchanged ZIP writer;
+- added `.tar` format inference plus strict `format = "zip" | "tar"`, preserved
+  ZIP as the backward-compatible fallback for other extensions, and at that
+  stage kept compressed TAR suffixes explicitly disabled;
+- streams source files through pinned descriptors into TAR, checks the source
+  inode, size, mtime, and ctime before and after reading, supports pax long
+  paths, empty directories, workers, atomic whole-archive publication, and
+  deterministic UID/GID/mode/timestamp metadata;
+- hardened `build_local.sh` with a content fingerprint for `src/` and
+  `CMakeLists.txt`; when sources copied from a ZIP have misleading old
+  timestamps, Babet now cleans only its own CMake objects instead of silently
+  reusing stale code;
+- added a reproducible static integration of zlib 1.3.2, verified by
+  SHA-256, and enabled only libarchive's internal gzip filter;
+- extended `list()`, `extract()`, and `extractFile()` to gzip-compressed TAR,
+  detected by content, with full-stream CRC/truncation checks and the same
+  pinned-source, two-pass, atomic-publication, worker, and special-type policy;
+- extended `create()` with `.tar.gz` and `.tgz` inference plus strict
+  `format = "tar.gz"`, levels `0` through `9`, deterministic zero gzip mtime,
+  and byte-for-byte reproducible output;
+- applied `max_compression_ratio` to gzip TAR as a bounded global ratio between
+  announced regular-file bytes and the complete compressed archive size;
+- added a libarchive build profile so a cached library compiled without the
+  requested gzip, xz, bzip2, or zstd filters is rebuilt automatically when the dependency
+  configuration changes;
+- added a reproducible static integration of XZ Utils/liblzma 5.8.3, verified
+  by SHA-256, and forced both its headers and `liblzma.a` to come from the local
+  project build rather than the host distribution;
+- extended `list()`, `extract()`, and `extractFile()` to xz-compressed TAR,
+  detected by content, with the same full-stream validation, pinned-source,
+  two-pass, atomic-publication, worker, and special-type policy;
+- extended `create()` with `.tar.xz` and `.txz` inference plus strict
+  `format = "tar.xz"`, levels `0` through `9`, deterministic output, and
+  explicit `format = "tar"` / `compression = "xz"` result metadata;
+- generalized `max_compression_ratio` to gzip-, xz-, bzip2-, and zstd-compressed TAR;
+- added an early runtime check that the compile-time and linked liblzma
+  versions match, mirroring the existing zlib consistency check;
+- added a reproducible static integration of bzip2/libbz2 1.0.8 from the
+  official Sourceware distribution, verified by SHA-256, with both `bzlib.h`
+  and `libbz2.a` forced to come from the local project build;
+- enabled only libarchive's internal bzip2 filter and extended `list()`,
+  `extract()`, and `extractFile()` to bzip2-compressed TAR detected by content,
+  with the same pinned-source, two-pass, atomic-publication, worker, corruption,
+  ratio-limit, and special-type policy as gzip and xz;
+- extended `create()` with `.tar.bz2`, `.tbz2`, and `.tbz` inference plus strict
+  `format = "tar.bz2"`, levels `1` through `9`, deterministic output, and
+  explicit `format = "tar"` / `compression = "bzip2"` result metadata;
+- added an early runtime check that the linked libbz2 version starts with the
+  pinned 1.0.8 version injected by CMake;
+- added reproducible static integration of Zstandard/libzstd 1.5.7, verified by
+  SHA-256, with locally built headers and `libzstd.a` forced into libarchive and
+  Babet instead of any host-distribution copy;
+- enabled only libarchive's internal zstd filter and extended `list()`,
+  `extract()`, and `extractFile()` to content-detected zstd-compressed TAR, with
+  complete-frame validation through libzstd, concatenated-frame support,
+  trailing-data and corruption rejection, global ratio limits, pinned-source
+  two-pass extraction, atomic publication, and workers;
+- extended `create()` with `.tar.zst`, `.tar.zstd`, and `.tzst` inference plus
+  strict `format = "tar.zst"`, levels `0` through `19`, deterministic output,
+  and explicit `format = "tar"` / `compression = "zstd"` result metadata;
+- worked around libarchive 3.8.8's custom-write-callback issue for zstd by using
+  its built-in `archive_write_open_fd()` path for that filter while retaining
+  Babet's pinned temporary descriptor and atomic whole-archive publication;
+- added an early runtime check that the libzstd header and linked-library
+  versions match exactly;
+- audited every `std::regex` use and confirmed that only `babet.find()` used
+  it;
+- added bounded `glob`, `iglob`, `path_glob`, and `path_iglob` filters to
+  `babet.find()`;
+- implemented the safe glob matcher as a non-recursive dynamic-programming
+  automaton with `*`, `**`, `?`, and backslash escaping, a 4096-byte pattern
+  ceiling, anchored whole-string matching, ASCII-only case folding for the
+  insensitive forms, and no catastrophic backtracking;
+- replaced the remaining `std::regex` implementation behind `name`, `iname`,
+  and `path` with statically linked RE2 2025-11-05 and Abseil 20250814.2,
+  downloaded and SHA-256 verified by `build_local.sh` instead of using host
+  packages;
+- preserved `name`/`iname` full-match and `path` partial-search semantics,
+  while documenting the intentional RE2 syntax differences such as rejection
+  of backreferences and look-around assertions;
+- bounded each RE2 pattern to 4096 bytes and each compiled expression to a
+  1 MiB memory budget, using Latin-1 byte mode so Linux filenames containing
+  non-UTF-8 bytes remain matchable;
+- added shared, allocation-free Lua validation predicates for exact or bounded
+  arity, strict strings, numbers, integers, booleans, optional `nil`, and
+  embedded-NUL-safe strings;
+- harmonized public bindings around those validators, removing accidental
+  number-to-string coercions, rejecting surplus arguments where the documented
+  signature is fixed, and preserving non-`longjmp` error paths while C++
+  objects are alive;
+- strengthened validation tests for `find`, filesystem listings and iterators,
+  tree copies, `exec`, signals, workers, and archive options;
+- fixed release packaging so the existing French README (`README.fr.md`) is
+  included under its actual filename;
+- completed the final code/tests/documentation audit, synchronized the French
+  and English references, corrected the RE2 escaping example, and regenerated
+  both PDF manuals for the 2.6.0 release;
+- added deterministic pure-Lua TAR fixtures for ustar prefixes, GNU long
+  names, pax paths, links, sparse files, special types, unsafe paths, limits,
+  corruption,
+  truncation, concatenated archives, trailing foreign data, symlinked inputs,
+  extraction contents, permissions, overwrite, destination symlink attacks,
+  cleanup, single-file selection, mixed and concatenated archives, sparse
+  selection policy, and worker states.
+
+ZIP creation, listing, and extraction continue to use miniz with their 2.5.0
+contracts. Plain, gzip-, xz-, bzip2-, and zstd-compressed TAR creation, listing,
+complete extraction, and single-file extraction use libarchive with static
+zlib, XZ Utils/liblzma, libbz2, and libzstd. Standalone compressed streams
+remain a separate later decision.
+
 ## [2.5.0] - 2026-07-15
 
 ### Release summary

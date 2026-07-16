@@ -97,7 +97,7 @@ bool dense_array(lua_State *L, int idx, size_t min_n, size_t max_n,
     lua_pushnil(L);
     while (lua_next(L, idx) != 0)
     {
-        if (!lua_isinteger(L, -2))
+        if (!lua_is_strict_integer(L, -2))
         {
             lua_pop(L, 2);
             err = std::string(label) + " must be a dense array";
@@ -125,7 +125,7 @@ bool validate_keys(lua_State *L, int idx,
                    const std::unordered_set<std::string> &allowed,
                    const char *label, std::string &err)
 {
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -139,7 +139,7 @@ bool validate_keys(lua_State *L, int idx,
     lua_pushnil(L);
     while (lua_next(L, idx) != 0)
     {
-        if (lua_type(L, -2) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -2))
         {
             lua_pop(L, 2);
             err = std::string(label) + " keys must be strings";
@@ -170,7 +170,7 @@ bool parse_timeout_value(lua_State *L, int idx, const char *label,
                          bool allow_absent, double &out, bool &present,
                          std::string &err)
 {
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         if (!allow_absent && lua_isnil(L, idx))
         {
@@ -181,7 +181,7 @@ bool parse_timeout_value(lua_State *L, int idx, const char *label,
         present = false;
         return true;
     }
-    if (lua_type(L, idx) != LUA_TNUMBER)
+    if (!lua_is_strict_number(L, idx))
     {
         err = std::string(label) + " must be a number";
         return false;
@@ -244,7 +244,7 @@ bool collect_pipeline_options(lua_State *L, int idx, PipelineOptions &opts,
     {
         return false;
     }
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -253,7 +253,7 @@ bool collect_pipeline_options(lua_State *L, int idx, PipelineOptions &opts,
     raw_getfield(L, idx, "stdin");
     if (!lua_isnil(L, -1))
     {
-        if (lua_type(L, -1) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 1);
             err = "opts.stdin must be a string";
@@ -269,7 +269,7 @@ bool collect_pipeline_options(lua_State *L, int idx, PipelineOptions &opts,
     raw_getfield(L, idx, "timeout");
     if (!lua_isnil(L, -1))
     {
-        if (lua_type(L, -1) != LUA_TNUMBER)
+        if (!lua_is_strict_number(L, -1))
         {
             lua_pop(L, 1);
             err = "opts.timeout must be a number";
@@ -290,7 +290,7 @@ bool collect_pipeline_options(lua_State *L, int idx, PipelineOptions &opts,
     raw_getfield(L, idx, "max_output");
     if (!lua_isnil(L, -1))
     {
-        if (!lua_isinteger(L, -1))
+        if (!lua_is_strict_integer(L, -1))
         {
             lua_pop(L, 1);
             err = "opts.max_output must be an integer";
@@ -323,7 +323,7 @@ bool collect_spawn_pipeline_options(lua_State *L, int idx,
     {
         return false;
     }
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -383,7 +383,7 @@ bool collect_stages(
         }
 
         lua_geti(L, stage_idx, 1);
-        if (lua_type(L, -1) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 2);
             err = label + "[1] must be a string";
@@ -968,7 +968,7 @@ int read_pipeline_fd(lua_State *L, int &fd, size_t max_bytes,
 int pipeline_process_read_stdout(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 3)
+    if (!lua_arity_between(L, 1, 3))
     {
         return luaL_error(
             L, "pipeline.read_stdout expects optional max_bytes and timeout");
@@ -977,7 +977,7 @@ int pipeline_process_read_stdout(lua_State *L)
     size_t max_bytes = DEFAULT_READ_SIZE;
     if (argc >= 2 && !lua_isnil(L, 2))
     {
-        if (!lua_isinteger(L, 2))
+        if (!lua_is_strict_integer(L, 2))
         {
             return luaL_error(
                 L, "pipeline.read_stdout: max_bytes must be an integer");
@@ -1010,13 +1010,13 @@ int pipeline_process_read_stdout(lua_State *L)
 int pipeline_process_read_stderr(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 2 || argc > 4)
+    if (!lua_arity_between(L, 2, 4))
     {
         return luaL_error(
             L, "pipeline.read_stderr expects stage, optional max_bytes and timeout");
     }
     PipelineProcess *pipeline = check_pipeline_process(L, 1);
-    if (!lua_isinteger(L, 2))
+    if (!lua_is_strict_integer(L, 2))
     {
         return luaL_error(L, "pipeline.read_stderr: stage must be an integer");
     }
@@ -1029,7 +1029,7 @@ int pipeline_process_read_stderr(lua_State *L)
     size_t max_bytes = DEFAULT_READ_SIZE;
     if (argc >= 3 && !lua_isnil(L, 3))
     {
-        if (!lua_isinteger(L, 3))
+        if (!lua_is_strict_integer(L, 3))
         {
             return luaL_error(
                 L, "pipeline.read_stderr: max_bytes must be an integer");
@@ -1063,7 +1063,7 @@ int pipeline_process_read_stderr(lua_State *L)
 int pipeline_process_write(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 2 || argc > 3)
+    if (!lua_arity_between(L, 2, 3))
     {
         return luaL_error(L,
                           "pipeline.write expects data and optional timeout");
@@ -1147,7 +1147,7 @@ int pipeline_process_write(lua_State *L)
 
 int pipeline_process_close_stdin(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "pipeline.close_stdin expects no argument");
     }
@@ -1158,7 +1158,7 @@ int pipeline_process_close_stdin(lua_State *L)
 
 int pipeline_process_pids(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "pipeline.pids expects no argument");
     }
@@ -1175,7 +1175,7 @@ int pipeline_process_pids(lua_State *L)
 int pipeline_process_is_running(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(L,
                           "pipeline.is_running expects an optional stage");
@@ -1190,7 +1190,7 @@ int pipeline_process_is_running(lua_State *L)
     size_t selected = pipeline->count;
     if (argc == 2)
     {
-        if (!lua_isinteger(L, 2))
+        if (!lua_is_strict_integer(L, 2))
         {
             return luaL_error(L,
                               "pipeline.is_running: stage must be an integer");
@@ -1220,7 +1220,7 @@ int pipeline_process_is_running(lua_State *L)
 int pipeline_process_wait(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(L, "pipeline.wait expects an optional timeout");
     }
@@ -1334,7 +1334,7 @@ int terminate_pipeline_process(lua_State *L, PipelineProcess *pipeline,
 int pipeline_process_terminate(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(
             L, "pipeline.terminate expects an optional grace period");
@@ -1355,7 +1355,7 @@ int pipeline_process_terminate(lua_State *L)
 
 int pipeline_process_kill(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "pipeline.kill expects no argument");
     }
@@ -1397,7 +1397,7 @@ void cleanup_pipeline_process(PipelineProcess *pipeline)
 
 int pipeline_process_close(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "pipeline.close expects no argument");
     }
@@ -1496,8 +1496,7 @@ babet_process::ChildWaitResult wait_pipeline_stage_until(
 
 int lua_pipeline(lua_State *L)
 {
-    const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2 || lua_type(L, 1) != LUA_TTABLE)
+    if (!lua_arity_between(L, 1, 2) || lua_type(L, 1) != LUA_TTABLE)
     {
         return luaL_error(L,
                           "pipeline expects a commands table and optional opts");
@@ -1819,8 +1818,7 @@ int lua_pipeline(lua_State *L)
 
 int lua_spawn_pipeline(lua_State *L)
 {
-    const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2 || lua_type(L, 1) != LUA_TTABLE)
+    if (!lua_arity_between(L, 1, 2) || lua_type(L, 1) != LUA_TTABLE)
     {
         return luaL_error(
             L, "spawnPipeline expects a commands table and optional opts");

@@ -620,8 +620,8 @@ namespace
             lua_pushnil(L);
             while (lua_next(L, idx) != 0)
             {
-                if (lua_type(L, -2) == LUA_TNUMBER &&
-                    lua_isinteger(L, -2))
+                if (lua_is_strict_number(L, -2) &&
+                    lua_is_strict_integer(L, -2))
                 {
                     lua_Integer k = lua_tointeger(L, -2);
                     if (k < 1)
@@ -680,7 +680,7 @@ namespace
         lua_pushnil(L);
         while (lua_next(L, idx) != 0)
         {
-            if (lua_type(L, -2) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -2))
             {
                 err = "workers: spawn: table key must be a string "
                       "(non-array table)";
@@ -741,7 +741,7 @@ namespace
             out = static_cast<bool>(lua_toboolean(L, idx));
             return true;
         case LUA_TNUMBER:
-            if (lua_isinteger(L, idx))
+            if (lua_is_strict_integer(L, idx))
             {
                 out = static_cast<int64_t>(lua_tointeger(L, idx));
                 return true;
@@ -1277,7 +1277,8 @@ namespace
         // luaL_checklstring convertirait silencieusement un nombre en texte,
         // puis créerait un worker qui échouerait seulement au chargement du
         // chunk. Refuser immédiatement donne une erreur d'appel claire.
-        if (lua_gettop(L) < 1 || lua_type(L, 1) != LUA_TSTRING)
+        if (!lua_arity_between(L, 1, 3) ||
+            !lua_is_strict_string(L, 1))
         {
             return luaL_error(L,
                               "workers.spawn: code must be a string");
@@ -1287,12 +1288,12 @@ namespace
 
         // Vérification de type sur args et opts (les contenus sont
         // validés via la sérialisation).
-        if (!lua_isnoneornil(L, 2) && !lua_istable(L, 2))
+        if (!lua_is_none_or_nil(L, 2) && !lua_istable(L, 2))
         {
             return luaL_error(L,
                               "workers.spawn: args must be a table");
         }
-        if (!lua_isnoneornil(L, 3) && !lua_istable(L, 3))
+        if (!lua_is_none_or_nil(L, 3) && !lua_istable(L, 3))
         {
             return luaL_error(L,
                               "workers.spawn: opts must be a table");
@@ -1309,40 +1310,42 @@ namespace
             lua_getfield(L, 3, "inbox_capacity");
             if (!lua_isnil(L, -1))
             {
-                if (lua_type(L, -1) != LUA_TNUMBER)
+                if (!lua_is_strict_integer(L, -1))
                 {
-                    return luaL_error(L,
-                                      "workers.spawn: opts.inbox_capacity must be a number");
+                    return luaL_error(
+                        L, "workers.spawn: opts.inbox_capacity must be an "
+                           "integer between 1 and 1000000");
                 }
-                lua_Number n = lua_tonumber(L, -1);
-                if (n != std::floor(n) || n <= 0 || n > 1000000)
+                const lua_Integer n = lua_tointeger(L, -1);
+                if (n <= 0 || n > 1000000)
                 {
-                    return luaL_error(L,
-                                      "workers.spawn: opts.inbox_capacity must be an "
-                                      "integer between 1 and 1000000 (got %g)",
-                                      (double)n);
+                    return luaL_error(
+                        L, "workers.spawn: opts.inbox_capacity must be an "
+                           "integer between 1 and 1000000 (got %lld)",
+                        static_cast<long long>(n));
                 }
-                inbox_cap = (int)n;
+                inbox_cap = static_cast<int>(n);
             }
             lua_pop(L, 1);
 
             lua_getfield(L, 3, "outbox_capacity");
             if (!lua_isnil(L, -1))
             {
-                if (lua_type(L, -1) != LUA_TNUMBER)
+                if (!lua_is_strict_integer(L, -1))
                 {
-                    return luaL_error(L,
-                                      "workers.spawn: opts.outbox_capacity must be a number");
+                    return luaL_error(
+                        L, "workers.spawn: opts.outbox_capacity must be an "
+                           "integer between 1 and 1000000");
                 }
-                lua_Number n = lua_tonumber(L, -1);
-                if (n != std::floor(n) || n <= 0 || n > 1000000)
+                const lua_Integer n = lua_tointeger(L, -1);
+                if (n <= 0 || n > 1000000)
                 {
-                    return luaL_error(L,
-                                      "workers.spawn: opts.outbox_capacity must be an "
-                                      "integer between 1 and 1000000 (got %g)",
-                                      (double)n);
+                    return luaL_error(
+                        L, "workers.spawn: opts.outbox_capacity must be an "
+                           "integer between 1 and 1000000 (got %lld)",
+                        static_cast<long long>(n));
                 }
-                outbox_cap = (int)n;
+                outbox_cap = static_cast<int>(n);
             }
             lua_pop(L, 1);
         }
@@ -1582,11 +1585,11 @@ namespace
     // Retourne directement la valeur ms (peut lever via luaL_error).
     int64_t parse_timeout_arg(lua_State *L, int idx)
     {
-        if (lua_isnoneornil(L, idx))
+        if (lua_is_none_or_nil(L, idx))
         {
             return -1; // blocage indéfini
         }
-        if (lua_type(L, idx) != LUA_TNUMBER)
+        if (!lua_is_strict_number(L, idx))
         {
             luaL_error(L,
                        "workers: timeout must be a number (seconds) or nil");

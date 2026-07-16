@@ -8,6 +8,71 @@
 #include <string_view>
 
 /**
+ * Small, allocation-free predicates shared by public Lua bindings.
+ *
+ * Lua's convenience checks are sometimes deliberately permissive:
+ * lua_isstring() accepts numbers and lua_toboolean() accepts every value.
+ * Babet's documented contracts use strict Lua types instead, so bindings
+ * should use these helpers before converting a value.  They never raise a
+ * Lua error and are therefore safe to call while C++ objects are alive.
+ */
+inline bool lua_arity_is(lua_State *L, int expected) noexcept
+{
+    return lua_gettop(L) == expected;
+}
+
+inline bool lua_arity_between(lua_State *L, int minimum, int maximum) noexcept
+{
+    const int argc = lua_gettop(L);
+    return argc >= minimum && argc <= maximum;
+}
+
+inline bool lua_is_none_or_nil(lua_State *L, int idx) noexcept
+{
+    return lua_isnoneornil(L, idx) != 0;
+}
+
+inline bool lua_is_strict_string(lua_State *L, int idx) noexcept
+{
+    return lua_type(L, idx) == LUA_TSTRING;
+}
+
+inline bool lua_is_strict_number(lua_State *L, int idx) noexcept
+{
+    return lua_type(L, idx) == LUA_TNUMBER;
+}
+
+inline bool lua_is_strict_integer(lua_State *L, int idx) noexcept
+{
+    return lua_isinteger(L, idx) != 0;
+}
+
+inline bool lua_is_strict_boolean(lua_State *L, int idx) noexcept
+{
+    return lua_type(L, idx) == LUA_TBOOLEAN;
+}
+
+inline bool lua_is_optional_strict_string(lua_State *L, int idx) noexcept
+{
+    return lua_is_none_or_nil(L, idx) || lua_is_strict_string(L, idx);
+}
+
+inline bool lua_is_optional_strict_number(lua_State *L, int idx) noexcept
+{
+    return lua_is_none_or_nil(L, idx) || lua_is_strict_number(L, idx);
+}
+
+inline bool lua_is_optional_strict_integer(lua_State *L, int idx) noexcept
+{
+    return lua_is_none_or_nil(L, idx) || lua_is_strict_integer(L, idx);
+}
+
+inline bool lua_is_optional_strict_boolean(lua_State *L, int idx) noexcept
+{
+    return lua_is_none_or_nil(L, idx) || lua_is_strict_boolean(L, idx);
+}
+
+/**
  * @brief Pushes a single error message on the stack (legacy 1-return).
  * @return 1
  */
@@ -94,25 +159,26 @@ inline std::string lua_value_to_display_string(lua_State *L, int idx)
  *
  * Many POSIX/OpenSSL/SQLite APIs consume NUL-terminated C strings. Passing a
  * Lua string through lua_tostring() would silently truncate it at the first
- * embedded NUL. Callers must first validate the Lua type themselves, then use
- * this helper before forwarding the value to a C-string API.
+ * embedded NUL. The helper validates the strict Lua string type itself before
+ * forwarding the value to a C-string API.
  *
  * @param label User-facing field name used in the error message.
- * @return true on success; false with `err` filled when a NUL byte is present.
+ * @return true on success; false with `err` filled for a wrong type or a NUL byte.
  */
 inline bool lua_string_without_nul(lua_State *L, int idx,
                                    std::string &out,
                                    std::string_view label,
                                    std::string &err)
 {
-    size_t len = 0;
-    const char *data = lua_tolstring(L, idx, &len);
-    if (data == nullptr)
+    if (!lua_is_strict_string(L, idx))
     {
         err.assign(label);
         err += " must be a string";
         return false;
     }
+
+    size_t len = 0;
+    const char *data = lua_tolstring(L, idx, &len);
     if (std::memchr(data, '\0', len) != nullptr)
     {
         err.assign(label);
@@ -134,11 +200,18 @@ inline bool lua_string_without_nul(lua_State *L, int idx,
 inline std::string_view luaL_checkstring_view_without_nul(
     lua_State *L, int idx, const char *label)
 {
+    if (!lua_is_strict_string(L, idx))
+    {
+        luaL_typeerror(L, idx, "string");
+        return {};
+    }
+
     size_t len = 0;
-    const char *data = luaL_checklstring(L, idx, &len);
+    const char *data = lua_tolstring(L, idx, &len);
     if (std::memchr(data, '\0', len) != nullptr)
     {
         luaL_error(L, "%s must not contain NUL byte", label);
+        return {};
     }
     return std::string_view(data, len);
 }

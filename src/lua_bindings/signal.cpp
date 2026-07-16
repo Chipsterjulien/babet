@@ -1,4 +1,5 @@
 // =====================================================================
+#include "lua_utils.hpp"
 // signal.cpp — implémentation des bindings signaux POSIX
 // =====================================================================
 // Voir signal.hpp pour le design global et les invariants de sécurité.
@@ -215,7 +216,7 @@ namespace
         // luaL_checklstring accepterait aussi un nombre en le convertissant
         // implicitement en texte ; cette coercition rendait les diagnostics
         // incohérents avec le reste de l'API et masquait les erreurs d'appel.
-        if (lua_type(L, 1) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, 1))
         {
             luaL_argerror(L, 1, "signal name must be a string");
         }
@@ -271,7 +272,7 @@ namespace
         // handle("TERM", nil), donc désinstallerait silencieusement
         // le handler — typique foot-gun pour quelqu'un qui voulait
         // juste interroger l'état.
-        if (lua_gettop(L) < 2)
+        if (!lua_arity_is(L, 2))
         {
             return luaL_error(L,
                               "signal.handle: missing handler argument; "
@@ -326,6 +327,10 @@ namespace
     int l_ignore(lua_State *L)
     {
         check_main_thread(L, "ignore");
+        if (!lua_arity_is(L, 1))
+        {
+            return luaL_error(L, "signal.ignore expects one argument");
+        }
 
         int signum = check_signum(L);
 
@@ -347,6 +352,10 @@ namespace
     int l_default(lua_State *L)
     {
         check_main_thread(L, "default");
+        if (!lua_arity_is(L, 1))
+        {
+            return luaL_error(L, "signal.default expects one argument");
+        }
 
         int signum = check_signum(L);
 

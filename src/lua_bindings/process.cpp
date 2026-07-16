@@ -81,7 +81,7 @@ void raw_getfield(lua_State *L, int idx, const char *name)
 
 bool validate_spawn_opts_keys(lua_State *L, int idx, std::string &err)
 {
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -95,7 +95,7 @@ bool validate_spawn_opts_keys(lua_State *L, int idx, std::string &err)
     lua_pushnil(L);
     while (lua_next(L, idx) != 0)
     {
-        if (lua_type(L, -2) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -2))
         {
             lua_pop(L, 2);
             err = "opts keys must be strings";
@@ -120,7 +120,7 @@ bool parse_timeout_value(lua_State *L, int idx, const char *label,
                          double default_value, bool allow_absent,
                          double &out, bool &present, std::string &err)
 {
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         if (!allow_absent && lua_isnil(L, idx))
         {
@@ -131,7 +131,7 @@ bool parse_timeout_value(lua_State *L, int idx, const char *label,
         present = false;
         return true;
     }
-    if (lua_type(L, idx) != LUA_TNUMBER)
+    if (!lua_is_strict_number(L, idx))
     {
         err = std::string(label) + " must be a number";
         return false;
@@ -162,7 +162,7 @@ bool parse_launch_timeout(lua_State *L, int opts_idx,
 {
     has_timeout = false;
     deadline = 0;
-    if (lua_isnoneornil(L, opts_idx))
+    if (lua_is_none_or_nil(L, opts_idx))
     {
         return true;
     }
@@ -307,7 +307,7 @@ int process_read_stream(lua_State *L, int Process::*fd_member,
                         const char *method_name)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 3)
+    if (!lua_arity_between(L, 1, 3))
     {
         return luaL_error(L, "%s expects optional max_bytes and timeout",
                           method_name);
@@ -317,7 +317,7 @@ int process_read_stream(lua_State *L, int Process::*fd_member,
     size_t max_bytes = DEFAULT_READ_SIZE;
     if (argc >= 2 && !lua_isnil(L, 2))
     {
-        if (!lua_isinteger(L, 2))
+        if (!lua_is_strict_integer(L, 2))
         {
             return luaL_error(L, "%s: max_bytes must be an integer",
                               method_name);
@@ -426,7 +426,7 @@ int process_read_stderr(lua_State *L)
 int process_write(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 2 || argc > 3)
+    if (!lua_arity_between(L, 2, 3))
     {
         return luaL_error(L, "process.write expects data and optional timeout");
     }
@@ -512,7 +512,7 @@ int process_write(lua_State *L)
 
 int process_close_stdin(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "process.close_stdin expects no argument");
     }
@@ -523,7 +523,7 @@ int process_close_stdin(lua_State *L)
 
 int process_pid(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "process.pid expects no argument");
     }
@@ -534,7 +534,7 @@ int process_pid(lua_State *L)
 
 int process_is_running(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "process.is_running expects no argument");
     }
@@ -626,7 +626,7 @@ int wait_for_process(lua_State *L, Process *process,
 int process_wait(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(L, "process.wait expects an optional timeout");
     }
@@ -695,7 +695,7 @@ int terminate_process(lua_State *L, Process *process, int signal,
 int process_terminate(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(L,
                           "process.terminate expects an optional grace period");
@@ -717,7 +717,7 @@ int process_terminate(lua_State *L)
 
 int process_kill(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "process.kill expects no argument");
     }
@@ -751,7 +751,7 @@ void cleanup_process(Process *process)
 
 int process_close(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "process.close expects no argument");
     }
@@ -781,12 +781,11 @@ int process_tostring(lua_State *L)
 
 int lua_spawn(lua_State *L)
 {
-    const int argc = lua_gettop(L);
-    if (argc < 1 || argc > 3)
+    if (!lua_arity_between(L, 1, 3))
     {
         return luaL_error(L, "spawn expects command, optional args and opts");
     }
-    if (lua_type(L, 1) != LUA_TSTRING)
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "spawn: command must be a string");
     }

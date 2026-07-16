@@ -7,26 +7,25 @@
 
 int lua_symlinkattr(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc != 3)
+    if (!lua_arity_is(L, 3))
     {
         return luaL_error(L, "Expected three arguments: path, owner (UID), and group (GID)");
     }
-    if (!lua_isstring(L, 1))
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_argerror(L, 1, "Expected a string as the first argument");
     }
-    if (!lua_isinteger(L, 2))
+    if (!lua_is_strict_integer(L, 2))
     {
         return luaL_argerror(L, 2, "Expected an integer as the second argument (owner UID)");
     }
-    if (!lua_isinteger(L, 3))
+    if (!lua_is_strict_integer(L, 3))
     {
         return luaL_argerror(L, 3, "Expected an integer as the third argument (group GID)");
     }
 
-    lua_Integer owner_raw = luaL_checkinteger(L, 2);
-    lua_Integer group_raw = luaL_checkinteger(L, 3);
+    const lua_Integer owner_raw = lua_tointeger(L, 2);
+    const lua_Integer group_raw = lua_tointeger(L, 3);
     std::string path = luaL_checkstring_without_nul(L, 1, "path");
 
     if (owner_raw < 0 || group_raw < 0)

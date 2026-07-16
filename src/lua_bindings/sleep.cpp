@@ -54,13 +54,13 @@ bool convert_to_seconds(double duration, const char *unit, double &seconds)
 int lua_sleep(lua_State *L)
 {
     int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(L, "Expected one or two arguments: duration and optional unit");
     }
     // `lua_isnumber` accepte aussi les strings numériques. Le contrat
     // public exige un vrai number Lua, comme les autres bindings audités.
-    if (lua_type(L, 1) != LUA_TNUMBER)
+    if (!lua_is_strict_number(L, 1))
     {
         return luaL_argerror(L, 1, "Expected a number as the first argument for duration");
     }
@@ -94,7 +94,7 @@ int lua_sleep(lua_State *L)
     {
         // `lua_isstring` considère aussi un number comme convertible en
         // string. Refus strict afin que sleep(1, 42) soit une erreur de type.
-        if (lua_type(L, 2) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, 2))
         {
             return luaL_argerror(L, 2, "Expected a string as the second argument for unit");
         }

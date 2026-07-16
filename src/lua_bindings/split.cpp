@@ -1,4 +1,5 @@
 #include "split.hpp"
+#include "lua_utils.hpp"
 #include <string>
 #include <string_view>
 
@@ -29,37 +30,37 @@
 int lua_split(lua_State *L)
 {
     int argc = lua_gettop(L);
-    if (argc < 1 || argc > 3)
+    if (!lua_arity_between(L, 1, 3))
     {
         return luaL_error(L, "Expected 1 to 3 arguments: string, optional delimiter, and optional max_splits");
     }
 
     // Lua's lua_isstring() also accepts numbers because they can be
     // converted to text. The public API requires an actual Lua string.
-    if (lua_type(L, 1) != LUA_TSTRING)
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected a Lua string as the first argument");
     }
-    // CORRECTIF (audit v21) : longueur Lua réelle via luaL_checklstring,
-    // plus std::strlen. Les strings Lua peuvent contenir des NUL ;
+    // CORRECTIF (audit v21) : longueur Lua réelle via lua_tolstring,
+    // sans std::strlen. Les strings Lua peuvent contenir des NUL ;
     // strlen tronquait silencieusement le sujet au premier '\0'
     // (split("a\0b,c", ",") rendait {"a"} au lieu de {"a\0b", "c"}).
     // Incohérent avec le reste de la fonction, qui mesure déjà le
     // délimiteur avec lua_rawlen. Tout le corps travaille sur
     // (str, str_len) et lua_pushlstring : binaire-safe de bout en bout.
     size_t str_len = 0;
-    const char *str = luaL_checklstring(L, 1, &str_len);
+    const char *str = lua_tolstring(L, 1, &str_len);
 
     char delimiter = ' ';
     bool has_delimiter = false;
     if (argc >= 2)
     {
-        if (lua_type(L, 2) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, 2))
         {
             return luaL_error(L, "Expected a Lua string as the second argument");
         }
         size_t delim_len = 0;
-        const char *delim = luaL_checklstring(L, 2, &delim_len);
+        const char *delim = lua_tolstring(L, 2, &delim_len);
         if (delim_len == 1)
         {
             delimiter = delim[0];
@@ -81,11 +82,11 @@ int lua_split(lua_State *L)
     lua_Integer max_splits = -1;
     if (argc == 3)
     {
-        if (!lua_isinteger(L, 3))
+        if (!lua_is_strict_integer(L, 3))
         {
             return luaL_error(L, "Expected an integer as the third argument");
         }
-        max_splits = luaL_checkinteger(L, 3);
+        max_splits = lua_tointeger(L, 3);
         if (max_splits < -1)
         {
             return luaL_error(L, "max_splits should be -1 or greater");

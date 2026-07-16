@@ -70,12 +70,11 @@ std::string rename_file(std::string_view old_path, std::string_view new_path)
  */
 int lua_rename(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc != 2)
+    if (!lua_arity_is(L, 2))
     {
         return luaL_error(L, "Expected two arguments");
     }
-    if (!lua_isstring(L, 1) || !lua_isstring(L, 2))
+    if (!lua_is_strict_string(L, 1) || !lua_is_strict_string(L, 2))
     {
         return luaL_error(L, "Expected two strings as arguments");
     }

@@ -237,8 +237,7 @@ namespace
 
     int inot_add(lua_State *L)
     {
-        const int argc = lua_gettop(L);
-        if (argc < 3 || argc > 4)
+        if (!lua_arity_between(L, 3, 4))
         {
             return luaL_error(L,
                               "inotify.add expects path, events and optional opts");
@@ -254,7 +253,7 @@ namespace
         // si absent (none) ou si ce n'est pas une table.
         luaL_checktype(L, 3, LUA_TTABLE);
         bool onlydir = false;
-        if (!lua_isnoneornil(L, 4))
+        if (!lua_is_none_or_nil(L, 4))
         {
             luaL_checktype(L, 4, LUA_TTABLE);
             // Conserver le comportement historique de lua_getfield (donc
@@ -263,7 +262,7 @@ namespace
             lua_getfield(L, 4, "onlydir");
             if (!lua_isnil(L, -1))
             {
-                if (lua_type(L, -1) != LUA_TBOOLEAN)
+                if (!lua_is_strict_boolean(L, -1))
                 {
                     lua_pop(L, 1);
                     return push_fail(L,
@@ -298,7 +297,7 @@ namespace
         for (lua_Integer i = 1; i <= count; ++i)
         {
             lua_rawgeti(L, 3, static_cast<lua_Integer>(i));
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 // Cohérence : toutes les erreurs de contenu de la
                 // table events (sparse, extra keys, unknown event,
@@ -345,7 +344,7 @@ namespace
         while (lua_next(L, 3) != 0)
         {
             int kt = lua_type(L, -2);
-            if (kt == LUA_TNUMBER && lua_isinteger(L, -2))
+            if (kt == LUA_TNUMBER && lua_is_strict_integer(L, -2))
             {
                 lua_Integer idx = lua_tointeger(L, -2);
                 if (idx < 1 || idx > count)
@@ -401,8 +400,7 @@ namespace
 
     int inot_read(lua_State *L)
     {
-        const int argc = lua_gettop(L);
-        if (argc < 1 || argc > 2)
+        if (!lua_arity_between(L, 1, 2))
         {
             return luaL_error(L, "inotify.read expects an optional timeout");
         }
@@ -417,9 +415,14 @@ namespace
         // dispo tout de suite). Refuser NaN/Inf cohérent avec le
         // reste du projet (exec, socket, workers).
         Deadline deadline = NO_DEADLINE;
-        if (!lua_isnoneornil(L, 2))
+        if (!lua_is_none_or_nil(L, 2))
         {
-            double secs = luaL_checknumber(L, 2);
+            if (!lua_is_strict_number(L, 2))
+            {
+                return luaL_error(L,
+                                  "inotify.read timeout must be a number");
+            }
+            const double secs = lua_tonumber(L, 2);
             if (std::isnan(secs) || !std::isfinite(secs) || secs < 0)
             {
                 return push_fail(L,
@@ -561,12 +564,17 @@ namespace
 
     int inot_remove(lua_State *L)
     {
-        if (lua_gettop(L) != 2)
+        if (!lua_arity_is(L, 2))
         {
             return luaL_error(L, "inotify.remove expects a watch descriptor");
         }
         Watcher *w = check_watcher(L, 1);
-        lua_Integer wd = luaL_checkinteger(L, 2);
+        if (!lua_is_strict_integer(L, 2))
+        {
+            return luaL_error(
+                L, "inotify.remove expects an integer watch descriptor");
+        }
+        const lua_Integer wd = lua_tointeger(L, 2);
         if (wd < static_cast<lua_Integer>(INT_MIN) ||
             wd > static_cast<lua_Integer>(INT_MAX))
         {
@@ -588,7 +596,7 @@ namespace
 
     int inot_close(lua_State *L)
     {
-        if (lua_gettop(L) != 1)
+        if (!lua_arity_is(L, 1))
         {
             return luaL_error(L, "inotify.close expects no argument");
         }
@@ -629,7 +637,7 @@ namespace
 
     int lua_inotify_new(lua_State *L)
     {
-        if (lua_gettop(L) != 0)
+        if (!lua_arity_is(L, 0))
         {
             return luaL_error(L, "inotify.new expects no argument");
         }

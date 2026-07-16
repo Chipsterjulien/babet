@@ -25,7 +25,7 @@ namespace
      */
     std::optional<long> resolve_mode(lua_State *L, int index, std::string &error_out)
     {
-        if (lua_type(L, index) == LUA_TSTRING)
+        if (lua_is_strict_string(L, index))
         {
             size_t mode_len = 0;
             const char *mode_str = lua_tolstring(L, index, &mode_len);
@@ -57,10 +57,10 @@ namespace
             return mode;
         }
 
-        if (lua_type(L, index) == LUA_TNUMBER)
+        if (lua_is_strict_number(L, index))
         {
             // On exige un entier : un mode 0.5 n'a aucun sens.
-            if (!lua_isinteger(L, index))
+            if (!lua_is_strict_integer(L, index))
             {
                 error_out = "numeric mode must be an integer";
                 return std::nullopt;
@@ -86,12 +86,11 @@ namespace
  */
 int lua_setmode(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc != 2)
+    if (!lua_arity_is(L, 2))
     {
         return luaL_error(L, "Expected two arguments: path and mode");
     }
-    if (!lua_isstring(L, 1))
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected a string as first argument (path)");
     }
@@ -131,12 +130,11 @@ int lua_setmode(lua_State *L)
  */
 int lua_getmode(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "Expected one argument");
     }
-    if (!lua_isstring(L, 1))
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected a string as argument");
     }

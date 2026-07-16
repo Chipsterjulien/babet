@@ -1,4 +1,5 @@
 #include "time_format.hpp"
+#include "lua_utils.hpp"
 
 #include <array>
 #include <cctype>
@@ -483,7 +484,7 @@ namespace
                             int64_t &out,
                             const char *err_prefix /* funcname for luaL_error */)
     {
-        if (lua_isinteger(L, idx))
+        if (lua_is_strict_integer(L, idx))
         {
             out = static_cast<int64_t>(lua_tointeger(L, idx));
             return true;
@@ -491,7 +492,7 @@ namespace
         // `lua_isnumber` accepterait aussi une string numérique ("60").
         // Les signatures publiques iso(number) et format_duration(number)
         // exigent un vrai number Lua.
-        if (lua_type(L, idx) != LUA_TNUMBER)
+        if (!lua_is_strict_number(L, idx))
         {
             luaL_error(L, "%s: expected a number", err_prefix);
             return false; // unreachable
@@ -566,13 +567,13 @@ int lua_time_iso(lua_State *L)
 
 int lua_time_parse_iso(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "parse_iso: expected one argument");
     }
     // `lua_isstring` accepte aussi les numbers ; le parseur exige une
     // vraie string afin que parse_iso(42) soit une erreur de type.
-    if (lua_type(L, 1) != LUA_TSTRING)
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "parse_iso: expected a string");
     }
@@ -598,13 +599,13 @@ int lua_time_parse_iso(lua_State *L)
 
 int lua_time_parse_duration(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "parse_duration: expected one argument");
     }
     // Même contrat strict que parse_iso : pas de coercition implicite
     // d'un number vers sa représentation textuelle.
-    if (lua_type(L, 1) != LUA_TSTRING)
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "parse_duration: expected a string");
     }
@@ -630,7 +631,7 @@ int lua_time_parse_duration(lua_State *L)
 
 int lua_time_format_duration(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "format_duration: expected one argument");
     }

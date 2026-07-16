@@ -663,7 +663,9 @@ local files = assert(babet.listFiles("collection", true))
 -- collection/external -> /other/directory is not followed
 ```
 
-The second argument is optional and defaults to `false`.
+The second argument is optional and defaults to `false`. When present, it must
+be a strict Lua boolean; numbers and strings are not coerced. The function
+accepts exactly one or two arguments.
 
 <a id="createfileiterator"></a>
 ### `babet.createFileIterator(path, recursive?)`
@@ -715,12 +717,18 @@ Symlink behavior:
   `(nil, err)`.
 
 Calling `next()` after `close()` raises a Lua error. Omitting `close()` is not
-fatal: the garbage collector eventually releases the object.
+fatal: the garbage collector eventually releases the object. The optional
+`recursive` argument must be a strict Lua boolean, and the constructor accepts
+exactly one or two arguments.
 
 <a id="find"></a>
 ### `babet.find(path, opts?)`
 
 Recursively searches the entries of a directory and returns an array of paths.
+
+`path` must be a strict Lua string. `opts` must be a table or `nil`, and the
+function accepts exactly one or two arguments. Option fields are also strict:
+depths are Lua integers, and every name/path/regex/glob field is a Lua string.
 
 These calls are equivalent:
 
@@ -737,26 +745,65 @@ is not included.
 | Option | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `type` | string | no filter | `"f"` for files, `"d"` for directories |
-| `name` | string | absent | ECMAScript regex on basename, case-sensitive |
-| `iname` | string | absent | ECMAScript regex on basename, case-insensitive |
-| `path` | string | absent | ECMAScript regex searched in the full path |
+| `glob` | string | absent | bounded glob on the complete basename, case-sensitive |
+| `iglob` | string | absent | bounded glob on the complete basename, ASCII case-insensitive |
+| `path_glob` | string | absent | bounded glob on the complete returned path, case-sensitive |
+| `path_iglob` | string | absent | bounded glob on the complete returned path, ASCII case-insensitive |
+| `name` | string | absent | RE2 regex on the complete basename, case-sensitive |
+| `iname` | string | absent | RE2 regex on the complete basename, case-insensitive |
+| `path` | string | absent | RE2 regex searched within the full path |
 | `mindepth` | integer | `0` | minimum included depth |
 | `maxdepth` | integer | practically unlimited | maximum included depth |
 
-All supplied options are combined with logical **AND**.
+All supplied options are combined with logical **AND**. An empty pattern acts
+like an absent filter, matching the historical regex behavior.
 
-#### Find files by extension
+#### Safe glob filters
 
-`name` matches the complete basename rather than searching for a substring:
+Use the glob fields for ordinary filename filtering, especially when a pattern
+may come from an untrusted user:
 
 ```lua
 local lua_files = assert(babet.find("src", {
     type = "f",
-    name = ".*\\.lua$",
+    glob = "*.lua",
+}))
+
+local images = assert(babet.find("assets", {
+    type = "f",
+    iglob = "*.jpg",
 }))
 ```
 
-#### Case-insensitive search
+The glob language is deliberately small:
+
+- `*`: zero or more bytes except `/`;
+- `**`: zero or more bytes, including `/`;
+- `?`: exactly one byte except `/`;
+- `\x`: literal byte `x`.
+
+Matching is anchored to the complete basename or path. Brackets, braces, and
+shell extglob syntax have no special meaning and are matched literally. Each
+pattern is limited to 4096 bytes. The matcher uses no recursive backtracking;
+its work is bounded polynomially by the pattern and candidate lengths.
+
+`path_glob` and `path_iglob` match the complete returned path with `/` as the
+separator. Use `**` when a wildcard must cross directories:
+
+```lua
+local tests = assert(babet.find(".", {
+    type = "f",
+    path_glob = "**/tests/**/*.lua",
+}))
+```
+
+The insensitive variants fold ASCII letters only. UTF-8 bytes outside ASCII
+are compared exactly, which keeps behavior independent of the process locale.
+
+#### Bounded RE2 regular expressions
+
+The historical `name`, `iname`, and `path` fields now use the statically linked
+RE2 engine. `name` and `iname` match the complete basename:
 
 ```lua
 local images = assert(babet.find("assets", {
@@ -765,9 +812,7 @@ local images = assert(babet.find("assets", {
 }))
 ```
 
-#### Filter the full path
-
-`path` searches within the complete path:
+`path` performs a partial regex search within the complete path:
 
 ```lua
 local tests = assert(babet.find(".", {
@@ -775,6 +820,19 @@ local tests = assert(babet.find(".", {
     path = "/tests/",
 }))
 ```
+
+Each regex is limited to 4096 bytes and compiled with a 1 MiB RE2 memory
+budget. Matching is linear-time; when the DFA cache reaches its budget, RE2
+falls back to its bounded NFA instead of backtracking exponentially. Babet uses
+RE2's Latin-1 mode so every Linux pathname byte remains matchable, including
+names that are not valid UTF-8. `iname` disables case sensitivity through RE2;
+no process locale is consulted.
+
+RE2 deliberately rejects constructs that require backtracking or non-regular
+state, notably backreferences and look-around assertions. Such a pattern makes
+the whole call fail with `(nil, err)`. Use the safe glob fields for simple
+filename filters and RE2 when grouping, alternation, character classes, or
+bounded repetitions are genuinely useful.
 
 #### Limit depth
 
@@ -805,14 +863,9 @@ valid target, however: a symlink to a file may match `type = "f"`, and a
 symlink to a directory may appear with `type = "d"` without its contents being
 traversed.
 
-An invalid regex or traversal error fails the entire call with `(nil, err)`.
-There is no “continue after errors” mode for `find`.
-
-The regex engine is `std::regex` in ECMAScript mode. It may use exponential
-backtracking for some patterns, such as nested ambiguous repetitions. Do not
-pass an untrusted, user-supplied regex directly to `name`, `iname`, or `path`;
-a hostile pattern can keep the calling thread or worker busy for a very long
-time. This warning concerns the regex itself, not ordinary filenames.
+An invalid or oversized regex, invalid or oversized glob, or traversal error fails the
+entire call with `(nil, err)`. There is no “continue after errors” mode for
+`find`.
 
 <a id="fs-copy-move"></a>
 ## Copy and move
@@ -857,7 +910,8 @@ assert(babet.copyTree("site", "backup/site"))
 
 #### Default value of `continue_on_error`
 
-The optional third argument defaults to **`true`**.
+The optional third argument defaults to **`true`**. When present it must be a
+strict Lua boolean; the function accepts exactly two or three arguments.
 
 For an error limited to one entry:
 
@@ -1209,7 +1263,8 @@ as the normal result `(false, nil)`. A genuine inspection failure remains
 - **`mkdir` is always recursive**: no non-recursive API variant exists.
 - **`copy` for one file, `copyTree` for a tree**: no implicit overload based
   on source type.
-- **No standalone glob**: use `find` with an ECMAScript regex.
+- **Glob is a `find` filter, not a standalone function**: use `glob`, `iglob`,
+  `path_glob`, or `path_iglob` in `babet.find`.
 - **No automatic sorting**: call `table.sort` when stable ordering matters.
 - **No complete metadata preservation during copy**: regular file permission
   bits are handled, but owners, groups, timestamps, and directory modes are

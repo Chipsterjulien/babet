@@ -164,7 +164,7 @@ std::optional<std::string> set_attributes(const fs::path &path,
 int lua_setattr(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc < 3 || argc > 4)
+    if (!lua_arity_between(L, 3, 4))
     {
         return luaL_error(L, "Expected three or four arguments");
     }
@@ -172,19 +172,19 @@ int lua_setattr(lua_State *L)
     // Validate every argument that may raise before constructing an owning
     // C++ string. luaL_error uses a non-local jump and would otherwise bypass
     // that string's destructor when UID/GID/mode has the wrong Lua type.
-    if (lua_type(L, 1) != LUA_TSTRING)
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "path must be a string");
     }
-    if (!lua_isinteger(L, 2))
+    if (!lua_is_strict_integer(L, 2))
     {
         return luaL_error(L, "UID must be an integer");
     }
-    if (!lua_isinteger(L, 3))
+    if (!lua_is_strict_integer(L, 3))
     {
         return luaL_error(L, "GID must be an integer");
     }
-    if (argc == 4 && !lua_isinteger(L, 4))
+    if (argc == 4 && !lua_is_strict_integer(L, 4))
     {
         return luaL_error(L, "mode must be an integer");
     }
@@ -233,7 +233,7 @@ int lua_setattr(lua_State *L)
 
 int lua_getattr(lua_State *L)
 {
-    if (lua_gettop(L) != 1 || !lua_isstring(L, 1))
+    if (!lua_arity_is(L, 1) || !lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected one string argument");
     }

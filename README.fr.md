@@ -10,11 +10,12 @@
 > capable d’allumer un feu — comme ce binaire.
 
 Babet est un binaire Lua 5.5 autonome pour le scripting et l’automatisation
-sous Linux, écrit en C++23. OpenSSL, SQLite, miniz, nlohmann/json,
-cpp-httplib et tomlplusplus sont liés statiquement : un seul binaire, sans
-dépendance système autre que glibc.
+sous Linux, écrit en C++23. OpenSSL, SQLite, miniz, libarchive, zlib,
+liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
+tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
+autre que glibc.
 
-Version stable et auditée actuelle : **2.5.0**. Voir le
+Version stable et auditée actuelle : **2.6.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
@@ -28,7 +29,7 @@ Babet s’utilise de trois façons :
    `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`,
    `babet.inotify`, `babet.workers`, `babet.user`, `babet.exec`, le streaming
    `babet.spawn`, les pipelines `babet.pipeline` / `babet.spawnPipeline`, les
-   archives ZIP sécurisées `babet.archive` et le téléchargement direct
+   archives ZIP et TAR sécurisées `babet.archive` et le téléchargement direct
    `babet.http.download`.
 
 ## Démarrage rapide
@@ -42,7 +43,7 @@ cd babet
 ```
 
 Le premier build télécharge et compile les dépendances. Il faut un compilateur
-C++23, CMake, `wget` et `unzip`.
+C++23, CMake 3.22 ou plus récent, `wget`, `unzip` et `xz`.
 
 ### Télécharger une grosse réponse HTTP sans la garder en mémoire
 
@@ -65,7 +66,7 @@ La réponse est écrite dans un temporaire du même dossier, puis validée
 atomiquement uniquement pour un statut final 2xx. Une destination existante est
 préservée après erreur réseau, TLS, taille, disque ou statut non-2xx.
 
-### Créer, inspecter puis extraire une archive ZIP en sécurité
+### Créer, inspecter et extraire ZIP ou TAR en sécurité
 
 ```lua
 local created, err = babet.archive.create("projet", "projet.zip", {
@@ -74,24 +75,49 @@ local created, err = babet.archive.create("projet", "projet.zip", {
 })
 assert(created, err)
 
+local tar_created
+tar_created, err = babet.archive.create("projet", "projet.tar")
+assert(tar_created, err)
+assert(tar_created.format == "tar")
+
 local info, err = babet.archive.list("upload.zip", {
     max_entries = 2000,
     max_total_size = 512 * 1024 * 1024,
 })
 assert(info, err)
 
+local tar_info
+tar_info, err = babet.archive.list("source.tar.xz")
+assert(tar_info, err)
+assert(tar_info.format == "tar")
+assert(tar_info.compression == "xz")
+
 local result
-result, err = babet.archive.extract("upload.zip", "restore", {
+result, err = babet.archive.extract("source.tar", "restore", {
     overwrite = false,
 })
 assert(result, err)
+
+local one
+one, err = babet.archive.extractFile(
+    "source.tar", "docs/readme.txt", "readme.txt")
+assert(one, err)
 ```
 
-La création refuse les symlinks source, objets non pris en charge, noms
+La création, le listing et l’extraction ZIP continuent d’utiliser miniz. Les
+opérations TAR brutes, gzip, xz, bzip2 ou zstd utilisent les backends
+libarchive, zlib, XZ Utils/liblzma, libbz2 et libzstd liés statiquement. Les
+lecteurs détectent le format et la compression à partir du contenu ;
+`archive.create()` déduit TAR de `.tar`, TAR gzip de `.tar.gz` ou `.tgz`, TAR xz
+de `.tar.xz` ou `.txz`, TAR bzip2 de `.tar.bz2`, `.tbz2` ou `.tbz`, et TAR zstd
+de `.tar.zst`, `.tar.zstd` ou `.tzst`. Il accepte `format = "tar"`,
+`format = "tar.gz"`, `format = "tar.xz"`, `format = "tar.bz2"` ou
+`format = "tar.zst"`. La création refuse les symlinks source,
+objets non pris en charge, noms
 d’entrée dangereux et toute sortie située dans l’arbre source. L’extraction
-refuse les chemins absolus, composants `..`, symlinks ZIP et parents symlinkés.
-L’archive est publiée atomiquement en bloc ; chaque fichier extrait est
-contrôlé puis publié atomiquement.
+refuse les chemins absolus, composants `..`, liens et types spéciaux de
+l’archive, fichiers TAR sparse et parents symlinkés. Les fichiers extraits sont
+tous préparés avant publication, puis publiés atomiquement un par un.
 
 ## Validation avant une release
 

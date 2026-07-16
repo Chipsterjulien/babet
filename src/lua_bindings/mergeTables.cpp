@@ -1,4 +1,5 @@
 #include "mergeTables.hpp"
+#include "lua_utils.hpp"
 
 #include <limits>
 
@@ -56,7 +57,7 @@ int lua_mergeTables(lua_State *L)
             lua_pushnil(L);
             while (lua_next(L, source_index) != 0)
             {
-                if (lua_isinteger(L, -2))
+                if (lua_is_strict_integer(L, -2))
                 {
                     const lua_Integer key = lua_tointeger(L, -2);
                     if (key >= 1 && key > previous_key &&
@@ -85,7 +86,7 @@ int lua_mergeTables(lua_State *L)
         while (lua_next(L, source_index) != 0)
         {
             bool appended_numeric_key = false;
-            if (lua_isinteger(L, -2))
+            if (lua_is_strict_integer(L, -2))
             {
                 appended_numeric_key = lua_tointeger(L, -2) >= 1;
             }

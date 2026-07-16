@@ -4,7 +4,7 @@
 #include <lua.hpp>
 
 /**
- * @brief Registers the secure ZIP archive API as `babet.archive`.
+ * @brief Registers the secure ZIP/TAR archive API as `babet.archive`.
  *
  * Public functions:
  *   create(source, archive [, opts])
@@ -12,12 +12,14 @@
  *   extract(archive, destination [, opts])
  *   extractFile(archive, entry, destination [, opts])
  *
- * The implementation is ZIP-only, uses miniz, opens input archives through a
- * single regular-file stream, validates the whole selected entry set before
- * writing, rejects unsafe paths and unsupported entry types, enforces
- * configurable anti-bomb limits, requires valid UTF-8 names for newly created
- * archives, and publishes regular files atomically through same-directory
- * temporary files.
+ * ZIP creation, listing, and extraction use miniz. list(), extract(), and
+ * extractFile() additionally detect TAR, optionally gzip-compressed, through
+ * libarchive. Input
+ * archives are pinned through a regular-file descriptor, unsafe paths and
+ * unsupported entry types are rejected, configurable anti-bomb limits are
+ * enforced, and extracted regular files use same-directory staging before
+ * publication.
+ * Archive creation remains ZIP-only in the current lot.
  */
 void register_archive(lua_State *L);
 

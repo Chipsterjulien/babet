@@ -56,6 +56,7 @@
 #include "lua_bindings/workers.hpp"
 #include "lua_bindings/fileIterator.hpp"
 
+#include "project_core/archive_backend.hpp"
 #include "project_core/bundled_modules.hpp"
 #include "project_core/create_executable.hpp"
 #include "project_core/embedded_searcher.hpp"
@@ -66,6 +67,7 @@
 
 #include "version.hpp"
 
+#include <cstring>
 #include <iostream>
 #include <lua.hpp>
 #include <filesystem>
@@ -253,7 +255,7 @@ void register_babet(lua_State *L)
     lua_pushcfunction(L, lua_createFileIterator);
     lua_setfield(L, -2, "createFileIterator");
 
-    // Sous-table babet.archive (ZIP sécurisé : création, inspection et extraction).
+    // Sous-table babet.archive (ZIP miniz + TAR/libarchive, gzip compris).
     // Même précondition de pile que les autres sous-modules.
     register_archive(L);
 
@@ -453,6 +455,102 @@ static int run_tool_script(const fs::path &anchorDir,
 
 int main(int argc, char *argv[])
 {
+    // === ÉTAPE -1 : vérifier les backends d'archive liés ============
+    // La 2.6.0 utilise libarchive, zlib, liblzma, libbz2 et libzstd
+    // statiquement pour TAR/gzip/xz/bzip2/zstd, tout en conservant miniz pour
+    // ZIP. Ces contrôles détectent
+    // immédiatement un mélange header/bibliothèque dans les builds personnalisés.
+    const auto libarchive_runtime = babet::archive_backend::inspect_runtime();
+    if (libarchive_runtime.runtime_version_string == nullptr)
+    {
+        std::cerr << "Erreur : libarchive n'a retourné aucune version runtime."
+                  << std::endl;
+        return 1;
+    }
+    if (libarchive_runtime.runtime_version != libarchive_runtime.header_version)
+    {
+        std::cerr << "Erreur : incohérence libarchive entre les en-têtes ("
+                  << libarchive_runtime.header_version << ") et la bibliothèque ("
+                  << libarchive_runtime.runtime_version << ")." << std::endl;
+        return 1;
+    }
+    if (libarchive_runtime.zlib_header_version == nullptr ||
+        libarchive_runtime.zlib_runtime_version == nullptr)
+    {
+        std::cerr << "Erreur : zlib n'a retourné aucune version runtime."
+                  << std::endl;
+        return 1;
+    }
+    if (std::strcmp(libarchive_runtime.zlib_header_version,
+                    libarchive_runtime.zlib_runtime_version) != 0)
+    {
+        std::cerr << "Erreur : incohérence zlib entre les en-têtes ("
+                  << libarchive_runtime.zlib_header_version
+                  << ") et la bibliothèque ("
+                  << libarchive_runtime.zlib_runtime_version << ")."
+                  << std::endl;
+        return 1;
+    }
+    if (libarchive_runtime.lzma_header_version == nullptr ||
+        libarchive_runtime.lzma_runtime_version == nullptr)
+    {
+        std::cerr << "Erreur : liblzma n'a retourné aucune version runtime."
+                  << std::endl;
+        return 1;
+    }
+    if (std::strcmp(libarchive_runtime.lzma_header_version,
+                    libarchive_runtime.lzma_runtime_version) != 0)
+    {
+        std::cerr << "Erreur : incohérence liblzma entre les en-têtes ("
+                  << libarchive_runtime.lzma_header_version
+                  << ") et la bibliothèque ("
+                  << libarchive_runtime.lzma_runtime_version << ")."
+                  << std::endl;
+        return 1;
+    }
+    if (libarchive_runtime.bzip2_expected_version == nullptr ||
+        libarchive_runtime.bzip2_runtime_version == nullptr)
+    {
+        std::cerr << "Erreur : libbz2 n'a retourné aucune version runtime."
+                  << std::endl;
+        return 1;
+    }
+    const std::size_t bzip2_expected_length =
+        std::strlen(libarchive_runtime.bzip2_expected_version);
+    const std::size_t bzip2_runtime_length =
+        std::strlen(libarchive_runtime.bzip2_runtime_version);
+    if (bzip2_runtime_length < bzip2_expected_length ||
+        std::strncmp(libarchive_runtime.bzip2_runtime_version,
+                     libarchive_runtime.bzip2_expected_version,
+                     bzip2_expected_length) != 0 ||
+        (bzip2_runtime_length > bzip2_expected_length &&
+         libarchive_runtime.bzip2_runtime_version[bzip2_expected_length] != ','))
+    {
+        std::cerr << "Erreur : incohérence libbz2 entre la version attendue ("
+                  << libarchive_runtime.bzip2_expected_version
+                  << ") et la bibliothèque ("
+                  << libarchive_runtime.bzip2_runtime_version << ")."
+                  << std::endl;
+        return 1;
+    }
+    if (libarchive_runtime.zstd_header_version == nullptr ||
+        libarchive_runtime.zstd_runtime_version == nullptr)
+    {
+        std::cerr << "Erreur : libzstd n'a retourné aucune version runtime."
+                  << std::endl;
+        return 1;
+    }
+    if (std::strcmp(libarchive_runtime.zstd_header_version,
+                    libarchive_runtime.zstd_runtime_version) != 0)
+    {
+        std::cerr << "Erreur : incohérence libzstd entre les en-têtes ("
+                  << libarchive_runtime.zstd_header_version
+                  << ") et la bibliothèque ("
+                  << libarchive_runtime.zstd_runtime_version << ")."
+                  << std::endl;
+        return 1;
+    }
+
     // === ÉTAPE 0 : capturer le thread principal pour signal.cpp =====
     // Doit être fait avant tout spawn de worker. Permet à
     // babet.signal.handle/ignore/default de refuser les appels

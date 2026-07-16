@@ -54,7 +54,7 @@ std::optional<std::string> getPath(std::string_view fullPath) {
  */
 template<typename Func>
 int lua_genericFunction(lua_State* L, Func func) {
-    if (lua_gettop(L) != 1 || !lua_isstring(L, 1)) {
+    if (!lua_arity_is(L, 1) || !lua_is_strict_string(L, 1)) {
         return luaL_error(L, "Expected one string argument");
     }
 

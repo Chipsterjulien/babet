@@ -1,5 +1,6 @@
 #include "archive.hpp"
 #include "lua_utils.hpp"
+#include "project_core/archive_tar.hpp"
 
 #include <miniz.h>
 
@@ -75,7 +76,27 @@ enum class EntryKind
     regular,
     directory,
     symlink,
+    hardlink,
+    fifo,
+    character_device,
+    block_device,
+    socket,
     unsupported,
+};
+
+enum class ArchiveFormat
+{
+    zip,
+    tar,
+};
+
+enum class ArchiveCompression
+{
+    none,
+    gzip,
+    xz,
+    bzip2,
+    zstd,
 };
 
 struct ArchiveEntry
@@ -85,15 +106,22 @@ struct ArchiveEntry
     std::string normalized;
     EntryKind kind = EntryKind::unsupported;
     std::uint64_t compressed_size = 0;
+    bool has_compressed_size = true;
     std::uint64_t size = 0;
     std::uint32_t crc32 = 0;
+    bool has_crc32 = true;
     std::uint16_t method = 0;
+    bool has_compression_method = true;
     std::uint16_t version_made_by = 0;
     std::uint32_t external_attributes = 0;
     mode_t unix_mode = 0;
+    bool has_unix_mode = false;
     bool encrypted = false;
     bool supported = false;
     bool safe_path = false;
+    bool sparse = false;
+    bool has_link_target = false;
+    std::string link_target;
     std::string path_error;
 };
 
@@ -103,6 +131,8 @@ struct ArchiveScan
     std::uint64_t total_size = 0;
     std::uint64_t archive_size = 0;
     bool zip64 = false;
+    ArchiveFormat format = ArchiveFormat::zip;
+    ArchiveCompression compression = ArchiveCompression::none;
 };
 
 std::string errno_message(std::string_view action, const fs::path &path,
@@ -250,6 +280,90 @@ std::string miniz_error(mz_zip_archive &zip, std::string_view action,
     return result;
 }
 
+int duplicate_cloexec(int fd);
+
+class PinnedArchiveSource
+{
+public:
+    PinnedArchiveSource() = default;
+    ~PinnedArchiveSource()
+    {
+        if (fd_ >= 0)
+        {
+            ::close(fd_);
+        }
+    }
+
+    PinnedArchiveSource(const PinnedArchiveSource &) = delete;
+    PinnedArchiveSource &operator=(const PinnedArchiveSource &) = delete;
+
+    bool open(const std::string &path, std::string &err)
+    {
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0)
+        {
+            err = "archive: " + errno_message("cannot open archive", path,
+                                                errno);
+            return false;
+        }
+
+        struct stat st{};
+        if (::fstat(fd, &st) != 0)
+        {
+            const int e = errno;
+            ::close(fd);
+            err = "archive: " + errno_message("cannot inspect archive", path,
+                                                e);
+            return false;
+        }
+        if (!S_ISREG(st.st_mode))
+        {
+            ::close(fd);
+            err = "archive: archive source is not a regular file: '" + path +
+                  "'";
+            return false;
+        }
+        if (st.st_size < 0)
+        {
+            ::close(fd);
+            err = "archive: archive source has a negative size: '" + path +
+                  "'";
+            return false;
+        }
+
+        fd_ = fd;
+        size_ = static_cast<std::uint64_t>(st.st_size);
+        path_ = path;
+        return true;
+    }
+
+    int duplicate_rewound(std::string &err) const
+    {
+        if (::lseek(fd_, 0, SEEK_SET) < 0)
+        {
+            err = "archive: " + errno_message("cannot rewind archive", path_,
+                                                errno);
+            return -1;
+        }
+        const int duplicate = duplicate_cloexec(fd_);
+        if (duplicate < 0)
+        {
+            err = "archive: " + errno_message(
+                "cannot duplicate archive descriptor", path_, errno);
+            return -1;
+        }
+        return duplicate;
+    }
+
+    [[nodiscard]] std::uint64_t size() const noexcept { return size_; }
+    [[nodiscard]] const std::string &path() const noexcept { return path_; }
+
+private:
+    int fd_ = -1;
+    std::uint64_t size_ = 0;
+    std::string path_;
+};
+
 class ArchiveReader
 {
 public:
@@ -310,6 +424,18 @@ public:
             return false;
         }
 
+        return open_fd(fd, path, err);
+    }
+
+    bool open_fd(int fd, const std::string &path, std::string &err)
+    {
+        if (fd < 0)
+        {
+            err = "archive: invalid ZIP archive descriptor for '" + path +
+                  "'";
+            return false;
+        }
+
         FILE *file = ::fdopen(fd, "rb");
         if (file == nullptr)
         {
@@ -363,7 +489,7 @@ void raw_getfield(lua_State *L, int idx, const char *name)
 bool validate_option_keys(lua_State *L, int idx, bool extraction,
                           std::string &err)
 {
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -385,7 +511,7 @@ bool validate_option_keys(lua_State *L, int idx, bool extraction,
     lua_pushnil(L);
     while (lua_next(L, idx) != 0)
     {
-        if (lua_type(L, -2) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -2))
         {
             lua_pop(L, 2);
             err = "archive option keys must be strings";
@@ -410,16 +536,16 @@ bool parse_positive_integer(lua_State *L, int table_index, const char *field,
                             std::string &err)
 {
     raw_getfield(L, table_index, field);
-    if (lua_isnil(L, -1))
-    {
-        lua_pop(L, 1);
-        return true;
-    }
-    if (!lua_isinteger(L, -1))
+    if (!lua_is_optional_strict_integer(L, -1))
     {
         lua_pop(L, 1);
         err = std::string("opts.") + field + " must be an integer";
         return false;
+    }
+    if (lua_is_none_or_nil(L, -1))
+    {
+        lua_pop(L, 1);
+        return true;
     }
     const lua_Integer parsed = lua_tointeger(L, -1);
     lua_pop(L, 1);
@@ -437,16 +563,16 @@ bool parse_strict_boolean(lua_State *L, int table_index, const char *field,
                           bool &value, std::string &err)
 {
     raw_getfield(L, table_index, field);
-    if (lua_isnil(L, -1))
-    {
-        lua_pop(L, 1);
-        return true;
-    }
-    if (lua_type(L, -1) != LUA_TBOOLEAN)
+    if (!lua_is_optional_strict_boolean(L, -1))
     {
         lua_pop(L, 1);
         err = std::string("opts.") + field + " must be a boolean";
         return false;
+    }
+    if (lua_is_none_or_nil(L, -1))
+    {
+        lua_pop(L, 1);
+        return true;
     }
     value = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
@@ -460,7 +586,7 @@ bool collect_options(lua_State *L, int idx, bool extraction,
     {
         return false;
     }
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -479,14 +605,14 @@ bool collect_options(lua_State *L, int idx, bool extraction,
     }
 
     raw_getfield(L, idx, "max_compression_ratio");
-    if (!lua_isnil(L, -1))
+    if (!lua_is_optional_strict_number(L, -1))
     {
-        if (lua_type(L, -1) != LUA_TNUMBER)
-        {
-            lua_pop(L, 1);
-            err = "opts.max_compression_ratio must be a number";
-            return false;
-        }
+        lua_pop(L, 1);
+        err = "opts.max_compression_ratio must be a number";
+        return false;
+    }
+    if (!lua_is_none_or_nil(L, -1))
+    {
         const double ratio = lua_tonumber(L, -1);
         lua_pop(L, 1);
         if (!std::isfinite(ratio) || ratio < 1.0 ||
@@ -552,13 +678,15 @@ bool read_archive_filename(mz_zip_archive &zip, mz_uint index,
 }
 
 EntryKind detect_entry_kind(const mz_zip_archive_file_stat &stat,
-                            mode_t &unix_mode)
+                            mode_t &unix_mode, bool &has_unix_mode)
 {
     unix_mode = 0;
+    has_unix_mode = false;
     const unsigned host_system = stat.m_version_made_by >> 8U;
     if (host_system == 3U || host_system == 19U) // Unix or macOS.
     {
         unix_mode = static_cast<mode_t>((stat.m_external_attr >> 16U) & 0xFFFFU);
+        has_unix_mode = unix_mode != 0;
         const mode_t type = unix_mode & S_IFMT;
         if (type == S_IFLNK)
         {
@@ -757,6 +885,16 @@ std::string entry_kind_name(EntryKind kind)
         return "directory";
     case EntryKind::symlink:
         return "symlink";
+    case EntryKind::hardlink:
+        return "hardlink";
+    case EntryKind::fifo:
+        return "fifo";
+    case EntryKind::character_device:
+        return "character_device";
+    case EntryKind::block_device:
+        return "block_device";
+    case EntryKind::socket:
+        return "socket";
     case EntryKind::unsupported:
         return "unsupported";
     }
@@ -781,16 +919,42 @@ std::string extraction_rejection_reason(const ArchiveEntry &entry)
     {
         return "symlink entries are refused";
     }
+    if (entry.kind == EntryKind::hardlink)
+    {
+        return "hard link entries are refused";
+    }
+    if (entry.kind == EntryKind::fifo)
+    {
+        return "FIFO entries are refused";
+    }
+    if (entry.kind == EntryKind::character_device)
+    {
+        return "character-device entries are refused";
+    }
+    if (entry.kind == EntryKind::block_device)
+    {
+        return "block-device entries are refused";
+    }
+    if (entry.kind == EntryKind::socket)
+    {
+        return "socket entries are refused";
+    }
     if (entry.kind == EntryKind::unsupported)
     {
         return "unsupported filesystem entry type";
     }
+    if (entry.sparse)
+    {
+        return "sparse TAR entries are refused";
+    }
     return {};
 }
 
-bool scan_archive(ArchiveReader &reader, const ArchiveOptions &options,
-                  ArchiveScan &scan, std::string &err)
+bool scan_zip_archive(ArchiveReader &reader, const ArchiveOptions &options,
+                      ArchiveScan &scan, std::string &err)
 {
+    scan.format = ArchiveFormat::zip;
+    scan.compression = ArchiveCompression::none;
     mz_zip_archive &zip = reader.zip();
     const mz_uint count = mz_zip_reader_get_num_files(&zip);
     if (static_cast<std::uint64_t>(count) > options.max_entries)
@@ -828,7 +992,8 @@ bool scan_archive(ArchiveReader &reader, const ArchiveOptions &options,
             return false;
         }
         total_name_bytes += entry.name.size();
-        entry.kind = detect_entry_kind(stat, entry.unix_mode);
+        entry.kind = detect_entry_kind(stat, entry.unix_mode,
+                                       entry.has_unix_mode);
         entry.compressed_size = stat.m_comp_size;
         entry.size = stat.m_uncomp_size;
         entry.crc32 = stat.m_crc32;
@@ -880,6 +1045,107 @@ bool scan_archive(ArchiveReader &reader, const ArchiveOptions &options,
         scan.entries.push_back(std::move(entry));
     }
     scan.total_size = total;
+    return true;
+}
+
+EntryKind tar_entry_kind(babet::archive_tar::EntryType type)
+{
+    using TarType = babet::archive_tar::EntryType;
+    switch (type)
+    {
+    case TarType::regular:
+        return EntryKind::regular;
+    case TarType::directory:
+        return EntryKind::directory;
+    case TarType::symlink:
+        return EntryKind::symlink;
+    case TarType::hardlink:
+        return EntryKind::hardlink;
+    case TarType::fifo:
+        return EntryKind::fifo;
+    case TarType::character_device:
+        return EntryKind::character_device;
+    case TarType::block_device:
+        return EntryKind::block_device;
+    case TarType::socket:
+        return EntryKind::socket;
+    case TarType::unsupported:
+        return EntryKind::unsupported;
+    }
+    return EntryKind::unsupported;
+}
+
+bool scan_tar_archive(PinnedArchiveSource &source,
+                      const ArchiveOptions &options, ArchiveScan &scan,
+                      std::string &err,
+                      babet::archive_tar::ScanResult *raw_result = nullptr)
+{
+    const int fd = source.duplicate_rewound(err);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    babet::archive_tar::ScanResult tar_scan;
+    const babet::archive_tar::ScanLimits limits{
+        .max_entries = options.max_entries,
+        .max_entry_size = options.max_entry_size,
+        .max_total_size = options.max_total_size,
+        .max_total_name_bytes = HARD_MAX_TOTAL_NAME_BYTES,
+        .max_compression_ratio = options.max_compression_ratio,
+    };
+    const bool scanned = babet::archive_tar::scan_fd(
+        fd, source.size(), source.path(), limits, tar_scan, err);
+    ::close(fd);
+    if (!scanned)
+    {
+        return false;
+    }
+
+    scan = {};
+    scan.format = ArchiveFormat::tar;
+    scan.compression =
+        tar_scan.compression == babet::archive_tar::Compression::gzip
+            ? ArchiveCompression::gzip
+            : tar_scan.compression == babet::archive_tar::Compression::xz
+                  ? ArchiveCompression::xz
+                  : tar_scan.compression ==
+                            babet::archive_tar::Compression::bzip2
+                        ? ArchiveCompression::bzip2
+                        : tar_scan.compression ==
+                                  babet::archive_tar::Compression::zstd
+                              ? ArchiveCompression::zstd
+                              : ArchiveCompression::none;
+    scan.total_size = tar_scan.total_size;
+    scan.archive_size = tar_scan.archive_size;
+    scan.entries.reserve(tar_scan.entries.size());
+    for (std::size_t index = 0; index < tar_scan.entries.size(); ++index)
+    {
+        const babet::archive_tar::Entry &tar_entry = tar_scan.entries[index];
+        ArchiveEntry entry;
+        entry.index = static_cast<mz_uint>(index);
+        entry.name = tar_entry.name;
+        entry.kind = tar_entry_kind(tar_entry.type);
+        entry.size = tar_entry.size;
+        entry.has_compressed_size = false;
+        entry.has_crc32 = false;
+        entry.has_compression_method = false;
+        entry.unix_mode = static_cast<mode_t>(tar_entry.unix_mode);
+        entry.has_unix_mode = tar_entry.has_unix_mode;
+        entry.encrypted = false;
+        entry.supported = true;
+        entry.sparse = tar_entry.sparse;
+        entry.has_link_target = tar_entry.has_link_target;
+        entry.link_target = tar_entry.link_target;
+        entry.safe_path = validate_entry_path(entry.name, entry.kind,
+                                              entry.normalized,
+                                              entry.path_error);
+        scan.entries.push_back(std::move(entry));
+    }
+    if (raw_result != nullptr)
+    {
+        *raw_result = std::move(tar_scan);
+    }
     return true;
 }
 
@@ -1046,6 +1312,7 @@ public:
     SecureArchiveDestination() = default;
     ~SecureArchiveDestination()
     {
+        abort_active_staged_file();
         cleanup_staged();
         cleanup_created_directories();
         if (root_fd_ >= 0)
@@ -1310,85 +1577,126 @@ public:
         return true;
     }
 
+    bool begin_stream_file(const fs::path &relative,
+                           std::uint64_t expected_size,
+                           std::string &err)
+    {
+        return begin_staged_file(relative, expected_size, err);
+    }
+
+    bool write_stream_block(std::uint64_t offset, const void *buffer,
+                            std::size_t size, std::string &err)
+    {
+        if (active_fd_ < 0 || active_parent_fd_ < 0 ||
+            offset != active_written_ || active_written_ > active_expected_ ||
+            size > active_expected_ - active_written_)
+        {
+            err = "archive: invalid streamed extraction block for '" +
+                  (display_root_ / active_relative_).string() + "'";
+            return false;
+        }
+        if (buffer == nullptr && size != 0)
+        {
+            err = "archive: null streamed extraction block for '" +
+                  (display_root_ / active_relative_).string() + "'";
+            return false;
+        }
+
+        const char *data = static_cast<const char *>(buffer);
+        std::size_t written = 0;
+        while (written < size)
+        {
+            const std::uint64_t position = offset + written;
+            if (position > static_cast<std::uint64_t>(
+                               std::numeric_limits<off_t>::max()))
+            {
+                err = "archive: streamed extraction offset is too large for '" +
+                      (display_root_ / active_relative_).string() + "'";
+                return false;
+            }
+            const ssize_t result = ::pwrite(
+                active_fd_, data + written, size - written,
+                static_cast<off_t>(position));
+            if (result > 0)
+            {
+                written += static_cast<std::size_t>(result);
+                continue;
+            }
+            if (result < 0 && errno == EINTR)
+            {
+                continue;
+            }
+            const int e = result < 0 ? errno : EIO;
+            err = "archive: " + errno_message(
+                "cannot write extracted file",
+                display_root_ / active_relative_, e);
+            return false;
+        }
+        active_written_ += size;
+        return true;
+    }
+
+    bool finish_stream_file(mode_t mode, std::string &err)
+    {
+        if (active_fd_ < 0 || active_parent_fd_ < 0 ||
+            active_written_ != active_expected_)
+        {
+            err = "archive: streamed extraction ended before its announced size for '" +
+                  (display_root_ / active_relative_).string() + "'";
+            return false;
+        }
+        if (::fchmod(active_fd_, mode & 0777) != 0)
+        {
+            const int e = errno;
+            err = "archive: " + errno_message(
+                "cannot set extracted file permissions",
+                display_root_ / active_relative_, e);
+            return false;
+        }
+        if (::close(active_fd_) != 0)
+        {
+            const int e = errno;
+            active_fd_ = -1;
+            err = "archive: " + errno_message(
+                "cannot close temporary extraction file",
+                display_root_ / active_relative_, e);
+            return false;
+        }
+        active_fd_ = -1;
+        ::close(active_parent_fd_);
+        active_parent_fd_ = -1;
+
+        staged_.push_back(StagedFile{active_relative_, active_temporary_});
+        active_relative_.clear();
+        active_temporary_.clear();
+        active_expected_ = 0;
+        active_written_ = 0;
+        return true;
+    }
+
+    void abort_stream_file() noexcept
+    {
+        abort_active_staged_file();
+    }
+
     bool stage_file(mz_zip_archive &zip, const ArchiveEntry &entry,
                     mode_t mode, std::string &err)
     {
         const fs::path relative(entry.normalized);
-        const fs::path parent = relative.parent_path();
-        if (!parent.empty() &&
-            !ensure_directory(parent, DEFAULT_DIRECTORY_MODE, err, false))
+        if (!begin_staged_file(relative, entry.size, err))
         {
-            return false;
-        }
-
-        int parent_fd = -1;
-        std::string leaf;
-        bool missing = false;
-        if (!open_parent(relative, true, parent_fd, leaf, missing, err))
-        {
-            return false;
-        }
-
-        struct stat existing{};
-        if (::fstatat(parent_fd, leaf.c_str(), &existing,
-                      AT_SYMLINK_NOFOLLOW) != 0 &&
-            errno != ENOENT)
-        {
-            const int e = errno;
-            ::close(parent_fd);
-            err = "archive: " + errno_message(
-                "cannot inspect destination file", display_root_ / relative,
-                e);
-            return false;
-        }
-
-        std::string temporary;
-        int temp_fd = -1;
-        int filesystem_collisions = 0;
-        while (filesystem_collisions < 64)
-        {
-            const unsigned long long id = archive_temp_counter.fetch_add(
-                1, std::memory_order_relaxed);
-            temporary = ".babet-archive-" + std::to_string(::getpid()) +
-                        "-" + std::to_string(id);
-            const fs::path temporary_relative = parent / temporary;
-            if (reserved_output_paths_.contains(
-                    temporary_relative.generic_string()))
-            {
-                continue;
-            }
-
-            temp_fd = ::openat(parent_fd, temporary.c_str(),
-                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
-                                   O_NOFOLLOW,
-                               STAGING_FILE_MODE);
-            if (temp_fd >= 0 || errno != EEXIST)
-            {
-                break;
-            }
-            ++filesystem_collisions;
-        }
-        if (temp_fd < 0)
-        {
-            const int e = errno;
-            ::close(parent_fd);
-            err = "archive: " + errno_message(
-                "cannot create temporary extraction file",
-                display_root_ / relative, e);
             return false;
         }
 
         ExtractCallbackState state;
-        state.fd = temp_fd;
+        state.fd = active_fd_;
         state.expected = entry.size;
         const mz_bool extracted = mz_zip_reader_extract_to_callback(
             &zip, entry.index, extract_write_callback, &state, 0);
         if (!extracted || state.written != entry.size)
         {
             const int callback_error = state.error_number;
-            ::close(temp_fd);
-            ::unlinkat(parent_fd, temporary.c_str(), 0);
-            ::close(parent_fd);
+            abort_active_staged_file();
             if (callback_error != 0)
             {
                 err = "archive: " + errno_message(
@@ -1401,31 +1709,12 @@ public:
             }
             return false;
         }
-
-        if (::fchmod(temp_fd, mode & 0777) != 0)
+        active_written_ = state.written;
+        if (!finish_stream_file(mode, err))
         {
-            const int e = errno;
-            ::close(temp_fd);
-            ::unlinkat(parent_fd, temporary.c_str(), 0);
-            ::close(parent_fd);
-            err = "archive: " + errno_message(
-                "cannot set extracted file permissions",
-                display_root_ / relative, e);
+            abort_active_staged_file();
             return false;
         }
-        if (::close(temp_fd) != 0)
-        {
-            const int e = errno;
-            ::unlinkat(parent_fd, temporary.c_str(), 0);
-            ::close(parent_fd);
-            err = "archive: " + errno_message(
-                "cannot close temporary extraction file",
-                display_root_ / relative, e);
-            return false;
-        }
-        ::close(parent_fd);
-
-        staged_.push_back(StagedFile{relative, temporary});
         return true;
     }
 
@@ -1548,6 +1837,7 @@ public:
 
     void commit()
     {
+        abort_active_staged_file();
         staged_.clear();
         created_directories_.clear();
         desired_directory_modes_.clear();
@@ -1555,6 +1845,111 @@ public:
     }
 
 private:
+    bool begin_staged_file(const fs::path &relative,
+                           std::uint64_t expected_size,
+                           std::string &err)
+    {
+        if (active_fd_ >= 0 || active_parent_fd_ >= 0)
+        {
+            err = "archive: internal extraction staging state is already active";
+            return false;
+        }
+
+        const fs::path parent = relative.parent_path();
+        if (!parent.empty() &&
+            !ensure_directory(parent, DEFAULT_DIRECTORY_MODE, err, false))
+        {
+            return false;
+        }
+
+        int parent_fd = -1;
+        std::string leaf;
+        bool missing = false;
+        if (!open_parent(relative, true, parent_fd, leaf, missing, err))
+        {
+            return false;
+        }
+
+        struct stat existing{};
+        if (::fstatat(parent_fd, leaf.c_str(), &existing,
+                      AT_SYMLINK_NOFOLLOW) != 0 &&
+            errno != ENOENT)
+        {
+            const int e = errno;
+            ::close(parent_fd);
+            err = "archive: " + errno_message(
+                "cannot inspect destination file", display_root_ / relative,
+                e);
+            return false;
+        }
+
+        std::string temporary;
+        int temp_fd = -1;
+        int filesystem_collisions = 0;
+        while (filesystem_collisions < 64)
+        {
+            const unsigned long long id = archive_temp_counter.fetch_add(
+                1, std::memory_order_relaxed);
+            temporary = ".babet-archive-" + std::to_string(::getpid()) +
+                        "-" + std::to_string(id);
+            const fs::path temporary_relative = parent / temporary;
+            if (reserved_output_paths_.contains(
+                    temporary_relative.generic_string()))
+            {
+                continue;
+            }
+
+            temp_fd = ::openat(parent_fd, temporary.c_str(),
+                               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                                   O_NOFOLLOW,
+                               STAGING_FILE_MODE);
+            if (temp_fd >= 0 || errno != EEXIST)
+            {
+                break;
+            }
+            ++filesystem_collisions;
+        }
+        if (temp_fd < 0)
+        {
+            const int e = errno;
+            ::close(parent_fd);
+            err = "archive: " + errno_message(
+                "cannot create temporary extraction file",
+                display_root_ / relative, e);
+            return false;
+        }
+
+        active_fd_ = temp_fd;
+        active_parent_fd_ = parent_fd;
+        active_relative_ = relative;
+        active_temporary_ = std::move(temporary);
+        active_expected_ = expected_size;
+        active_written_ = 0;
+        return true;
+    }
+
+    void abort_active_staged_file() noexcept
+    {
+        if (active_fd_ >= 0)
+        {
+            ::close(active_fd_);
+            active_fd_ = -1;
+        }
+        if (active_parent_fd_ >= 0)
+        {
+            if (!active_temporary_.empty())
+            {
+                ::unlinkat(active_parent_fd_, active_temporary_.c_str(), 0);
+            }
+            ::close(active_parent_fd_);
+            active_parent_fd_ = -1;
+        }
+        active_relative_.clear();
+        active_temporary_.clear();
+        active_expected_ = 0;
+        active_written_ = 0;
+    }
+
     bool open_parent(const fs::path &relative, bool create,
                      int &parent_fd, std::string &leaf,
                      bool &parent_missing, std::string &err)
@@ -1735,9 +2130,132 @@ private:
     std::vector<fs::path> created_directories_;
     std::unordered_map<std::string, mode_t> desired_directory_modes_;
     std::unordered_set<std::string> reserved_output_paths_;
+    int active_fd_ = -1;
+    int active_parent_fd_ = -1;
+    fs::path active_relative_;
+    std::string active_temporary_;
+    std::uint64_t active_expected_ = 0;
+    std::uint64_t active_written_ = 0;
+};
+
+mode_t file_mode_for_entry(const ArchiveEntry &entry,
+                           const ArchiveOptions &options);
+
+class TarExtractionSink final : public babet::archive_tar::ExtractionSink
+{
+public:
+    TarExtractionSink(SecureArchiveDestination &destination,
+                      const ArchiveScan &scan,
+                      const ArchiveOptions &options)
+        : destination_(destination), scan_(scan), options_(options)
+    {
+    }
+
+    TarExtractionSink(SecureArchiveDestination &destination,
+                      const ArchiveScan &scan,
+                      const ArchiveOptions &options,
+                      std::size_t selected_index,
+                      fs::path selected_relative)
+        : destination_(destination), scan_(scan), options_(options),
+          selected_index_(selected_index),
+          selected_relative_(std::move(selected_relative))
+    {
+    }
+
+    bool wants_file(std::size_t index,
+                    const babet::archive_tar::Entry &entry) const noexcept override
+    {
+        (void)entry;
+        return !selected_index_.has_value() || *selected_index_ == index;
+    }
+
+    bool begin_file(std::size_t index,
+                    const babet::archive_tar::Entry &entry,
+                    std::string &err) override
+    {
+        if (index >= scan_.entries.size() ||
+            scan_.entries[index].kind != EntryKind::regular ||
+            scan_.entries[index].size != entry.size ||
+            (selected_index_.has_value() && *selected_index_ != index))
+        {
+            err = "archive: internal TAR extraction plan mismatch";
+            return false;
+        }
+        const fs::path relative = selected_index_.has_value()
+                                      ? selected_relative_
+                                      : fs::path(scan_.entries[index].normalized);
+        active_ = true;
+        if (!destination_.begin_stream_file(relative, entry.size, err))
+        {
+            active_ = false;
+            return false;
+        }
+        return true;
+    }
+
+    bool write_file_block(std::size_t index,
+                          const babet::archive_tar::Entry &entry,
+                          std::uint64_t offset, const void *data,
+                          std::size_t size, std::string &err) override
+    {
+        (void)index;
+        (void)entry;
+        if (!active_)
+        {
+            err = "archive: internal TAR extraction plan mismatch";
+            return false;
+        }
+        return destination_.write_stream_block(offset, data, size, err);
+    }
+
+    bool finish_file(std::size_t index,
+                     const babet::archive_tar::Entry &entry,
+                     std::string &err) override
+    {
+        (void)entry;
+        if (!active_ || index >= scan_.entries.size())
+        {
+            err = "archive: internal TAR extraction plan mismatch";
+            return false;
+        }
+        const bool finished = destination_.finish_stream_file(
+            file_mode_for_entry(scan_.entries[index], options_), err);
+        if (finished)
+        {
+            active_ = false;
+        }
+        return finished;
+    }
+
+    void abort_file() noexcept override
+    {
+        if (active_)
+        {
+            destination_.abort_stream_file();
+            active_ = false;
+        }
+    }
+
+private:
+    SecureArchiveDestination &destination_;
+    const ArchiveScan &scan_;
+    const ArchiveOptions &options_;
+    std::optional<std::size_t> selected_index_;
+    fs::path selected_relative_;
+    bool active_ = false;
 };
 
 void push_u64(lua_State *L, std::uint64_t value);
+
+enum class CreateArchiveFormat
+{
+    zip,
+    tar,
+    tar_gzip,
+    tar_xz,
+    tar_bzip2,
+    tar_zstd,
+};
 
 struct ArchiveCreateOptions
 {
@@ -1745,9 +2263,12 @@ struct ArchiveCreateOptions
     std::uint64_t max_file_size = DEFAULT_MAX_ENTRY_SIZE;
     std::uint64_t max_total_size = DEFAULT_MAX_TOTAL_SIZE;
     int compression_level = MZ_DEFAULT_LEVEL;
+    bool compression_level_explicit = false;
     bool overwrite = false;
     bool deterministic = true;
     bool include_directories = true;
+    CreateArchiveFormat format = CreateArchiveFormat::zip;
+    bool format_explicit = false;
 };
 
 enum class CreateEntryKind
@@ -1841,7 +2362,7 @@ bool same_timespec(const timespec &a, const timespec &b) noexcept
 
 bool validate_create_option_keys(lua_State *L, int idx, std::string &err)
 {
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -1853,12 +2374,12 @@ bool validate_create_option_keys(lua_State *L, int idx, std::string &err)
     static const std::unordered_set<std::string> allowed = {
         "max_entries", "max_file_size", "max_total_size",
         "compression_level", "overwrite", "deterministic",
-        "include_directories"};
+        "include_directories", "format"};
     idx = lua_absindex(L, idx);
     lua_pushnil(L);
     while (lua_next(L, idx) != 0)
     {
-        if (lua_type(L, -2) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -2))
         {
             lua_pop(L, 2);
             err = "archive create option keys must be strings";
@@ -1886,7 +2407,7 @@ bool collect_create_options(lua_State *L, int idx,
     {
         return false;
     }
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -1909,22 +2430,75 @@ bool collect_create_options(lua_State *L, int idx,
     }
 
     raw_getfield(L, idx, "compression_level");
-    if (!lua_isnil(L, -1))
+    if (!lua_is_optional_strict_integer(L, -1))
     {
-        if (!lua_isinteger(L, -1))
-        {
-            lua_pop(L, 1);
-            err = "opts.compression_level must be an integer";
-            return false;
-        }
+        lua_pop(L, 1);
+        err = "opts.compression_level must be an integer";
+        return false;
+    }
+    if (!lua_is_none_or_nil(L, -1))
+    {
         const lua_Integer level = lua_tointeger(L, -1);
         lua_pop(L, 1);
-        if (level < 0 || level > 9)
+        if (level < 0 || level > 19)
         {
-            err = "opts.compression_level must be between 0 and 9";
+            err = "opts.compression_level must be between 0 and 19";
             return false;
         }
         options.compression_level = static_cast<int>(level);
+        options.compression_level_explicit = true;
+    }
+    else
+    {
+        lua_pop(L, 1);
+    }
+
+    raw_getfield(L, idx, "format");
+    if (!lua_is_optional_strict_string(L, -1))
+    {
+        lua_pop(L, 1);
+        err = "opts.format must be a string";
+        return false;
+    }
+    if (!lua_is_none_or_nil(L, -1))
+    {
+        std::string format;
+        if (!lua_string_without_nul(L, -1, format, "opts.format", err))
+        {
+            lua_pop(L, 1);
+            return false;
+        }
+        lua_pop(L, 1);
+        if (format == "zip")
+        {
+            options.format = CreateArchiveFormat::zip;
+        }
+        else if (format == "tar")
+        {
+            options.format = CreateArchiveFormat::tar;
+        }
+        else if (format == "tar.gz")
+        {
+            options.format = CreateArchiveFormat::tar_gzip;
+        }
+        else if (format == "tar.xz")
+        {
+            options.format = CreateArchiveFormat::tar_xz;
+        }
+        else if (format == "tar.bz2")
+        {
+            options.format = CreateArchiveFormat::tar_bzip2;
+        }
+        else if (format == "tar.zst")
+        {
+            options.format = CreateArchiveFormat::tar_zstd;
+        }
+        else
+        {
+            err = "opts.format must be 'zip', 'tar', 'tar.gz', 'tar.xz', 'tar.bz2', or 'tar.zst'";
+            return false;
+        }
+        options.format_explicit = true;
     }
     else
     {
@@ -2040,6 +2614,106 @@ bool path_is_within(const fs::path &candidate, const fs::path &root,
     }
     within = true;
     return true;
+}
+
+std::string lowercase_ascii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c)
+                   {
+                       return c >= 'A' && c <= 'Z'
+                                  ? static_cast<char>(c - 'A' + 'a')
+                                  : static_cast<char>(c);
+                   });
+    return value;
+}
+
+bool has_suffix(std::string_view value, std::string_view suffix) noexcept
+{
+    return value.size() >= suffix.size() &&
+           value.substr(value.size() - suffix.size()) == suffix;
+}
+
+bool validate_create_compression_level(const ArchiveCreateOptions &options,
+                                       std::string &err)
+{
+    if (!options.compression_level_explicit)
+    {
+        return true;
+    }
+    if (options.format == CreateArchiveFormat::tar)
+    {
+        err = "opts.compression_level is only valid for ZIP, gzip, xz, bzip2, or zstd creation";
+        return false;
+    }
+    if (options.format == CreateArchiveFormat::tar_bzip2 &&
+        (options.compression_level < 1 || options.compression_level > 9))
+    {
+        err = "opts.compression_level must be between 1 and 9 for bzip2";
+        return false;
+    }
+    if ((options.format == CreateArchiveFormat::zip ||
+         options.format == CreateArchiveFormat::tar_gzip ||
+         options.format == CreateArchiveFormat::tar_xz) &&
+        options.compression_level > 9)
+    {
+        err = "opts.compression_level must be between 0 and 9 for ZIP, gzip, or xz";
+        return false;
+    }
+    return true;
+}
+
+bool resolve_create_format(const fs::path &destination,
+                           ArchiveCreateOptions &options,
+                           std::string &err)
+{
+    const std::string name = lowercase_ascii(destination.filename().string());
+    const bool gzip_tar_suffix =
+        has_suffix(name, ".tar.gz") || has_suffix(name, ".tgz");
+    const bool xz_tar_suffix = has_suffix(name, ".tar.xz") ||
+                               has_suffix(name, ".txz");
+    const bool bzip2_tar_suffix =
+        has_suffix(name, ".tar.bz2") || has_suffix(name, ".tbz2") ||
+        has_suffix(name, ".tbz");
+    const bool zstd_tar_suffix =
+        has_suffix(name, ".tar.zst") || has_suffix(name, ".tar.zstd") ||
+        has_suffix(name, ".tzst");
+
+    if (options.format_explicit)
+    {
+        return validate_create_compression_level(options, err);
+    }
+    if (gzip_tar_suffix)
+    {
+        options.format = CreateArchiveFormat::tar_gzip;
+        return validate_create_compression_level(options, err);
+    }
+    if (xz_tar_suffix)
+    {
+        options.format = CreateArchiveFormat::tar_xz;
+        return validate_create_compression_level(options, err);
+    }
+    if (bzip2_tar_suffix)
+    {
+        options.format = CreateArchiveFormat::tar_bzip2;
+        return validate_create_compression_level(options, err);
+    }
+    if (zstd_tar_suffix)
+    {
+        options.format = CreateArchiveFormat::tar_zstd;
+        return validate_create_compression_level(options, err);
+    }
+    if (has_suffix(name, ".tar"))
+    {
+        options.format = CreateArchiveFormat::tar;
+        return validate_create_compression_level(options, err);
+    }
+
+    // Backward compatibility: before TAR creation existed, archive.create()
+    // always produced ZIP regardless of the destination extension. Only
+    // unambiguous TAR suffixes change the inferred format.
+    options.format = CreateArchiveFormat::zip;
+    return validate_create_compression_level(options, err);
 }
 
 bool fixed_deterministic_time(MZ_TIME_T &result, std::string &err)
@@ -2381,7 +3055,7 @@ public:
         if (destination.empty() || leaf_.empty() || leaf_ == "." ||
             leaf_ == "..")
         {
-            err = "archive: destination must name a ZIP file";
+            err = "archive: destination must name an archive file";
             return false;
         }
         fs::path parent = destination.parent_path();
@@ -2636,10 +3310,125 @@ bool source_file_unchanged(int fd, const CreateEntry &entry,
     return true;
 }
 
+class TarCreationSource final : public babet::archive_tar::CreationSource
+{
+public:
+    TarCreationSource(int source_root_fd,
+                      const std::vector<CreateEntry> &entries) noexcept
+        : source_root_fd_(source_root_fd), entries_(entries)
+    {
+    }
+
+    [[nodiscard]] bool begin_file(
+        std::size_t index, const babet::archive_tar::CreateEntry &entry,
+        std::string &err) override
+    {
+        if (active_fd_.get() >= 0 || index >= entries_.size())
+        {
+            err = "archive: internal TAR creation plan mismatch";
+            return false;
+        }
+        const CreateEntry &planned = entries_[index];
+        if (planned.kind != CreateEntryKind::regular ||
+            planned.relative.generic_string() != entry.name ||
+            planned.size != entry.size)
+        {
+            err = "archive: internal TAR creation plan mismatch";
+            return false;
+        }
+        if (!open_source_entry(source_root_fd_, planned, active_fd_, err))
+        {
+            return false;
+        }
+        active_index_ = index;
+        return true;
+    }
+
+    [[nodiscard]] bool read_file_block(void *buffer, std::size_t capacity,
+                                       std::size_t &size,
+                                       std::string &err) override
+    {
+        size = 0;
+        if (active_fd_.get() < 0 || buffer == nullptr || capacity == 0)
+        {
+            err = "archive: invalid TAR source stream state";
+            return false;
+        }
+        for (;;)
+        {
+            const ssize_t count = ::read(active_fd_.get(), buffer, capacity);
+            if (count >= 0)
+            {
+                size = static_cast<std::size_t>(count);
+                return true;
+            }
+            if (errno != EINTR)
+            {
+                err = "archive: cannot read source entry for TAR creation: " +
+                      std::string(std::strerror(errno));
+                return false;
+            }
+        }
+    }
+
+    [[nodiscard]] bool finish_file(
+        std::size_t index, const babet::archive_tar::CreateEntry &entry,
+        std::string &err) override
+    {
+        if (active_fd_.get() < 0 || !active_index_.has_value() ||
+            *active_index_ != index || index >= entries_.size() ||
+            entries_[index].relative.generic_string() != entry.name)
+        {
+            err = "archive: internal TAR creation plan mismatch";
+            return false;
+        }
+        if (!source_file_unchanged(active_fd_.get(), entries_[index], err))
+        {
+            return false;
+        }
+        active_fd_.reset();
+        active_index_.reset();
+        return true;
+    }
+
+    void abort_file() noexcept override
+    {
+        active_fd_.reset();
+        active_index_.reset();
+    }
+
+private:
+    int source_root_fd_ = -1;
+    const std::vector<CreateEntry> &entries_;
+    ScopedFd active_fd_;
+    std::optional<std::size_t> active_index_;
+};
+
+std::vector<babet::archive_tar::CreateEntry> make_tar_create_entries(
+    const std::vector<CreateEntry> &entries)
+{
+    std::vector<babet::archive_tar::CreateEntry> result;
+    result.reserve(entries.size());
+    for (const CreateEntry &entry : entries)
+    {
+        babet::archive_tar::CreateEntry item;
+        item.name = entry.relative.generic_string();
+        item.directory = entry.kind == CreateEntryKind::directory;
+        if (item.directory)
+        {
+            item.name += "/";
+        }
+        item.size = entry.size;
+        item.modified_seconds = static_cast<std::int64_t>(entry.modified.tv_sec);
+        item.modified_nanoseconds = entry.modified.tv_nsec;
+        result.push_back(std::move(item));
+    }
+    return result;
+}
+
 int lua_archive_create(lua_State *L)
 {
-    const int top = lua_gettop(L);
-    if (top < 2 || top > 3)
+    if (!lua_arity_between(L, 2, 3))
     {
         return luaL_error(L, "archive.create expects 2 or 3 arguments");
     }
@@ -2665,6 +3454,11 @@ int lua_archive_create(lua_State *L)
 
     const fs::path source{std::string(source_view)};
     const fs::path destination{std::string(destination_view)};
+    if (!resolve_create_format(destination, options, err))
+    {
+        return push_fail(L, err);
+    }
+
     bool destination_inside_source = false;
     if (!path_is_within(destination, source, destination_inside_source, err))
     {
@@ -2695,112 +3489,168 @@ int lua_archive_create(lua_State *L)
     }
     std::sort(entries.begin(), entries.end(),
               [](const CreateEntry &a, const CreateEntry &b)
-              { return a.relative.generic_string() <
-                       b.relative.generic_string(); });
+              {
+                  return a.relative.generic_string() <
+                         b.relative.generic_string();
+              });
 
     MZ_TIME_T fixed_time{};
-    if (options.deterministic)
+    bool write_zip64 = false;
+    if (options.format == CreateArchiveFormat::zip)
     {
-        if (!fixed_deterministic_time(fixed_time, err))
+        if (options.deterministic)
         {
-            return push_fail(L, err);
-        }
-    }
-    else
-    {
-        for (const CreateEntry &entry : entries)
-        {
-            if (!validate_source_zip_timestamp(entry, err))
+            if (!fixed_deterministic_time(fixed_time, err))
             {
                 return push_fail(L, err);
             }
         }
+        else
+        {
+            for (const CreateEntry &entry : entries)
+            {
+                if (!validate_source_zip_timestamp(entry, err))
+                {
+                    return push_fail(L, err);
+                }
+            }
+        }
+        write_zip64 = create_requires_zip64(entries, total_size);
     }
-    const bool write_zip64 = create_requires_zip64(entries, total_size);
 
     AtomicArchiveOutput output;
     if (!output.open(destination, options.overwrite, err))
     {
         return push_fail(L, err);
     }
-    const int stream_fd = ::dup(output.fd());
-    if (stream_fd < 0)
-    {
-        return push_fail(L, "archive: cannot duplicate temporary archive descriptor: " +
-                                std::string(std::strerror(errno)));
-    }
-    ScopedFile output_file(::fdopen(stream_fd, "w+b"));
-    if (output_file.get() == nullptr)
-    {
-        const int e = errno;
-        ::close(stream_fd);
-        return push_fail(L, "archive: cannot open temporary archive stream: " +
-                                std::string(std::strerror(e)));
-    }
 
-    ArchiveWriter writer;
-    if (!writer.init(output_file.get(), write_zip64, err))
-    {
-        return push_fail(L, err);
-    }
     std::uint64_t files = 0;
     std::uint64_t directories = 0;
-    for (const CreateEntry &entry : entries)
+    if (options.format == CreateArchiveFormat::tar ||
+        options.format == CreateArchiveFormat::tar_gzip ||
+        options.format == CreateArchiveFormat::tar_xz ||
+        options.format == CreateArchiveFormat::tar_bzip2 ||
+        options.format == CreateArchiveFormat::tar_zstd)
     {
-        std::string archive_name = entry.relative.generic_string();
-        if (entry.kind == CreateEntryKind::directory)
+        const std::vector<babet::archive_tar::CreateEntry> tar_entries =
+            make_tar_create_entries(entries);
+        TarCreationSource tar_source(source_fd.get(), entries);
+        const babet::archive_tar::Compression tar_compression =
+            options.format == CreateArchiveFormat::tar_gzip
+                ? babet::archive_tar::Compression::gzip
+                : options.format == CreateArchiveFormat::tar_xz
+                      ? babet::archive_tar::Compression::xz
+                      : options.format == CreateArchiveFormat::tar_bzip2
+                            ? babet::archive_tar::Compression::bzip2
+                            : options.format == CreateArchiveFormat::tar_zstd
+                                  ? babet::archive_tar::Compression::zstd
+                                  : babet::archive_tar::Compression::none;
+        if (!babet::archive_tar::create_fd(
+                output.fd(), destination.string(), tar_entries,
+                tar_compression, options.compression_level,
+                options.deterministic, tar_source, err))
         {
-            archive_name += "/";
-            const MZ_TIME_T timestamp = options.deterministic
-                                            ? fixed_time
-                                            : static_cast<MZ_TIME_T>(entry.modified.tv_sec);
-            if (!writer.add_directory(archive_name, &timestamp, err))
+            return push_fail(L, err);
+        }
+        for (const CreateEntry &entry : entries)
+        {
+            if (entry.kind == CreateEntryKind::directory)
+            {
+                ++directories;
+            }
+            else
+            {
+                ++files;
+            }
+        }
+    }
+    else
+    {
+        const int stream_fd = ::dup(output.fd());
+        if (stream_fd < 0)
+        {
+            return push_fail(
+                L, "archive: cannot duplicate temporary archive descriptor: " +
+                       std::string(std::strerror(errno)));
+        }
+        ScopedFile output_file(::fdopen(stream_fd, "w+b"));
+        if (output_file.get() == nullptr)
+        {
+            const int e = errno;
+            ::close(stream_fd);
+            return push_fail(
+                L, "archive: cannot open temporary archive stream: " +
+                       std::string(std::strerror(e)));
+        }
+
+        ArchiveWriter writer;
+        if (!writer.init(output_file.get(), write_zip64, err))
+        {
+            return push_fail(L, err);
+        }
+        for (const CreateEntry &entry : entries)
+        {
+            std::string archive_name = entry.relative.generic_string();
+            if (entry.kind == CreateEntryKind::directory)
+            {
+                archive_name += "/";
+                const MZ_TIME_T timestamp =
+                    options.deterministic
+                        ? fixed_time
+                        : static_cast<MZ_TIME_T>(entry.modified.tv_sec);
+                if (!writer.add_directory(archive_name, &timestamp, err))
+                {
+                    return push_fail(L, err);
+                }
+                ++directories;
+                continue;
+            }
+
+            ScopedFd input_fd;
+            if (!open_source_entry(source_fd.get(), entry, input_fd, err))
             {
                 return push_fail(L, err);
             }
-            ++directories;
-            continue;
+            const int file_stream_fd = ::dup(input_fd.get());
+            if (file_stream_fd < 0)
+            {
+                return push_fail(
+                    L, "archive: cannot duplicate source file descriptor: " +
+                           std::string(std::strerror(errno)));
+            }
+            ScopedFile input_file(::fdopen(file_stream_fd, "rb"));
+            if (input_file.get() == nullptr)
+            {
+                const int e = errno;
+                ::close(file_stream_fd);
+                return push_fail(
+                    L, "archive: cannot open source file stream: " +
+                           std::string(std::strerror(e)));
+            }
+            const MZ_TIME_T timestamp =
+                options.deterministic
+                    ? fixed_time
+                    : static_cast<MZ_TIME_T>(entry.modified.tv_sec);
+            if (!writer.add_file(archive_name, input_file.get(), entry.size,
+                                 &timestamp, options.compression_level, err) ||
+                !source_file_unchanged(input_fd.get(), entry, err))
+            {
+                return push_fail(L, err);
+            }
+            ++files;
         }
+        if (!writer.finalize_and_end(err))
+        {
+            return push_fail(L, err);
+        }
+        if (std::fflush(output_file.get()) != 0)
+        {
+            return push_fail(L,
+                             "archive: cannot flush temporary archive: " +
+                                 std::string(std::strerror(errno)));
+        }
+    }
 
-        ScopedFd input_fd;
-        if (!open_source_entry(source_fd.get(), entry, input_fd, err))
-        {
-            return push_fail(L, err);
-        }
-        const int file_stream_fd = ::dup(input_fd.get());
-        if (file_stream_fd < 0)
-        {
-            return push_fail(L, "archive: cannot duplicate source file descriptor: " +
-                                    std::string(std::strerror(errno)));
-        }
-        ScopedFile input_file(::fdopen(file_stream_fd, "rb"));
-        if (input_file.get() == nullptr)
-        {
-            const int e = errno;
-            ::close(file_stream_fd);
-            return push_fail(L, "archive: cannot open source file stream: " +
-                                    std::string(std::strerror(e)));
-        }
-        const MZ_TIME_T timestamp = options.deterministic
-                                        ? fixed_time
-                                        : static_cast<MZ_TIME_T>(entry.modified.tv_sec);
-        if (!writer.add_file(archive_name, input_file.get(), entry.size,
-                             &timestamp, options.compression_level, err) ||
-            !source_file_unchanged(input_fd.get(), entry, err))
-        {
-            return push_fail(L, err);
-        }
-        ++files;
-    }
-    if (!writer.finalize_and_end(err))
-    {
-        return push_fail(L, err);
-    }
-    if (std::fflush(output_file.get()) != 0)
-    {
-        return push_fail(L, "archive: cannot flush temporary archive: " +
-                                std::string(std::strerror(errno)));
-    }
     if (!output.publish(err))
     {
         return push_fail(L, err);
@@ -2815,7 +3665,33 @@ int lua_archive_create(lua_State *L)
     lua_setfield(L, -2, "bytes");
     lua_pushlstring(L, destination_view.data(), destination_view.size());
     lua_setfield(L, -2, "path");
-    lua_pushinteger(L, options.compression_level);
+    lua_pushstring(L, options.format == CreateArchiveFormat::zip ? "zip"
+                                                                  : "tar");
+    lua_setfield(L, -2, "format");
+    lua_pushstring(L, options.format == CreateArchiveFormat::tar_gzip
+                          ? "gzip"
+                          : options.format == CreateArchiveFormat::tar_xz
+                                ? "xz"
+                                : options.format ==
+                                          CreateArchiveFormat::tar_bzip2
+                                      ? "bzip2"
+                                      : options.format ==
+                                                CreateArchiveFormat::tar_zstd
+                                            ? "zstd"
+                                            : "none");
+    lua_setfield(L, -2, "compression");
+    if (options.format == CreateArchiveFormat::zip ||
+        options.format == CreateArchiveFormat::tar_gzip ||
+        options.format == CreateArchiveFormat::tar_xz ||
+        options.format == CreateArchiveFormat::tar_bzip2 ||
+        options.format == CreateArchiveFormat::tar_zstd)
+    {
+        lua_pushinteger(L, options.compression_level);
+    }
+    else
+    {
+        lua_pushnil(L);
+    }
     lua_setfield(L, -2, "compression_level");
     lua_pushboolean(L, options.deterministic);
     lua_setfield(L, -2, "deterministic");
@@ -2851,6 +3727,21 @@ void push_u64(lua_State *L, std::uint64_t value)
 void push_list_result(lua_State *L, const ArchiveScan &scan)
 {
     lua_newtable(L);
+    const char *format = scan.format == ArchiveFormat::zip ? "zip" : "tar";
+    lua_pushstring(L, format);
+    lua_setfield(L, -2, "format");
+    lua_pushstring(L, scan.compression == ArchiveCompression::gzip
+                          ? "gzip"
+                          : scan.compression == ArchiveCompression::xz
+                                ? "xz"
+                                : scan.compression ==
+                                          ArchiveCompression::bzip2
+                                      ? "bzip2"
+                                      : scan.compression ==
+                                                ArchiveCompression::zstd
+                                            ? "zstd"
+                                            : "none");
+    lua_setfield(L, -2, "compression");
     lua_createtable(L, static_cast<int>(scan.entries.size()), 0);
     for (std::size_t i = 0; i < scan.entries.size(); ++i)
     {
@@ -2865,11 +3756,32 @@ void push_list_result(lua_State *L, const ArchiveScan &scan)
         lua_setfield(L, -2, "type");
         push_u64(L, entry.size);
         lua_setfield(L, -2, "size");
-        push_u64(L, entry.compressed_size);
+        if (entry.has_compressed_size)
+        {
+            push_u64(L, entry.compressed_size);
+        }
+        else
+        {
+            lua_pushnil(L);
+        }
         lua_setfield(L, -2, "compressed_size");
-        lua_pushinteger(L, entry.crc32);
+        if (entry.has_crc32)
+        {
+            lua_pushinteger(L, entry.crc32);
+        }
+        else
+        {
+            lua_pushnil(L);
+        }
         lua_setfield(L, -2, "crc32");
-        lua_pushinteger(L, entry.method);
+        if (entry.has_compression_method)
+        {
+            lua_pushinteger(L, entry.method);
+        }
+        else
+        {
+            lua_pushnil(L);
+        }
         lua_setfield(L, -2, "compression_method");
         lua_pushboolean(L, entry.encrypted);
         lua_setfield(L, -2, "encrypted");
@@ -2889,7 +3801,7 @@ void push_list_result(lua_State *L, const ArchiveScan &scan)
             lua_pushlstring(L, rejection.data(), rejection.size());
         }
         lua_setfield(L, -2, "reason");
-        if (entry.unix_mode != 0)
+        if (entry.has_unix_mode)
         {
             lua_pushinteger(L, entry.unix_mode & 07777);
         }
@@ -2898,6 +3810,18 @@ void push_list_result(lua_State *L, const ArchiveScan &scan)
             lua_pushnil(L);
         }
         lua_setfield(L, -2, "unix_mode");
+        lua_pushboolean(L, entry.sparse);
+        lua_setfield(L, -2, "sparse");
+        if (!entry.has_link_target)
+        {
+            lua_pushnil(L);
+        }
+        else
+        {
+            lua_pushlstring(L, entry.link_target.data(),
+                            entry.link_target.size());
+        }
+        lua_setfield(L, -2, "link_target");
         lua_seti(L, -2, static_cast<lua_Integer>(i + 1));
     }
     lua_setfield(L, -2, "entries");
@@ -2907,14 +3831,60 @@ void push_list_result(lua_State *L, const ArchiveScan &scan)
     lua_setfield(L, -2, "total_size");
     push_u64(L, scan.archive_size);
     lua_setfield(L, -2, "archive_size");
-    lua_pushboolean(L, scan.zip64);
+    if (scan.format == ArchiveFormat::zip)
+    {
+        lua_pushboolean(L, scan.zip64);
+    }
+    else
+    {
+        lua_pushnil(L);
+    }
     lua_setfield(L, -2, "zip64");
+}
+
+bool scan_archive_for_list(const std::string &archive_path,
+                           const ArchiveOptions &options, ArchiveScan &scan,
+                           std::string &err)
+{
+    PinnedArchiveSource source;
+    if (!source.open(archive_path, err))
+    {
+        return false;
+    }
+
+    std::string zip_error;
+    {
+        const int zip_fd = source.duplicate_rewound(err);
+        if (zip_fd < 0)
+        {
+            return false;
+        }
+        ArchiveReader reader;
+        if (reader.open_fd(zip_fd, archive_path, zip_error))
+        {
+            if (!scan_zip_archive(reader, options, scan, zip_error))
+            {
+                err = std::move(zip_error);
+                return false;
+            }
+            return true;
+        }
+    }
+
+    std::string tar_error;
+    if (scan_tar_archive(source, options, scan, tar_error))
+    {
+        return true;
+    }
+
+    err = "archive: unsupported or malformed archive '" + archive_path +
+          "' (ZIP: " + zip_error + "; TAR: " + tar_error + ")";
+    return false;
 }
 
 int lua_archive_list(lua_State *L)
 {
-    const int top = lua_gettop(L);
-    if (top < 1 || top > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(L, "archive.list expects 1 or 2 arguments");
     }
@@ -2928,13 +3898,8 @@ int lua_archive_list(lua_State *L)
         return push_fail(L, err);
     }
 
-    ArchiveReader reader;
-    if (!reader.open(archive_path, err))
-    {
-        return push_fail(L, err);
-    }
     ArchiveScan scan;
-    if (!scan_archive(reader, options, scan, err))
+    if (!scan_archive_for_list(archive_path, options, scan, err))
     {
         return push_fail(L, err);
     }
@@ -2946,8 +3911,7 @@ int lua_archive_list(lua_State *L)
 
 int lua_archive_extract(lua_State *L)
 {
-    const int top = lua_gettop(L);
-    if (top < 2 || top > 3)
+    if (!lua_arity_between(L, 2, 3))
     {
         return luaL_error(L, "archive.extract expects 2 or 3 arguments");
     }
@@ -2970,15 +3934,43 @@ int lua_archive_extract(lua_State *L)
         return push_fail(L, err);
     }
 
-    ArchiveReader reader;
-    if (!reader.open(archive_path, err))
+    PinnedArchiveSource source;
+    if (!source.open(archive_path, err))
     {
         return push_fail(L, err);
     }
+
+    ArchiveReader zip_reader;
     ArchiveScan scan;
-    if (!scan_archive(reader, options, scan, err))
+    babet::archive_tar::ScanResult tar_scan;
+    bool zip_backend = false;
+    std::string zip_error;
     {
-        return push_fail(L, err);
+        const int zip_fd = source.duplicate_rewound(err);
+        if (zip_fd < 0)
+        {
+            return push_fail(L, err);
+        }
+        if (zip_reader.open_fd(zip_fd, archive_path, zip_error))
+        {
+            if (!scan_zip_archive(zip_reader, options, scan, zip_error))
+            {
+                return push_fail(L, zip_error);
+            }
+            zip_backend = true;
+        }
+    }
+
+    if (!zip_backend)
+    {
+        std::string tar_error;
+        if (!scan_tar_archive(source, options, scan, tar_error, &tar_scan))
+        {
+            err = "archive: unsupported or malformed archive '" +
+                  archive_path + "' (ZIP: " + zip_error + "; TAR: " +
+                  tar_error + ")";
+            return push_fail(L, err);
+        }
     }
 
     std::vector<const ArchiveEntry *> selected;
@@ -3023,20 +4015,57 @@ int lua_archive_extract(lua_State *L)
         }
         ++directories;
     }
-    for (const ArchiveEntry *entry : selected)
+
+    if (zip_backend)
     {
-        if (entry->kind != EntryKind::regular)
+        for (const ArchiveEntry *entry : selected)
         {
-            continue;
+            if (entry->kind != EntryKind::regular)
+            {
+                continue;
+            }
+            if (!output.stage_file(zip_reader.zip(), *entry,
+                                   file_mode_for_entry(*entry, options), err))
+            {
+                return push_fail(L, err);
+            }
+            ++files;
+            bytes += entry->size;
         }
-        if (!output.stage_file(reader.zip(), *entry,
-                               file_mode_for_entry(*entry, options), err))
+    }
+    else
+    {
+        const int tar_fd = source.duplicate_rewound(err);
+        if (tar_fd < 0)
         {
             return push_fail(L, err);
         }
-        ++files;
-        bytes += entry->size;
+        const babet::archive_tar::ScanLimits limits{
+            .max_entries = options.max_entries,
+            .max_entry_size = options.max_entry_size,
+            .max_total_size = options.max_total_size,
+            .max_total_name_bytes = HARD_MAX_TOTAL_NAME_BYTES,
+            .max_compression_ratio = options.max_compression_ratio,
+        };
+        TarExtractionSink sink(output, scan, options);
+        const bool extracted = babet::archive_tar::extract_fd(
+            tar_fd, source.size(), source.path(), limits,
+            tar_scan.compression, tar_scan.entries, sink, err);
+        ::close(tar_fd);
+        if (!extracted)
+        {
+            return push_fail(L, err);
+        }
+        for (const ArchiveEntry *entry : selected)
+        {
+            if (entry->kind == EntryKind::regular)
+            {
+                ++files;
+                bytes += entry->size;
+            }
+        }
     }
+
     if (!output.publish(options.overwrite, err) ||
         !output.finalize_directory_modes(err))
     {
@@ -3059,8 +4088,7 @@ int lua_archive_extract(lua_State *L)
 
 int lua_archive_extract_file(lua_State *L)
 {
-    const int top = lua_gettop(L);
-    if (top < 3 || top > 4)
+    if (!lua_arity_between(L, 3, 4))
     {
         return luaL_error(L, "archive.extractFile expects 3 or 4 arguments");
     }
@@ -3082,20 +4110,50 @@ int lua_archive_extract_file(lua_State *L)
         return push_fail(L, err);
     }
 
-    ArchiveReader reader;
-    if (!reader.open(archive_path, err))
-    {
-        return push_fail(L, err);
-    }
-    ArchiveScan scan;
-    if (!scan_archive(reader, options, scan, err))
+    PinnedArchiveSource source;
+    if (!source.open(archive_path, err))
     {
         return push_fail(L, err);
     }
 
-    const ArchiveEntry *selected = nullptr;
-    for (const ArchiveEntry &entry : scan.entries)
+    ArchiveReader zip_reader;
+    ArchiveScan scan;
+    babet::archive_tar::ScanResult tar_scan;
+    bool zip_backend = false;
+    std::string zip_error;
     {
+        const int zip_fd = source.duplicate_rewound(err);
+        if (zip_fd < 0)
+        {
+            return push_fail(L, err);
+        }
+        if (zip_reader.open_fd(zip_fd, archive_path, zip_error))
+        {
+            if (!scan_zip_archive(zip_reader, options, scan, zip_error))
+            {
+                return push_fail(L, zip_error);
+            }
+            zip_backend = true;
+        }
+    }
+
+    if (!zip_backend)
+    {
+        std::string tar_error;
+        if (!scan_tar_archive(source, options, scan, tar_error, &tar_scan))
+        {
+            err = "archive: unsupported or malformed archive '" +
+                  archive_path + "' (ZIP: " + zip_error + "; TAR: " +
+                  tar_error + ")";
+            return push_fail(L, err);
+        }
+    }
+
+    const ArchiveEntry *selected = nullptr;
+    std::size_t selected_index = 0;
+    for (std::size_t index = 0; index < scan.entries.size(); ++index)
+    {
+        const ArchiveEntry &entry = scan.entries[index];
         if (entry.name == requested)
         {
             if (selected != nullptr)
@@ -3103,6 +4161,7 @@ int lua_archive_extract_file(lua_State *L)
                 return push_fail(L, "archive: requested entry is ambiguous because it appears more than once");
             }
             selected = &entry;
+            selected_index = index;
         }
     }
     if (selected == nullptr)
@@ -3132,14 +4191,49 @@ int lua_archive_extract_file(lua_State *L)
         parent = ".";
     }
 
-    ArchiveEntry mapped = *selected;
-    mapped.normalized = leaf.string();
     SecureArchiveDestination output;
     if (!output.open_root(parent, err) ||
-        !output.preflight(leaf, EntryKind::regular, options.overwrite, err) ||
-        !output.stage_file(reader.zip(), mapped,
-                           file_mode_for_entry(*selected, options), err) ||
-        !output.publish(options.overwrite, err) ||
+        !output.preflight(leaf, EntryKind::regular, options.overwrite, err))
+    {
+        return push_fail(L, err);
+    }
+
+    if (zip_backend)
+    {
+        ArchiveEntry mapped = *selected;
+        mapped.normalized = leaf.string();
+        if (!output.stage_file(zip_reader.zip(), mapped,
+                               file_mode_for_entry(*selected, options), err))
+        {
+            return push_fail(L, err);
+        }
+    }
+    else
+    {
+        const int tar_fd = source.duplicate_rewound(err);
+        if (tar_fd < 0)
+        {
+            return push_fail(L, err);
+        }
+        const babet::archive_tar::ScanLimits limits{
+            .max_entries = options.max_entries,
+            .max_entry_size = options.max_entry_size,
+            .max_total_size = options.max_total_size,
+            .max_total_name_bytes = HARD_MAX_TOTAL_NAME_BYTES,
+            .max_compression_ratio = options.max_compression_ratio,
+        };
+        TarExtractionSink sink(output, scan, options, selected_index, leaf);
+        const bool extracted = babet::archive_tar::extract_fd(
+            tar_fd, source.size(), source.path(), limits,
+            tar_scan.compression, tar_scan.entries, sink, err);
+        ::close(tar_fd);
+        if (!extracted)
+        {
+            return push_fail(L, err);
+        }
+    }
+
+    if (!output.publish(options.overwrite, err) ||
         !output.finalize_directory_modes(err))
     {
         return push_fail(L, err);

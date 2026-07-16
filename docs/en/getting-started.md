@@ -10,13 +10,14 @@ available on the
 
 ## Build from source
 
-Babet vendors all its dependencies (Lua, OpenSSL, SQLite, miniz,
+Babet vendors all its dependencies (Lua, OpenSSL, SQLite, miniz, libarchive, zlib,
+XZ Utils/liblzma, bzip2/libbz2, Zstandard/libzstd, RE2, Abseil,
 nlohmann/json, cpp-httplib, tomlplusplus), so the only prerequisites
 on your system are :
 
 - a C++23 compiler (recent GCC or Clang)
-- CMake (≥ 3.20)
-- `wget` and `unzip`
+- CMake (≥ 3.22)
+- `wget`, `unzip`, and `xz`
 
 ```sh
 git clone https://github.com/Chipsterjulien/babet.git
@@ -26,11 +27,11 @@ cd babet
 ./run_tests.sh          # offline harness — should finish with 0 FAIL
 ```
 
-The build script downloads each dependency from its upstream source,
-verifies the SHA256, then compiles statically. If the upstream is
-temporarily unreachable (`lua.org` notably has had outages), the
-script falls back to the Internet Archive's Wayback Machine — the
-SHA256 check still applies.
+The build script downloads each dependency from a pinned upstream source,
+verifies its SHA256, then compiles it statically. Several dependencies have an
+explicit mirror or fallback URL. When a source has no mirror, the script prints
+the exact archive name to place manually in `downloads/`; the same SHA256 check
+still applies before extraction.
 
 The resulting binary is at `test/babet`.
 
@@ -102,7 +103,7 @@ directory name. Folders whose name legitimately starts with `-`
 can still be passed via `./-dirname` (POSIX convention).
 
 ```sh
-babet --version    # babet 2.5.0
+babet --version    # babet 2.6.0
 babet --help       # full usage
 babet --bogus      # Unknown option: --bogus
                       # Try 'babet --help' for more information.

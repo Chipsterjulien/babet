@@ -6,6 +6,168 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.6.0] - 2026-07-16
+
+### Résumé de la version
+
+Babet 2.6.0 ajoute la prise en charge sécurisée des TAR multi-formats, des
+filtres de noms bornés et une validation stricte cohérente des bindings Lua,
+tout en préservant les contrats ZIP et API audités de la 2.5.0.
+
+- passage de la version source à 2.6.0 ;
+- intégration reproductible de libarchive 3.8.8 sous forme statique, à partir
+  de la distribution officielle vérifiée par SHA-256 ;
+- configuration initialement limitée au cœur de libarchive et aux TAR bruts,
+  puis activation de gzip via une zlib statique épinglée, de xz via une
+  XZ Utils/liblzma statique épinglée, de bzip2 via une libbz2 statique épinglée
+  et de zstd via une libzstd statique épinglée ;
+- contrôle au démarrage de la cohérence entre les en-têtes et la bibliothèque
+  libarchive liés ;
+- ajout de la notice de licence libarchive aux distributions binaires ;
+- extension de `babet.archive.list()` avec détection par le contenu des archives
+  TAR non compressées, tout en conservant miniz comme backend ZIP inchangé ;
+- analyse progressive des métadonnées et données TAR avec libarchive, limites
+  sur les entrées, tailles, somme des tailles, mémoire des chemins et détection
+  des données tronquées ;
+- ajout des champs canoniques `format` et `compression`, des types TAR, cibles
+  de liens, métadonnées sparse et valeurs `nil` explicites pour les champs CRC
+  et compression propres au ZIP ;
+- ajout de l’extraction complète sécurisée des TAR non compressés, tout en
+  conservant miniz comme backend d’extraction ZIP inchangé ;
+- extraction TAR en deux passes : Babet inspecte l’archive épinglée en entier,
+  valide chemins, limites, doublons, conflits et types de destination, puis
+  relit le même descripteur et compare chaque en-tête avant préparation ;
+- réutilisation pour TAR de la destination confinée par descripteurs, des
+  temporaires `0600` dans le dossier final, écritures bornées, publication
+  atomique fichier par fichier, nettoyage, workers et permissions sûres ;
+- refus volontaire des fichiers TAR sparse, symlinks, hard links, FIFO,
+  sockets, périphériques et types non pris en charge avant toute publication ;
+- extension de `babet.archive.extractFile()` aux TAR non compressés avec
+  sélection par nom brut exact, limites sur l’archive entière, seconde passe
+  vérifiée, consommation en flux des données non sélectionnées et réutilisation
+  de la destination confinée avec publication atomique ;
+- possibilité de sélectionner un fichier régulier TAR sûr malgré des entrées
+  non liées aux chemins dangereux, types spéciaux ou cartes sparse, tout en
+  refusant un sparse sélectionné et toute donnée malformée dans l’archive ;
+- extension de `babet.archive.create()` à la création déterministe de TAR non
+  compressés avec le writer POSIX pax restreint de libarchive, tout en gardant
+  miniz comme writer ZIP inchangé ;
+- déduction du format TAR depuis `.tar`, ajout de l’option stricte
+  `format = "zip" | "tar"`, conservation du ZIP comme repli compatible pour les
+  autres extensions et, à ce stade, refus explicite des suffixes TAR compressés ;
+- lecture en flux des fichiers source depuis des descripteurs épinglés, contrôle
+  de l’inode, taille, mtime et ctime avant et après lecture, prise en charge des
+  chemins pax longs, répertoires vides, workers, publication atomique de
+  l’archive entière et métadonnées UID/GID/mode/date déterministes ;
+- durcissement de `build_local.sh` par une empreinte du contenu de `src/` et
+  de `CMakeLists.txt` ; lorsque des sources copiées depuis un ZIP conservent des
+  dates anciennes trompeuses, Babet nettoie désormais uniquement ses propres
+  objets CMake au lieu de réutiliser silencieusement un ancien code ;
+- intégration statique reproductible de zlib 1.3.2, vérifiée par SHA-256,
+  avec activation du seul filtre gzip interne de libarchive ;
+- extension de `list()`, `extract()` et `extractFile()` aux TAR gzip détectés
+  par le contenu, avec contrôle CRC/troncature du flux complet et les mêmes
+  garanties de source épinglée, double passe, publication atomique, workers et
+  refus des types spéciaux ;
+- extension de `create()` avec déduction `.tar.gz`/`.tgz`, option stricte
+  `format = "tar.gz"`, niveaux `0` à `9`, date gzip nulle en mode déterministe
+  et sortie reproductible octet par octet ;
+- application de `max_compression_ratio` aux TAR gzip sous forme d’un rapport
+  global entre les octets annoncés des fichiers réguliers et la taille complète
+  de l’archive compressée ;
+- ajout d’un profil de build libarchive afin qu’un cache compilé sans les
+  filtres gzip, xz, bzip2 ou zstd demandés soit automatiquement reconstruit lorsque la
+  configuration des dépendances change ;
+- intégration statique reproductible de XZ Utils/liblzma 5.8.3, vérifiée par
+  SHA-256, avec utilisation forcée des en-têtes et de `liblzma.a` compilés
+  localement plutôt que des versions de la distribution hôte ;
+- extension de `list()`, `extract()` et `extractFile()` aux TAR xz détectés par
+  le contenu, avec les mêmes garanties de validation du flux complet, source
+  épinglée, double passe, publication atomique, workers et refus des types
+  spéciaux ;
+- extension de `create()` avec déduction `.tar.xz`/`.txz`, option stricte
+  `format = "tar.xz"`, niveaux `0` à `9`, sortie déterministe et métadonnées de
+  résultat explicites `format = "tar"` / `compression = "xz"` ;
+- généralisation de `max_compression_ratio` aux TAR gzip, xz, bzip2 et zstd ;
+- contrôle au démarrage de la cohérence entre les versions liblzma des
+  en-têtes et de la bibliothèque liée, sur le même principe que zlib ;
+- intégration statique reproductible de bzip2/libbz2 1.0.8 depuis la
+  distribution officielle Sourceware, vérifiée par SHA-256, avec utilisation
+  forcée de `bzlib.h` et `libbz2.a` compilés localement ;
+- activation du seul filtre bzip2 interne de libarchive et extension de
+  `list()`, `extract()` et `extractFile()` aux TAR bzip2 détectés par le contenu,
+  avec les mêmes garanties de source épinglée, double passe, publication
+  atomique, workers, détection des corruptions, limite de ratio et refus des
+  types spéciaux que gzip et xz ;
+- extension de `create()` avec déduction `.tar.bz2`/`.tbz2`/`.tbz`, option
+  stricte `format = "tar.bz2"`, niveaux `1` à `9`, sortie déterministe et
+  métadonnées `format = "tar"` / `compression = "bzip2"` ;
+- contrôle au démarrage que la version libbz2 liée commence bien par la version
+  1.0.8 épinglée et injectée par CMake ;
+- intégration statique reproductible de Zstandard/libzstd 1.5.7, vérifiée par
+  SHA-256, avec utilisation forcée des en-têtes et de `libzstd.a` compilés
+  localement dans libarchive comme dans Babet ;
+- activation du seul filtre zstd interne de libarchive et extension de
+  `list()`, `extract()` et `extractFile()` aux TAR zstd détectés par le contenu,
+  avec validation complète des frames par libzstd, prise en charge des frames
+  concaténées, refus des corruptions et données finales étrangères, limite de
+  ratio globale, source épinglée, double passe, publication atomique et workers ;
+- extension de `create()` avec déduction `.tar.zst`/`.tar.zstd`/`.tzst`, option
+  stricte `format = "tar.zst"`, niveaux `0` à `19`, sortie déterministe et
+  métadonnées `format = "tar"` / `compression = "zstd"` ;
+- contournement du problème de callback d’écriture personnalisé de libarchive
+  3.8.8 pour zstd en utilisant son chemin intégré `archive_write_open_fd()`,
+  tout en conservant le descripteur temporaire épinglé et la publication
+  atomique de l’archive complète par Babet ;
+- contrôle au démarrage de l’égalité exacte entre les versions libzstd des
+  en-têtes et de la bibliothèque liée ;
+- audit de tous les usages de `std::regex`, qui confirme que seul
+  `babet.find()` l’utilisait ;
+- ajout des filtres bornés `glob`, `iglob`, `path_glob` et `path_iglob` à
+  `babet.find()` ;
+- implémentation du glob sûr sous forme d’automate dynamique non récursif avec
+  `*`, `**`, `?`, échappement par antislash, limite de 4096 octets, correspondance
+  ancrée sur la chaîne entière, casse ASCII pour les variantes insensibles et
+  absence de backtracking catastrophique ;
+- remplacement de la dernière implémentation `std::regex` derrière `name`,
+  `iname` et `path` par RE2 2025-11-05 et Abseil 20250814.2 liés statiquement,
+  téléchargés et vérifiés par SHA-256 dans `build_local.sh` plutôt que pris sur
+  le système hôte ;
+- conservation des correspondances complètes de `name`/`iname` et de la
+  recherche partielle de `path`, avec documentation des différences de syntaxe
+  volontaires de RE2, notamment le refus des références arrière et des
+  assertions d’anticipation ou de rétrospection ;
+- limitation de chaque motif RE2 à 4096 octets et de chaque expression compilée
+  à un budget mémoire de 1 Mio, en mode octets Latin-1 afin que les noms Linux
+  non UTF-8 restent filtrables ;
+- ajout de prédicats Lua partagés et sans allocation pour l’arité exacte ou
+  bornée, les chaînes, nombres, entiers et booléens stricts, le `nil` facultatif
+  et les chaînes sans octet NUL ;
+- harmonisation des bindings publics autour de ces validateurs, suppression des
+  conversions accidentelles nombre vers chaîne, refus des arguments en trop
+  lorsque la signature documentée est fixe et conservation des chemins
+  d’erreur sans `longjmp` pendant la vie d’objets C++ ;
+- renforcement des tests de validation de `find`, des listings et itérateurs,
+  copies d’arbres, `exec`, signaux, workers et options d’archives ;
+- correction du paquet de release afin d’inclure le README français existant
+  (`README.fr.md`) sous son véritable nom ;
+- achèvement de l’audit final code/tests/documentation, synchronisation des
+  références française et anglaise, correction de l’exemple d’échappement RE2
+  et régénération des deux manuels PDF pour la 2.6.0 ;
+- ajout de fixtures TAR déterministes en Lua pur pour les préfixes ustar, noms
+  longs GNU, chemins pax, liens, fichiers sparse, types spéciaux, chemins
+  dangereux, limites,
+  corruptions, troncatures, archives concaténées, données finales étrangères,
+  sources symlinkées, contenus extraits, permissions, écrasement, attaques par
+  symlink de destination, nettoyage, sélection d’un seul fichier, archives
+  mixtes et concaténées, politique sparse et workers.
+
+La création, l’inspection et l’extraction ZIP continuent d’utiliser miniz avec
+leurs contrats 2.5.0. La création, l’inspection, l’extraction complète et
+l’extraction d’un fichier des TAR bruts, gzip, xz, bzip2 ou zstd utilisent
+libarchive avec zlib, XZ Utils/liblzma, libbz2 et libzstd statiques. Les flux
+compressés autonomes restent une décision ultérieure séparée.
+
 ## [2.5.0] - 2026-07-15
 
 ### Résumé de la version

@@ -1,9 +1,9 @@
-# Archive — secure ZIP creation, inspection, and extraction
+# Archive — secure ZIP and TAR operations with gzip, xz, bzip2, or zstd
 
 ## Scope
 
-The `babet.archive` submodule creates, inspects, and extracts **ZIP** archives
-without calling an external command:
+The `babet.archive` submodule creates, inspects, and extracts **ZIP**, **TAR**,
+and **gzip-, xz-, bzip2-, or zstd-compressed TAR** archives without calling an external command:
 
 ```lua
 babet.archive.create(source, archive [, opts])
@@ -12,8 +12,18 @@ babet.archive.extract(archive, destination [, opts])
 babet.archive.extractFile(archive, entry, destination [, opts])
 ```
 
-The module is deliberately limited to ZIP and does not support TAR, GZIP, XZ,
-BZIP2, or Zstandard.
+ZIP creation, inspection, and extraction continue to use miniz. TAR creation,
+inspection, and extraction use the statically linked libarchive backend;
+gzip filtering is provided by the statically linked zlib backend, xz filtering
+uses the statically linked XZ Utils/liblzma backend, bzip2 filtering uses the
+statically linked bzip2/libbz2 backend, and zstd filtering uses the statically
+linked Zstandard/libzstd backend. Readers detect both the container
+and compression from the contents. For `create()`, `.tar` selects plain TAR,
+`.tar.gz` and `.tgz` select gzip-compressed TAR, `.tar.xz` or `.txz` select
+xz-compressed TAR, `.tar.bz2`, `.tbz2`, or `.tbz` select bzip2-compressed
+TAR, and `.tar.zst`, `.tar.zstd`, or `.tzst` select zstd-compressed TAR.
+`opts.format` can override the extension. Standalone compressed streams are not
+enabled.
 
 All four functions use the usual result contract:
 
@@ -58,64 +68,119 @@ local result, err = babet.archive.create(
 source directory name itself. Traversal is descriptor-based and does not follow
 symlinks. A symlink anywhere in the source path or tree, or a FIFO, socket,
 device, or other unsupported object, makes the operation fail before the
-archive is published. Entry names produced by `create()` must be valid UTF-8:
-Linux permits arbitrary bytes in filenames, but Babet rejects names that would
-produce a ZIP falsely declaring invalid bytes as UTF-8.
+archive is published. Entry names produced by `create()` must be valid UTF-8.
+Linux permits arbitrary bytes in filenames, but Babet rejects names that cannot
+be represented safely and consistently in both supported output formats.
+
+### Output format
+
+Without `opts.format`, `create()` uses these rules:
+
+- a destination ending in `.tar` (case-insensitive) creates an uncompressed
+  POSIX pax TAR archive;
+- `.tar.gz` and `.tgz` (case-insensitive) create a gzip-compressed POSIX pax
+  TAR archive;
+- `.tar.xz` and `.txz` (case-insensitive) create an xz-compressed
+  POSIX pax TAR archive;
+- `.tar.bz2`, `.tbz2`, and `.tbz` (case-insensitive) create a
+  bzip2-compressed POSIX pax TAR archive;
+- `.tar.zst`, `.tar.zstd`, and `.tzst` (case-insensitive) create a
+  zstd-compressed POSIX pax TAR archive;
+- every other destination keeps the pre-2.6 historical behaviour and creates a
+  ZIP archive, regardless of its extension.
+
+`opts.format = "zip"`, `"tar"`, `"tar.gz"`, `"tar.xz"`, `"tar.bz2"`, or
+`"tar.zst"` explicitly selects a backend. An explicit format always overrides the destination suffix. This means, for
+example, that `format = "zip"` may create a ZIP named `backup.tar.gz`, while
+`format = "tar"` may create an uncompressed TAR named `backup.tgz` or
+`backup.txz`, `backup.tbz2`, or `backup.tzst`. Format selection is based on the explicit
+option or content, not trust in the suffix.
 
 Creation options:
 
 | Option | Default | Behaviour |
 | --- | ---: | --- |
-| `compression_level` | `6` | integer from `0` (stored) through `9` |
+| `format` | inferred | strict string: `"zip"`, `"tar"`, `"tar.gz"`, `"tar.xz"`, `"tar.bz2"`, or `"tar.zst"` |
+| `compression_level` | `6` | ZIP/gzip/xz: `0` through `9`; bzip2: `1` through `9`; zstd: `0` through `19` |
 | `overwrite` | `false` | atomically replaces an existing regular archive |
-| `deterministic` | `true` | sorts names and writes the timezone-independent fixed timestamp 1980-01-01 00:00:00 |
+| `deterministic` | `true` | stable entry order and fixed format-specific timestamps |
 | `include_directories` | `true` | emits explicit directory entries, including empty directories |
 | `max_entries` | `10000` | maximum output entries; hard ceiling `100000` |
 | `max_file_size` | `256 * 1024 * 1024` | maximum source-file size; hard ceiling 8 GiB |
 | `max_total_size` | `1024 * 1024 * 1024` | maximum source bytes; hard ceiling 64 GiB |
 
+For plain TAR, an explicitly supplied `compression_level` is rejected. For
+ZIP, gzip-compressed TAR, and xz-compressed TAR, level `0` is valid and level
+`9` is the maximum. bzip2 accepts levels `1` through `9`; level `0` is
+rejected because libbz2 block sizes start at 100 KiB. zstd accepts levels `0`
+through `19`; Babet deliberately excludes the ultra levels `20` through `22`.
+
 All integer options require strict Lua integers. Boolean options require real
-Lua booleans. Unknown keys are rejected.
+Lua booleans. Unknown keys are rejected. `format` is case-sensitive and does
+not accept aliases.
 
 The complete source tree is scanned before the output temporary file is
 created. Entry names are limited to 4096 bytes each and 64 MiB cumulatively.
 The scan also has fixed ceilings of 100000 filesystem nodes and 256 directory
 levels, independently of `include_directories`. Files are then reopened through
-the source directory descriptor with
-`O_NOFOLLOW`. Device, inode, size, modification time, and change time are
-checked before and after compression; a file changed during creation causes a
-failure and the temporary archive is removed.
+the source directory descriptor with `O_NOFOLLOW`. Device, inode, size,
+modification time, and change time are checked before and after streaming; a
+file changed during creation causes a failure and the temporary archive is
+removed.
 
 The destination parent must already exist and may not contain symlink or `..`
 components. The destination itself must be absent unless `overwrite = true`,
 and it may never be a symlink or directory. An archive cannot be written inside
 the source tree, avoiding accidental self-inclusion.
 
-The result is:
+The result includes the selected format:
 
 ```lua
 {
     files = 12,
     directories = 3,
     bytes = 987654,
-    path = "backup.zip",
-    compression_level = 6,
+    path = "backup.tar",
+    format = "tar",
+    compression = "none",
+    compression_level = nil,
     deterministic = true,
 }
 ```
 
-With the default deterministic mode, identical directory contents and options
-produce byte-for-byte identical archives, including across local time zones.
-With `deterministic = false`, sorted entry order remains stable but each entry
-uses the source modification time, which must fit the ZIP DOS timestamp range
-1980 through 2107 in the local timezone. Ownership, ACLs, extended attributes, and
-permission bits are not copied. The archive file itself is published with mode
-`0644`; extracted files continue to use the safe extraction defaults described
-below.
+For ZIP and gzip-, xz-, bzip2-, or zstd-compressed TAR,
+`compression_level` is the effective integer level. For plain TAR it is `nil`. Archive-level `compression`
+is `"gzip"`, `"xz"`, `"bzip2"`, or `"zstd"` for compressed TAR and `"none"` otherwise. ZIP entry compression remains reported through the ZIP-specific
+per-entry metadata returned by `list()`.
 
-ZIP64 output is enabled automatically when the preflight indicates that the
-classic ZIP entry-count or 4 GiB size fields may be exceeded. Small archives
-remain classic ZIP files.
+With the default deterministic mode, identical directory contents, format,
+libarchive/miniz/zlib/liblzma/libbz2/libzstd versions, and options produce byte-for-byte
+identical archives:
+
+- ZIP entries use the fixed DOS timestamp 1980-01-01 00:00:00;
+- TAR entries use Unix epoch zero, UID/GID `0`, empty owner/group names, mode
+  `0644` for files, and mode `0755` for directories;
+- gzip-compressed TAR additionally writes a gzip header timestamp of zero, so
+  the outer stream does not inject wall-clock time;
+- xz streams contain no wall-clock timestamp, and the selected LZMA2 preset is
+  fixed by `compression_level`;
+- bzip2 streams contain no wall-clock timestamp, and their block size is fixed
+  by `compression_level`;
+- zstd frames contain no wall-clock timestamp, enable their frame checksum, and
+  use the compression level fixed by `compression_level`.
+
+With `deterministic = false`, sorted entry order remains stable. ZIP uses each
+source modification time, which must fit the DOS range 1980 through 2107 in the
+local timezone. TAR preserves the source modification time with nanosecond
+precision when representable by the platform and is not limited to the ZIP DOS
+range.
+
+Ownership, ACLs, extended attributes, and source permission bits are not copied.
+TAR uses libarchive's restricted POSIX pax writer: ordinary names use portable
+ustar headers where possible, while long paths or metadata that need extension
+records are represented with pax headers. ZIP64 output is enabled automatically
+when the preflight indicates that classic ZIP fields may be exceeded. Small ZIP
+archives remain classic ZIP files.
 
 The preflight and file checks prevent symlink substitution and detect changes
 to every file that is actually archived. Creation is not a filesystem snapshot:
@@ -125,19 +190,53 @@ secure reopen fail. Concurrent directory renames are not reported as a
 transactional conflict.
 
 When `include_directories = false`, empty directories cannot be represented and
-are therefore omitted.
+are therefore omitted. Parent directories needed by regular files are recreated
+implicitly during extraction.
 
-Example:
+Examples:
 
 ```lua
-local result, err = babet.archive.create("project", "project.zip", {
+local zip, err = babet.archive.create("project", "project.zip", {
     compression_level = 9,
     overwrite = true,
-    max_total_size = 2 * 1024 * 1024 * 1024,
 })
-if not result then
-    error(err)
-end
+assert(zip, err)
+
+local tar
+tar, err = babet.archive.create("project", "project.tar", {
+    deterministic = true,
+})
+assert(tar, err)
+
+local compressed
+compressed, err = babet.archive.create("project", "project.tar.gz", {
+    compression_level = 9,
+})
+assert(compressed, err)
+
+local xz
+xz, err = babet.archive.create("project", "project.tar.xz", {
+    compression_level = 9,
+})
+assert(xz, err)
+
+local bzip2
+bzip2, err = babet.archive.create("project", "project.tar.bz2", {
+    compression_level = 9,
+})
+assert(bzip2, err)
+
+local zstd
+zstd, err = babet.archive.create("project", "project.tar.zst", {
+    compression_level = 19,
+})
+assert(zstd, err)
+
+local named
+named, err = babet.archive.create("project", "snapshot.data", {
+    format = "tar.zst",
+})
+assert(named, err)
 ```
 
 ## Inspection/extraction options and anti-bomb limits
@@ -149,7 +248,7 @@ The options shared by `list()`, `extract()`, and `extractFile()` are:
 | `max_entries` | `10000` | `100000` | maximum number of entries in the archive |
 | `max_entry_size` | `256 * 1024 * 1024` | `8 * 1024^3` | maximum expanded size of one non-directory entry |
 | `max_total_size` | `1024 * 1024 * 1024` | `64 * 1024^3` | maximum sum of expanded non-directory entry sizes |
-| `max_compression_ratio` | `1000` | `1000000000` | maximum per-entry `expanded size / compressed size` ratio |
+| `max_compression_ratio` | `1000` | `1000000000` | maximum per-entry ratio for ZIP; maximum global expanded-file-bytes/archive-bytes ratio for gzip-, xz-, bzip2-, or zstd-compressed TAR; irrelevant for plain TAR |
 
 The three integer limits must be **strictly positive Lua integers**.
 `max_compression_ratio` must be finite and at least `1`. `NaN`, infinity,
@@ -160,7 +259,15 @@ internally limited to 64 MiB. This fixed ceiling bounds metadata memory even
 when `max_entries` is explicitly raised.
 Allocations made by the miniz ZIP reader are additionally capped at 128 MiB per
 archive. The central directory and its comments therefore cannot trigger an
-arbitrary allocation before per-entry limits are applied.
+arbitrary allocation before per-entry limits are applied. TAR inspection is
+streaming: Babet reads every entry data stream without storing it in memory,
+both to reach the following header and to detect truncated data. For gzip TAR, Babet additionally performs a bounded streaming validation with
+zlib because libarchive itself does not verify the gzip trailer CRC/ISIZE;
+corrupt trailers and non-gzip trailing bytes are therefore rejected. Standard
+zero padding after a gzip member is accepted. For zstd TAR, Babet performs an
+independent bounded streaming validation with libzstd, requiring complete
+frames, accepting valid concatenated frames, and rejecting corruption,
+truncation, or foreign trailing bytes before publication.
 
 For complete extraction, the output tree is also internally capped at 100000
 unique directories, including implicit parents, and 64 MiB of cumulative
@@ -172,9 +279,12 @@ with `list()` and `extractFile()`. Therefore `extractFile()` cannot bypass the
 global policy by selecting a small entry from an archive whose metadata
 announces excessive expansion.
 
-A non-empty entry that announces a zero compressed size is always rejected.
-Directories do not count towards `max_entry_size`, `max_total_size`, or the
-compression ratio, but they do count towards `max_entries`.
+For ZIP, a non-empty entry that announces a zero compressed size is always
+rejected and the ratio is checked per entry. For gzip-, xz-, bzip2-, or zstd-compressed TAR, Babet checks the sum of announced regular-file sizes against the complete
+compressed archive size after the stream has been consumed. Plain TAR has no
+compression ratio. Directories do not count towards `max_entry_size` or
+`max_total_size`,
+but they do count towards `max_entries`.
 
 Example:
 
@@ -198,19 +308,29 @@ accepted by `list()`.
 local info, err = babet.archive.list(archive [, opts])
 ```
 
-`archive` is the path to a ZIP file. The path may be a symlink to a regular file: Babet opens its target once and keeps that same descriptor for the
-whole scan. Directories, FIFOs, sockets, and devices are rejected before ZIP
-parsing; non-blocking open notably prevents a FIFO with no writer from hanging
-`list()`, `extract()`, or `extractFile()`. The function then opens the central
-directory, applies the limits above, and returns:
+`archive` is the path to a ZIP, plain TAR, gzip-compressed TAR,
+xz-compressed TAR, bzip2-compressed TAR, or zstd-compressed TAR file. The extension is not used for detection. The path may
+be a symlink to a regular file: Babet opens its target once and keeps that same
+descriptor for the whole scan. Directories,
+FIFOs, sockets, and devices are rejected before format parsing; non-blocking
+open notably prevents a FIFO with no writer from hanging `list()`.
+
+For ZIP, Babet first uses the existing miniz reader. If the same pinned file is
+not a ZIP, Babet rewinds that descriptor and enables only libarchive's TAR
+reader plus the built-in `none`, `gzip`, `xz`, `bzip2`, and `zstd` filters. No external
+decompressor can be invoked by this path. Concatenated TAR archives are traversed completely;
+non-TAR trailing data, truncated payloads, and data attached to non-regular
+entries are rejected. The function applies the limits above and returns:
 
 ```lua
 {
+    format = "zip",           -- "zip" or "tar"
+    compression = "none",    -- "none", "gzip", "xz", "bzip2", or "zstd" for TAR
     entries = {
         {
             name = "docs/readme.txt", -- raw entry name
             path = "docs/readme.txt", -- normalised extraction path
-            type = "file",            -- file, directory, symlink, unsupported
+            type = "file",            -- see the supported entry types below
             size = 1234,
             compressed_size = 530,
             crc32 = 305419896,         -- unsigned 32-bit integer
@@ -221,31 +341,52 @@ directory, applies the limits above, and returns:
             extractable = true,
             reason = nil,
             unix_mode = 420,           -- 0644, or nil without a Unix mode
+            sparse = false,
+            link_target = nil,         -- TAR symlink/hard-link target
         },
     },
     count = 1,
     total_size = 1234,
     archive_size = 666,
-    zip64 = false,
+    zip64 = false,             -- nil for TAR
 }
 ```
 
 `path` removes the trailing `/` from a directory entry. It is only meaningful
 as an extraction path when `safe_path == true`.
 
-`extractable` means that the entry has an acceptable path and type, uses a
-compression method understood by miniz, and is not encrypted. It does not
-predict destination conflicts or duplicates between entries. When it is
-`false`, `reason` describes the first rejection reason.
+For ZIP, `compression` remains `"none"`: ZIP compression is per entry rather
+than an outer stream. For TAR, `compression` is `"none"`, `"gzip"`, or `"xz"` according to the
+detected filter.
+
+For ZIP, `extractable` means that the entry has an acceptable path and type,
+uses a compression method understood by miniz, and is not encrypted. For TAR,
+safe regular files and directories are extractable. Sparse files, symlinks,
+hard links, FIFOs, devices, and other special TAR types are inspected but
+rejected with an explicit reason. `extractable` never predicts destination
+conflicts or duplicates between entries.
+
+ZIP-specific fields keep their previous exact values. For TAR,
+`compressed_size`, `crc32`, and `compression_method` are `nil`, because TAR has
+no per-entry compression or CRC metadata. `encrypted` is `false`, `supported`
+means that libarchive could parse the entry, and `sparse` reports sparse-file
+metadata. `link_target` contains the raw target announced for a TAR symlink or
+hard link when libarchive exposes one, and is `nil` otherwise. The TAR types
+reported by this lot are
+`file`, `directory`, `symlink`, `hardlink`, `fifo`, `character_device`,
+`block_device`, `socket`, and `unsupported`.
 
 `unix_mode` contains only bits `0000` through `7777` announced by an archive
 created on a Unix host. It is `nil` when that information is unavailable. A
 mode being present does not mean it will be preserved: see
 [`preserve_permissions`](#permissions).
 
-Names read from an existing archive are byte strings. Comparisons are exact and
-case-sensitive; no Unicode normalisation is performed. This inspection
-tolerance does not weaken `create()`, which emits valid UTF-8 names only.
+ZIP names read from an existing archive are byte strings. TAR pathnames are the
+native strings returned by libarchive after its TAR header handling (including
+ustar prefixes, GNU long names, and pax path headers). Comparisons are exact
+and case-sensitive, and Babet performs no additional Unicode normalisation.
+This inspection tolerance does not weaken `create()`, which emits valid UTF-8
+names for both ZIP and TAR.
 
 <a id="babetarchiveextract"></a>
 
@@ -268,21 +409,31 @@ Additional options:
 
 Both values must be real Lua booleans.
 
-Before writing any file, Babet:
+`archive` may be a ZIP, plain TAR, gzip-compressed TAR,
+xz-compressed TAR, bzip2-compressed TAR, or zstd-compressed TAR; the format and compression are detected from its contents,
+not its extension. Before writing any file, Babet:
 
-1. inspects all metadata and applies the limits;
+1. inspects the whole archive and applies the limits;
 2. rejects every non-extractable entry;
 3. rejects duplicate output paths;
 4. rejects conflicts where one path would need to be both a file and a
    directory;
 5. checks existing destination objects.
 
+For TAR, Babet then rereads the **same pinned file** from the beginning,
+compares every header with the plan produced by inspection, and forwards
+regular-file blocks to the secure destination layer. An entry added, removed,
+or changed in metadata between the two passes makes the operation fail. This
+check is not a snapshot: concurrent same-size data modification can still
+trigger a read error, but is not guaranteed to be distinguished when the
+headers remain identical.
+
 The result is:
 
 ```lua
 {
     files = 12,
-    directories = 3, -- explicit directory entries in the ZIP
+    directories = 3, -- explicit directory entries in the archive
     bytes = 987654,  -- expanded file bytes
     path = "restore",
 }
@@ -293,7 +444,7 @@ The result is:
 Example:
 
 ```lua
-local result, err = babet.archive.extract("backup.zip", "restore", {
+local result, err = babet.archive.extract("backup.tar", "restore", {
     overwrite = false,
     preserve_permissions = true,
     max_total_size = 2 * 1024 * 1024 * 1024,
@@ -319,15 +470,24 @@ local result, err = babet.archive.extractFile(
 )
 ```
 
-`entry` is the exact **raw name** stored in the archive. Lookup is
-case-sensitive. It fails when the name is absent or occurs more than once.
+`archive` may be a ZIP, plain TAR, gzip-compressed TAR,
+xz-compressed TAR, bzip2-compressed TAR, or zstd-compressed TAR; detection uses the file contents, not the extension. ZIP
+stays on miniz. TAR uses the same pinned-source and two-pass libarchive reader
+as complete extraction.
 
-Only a regular-file entry can be selected. The entry path is not reproduced:
-the content is written exactly to the caller-supplied `destination` path.
+`entry` is the exact **raw name** exposed by `list()`. Lookup is case-sensitive
+and fails when the name is absent or occurs more than once. For TAR, GNU long
+names and pax `path` records are matched after libarchive has decoded the TAR
+headers, exactly as they appear in `list().entries[i].name`.
+
+Only a regular-file entry can be selected. Sparse TAR files, symlinks, hard
+links, directories, and special types are refused when selected. The entry path
+is not reproduced: the content is written exactly to the caller-supplied
+`destination` path.
 
 ```lua
 local result, err = babet.archive.extractFile(
-    "package.zip",
+    "package.tar",
     "assets/logo.bin",
     "cache/current-logo.bin",
     { overwrite = true }
@@ -344,9 +504,13 @@ Result:
 }
 ```
 
-Anti-bomb limits are still computed over the whole archive. Other entries are
-not extracted, however: an unselected entry with an unsafe path or a
-non-extractable type does not prevent selecting a safe entry.
+Anti-bomb limits are still computed over the whole archive. For TAR, the first
+pass consumes and validates every data stream. The second pass compares every
+header with the inspected plan and consumes the archive to its end before the
+selected temporary file is published. Unselected regular-file data is
+discarded, and an unrelated unsafe path, special type, or sparse file does not
+prevent selecting a safe regular file. Malformed or truncated data anywhere in
+the archive still makes the operation fail without publishing the destination.
 
 ## Path rules
 
@@ -363,7 +527,8 @@ For complete extraction, every entry name must satisfy all of these rules:
 
 Paths remain relative to the destination. Babet never converts a Windows name
 into a Linux path and never silently “cleans” traversal: the archive is
-rejected.
+rejected. With `extractFile()`, the same rules apply to the selected entry name;
+unselected unsafe names do not become destination paths.
 
 Duplicates are detected after removing the trailing `/` from directory names.
 An archive containing two identical outputs, or `node` as a file followed by
@@ -390,11 +555,13 @@ archive.
 
 ## Atomic publication and cleanup
 
-`create()` writes the complete ZIP to a unique mode-`0600` temporary file in
-the destination directory. Its short internal name does not repeat the output
-basename, so a valid destination close to the `NAME_MAX` limit remains
-creatable. After the central directory is finalized, Babet
-flushes and `fsync`s the file, changes it to `0644`, publishes it atomically,
+`create()` writes the complete ZIP, plain TAR, gzip-compressed TAR, or
+xz-compressed TAR to a unique mode-`0600` temporary file in the destination
+directory. Its short internal name does not repeat the
+output basename, so a valid destination close to the `NAME_MAX` limit remains
+creatable. After the miniz ZIP central directory or libarchive TAR stream is
+finalized, Babet flushes and `fsync`s the file, changes it to `0644`, publishes
+it atomically,
 and `fsync`s the parent directory. Without overwrite it uses a no-clobber hard
 link publication; with overwrite it uses same-directory `rename`. Every error
 before publication removes the temporary and leaves the previous destination
@@ -402,16 +569,21 @@ unchanged. If the final parent-directory `fsync` itself fails, the new archive
 has already been atomically published but the call returns an error because
 crash durability could not be confirmed.
 
-Each extracted file is progressively extracted into a unique temporary file created in
+Each extracted file is progressively written to a unique temporary file in
 its final directory with mode `0600`. Temporary names are selected so they can
 never collide with an output declared by the archive. Writes are bounded by
-the announced size. miniz validates decompression and CRC before the file is
-published. The temporary file then receives its final permissions.
+the announced size. For ZIP, miniz validates decompression and CRC. For TAR,
+libarchive provides streaming blocks and Babet validates their order, bounds,
+and final announced size. For gzip-wrapped TAR, Babet additionally validates
+every gzip member’s CRC and ISIZE with zlib before publication. The temporary
+file then receives its final permissions.
 
 All files of a complete extraction are prepared before publication starts. A
-read, decompression, or CRC error therefore publishes no file. Temporary files
-are removed, as are newly created empty directories **below** the destination.
-Destination-root path components that had to be created may remain present.
+read, decompression, or CRC error therefore publishes no file. `extractFile()`
+likewise keeps its selected file temporary until the complete archive has
+passed the verified read. Temporary files are removed, as are newly created
+empty directories **below** the destination. Destination-root path components
+that had to be created may remain present.
 
 Publication is atomic **per file**:
 
@@ -442,8 +614,8 @@ created destination-path components        0755 (subject to umask)
 ```
 
 With `preserve_permissions = true`, Babet preserves only the nine ordinary
-owner/group/other bits (`0777`) from Unix modes announced by the ZIP. setuid,
-setgid, and sticky bits are always stripped.
+owner/group/other bits (`0777`) from Unix modes announced by the ZIP or TAR.
+setuid, setgid, and sticky bits are always stripped.
 
 Permissions of a newly created directory are applied only after its contents
 have been extracted, so a restrictive final mode such as `0000` cannot block
@@ -453,14 +625,16 @@ UIDs, GIDs, ACLs, extended attributes, and timestamps are not restored.
 
 ## Supported entry types
 
-| Type | `create()` | `list()` | `extract()` / `extractFile()` |
-| --- | --- | --- | --- |
-| regular file | supported, stored at level `0` or DEFLATE otherwise | inspected | supported |
-| directory | supported when `include_directories = true` | inspected | supported by `extract()` |
-| symlink | always rejected | identified | always rejected |
-| FIFO, socket, device, or unknown filesystem type | always rejected | identified | rejected |
-| encrypted entry | not created | identified | rejected |
-| unknown compression method | not created | identified | rejected |
+| Type | ZIP/TAR `create()` | ZIP/TAR `list()` | ZIP/TAR `extract()` | ZIP/TAR `extractFile()` |
+| --- | --- | --- | --- | --- |
+| regular file | supported; ZIP/gzip/xz accept levels `0` through `9`, bzip2 accepts `1` through `9`, zstd accepts `0` through `19`, plain TAR stores raw data | inspected in ZIP and plain/gzip/xz/bzip2/zstd TAR | supported in ZIP and plain/gzip/xz/bzip2/zstd TAR, except sparse TAR | supported in ZIP and plain/gzip/xz/bzip2/zstd TAR, except sparse TAR |
+| directory | supported when `include_directories = true` | inspected in ZIP and TAR | supported in ZIP and TAR | cannot be selected |
+| sparse TAR file | never created | identified in TAR | rejected | rejected when selected; ignored when unrelated |
+| symlink | always rejected | identified in ZIP and TAR | always rejected | rejected |
+| hard link | not created | identified in TAR | rejected | rejected when selected |
+| FIFO, socket, device, or unknown filesystem type | always rejected | identified when the format exposes it | rejected | rejected |
+| encrypted entry | not created | identified in ZIP | rejected | rejected |
+| unknown ZIP compression method | not created | identified | rejected | rejected |
 
 A ZIP entry that resembles a hard link but is encoded as a regular file is
 treated as an independent regular file; no link is created.
@@ -470,9 +644,12 @@ treated as an independent regular file; no link is created.
 Common failures include:
 
 - missing or unsafe source directory, source symlink, non-UTF-8 source name,
-  out-of-range ZIP timestamp, or unsupported source object;
+  unsupported source object, invalid creation format, ZIP-only option used for
+  TAR, or out-of-range ZIP timestamp;
 - output archive inside the source, unsafe destination parent, or destination symlink;
-- missing, unreadable, non-regular, or malformed ZIP file;
+- missing, unreadable, non-regular, unsupported, or malformed archive file;
+- truncated TAR data, non-TAR trailing data, a non-regular TAR entry carrying
+  a payload, or a change detected between inspection and extraction;
 - inconsistent metadata or invalid CRC;
 - exceeded anti-bomb limit;
 - absolute path, traversal, duplicate, or path conflict;
@@ -484,13 +661,19 @@ Common failures include:
 The module is synchronous: a call returns only after creation, inspection, or
 extraction has completed. It does not expose progress, cancellation, or a timeout yet.
 
-The ZIP file must not be modified concurrently. Truncation or modification
-during an operation will normally cause a read, decompression, or CRC error,
-but no concurrent snapshot is guaranteed.
+The archive file must not be modified concurrently. ZIP truncation or
+modification will normally cause a read, decompression, or CRC error. TAR is
+streamed through libarchive; concatenated TAR streams are scanned to their end,
+and truncated or non-TAR trailing data is rejected. Neither backend provides a
+concurrent snapshot.
 The destination must not be actively reorganised by another process either.
 Traversal rejects symlinks and rechecks types before publication, but an actor
 that continuously renames directories can make the operation fail and turn
 temporary-file cleanup into a best-effort action.
+
+Plain, gzip-, xz-, bzip2-, and zstd-compressed TAR creation is supported.
+Standalone compression streams remain rejected until their API and safety
+policy are defined and audited separately.
 
 Multi-disk archives are not a supported target. ZIP64 is accepted when miniz
 can read it, while still being subject to the configured limits.

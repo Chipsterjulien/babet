@@ -80,6 +80,12 @@ Le travail de durcissement dans Babet protège les usages
   `http.max_body_size` bornent les accumulations principales. Après un timeout
   de lecture socket, les octets déjà consommés restent dans un buffer commun
   afin de ne pas être perdus ou réordonnés si le script change de méthode.
+- **Filtrage borné des noms** : les champs regex `name`, `iname` et `path`
+  de `babet.find` utilisent RE2 avec une limite de 4096 octets et un budget
+  mémoire de 1 Mio par expression ; les globs sûrs disposent eux aussi d’une
+  limite de 4096 octets et d’un automate non récursif. Les références arrière
+  et assertions d’anticipation/rétrospection ne font volontairement pas partie
+  de la syntaxe RE2.
 
 ## Ce contre quoi il *ne protège pas*
 
@@ -92,10 +98,6 @@ Le travail de durcissement dans Babet protège les usages
   sur la machine qui fait tourner Babet. Le durcissement rend
   les erreurs accidentelles visibles, pas les attaques
   adversariales impossibles.
-- Les expressions régulières non fiables. `babet.find` utilise
-  `std::regex` ; certains motifs ECMAScript peuvent provoquer un backtracking
-  catastrophique. Il faut valider ou prédéfinir les regex plutôt que de les
-  accepter directement depuis une personne non fiable.
 - Les problèmes OS-level (exploits kernel, évasions de
   conteneur, escalade de privilèges). Babet est un binaire
   userland ordinaire.

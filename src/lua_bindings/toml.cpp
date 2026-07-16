@@ -187,7 +187,7 @@ namespace
 int lua_toml_decode(lua_State *L)
 {
     const int argc = lua_gettop(L);
-    if (argc != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "Expected one argument");
     }

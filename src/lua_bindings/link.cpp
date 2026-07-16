@@ -71,7 +71,7 @@ std::optional<std::string> create_symlink(const std::string &target, const std::
 
 int lua_link(lua_State *L)
 {
-    luaL_argcheck(L, lua_gettop(L) == 2, 1, "Expected two arguments");
+    luaL_argcheck(L, lua_arity_is(L, 2), 1, "Expected two arguments");
 
     const std::string_view target =
         luaL_checkstring_view_without_nul(L, 1, "target");

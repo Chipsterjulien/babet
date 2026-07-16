@@ -1,6 +1,6 @@
 # Notes - known deferred work
 
-This file lists known topics intentionally left outside Babet 2.5.0. They are
+This file lists known topics intentionally left outside Babet 2.6.0. They are
 not hidden defects: each item records the current behavior, the remaining risk,
 and the reason it was not included in the release.
 
@@ -68,46 +68,69 @@ replace inotify, abstract executable-path discovery, and add tested CI targets.
 platforms. A portability patch should be tested on the target OS rather than
 written blind.
 
-## 5. Additional archive formats
+## 5. Standalone compressed streams
 
-**Current state**: Babet exposes secure ZIP creation, inspection, and
-extraction through `babet.archive.create`, `babet.archive.list`,
-`babet.archive.extract`, and `babet.archive.extractFile`. Creation uses a
-symlink-refusing descriptor walk, bounded preflight, deterministic ordering,
-change detection for source files, and atomic whole-archive publication. The
-public extractor has its own path, symlink, permission, overwrite,
-resource-limit, and cleanup rules instead of reusing the embedded-package
-reader blindly.
+**Current state**: Babet 2.6.0 creates, lists, extracts, and selectively extracts
+ZIP archives plus plain, gzip-, xz-, bzip2-, and zstd-compressed TAR archives.
+Archive readers detect format and compression from the contents. TAR operations
+use the statically linked libarchive stack and retain the bounded, pinned-source,
+confined-destination, atomic-publication, and worker guarantees documented by
+`babet.archive`.
 
-**Planned for 2.6.0**: TAR, GZIP, XZ, BZIP2, and Zstandard are part of
-the accepted multi-format archive roadmap. The preferred starting point is an
-evaluated libarchive integration rather than separate format implementations.
+**Deliberate boundary**: standalone `.gz`, `.xz`, `.bz2`, and `.zst` streams
+that contain one raw payload rather than a TAR archive are not accepted by the
+public archive API.
 
-## 6. Linear-time or otherwise bounded pattern matching
+**Why deferred**: a raw compressed stream has no portable entry name or archive
+metadata and therefore needs a separate API contract for destination naming,
+limits, overwrite behavior, result metadata, and concatenated-member handling.
+Silently treating it as a one-entry archive would make those decisions implicit.
 
-**Current state**: `babet.find()` uses `std::regex` with ECMAScript syntax.
+## 6. Archive creation from lists and exclusion rules
 
-**Remaining risk**: specially crafted expressions can trigger catastrophic
-backtracking and monopolize the calling thread. The 2.5.0 manual explicitly
-forbids passing untrusted patterns directly.
+**Current state**: `babet.archive.create(source_directory, archive, opts)` walks
+one real source directory through pinned descriptors, refuses source symlinks
+and unsupported filesystem objects, orders entries deterministically, and
+publishes the completed archive atomically.
 
-**Planned 2.6.0 work**: evaluate RE2 and a safe glob mode, document syntax
-differences, and preserve compatibility only where it does not reintroduce
-unbounded matching.
+**Deliberate boundary**: 2.6.0 does not accept an arbitrary list of unrelated
+source paths and does not expose include/exclude pattern rules.
 
-## 7. Shared strict Lua argument validators
+**Why deferred**: lists and exclusions require a stable policy for archive root
+names, collisions, paths outside a common root, symlinks, empty directories,
+and interaction with deterministic ordering. The directory API already covers
+the intended release use cases without adding an ambiguous second creation
+model.
 
-**Current state**: public bindings have been audited individually for strict
-types, arity, numeric bounds, embedded NUL bytes, and `longjmp` safety.
+## 7. Linear-time or otherwise bounded pattern matching
 
-**Planned 2.6.0 work**: consolidate recurring checks into small shared helpers
-for strict strings, integers, booleans, optional `nil`, and exact arity. This is
-an internal maintainability improvement; public contracts remain the source of
-truth.
+**Current state**: `babet.find()` offers bounded `glob`, `iglob`, `path_glob`,
+and `path_iglob` filters implemented by a small non-recursive matcher with a
+polynomial runtime bound and a 4096-byte pattern ceiling. The historical
+`name`, `iname`, and `path` fields are backed by RE2 instead of `std::regex`.
+They keep their full-match/full-match/partial-search behaviour, use Latin-1 byte
+mode for Linux paths, reject patterns above 4096 bytes, and assign a 1 MiB
+memory budget to each compiled expression.
+
+RE2 intentionally does not implement constructs whose matching cost cannot be
+kept linear, notably backreferences and look-around assertions. Scripts that
+need only wildcard filename filtering should prefer the simpler glob fields.
+
+## 8. Shared strict Lua argument validators
+
+**Current state**: 2.6.0 provides shared allocation-free helpers for exact and
+bounded arity, strict Lua strings, numbers, integers and booleans, optional
+`nil`, and strings passed to NUL-terminated native APIs. Public bindings use
+those helpers to avoid accidental number-to-string coercion and silent numeric
+truncation while retaining their documented error contracts.
+
+**Maintenance rule**: future bindings should validate with the shared helpers
+before conversion and should avoid `luaL_error` while non-trivial C++ objects
+that require destruction are alive.
 
 ## Validation note
 
-Valgrind is not a release requirement. Babet 2.5.0 is validated with ASan and
+Valgrind is not a release requirement. Babet 2.6.0 is validated with ASan and
 UBSan, followed by a clean normal rebuild and network smoke tests through:
 
 ```sh

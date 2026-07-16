@@ -195,7 +195,7 @@ bool collect_args(lua_State *L, int idx, const std::string &cmd,
     out.clear();
     out.push_back(cmd);
 
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -221,7 +221,7 @@ bool collect_args(lua_State *L, int idx, const std::string &cmd,
     lua_pushnil(L);
     while (lua_next(L, table_idx) != 0)
     {
-        if (!lua_isinteger(L, -2))
+        if (!lua_is_strict_integer(L, -2))
         {
             lua_pop(L, 2);
             err = "args must be a dense array of strings";
@@ -247,7 +247,7 @@ bool collect_args(lua_State *L, int idx, const std::string &cmd,
     for (lua_Integer i = 1; i <= n; ++i)
     {
         lua_geti(L, table_idx, i);
-        if (lua_type(L, -1) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 1);
             err = "args must contain only strings";
@@ -274,7 +274,7 @@ bool collect_cwd_env(lua_State *L, int idx,
     has_cwd = false;
     env.clear();
 
-    if (lua_isnoneornil(L, idx))
+    if (lua_is_none_or_nil(L, idx))
     {
         return true;
     }
@@ -290,7 +290,7 @@ bool collect_cwd_env(lua_State *L, int idx,
     lua_rawget(L, opts_idx);
     if (!lua_isnil(L, -1))
     {
-        if (lua_type(L, -1) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 1);
             err = "opts.cwd must be a string";
@@ -319,8 +319,8 @@ bool collect_cwd_env(lua_State *L, int idx,
         lua_pushnil(L);
         while (lua_next(L, env_idx) != 0)
         {
-            if (lua_type(L, -2) != LUA_TSTRING ||
-                lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -2) ||
+                !lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 3);
                 err = "opts.env must map strings to strings";

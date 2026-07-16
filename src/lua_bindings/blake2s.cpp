@@ -9,13 +9,12 @@ std::optional<std::string> blake2s256sum(const std::string &path)
 
 int lua_blake2s256sum(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "Expected one argument");
     }
 
-    if (!lua_isstring(L, 1))
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected a string as argument");
     }

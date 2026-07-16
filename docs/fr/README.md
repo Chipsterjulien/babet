@@ -17,7 +17,7 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version stable et auditée **2.5.0**.
+Documentation de la version stable et auditée **2.6.0**.
 
 ## Pour démarrer
 
@@ -27,8 +27,7 @@ Documentation de la version stable et auditée **2.5.0**.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Notes de version 2.5.0`](../../CHANGELOG.fr.md) — changements
-  complets, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.6.0 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 
@@ -38,7 +37,7 @@ Documentation de la version stable et auditée **2.5.0**.
 | lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |
 | lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, capture avec `exec`, streaming avec `spawn`, environnement, cwd et contrôle du processus |
 | enchaîner plusieurs commandes | [`Pipelines de processus`](modules/pipeline.md) | capture complète ou streaming, stderr séparés, statuts individuels et nettoyage des groupes |
-| créer, inspecter ou extraire une archive ZIP | [`Archive — ZIP sécurisé`](modules/archive.md) | création déterministe, listing détaillé, limites anti-bombe, refus des symlinks et publication atomique |
+| créer ou inspecter/extraire des archives ZIP ou TAR | [`Archive — archives multi-formats sécurisées`](modules/archive.md) | création déterministe de ZIP et de TAR brut/gzip/xz/bzip2/zstd, listing, extraction, limites anti-bombe, refus des types spéciaux et publication atomique des fichiers |
 | manipuler l’environnement, identifier le processus ou mesurer la VM Lua | [`SYS - processus et machine`](modules/sys.md) | version du runtime, PID, hostname, `uname`, `PATH`, `env`, `setenv` et mémoire de l’état Lua |
 | envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, téléchargement atomique vers fichier, redirections, TLS, timeout et limites de taille |
 | ouvrir une connexion TCP | [`Socket — TCP`](modules/socket.md) | client, serveur, acceptation, flux binaires, lignes, lecture jusqu’à EOF, timeouts, buffers et limites |
@@ -63,7 +62,7 @@ avoir à ouvrir chaque fichier.
 
 | Module | Périmètre détaillé |
 | --- | --- |
-| [`Archive — création, inspection et extraction ZIP sécurisées`](modules/archive.md) | Créer des archives déterministes, lister les entrées et extraire tout ou un fichier avec ressources bornées, chemins confinés, refus des symlinks et publication atomique. |
+| [`Archive — opérations ZIP, TAR, TAR gzip, TAR xz, TAR bzip2 et TAR zstd sécurisées`](modules/archive.md) | Créer des ZIP, TAR, TAR gzip, TAR xz, TAR bzip2 ou TAR zstd déterministes et les inspecter/extraire avec ressources bornées, chemins confinés, refus explicite des types spéciaux et publication atomique fichier par fichier. |
 | [`Argparse — arguments de ligne de commande`](modules/argparse.md) | Déclarer des flags, options et positionnels ; générer l’aide ; valider les choix ; convertir les valeurs. |
 | [`Exec — programmes externes et processus`](modules/exec.md) | Exécuter sans shell avec `exec`, ou piloter stdin/stdout/stderr progressivement avec `spawn`. |
 | [`Pipelines de processus`](modules/pipeline.md) | Relier plusieurs commandes sans shell, en capture complète ou en streaming, avec statuts par étape. |

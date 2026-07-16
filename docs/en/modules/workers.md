@@ -244,7 +244,7 @@ babet.workers.spawn("return worker.args.value", { value = 42 })
 - `outbox_capacity`: maximum queued worker-to-parent messages;
 - default: 64 messages for each queue;
 - allowed range: integer from `1` to `1,000,000`;
-- the value must be an actual Lua number, not the string `"64"`;
+- the value must be an actual Lua integer; the string `"64"` and the floating-point value `64.0` are rejected;
 - capacity counts **messages**, not bytes.
 
 ```lua

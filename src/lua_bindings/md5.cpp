@@ -10,7 +10,7 @@ std::optional<std::string> md5sum(const std::string &path)
 
 int lua_md5sum(lua_State *L)
 {
-    if (lua_gettop(L) != 1 || !lua_isstring(L, 1))
+    if (!lua_arity_is(L, 1) || !lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected one string argument");
     }

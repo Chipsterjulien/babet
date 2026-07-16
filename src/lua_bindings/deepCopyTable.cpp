@@ -1,4 +1,5 @@
 #include "deepCopyTable.hpp"
+#include "lua_utils.hpp"
 #include <cassert>
 
 /**
@@ -111,7 +112,7 @@ bool deepCopyTable(lua_State *L, int srcIndex, int depth, int maxDepth, VisitedM
 
 int lua_deepCopyTable(lua_State *L)
 {
-    if (lua_gettop(L) != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "Expected one argument (a table)");
     }

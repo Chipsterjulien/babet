@@ -1,4 +1,5 @@
 #include "json.hpp"
+#include "lua_utils.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -84,7 +85,7 @@ namespace
         {
             // pile : ... clé(-2) valeur(-1)
             int kt = lua_type(L, -2);
-            if (kt == LUA_TNUMBER && lua_isinteger(L, -2))
+            if (kt == LUA_TNUMBER && lua_is_strict_integer(L, -2))
             {
                 lua_Integer k = lua_tointeger(L, -2);
                 if (k >= 1)
@@ -251,7 +252,7 @@ namespace
             return json(static_cast<bool>(lua_toboolean(L, idx)));
 
         case LUA_TNUMBER:
-            if (lua_isinteger(L, idx))
+            if (lua_is_strict_integer(L, idx))
             {
                 return json(static_cast<std::int64_t>(lua_tointeger(L, idx)));
             }
@@ -409,7 +410,7 @@ namespace
 int lua_json_encode(lua_State *L)
 {
     int argc = lua_gettop(L);
-    if (argc < 1 || argc > 2)
+    if (!lua_arity_between(L, 1, 2))
     {
         return luaL_error(L, "Expected one or two arguments");
     }
@@ -424,7 +425,7 @@ int lua_json_encode(lua_State *L)
         lua_getfield(L, 2, "indent");
         if (!lua_isnil(L, -1))
         {
-            if (!lua_isinteger(L, -1))
+            if (!lua_is_strict_integer(L, -1))
             {
                 lua_pop(L, 1);
                 return luaL_error(L, "opts.indent must be an integer");
@@ -471,14 +472,14 @@ int lua_json_encode(lua_State *L)
 int lua_json_decode(lua_State *L)
 {
     int argc = lua_gettop(L);
-    if (argc != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "Expected one argument");
     }
     // lua_isstring() accepte aussi les nombres et les convertirait
     // implicitement en texte. decode() exige volontairement une vraie
     // chaîne Lua afin que les erreurs de type ne soient pas masquées.
-    if (lua_type(L, 1) != LUA_TSTRING)
+    if (!lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected a string as argument");
     }
@@ -507,8 +508,7 @@ int lua_json_decode(lua_State *L)
 
 int lua_json_as_array(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (argc != 1)
+    if (!lua_arity_is(L, 1))
     {
         return luaL_error(L, "Expected one argument");
     }

@@ -360,8 +360,8 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
  */
 int lua_moveTree(lua_State *L)
 {
-    if (lua_gettop(L) != 2 || !lua_isstring(L, 1) ||
-        !lua_isstring(L, 2))
+    if (!lua_arity_is(L, 2) || !lua_is_strict_string(L, 1) ||
+        !lua_is_strict_string(L, 2))
     {
         return luaL_error(L, "Expected two strings as arguments");
     }

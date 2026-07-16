@@ -15,7 +15,7 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the stable and audited **2.5.0** release.
+Documentation for the stable and audited **2.6.0** release.
 
 ## Getting started
 
@@ -25,8 +25,7 @@ Documentation for the stable and audited **2.5.0** release.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`2.5.0 release notes`](../../CHANGELOG.md) — complete changes, migration,
-  validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.6.0 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 
@@ -36,7 +35,7 @@ Documentation for the stable and audited **2.5.0** release.
 | parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversion |
 | run an external program | [`Exec — processes`](modules/exec.md) | shell-free arguments, complete capture with `exec`, streaming with `spawn`, environment, cwd, and process control |
 | chain several commands | [`Process pipelines`](modules/pipeline.md) | complete capture or streaming, separate stderr streams, per-stage statuses, and process-group cleanup |
-| create, inspect, or extract a ZIP archive | [`Archive — secure ZIP`](modules/archive.md) | deterministic creation, detailed listing, anti-bomb limits, symlink refusal, and atomic publication |
+| create or inspect/extract ZIP or TAR archives | [`Archive — secure multi-format archives`](modules/archive.md) | deterministic ZIP and plain/gzip/xz/bzip2/zstd TAR creation, listing, extraction, anti-bomb limits, special-type refusal, and atomic file publication |
 | inspect the process, environment, machine, or Lua VM memory | [`SYS — process and machine`](modules/sys.md) | runtime version, PID, hostname, `uname`, `PATH`, `env`, `setenv`, and Lua-state memory |
 | send an HTTP request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic downloads, redirects, TLS, timeout, and size limits |
 | open a TCP connection | [`Socket — TCP`](modules/socket.md) | client, server, accept, binary streams, lines, EOF reads, timeouts, buffers, and limits |
@@ -60,7 +59,7 @@ names below define each chapter's scope before you open it.
 
 | Module | Detailed scope |
 | --- | --- |
-| [`Archive — secure ZIP creation, inspection, and extraction`](modules/archive.md) | Create deterministic archives, list entries, and extract all or one file with bounded resources, confined paths, symlink refusal, and atomic publication. |
+| [`Archive — secure ZIP, TAR, gzip, xz, bzip2, and zstd operations`](modules/archive.md) | Create deterministic ZIP, TAR, gzip TAR, xz TAR, bzip2 TAR, or zstd TAR archives and inspect/extract them with bounded resources, confined paths, explicit special-type refusal, and atomic per-file publication. |
 | [`Argparse — command-line arguments`](modules/argparse.md) | Declare flags, options, and positional values; generate help; validate choices; convert values. |
 | [`Exec — external programs and processes`](modules/exec.md) | Run without a shell using `exec`, or progressively drive stdin/stdout/stderr using `spawn`. |
 | [`Process pipelines`](modules/pipeline.md) | Connect commands without a shell, using complete capture or streaming and per-stage statuses. |

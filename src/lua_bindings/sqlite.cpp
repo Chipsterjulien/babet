@@ -194,7 +194,7 @@ namespace
         lua_getfield(L, idx, "wal");
         if (!lua_isnil(L, -1))
         {
-            if (!lua_isboolean(L, -1))
+            if (!lua_is_strict_boolean(L, -1))
             {
                 lua_pop(L, 1);
                 luaL_error(L, "sqlite.open: opts.wal must be a boolean");
@@ -207,7 +207,7 @@ namespace
         lua_getfield(L, idx, "busy_timeout");
         if (!lua_isnil(L, -1))
         {
-            if (!lua_isinteger(L, -1))
+            if (!lua_is_strict_integer(L, -1))
             {
                 lua_pop(L, 1);
                 luaL_error(L, "sqlite.open: opts.busy_timeout must be an integer (ms)");
@@ -278,7 +278,7 @@ namespace
 
     int sqlite_blob(lua_State *L)
     {
-        if (lua_gettop(L) != 1)
+        if (!lua_arity_is(L, 1))
         {
             return luaL_error(L, "sqlite.blob: expected exactly one argument");
         }
@@ -373,7 +373,7 @@ namespace
             rc = sqlite3_bind_int(stmt, slot, lua_toboolean(L, idx) ? 1 : 0);
             break;
         case LUA_TNUMBER:
-            if (lua_isinteger(L, idx))
+            if (lua_is_strict_integer(L, idx))
             {
                 rc = sqlite3_bind_int64(stmt, slot, lua_tointeger(L, idx));
             }
@@ -553,7 +553,7 @@ namespace
             }
             else if (kt == LUA_TNUMBER)
             {
-                if (!lua_isinteger(L, -2))
+                if (!lua_is_strict_integer(L, -2))
                 {
                     err = "params table has a non-integer numeric key";
                     lua_pop(L, 2);
@@ -1307,7 +1307,7 @@ namespace
     // db:prepare(sql) -> prepared | (nil, err)
     int db_prepare(lua_State *L)
     {
-        if (lua_gettop(L) != 2)
+        if (!lua_arity_is(L, 2))
         {
             return luaL_error(L,
                               "sqlite.prepare: expected db and one SQL string");
@@ -1536,7 +1536,7 @@ namespace
     // prepared:reset() -> (true, nil) | (nil, err)
     int prepared_reset(lua_State *L)
     {
-        if (lua_gettop(L) != 1)
+        if (!lua_arity_is(L, 1))
         {
             return luaL_error(L,
                               "sqlite prepared reset: expected only self");
@@ -1568,7 +1568,7 @@ namespace
     // prepared:close()/finalize() -> (true, nil), idempotent.
     int prepared_close(lua_State *L)
     {
-        if (lua_gettop(L) != 1)
+        if (!lua_arity_is(L, 1))
         {
             return luaL_error(L,
                               "sqlite prepared close: expected only self");
@@ -1634,7 +1634,7 @@ namespace
     // db:in_transaction() -> boolean | (nil, err)
     int db_in_transaction(lua_State *L)
     {
-        if (lua_gettop(L) != 1)
+        if (!lua_arity_is(L, 1))
         {
             return luaL_error(L,
                               "sqlite.in_transaction: expected only self");

@@ -72,7 +72,7 @@ namespace
                                      const char *message)
     {
         luaL_checktype(L, idx, LUA_TNUMBER);
-        if (!lua_isinteger(L, idx))
+        if (!lua_is_strict_integer(L, idx))
         {
             luaL_argerror(L, idx, message);
         }
@@ -218,11 +218,11 @@ namespace
                                 const char *prefix_for_err)
     {
         *out = default_ms;
-        if (lua_isnoneornil(L, idx))
+        if (lua_is_none_or_nil(L, idx))
         {
             return true;
         }
-        if (lua_type(L, idx) != LUA_TNUMBER)
+        if (!lua_is_strict_number(L, idx))
         {
             err = prefix_for_err;
             err += ": timeout must be a number";
@@ -261,11 +261,11 @@ namespace
                                   std::string &err)
     {
         *out = DEFAULT_RECV_ALL_MAX_BYTES;
-        if (lua_isnoneornil(L, idx))
+        if (lua_is_none_or_nil(L, idx))
         {
             return true;
         }
-        if (!lua_isinteger(L, idx))
+        if (!lua_is_strict_integer(L, idx))
         {
             err = "socket: recv_all: max_bytes must be an integer";
             return false;
@@ -620,7 +620,7 @@ namespace
     bool parse_tls_options(lua_State *L, int idx, TlsOptions &opts,
                            std::string &err)
     {
-        if (lua_isnoneornil(L, idx))
+        if (lua_is_none_or_nil(L, idx))
         {
             return true; // tout default
         }
@@ -634,7 +634,7 @@ namespace
         lua_getfield(L, idx, "verify");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TBOOLEAN)
+            if (!lua_is_strict_boolean(L, -1))
             {
                 err = "tls: opts.verify must be a boolean";
                 lua_pop(L, 1);
@@ -648,7 +648,7 @@ namespace
         lua_getfield(L, idx, "ca_cert");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 err = "tls: opts.ca_cert must be a string";
                 lua_pop(L, 1);
@@ -667,7 +667,7 @@ namespace
         lua_getfield(L, idx, "ca_path");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 err = "tls: opts.ca_path must be a string";
                 lua_pop(L, 1);
@@ -686,7 +686,7 @@ namespace
         lua_getfield(L, idx, "hostname");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 err = "tls: opts.hostname must be a string";
                 lua_pop(L, 1);
@@ -705,7 +705,7 @@ namespace
         lua_getfield(L, idx, "min_version");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 err = "tls: opts.min_version must be a string";
                 lua_pop(L, 1);
@@ -732,7 +732,7 @@ namespace
         lua_getfield(L, idx, "timeout");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TNUMBER)
+            if (!lua_is_strict_number(L, -1))
             {
                 err = "tls: opts.timeout must be a number";
                 lua_pop(L, 1);
@@ -2622,7 +2622,7 @@ int lua_socket_listen(lua_State *L)
     lua_Integer port = check_strict_integer(
         L, 2, "port must be an integer");
     lua_Integer requested_backlog = 16;
-    if (!lua_isnoneornil(L, 3))
+    if (!lua_is_none_or_nil(L, 3))
     {
         requested_backlog = check_strict_integer(
             L, 3, "backlog must be an integer");

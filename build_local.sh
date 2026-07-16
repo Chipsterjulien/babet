@@ -39,6 +39,18 @@ if ! command -v cmake &> /dev/null; then
     exit 1
 fi
 
+# RE2 2025-11-05 et le CMakeLists.txt de Babet requièrent CMake 3.22.
+# build_local.sh refuse explicitement une version trop ancienne avant tout
+# téléchargement ou compilation.
+CMAKE_VERSION="$(cmake --version | awk 'NR == 1 { print $3 }')"
+CMAKE_MIN_LOCAL_DEPS="3.22.0"
+if [ -z "${CMAKE_VERSION}" ] || \
+   [ "$(printf '%s\n' "${CMAKE_MIN_LOCAL_DEPS}" "${CMAKE_VERSION}" | sort -V | head -n 1)" != "${CMAKE_MIN_LOCAL_DEPS}" ]; then
+    echo "CMake ${CMAKE_MIN_LOCAL_DEPS} ou plus récent est requis pour RE2 2025-11-05 et les dépendances locales de Babet."
+    echo "Version détectée : ${CMAKE_VERSION:-inconnue}"
+    exit 1
+fi
+
 # Vérifier si wget est installé
 if ! command -v wget &> /dev/null; then
     echo "wget n'est pas installé. Veuillez l'installer avant de continuer."
@@ -54,6 +66,12 @@ fi
 # Vérifier que unzip est installé
 if ! command -v unzip &> /dev/null; then
     echo "unzip n'est pas installé. Veuillez l'installer avant de continuer."
+    exit 1
+fi
+
+# Le tarball officiel de libarchive est distribué en .tar.xz.
+if ! command -v xz &> /dev/null; then
+    echo "xz n'est pas installé. Installez xz/xz-utils avant de continuer."
     exit 1
 fi
 
@@ -107,6 +125,60 @@ verify_sha256() {
     fi
 
     echo "Checksum SHA256 OK pour ${name}."
+}
+
+# --- Empreinte du code source du projet ------------------------------
+#
+# CMake/Make se basent normalement sur les dates de modification. Lorsqu'un
+# lot est copié depuis une archive ZIP par-dessus un arbre déjà compilé, les
+# dates historiques conservées par ZIP peuvent toutefois rendre un nouveau
+# fichier source artificiellement plus ancien que son ancien .o. Le build
+# incrémental réutiliserait alors un objet obsolète malgré un contenu modifié.
+#
+# On calcule donc une empreinte du contenu et des noms de tous les fichiers de
+# src/ ainsi que de CMakeLists.txt. Si elle diffère de celle du dernier build
+# réussi (ou si le cache est antérieur à ce mécanisme), seul le build CMake de
+# Babet est nettoyé. Les dépendances coûteuses restent en cache.
+compute_project_sources_sha256() {
+    local hash_cmd=()
+    if command -v sha256sum &> /dev/null; then
+        hash_cmd=(sha256sum)
+    elif command -v shasum &> /dev/null; then
+        hash_cmd=(shasum -a 256)
+    else
+        echo "ERREUR: ni sha256sum ni shasum -a 256 disponibles." >&2
+        return 1
+    fi
+
+    local manifest
+    manifest="$(mktemp)" || return 1
+
+    local file
+    local file_hash
+    while IFS= read -r -d '' file; do
+        if ! file_hash="$("${hash_cmd[@]}" "${SCRIPT_DIR}/${file}" | awk '{print $1}')"; then
+            rm -f "${manifest}"
+            return 1
+        fi
+        if ! printf '%s  %s\n' "${file_hash}" "${file}" >> "${manifest}"; then
+            rm -f "${manifest}"
+            return 1
+        fi
+    done < <(
+        cd "${SCRIPT_DIR}" || exit 1
+        {
+            printf '%s\0' "CMakeLists.txt"
+            find src -type f -print0
+        } | sort -z
+    )
+
+    local project_hash
+    if ! project_hash="$("${hash_cmd[@]}" "${manifest}" | awk '{print $1}')"; then
+        rm -f "${manifest}"
+        return 1
+    fi
+    rm -f "${manifest}"
+    printf '%s\n' "${project_hash}"
 }
 
 # --- Téléchargement avec fallback ----------------------------------
@@ -215,6 +287,139 @@ MINIZ_BUILD_DIR="${BUILD_DIR}/miniz"
 MINIZ_INSTALL_DIR="${MINIZ_BUILD_DIR}/${MINIZ_DIR}"
 MINIZ_C="${MINIZ_INSTALL_DIR}/miniz.c"
 MINIZ_H="${MINIZ_INSTALL_DIR}/miniz.h"
+#
+# zlib : backend gzip épinglé pour libarchive. La distribution officielle
+# est construite statiquement et installée dans build/zlib/install afin de ne
+# pas dépendre de la version fournie par la distribution Linux.
+ZLIB_VERSION="1.3.2"
+ZLIB_DIR="zlib-${ZLIB_VERSION}"
+ZLIB_TAR="${ZLIB_DIR}.tar.gz"
+ZLIB_URLS=(
+    "https://zlib.net/${ZLIB_TAR}"
+    "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/${ZLIB_TAR}"
+)
+# Hash publié sur la page officielle zlib :
+#   https://zlib.net/
+ZLIB_SHA256="bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
+ZLIB_ROOT="${BUILD_DIR}/zlib"
+ZLIB_SOURCE_DIR="${ZLIB_ROOT}/${ZLIB_DIR}"
+ZLIB_CMAKE_BUILD_DIR="${ZLIB_ROOT}/cmake-build"
+ZLIB_INSTALL_DIR="${ZLIB_ROOT}/install"
+ZLIB_LIB="${ZLIB_INSTALL_DIR}/lib/libz.a"
+ZLIB_INCLUDE="${ZLIB_INSTALL_DIR}/include"
+#
+# XZ Utils / liblzma : backend xz épinglé pour libarchive. La version 5.8.3
+# corrige notamment CVE-2026-34743. Seule la bibliothèque statique liblzma
+# est construite et installée localement ; aucun outil xz amont n'est lié à
+# Babet.
+XZ_VERSION="5.8.3"
+XZ_DIR="xz-${XZ_VERSION}"
+XZ_TAR="${XZ_DIR}.tar.xz"
+XZ_URLS=(
+    "https://github.com/tukaani-project/xz/releases/download/v${XZ_VERSION}/${XZ_TAR}"
+    "https://sourceforge.net/projects/lzmautils/files/${XZ_TAR}/download"
+)
+XZ_SHA256="fff1ffcf2b0da84d308a14de513a1aa23d4e9aa3464d17e64b9714bfdd0bbfb6"
+XZ_ROOT="${BUILD_DIR}/xz"
+XZ_SOURCE_DIR="${XZ_ROOT}/${XZ_DIR}"
+XZ_CMAKE_BUILD_DIR="${XZ_ROOT}/cmake-build"
+XZ_INSTALL_DIR="${XZ_ROOT}/install"
+XZ_LIB="${XZ_INSTALL_DIR}/lib/liblzma.a"
+XZ_INCLUDE="${XZ_INSTALL_DIR}/include"
+#
+# bzip2 / libbz2 : backend bzip2 épinglé pour libarchive. Le projet amont
+# 1.0.x utilise un Makefile classique ; seule la bibliothèque statique
+# libbz2.a est compilée avec -fPIC, puis le header public est copié dans une
+# installation locale contrôlée par Babet.
+BZIP2_VERSION="1.0.8"
+BZIP2_DIR="bzip2-${BZIP2_VERSION}"
+BZIP2_TAR="${BZIP2_DIR}.tar.gz"
+BZIP2_URLS=(
+    "https://sourceware.org/pub/bzip2/${BZIP2_TAR}"
+    "https://ftp.funet.fi/pub/mirrors/sourceware.org/pub/bzip2/${BZIP2_TAR}"
+)
+BZIP2_SHA256="ab5a03176ee106d3f0fa90e381da478ddae405918153cca248e682cd0c4a2269"
+BZIP2_ROOT="${BUILD_DIR}/bzip2"
+BZIP2_SOURCE_DIR="${BZIP2_ROOT}/${BZIP2_DIR}"
+BZIP2_INSTALL_DIR="${BZIP2_ROOT}/install"
+BZIP2_LIB="${BZIP2_INSTALL_DIR}/lib/libbz2.a"
+BZIP2_INCLUDE="${BZIP2_INSTALL_DIR}/include"
+#
+# Zstandard / libzstd : backend zstd épinglé pour libarchive. Seule la
+# bibliothèque statique est construite localement, sans programmes, tests,
+# compatibilité legacy ni support multithread. La désactivation du
+# multithread conserve un profil de ressources borné et des sorties
+# déterministes sur toutes les machines.
+ZSTD_VERSION="1.5.7"
+ZSTD_DIR="zstd-${ZSTD_VERSION}"
+ZSTD_TAR="${ZSTD_DIR}.tar.gz"
+ZSTD_URLS=(
+    "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/${ZSTD_TAR}"
+    "https://sourceforge.net/projects/zstandard.mirror/files/v${ZSTD_VERSION}/${ZSTD_TAR}/download"
+)
+ZSTD_SHA256="eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
+ZSTD_ROOT="${BUILD_DIR}/zstd"
+ZSTD_SOURCE_DIR="${ZSTD_ROOT}/${ZSTD_DIR}"
+ZSTD_CMAKE_BUILD_DIR="${ZSTD_ROOT}/cmake-build"
+ZSTD_INSTALL_DIR="${ZSTD_ROOT}/install"
+ZSTD_LIB="${ZSTD_INSTALL_DIR}/lib/libzstd.a"
+ZSTD_INCLUDE="${ZSTD_INSTALL_DIR}/include"
+#
+# Abseil : dépendance C++ transitive de RE2. La version 20250814.2 est le
+# dernier correctif de la branche LTS d’août 2025, choisie pour rester dans la
+# même ligne de compatibilité que RE2 2025-11-05 tout en intégrant son dernier
+# patch de maintenance. Elle est compilée localement en statique, sans tests.
+ABSL_VERSION="20250814.2"
+ABSL_DIR="abseil-cpp-${ABSL_VERSION}"
+ABSL_TAR="${ABSL_DIR}.tar.gz"
+ABSL_URLS=(
+    "https://github.com/abseil/abseil-cpp/releases/download/${ABSL_VERSION}/${ABSL_TAR}"
+)
+ABSL_SHA256="f9148fb00ec98a2396bdf875c99a78e6a70afa662b107862d92b285d857a8320"
+ABSL_ROOT="${BUILD_DIR}/abseil"
+ABSL_SOURCE_DIR="${ABSL_ROOT}/${ABSL_DIR}"
+ABSL_CMAKE_BUILD_DIR="${ABSL_ROOT}/cmake-build"
+ABSL_INSTALL_DIR="${ABSL_ROOT}/install"
+ABSL_CMAKE_DIR="${ABSL_INSTALL_DIR}/lib/cmake/absl"
+ABSL_PROFILE_FILE="${ABSL_CMAKE_BUILD_DIR}/.babet-build-profile"
+ABSL_BUILD_PROFILE="abseil=${ABSL_VERSION};cxx=17;shared=OFF;tests=OFF;install=ON"
+#
+# RE2 : remplace std::regex dans babet.find(). Le moteur garantit un temps
+# linéaire et borne sa mémoire ; ICU, tests et benchmarks sont désactivés.
+RE2_VERSION="2025-11-05"
+RE2_DIR="re2-${RE2_VERSION}"
+RE2_TAR="${RE2_DIR}.tar.gz"
+RE2_URLS=(
+    "https://github.com/google/re2/releases/download/${RE2_VERSION}/${RE2_TAR}"
+)
+RE2_SHA256="87f6029d2f6de8aa023654240a03ada90e876ce9a4676e258dd01ea4c26ffd67"
+RE2_ROOT="${BUILD_DIR}/re2"
+RE2_SOURCE_DIR="${RE2_ROOT}/${RE2_DIR}"
+RE2_CMAKE_BUILD_DIR="${RE2_ROOT}/cmake-build"
+RE2_INSTALL_DIR="${RE2_ROOT}/install"
+RE2_LIB="${RE2_INSTALL_DIR}/lib/libre2.a"
+RE2_INCLUDE="${RE2_INSTALL_DIR}/include"
+RE2_CMAKE_DIR="${RE2_INSTALL_DIR}/lib/cmake/re2"
+RE2_PROFILE_FILE="${RE2_CMAKE_BUILD_DIR}/.babet-build-profile"
+RE2_BUILD_PROFILE="re2=${RE2_VERSION};abseil=${ABSL_VERSION};icu=OFF;shared=OFF;tests=OFF"
+#
+# libarchive : backend multi-format de la 2.6.0. Il est compilé avec les
+# filtres gzip, xz, bzip2 et zstd internes, adossés respectivement aux
+# versions statiques de zlib, liblzma, libbz2 et libzstd ci-dessus.
+LIBARCHIVE_VERSION="3.8.8"
+LIBARCHIVE_DIR="libarchive-${LIBARCHIVE_VERSION}"
+LIBARCHIVE_TAR="${LIBARCHIVE_DIR}.tar.xz"
+LIBARCHIVE_URL="https://www.libarchive.org/downloads/${LIBARCHIVE_TAR}"
+# Calcule depuis la distribution officielle :
+#   wget -qO- https://www.libarchive.org/downloads/libarchive-3.8.8.tar.xz | sha256sum
+LIBARCHIVE_SHA256="3873a88801da067d0528a989af06877710529d50ee8fe6f3970cbb4302efb918"
+LIBARCHIVE_ROOT="${BUILD_DIR}/libarchive"
+LIBARCHIVE_SOURCE_DIR="${LIBARCHIVE_ROOT}/${LIBARCHIVE_DIR}"
+LIBARCHIVE_CMAKE_BUILD_DIR="${LIBARCHIVE_ROOT}/cmake-build"
+LIBARCHIVE_LIB="${LIBARCHIVE_CMAKE_BUILD_DIR}/libarchive/libarchive.a"
+LIBARCHIVE_INCLUDE="${LIBARCHIVE_SOURCE_DIR}/libarchive"
+LIBARCHIVE_PROFILE_FILE="${LIBARCHIVE_CMAKE_BUILD_DIR}/.babet-build-profile"
+LIBARCHIVE_BUILD_PROFILE="libarchive=${LIBARCHIVE_VERSION};zlib=${ZLIB_VERSION};gzip=ON;xz=${XZ_VERSION};lzma=ON;bzip2=${BZIP2_VERSION};bz2=ON;zstd=${ZSTD_VERSION};zstd_filter=ON"
 #
 # nlohmann/json : header-only, un seul fichier json.hpp téléchargé
 # depuis les releases GitHub. Version épinglée comme pour miniz ; pour
@@ -362,6 +567,447 @@ if [ ! -f "${MINIZ_C}" ] || [ ! -f "${MINIZ_H}" ]; then
     echo "miniz ${MINIZ_VERSION} installé."
 fi
 
+
+# Installer et compiler zlib si nécessaire.
+if [ ! -f "${ZLIB_LIB}" ] || \
+   [ ! -f "${ZLIB_INCLUDE}/zlib.h" ] || \
+   [ ! -f "${ZLIB_INCLUDE}/zconf.h" ]; then
+    echo "Installation de zlib ${ZLIB_VERSION}..."
+    mkdir -p "${ZLIB_ROOT}" "${DOWNLOAD_DIR}"
+
+    if [ ! -f "${DOWNLOAD_DIR}/${ZLIB_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${ZLIB_TAR}" \
+                "zlib ${ZLIB_VERSION}" "${ZLIB_URLS[@]}"; then
+            echo "Échec du téléchargement de zlib."
+            echo "Astuce : place ${ZLIB_TAR} manuellement dans"
+            echo "  ${DOWNLOAD_DIR}/"
+            echo "puis relance le script. Le SHA256 sera vérifié."
+            exit 1
+        fi
+    fi
+
+    verify_sha256 "${DOWNLOAD_DIR}/${ZLIB_TAR}" \
+        "${ZLIB_SHA256}" "zlib"
+
+    if [ ! -d "${ZLIB_SOURCE_DIR}" ]; then
+        echo "Décompression de zlib ${ZLIB_VERSION}..."
+        tar -xzf "${DOWNLOAD_DIR}/${ZLIB_TAR}" -C "${ZLIB_ROOT}"
+    fi
+
+    rm -rf "${ZLIB_CMAKE_BUILD_DIR}" "${ZLIB_INSTALL_DIR}"
+    echo "Compilation de zlib ${ZLIB_VERSION} (statique)..."
+    cmake -S "${ZLIB_SOURCE_DIR}" \
+          -B "${ZLIB_CMAKE_BUILD_DIR}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DCMAKE_INSTALL_PREFIX="${ZLIB_INSTALL_DIR}" \
+          -DCMAKE_INSTALL_LIBDIR=lib \
+          -DZLIB_BUILD_SHARED=OFF \
+          -DZLIB_BUILD_STATIC=ON \
+          -DZLIB_BUILD_TESTING=OFF \
+          -DZLIB_INSTALL=ON
+    cmake --build "${ZLIB_CMAKE_BUILD_DIR}" \
+          --target zlibstatic --parallel "$(nproc)"
+    cmake --install "${ZLIB_CMAKE_BUILD_DIR}"
+
+    if [ ! -f "${ZLIB_LIB}" ] || \
+       [ ! -f "${ZLIB_INCLUDE}/zlib.h" ] || \
+       [ ! -f "${ZLIB_INCLUDE}/zconf.h" ]; then
+        echo "Échec : installation statique de zlib incomplète."
+        exit 1
+    fi
+    echo "zlib ${ZLIB_VERSION} installé."
+else
+    echo "zlib ${ZLIB_VERSION} est déjà compilé."
+fi
+
+# Installer et compiler XZ Utils / liblzma si nécessaire.
+if [ ! -f "${XZ_LIB}" ] || \
+   [ ! -f "${XZ_INCLUDE}/lzma.h" ] || \
+   [ ! -f "${XZ_INCLUDE}/lzma/version.h" ]; then
+    echo "Installation de XZ Utils ${XZ_VERSION}..."
+    mkdir -p "${XZ_ROOT}" "${DOWNLOAD_DIR}"
+
+    if [ ! -f "${DOWNLOAD_DIR}/${XZ_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${XZ_TAR}" \
+                "XZ Utils ${XZ_VERSION}" "${XZ_URLS[@]}"; then
+            echo "Échec du téléchargement de XZ Utils."
+            echo "Astuce : place ${XZ_TAR} manuellement dans"
+            echo "  ${DOWNLOAD_DIR}/"
+            echo "puis relance le script. Le SHA256 sera vérifié."
+            exit 1
+        fi
+    fi
+
+    verify_sha256 "${DOWNLOAD_DIR}/${XZ_TAR}" \
+        "${XZ_SHA256}" "XZ Utils"
+
+    if [ ! -d "${XZ_SOURCE_DIR}" ]; then
+        echo "Décompression de XZ Utils ${XZ_VERSION}..."
+        tar -xJf "${DOWNLOAD_DIR}/${XZ_TAR}" -C "${XZ_ROOT}"
+    fi
+
+    rm -rf "${XZ_CMAKE_BUILD_DIR}" "${XZ_INSTALL_DIR}"
+    echo "Compilation de XZ Utils ${XZ_VERSION} (liblzma statique)..."
+    cmake -S "${XZ_SOURCE_DIR}" \
+          -B "${XZ_CMAKE_BUILD_DIR}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DCMAKE_INSTALL_PREFIX="${XZ_INSTALL_DIR}" \
+          -DCMAKE_INSTALL_LIBDIR=lib \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DXZ_NLS=OFF \
+          -DXZ_THREADS=no
+    cmake --build "${XZ_CMAKE_BUILD_DIR}" \
+          --target liblzma --parallel "$(nproc)"
+    cmake --install "${XZ_CMAKE_BUILD_DIR}" \
+          --component liblzma_Development
+
+    if [ ! -f "${XZ_LIB}" ] || \
+       [ ! -f "${XZ_INCLUDE}/lzma.h" ] || \
+       [ ! -f "${XZ_INCLUDE}/lzma/version.h" ]; then
+        echo "Échec : installation statique de liblzma incomplète."
+        exit 1
+    fi
+    echo "XZ Utils ${XZ_VERSION} installé."
+else
+    echo "XZ Utils ${XZ_VERSION} est déjà compilé."
+fi
+
+# Installer et compiler bzip2 / libbz2 si nécessaire.
+if [ ! -f "${BZIP2_LIB}" ] || [ ! -f "${BZIP2_INCLUDE}/bzlib.h" ]; then
+    echo "Installation de bzip2 ${BZIP2_VERSION}..."
+    mkdir -p "${BZIP2_ROOT}" "${DOWNLOAD_DIR}"
+
+    if [ ! -f "${DOWNLOAD_DIR}/${BZIP2_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${BZIP2_TAR}" \
+                "bzip2 ${BZIP2_VERSION}" "${BZIP2_URLS[@]}"; then
+            echo "Échec du téléchargement de bzip2."
+            echo "Astuce : place ${BZIP2_TAR} manuellement dans"
+            echo "  ${DOWNLOAD_DIR}/"
+            echo "puis relance le script. Le SHA256 sera vérifié."
+            exit 1
+        fi
+    fi
+
+    verify_sha256 "${DOWNLOAD_DIR}/${BZIP2_TAR}" \
+        "${BZIP2_SHA256}" "bzip2"
+
+    if [ ! -d "${BZIP2_SOURCE_DIR}" ]; then
+        echo "Décompression de bzip2 ${BZIP2_VERSION}..."
+        tar -xzf "${DOWNLOAD_DIR}/${BZIP2_TAR}" -C "${BZIP2_ROOT}"
+    fi
+
+    rm -rf "${BZIP2_INSTALL_DIR}"
+    echo "Compilation de bzip2 ${BZIP2_VERSION} (libbz2 statique)..."
+    make -C "${BZIP2_SOURCE_DIR}" clean >/dev/null 2>&1 || true
+    make -C "${BZIP2_SOURCE_DIR}" \
+         CC="${CC:-cc}" AR="${AR:-ar}" RANLIB="${RANLIB:-ranlib}" \
+         CFLAGS="-O2 -fPIC -Wall -Winline -D_FILE_OFFSET_BITS=64" \
+         libbz2.a
+
+    mkdir -p "${BZIP2_INSTALL_DIR}/lib" "${BZIP2_INCLUDE}"
+    cp "${BZIP2_SOURCE_DIR}/libbz2.a" "${BZIP2_LIB}"
+    cp "${BZIP2_SOURCE_DIR}/bzlib.h" "${BZIP2_INCLUDE}/bzlib.h"
+
+    if [ ! -f "${BZIP2_LIB}" ] || \
+       [ ! -f "${BZIP2_INCLUDE}/bzlib.h" ]; then
+        echo "Échec : installation statique de libbz2 incomplète."
+        exit 1
+    fi
+    echo "bzip2 ${BZIP2_VERSION} installé."
+else
+    echo "bzip2 ${BZIP2_VERSION} est déjà compilé."
+fi
+
+# Installer et compiler Zstandard / libzstd si nécessaire.
+if [ ! -f "${ZSTD_LIB}" ] || [ ! -f "${ZSTD_INCLUDE}/zstd.h" ]; then
+    echo "Installation de Zstandard ${ZSTD_VERSION}..."
+    mkdir -p "${ZSTD_ROOT}" "${DOWNLOAD_DIR}"
+
+    if [ ! -f "${DOWNLOAD_DIR}/${ZSTD_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${ZSTD_TAR}" \
+                "Zstandard ${ZSTD_VERSION}" "${ZSTD_URLS[@]}"; then
+            echo "Échec du téléchargement de Zstandard."
+            echo "Astuce : place ${ZSTD_TAR} manuellement dans"
+            echo "  ${DOWNLOAD_DIR}/"
+            echo "puis relance le script. Le SHA256 sera vérifié."
+            exit 1
+        fi
+    fi
+
+    verify_sha256 "${DOWNLOAD_DIR}/${ZSTD_TAR}" \
+        "${ZSTD_SHA256}" "Zstandard"
+
+    if [ ! -d "${ZSTD_SOURCE_DIR}" ]; then
+        echo "Décompression de Zstandard ${ZSTD_VERSION}..."
+        tar -xzf "${DOWNLOAD_DIR}/${ZSTD_TAR}" -C "${ZSTD_ROOT}"
+    fi
+
+    rm -rf "${ZSTD_CMAKE_BUILD_DIR}" "${ZSTD_INSTALL_DIR}"
+    echo "Compilation de Zstandard ${ZSTD_VERSION} (libzstd statique)..."
+    cmake -S "${ZSTD_SOURCE_DIR}/build/cmake" \
+          -B "${ZSTD_CMAKE_BUILD_DIR}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DCMAKE_INSTALL_PREFIX="${ZSTD_INSTALL_DIR}" \
+          -DCMAKE_INSTALL_LIBDIR=lib \
+          -DZSTD_BUILD_SHARED=OFF \
+          -DZSTD_BUILD_STATIC=ON \
+          -DZSTD_BUILD_PROGRAMS=OFF \
+          -DZSTD_BUILD_TESTS=OFF \
+          -DZSTD_BUILD_CONTRIB=OFF \
+          -DZSTD_LEGACY_SUPPORT=OFF \
+          -DZSTD_MULTITHREAD_SUPPORT=OFF
+    cmake --build "${ZSTD_CMAKE_BUILD_DIR}" \
+          --target libzstd_static --parallel "$(nproc)"
+    cmake --install "${ZSTD_CMAKE_BUILD_DIR}"
+
+    if [ ! -f "${ZSTD_LIB}" ] || \
+       [ ! -f "${ZSTD_INCLUDE}/zstd.h" ] || \
+       [ ! -f "${ZSTD_INCLUDE}/zstd_errors.h" ]; then
+        echo "Échec : installation statique de libzstd incomplète."
+        exit 1
+    fi
+    echo "Zstandard ${ZSTD_VERSION} installé."
+else
+    echo "Zstandard ${ZSTD_VERSION} est déjà compilé."
+fi
+
+# Installer et compiler Abseil si nécessaire.
+ABSL_REBUILD=0
+if [ ! -f "${ABSL_CMAKE_DIR}/abslConfig.cmake" ] || \
+   [ ! -f "${ABSL_INSTALL_DIR}/include/absl/base/config.h" ] || \
+   [ ! -f "${ABSL_PROFILE_FILE}" ] || \
+   [ "$(cat "${ABSL_PROFILE_FILE}" 2>/dev/null || true)" != \
+     "${ABSL_BUILD_PROFILE}" ]; then
+    ABSL_REBUILD=1
+fi
+
+if [ "${ABSL_REBUILD}" -eq 1 ]; then
+    echo "Installation d'Abseil ${ABSL_VERSION}..."
+    mkdir -p "${ABSL_ROOT}" "${DOWNLOAD_DIR}"
+
+    if [ ! -f "${DOWNLOAD_DIR}/${ABSL_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${ABSL_TAR}" \
+                "Abseil ${ABSL_VERSION}" "${ABSL_URLS[@]}"; then
+            echo "Échec du téléchargement d'Abseil."
+            echo "Astuce : place ${ABSL_TAR} manuellement dans"
+            echo "  ${DOWNLOAD_DIR}/"
+            echo "puis relance le script. Le SHA256 sera vérifié."
+            exit 1
+        fi
+    fi
+
+    verify_sha256 "${DOWNLOAD_DIR}/${ABSL_TAR}" \
+        "${ABSL_SHA256}" "Abseil"
+
+    if [ ! -d "${ABSL_SOURCE_DIR}" ]; then
+        echo "Décompression d'Abseil ${ABSL_VERSION}..."
+        tar -xzf "${DOWNLOAD_DIR}/${ABSL_TAR}" -C "${ABSL_ROOT}"
+    fi
+
+    rm -rf "${ABSL_CMAKE_BUILD_DIR}" "${ABSL_INSTALL_DIR}"
+    echo "Compilation d'Abseil ${ABSL_VERSION} (bibliothèques statiques)..."
+    cmake -S "${ABSL_SOURCE_DIR}" \
+          -B "${ABSL_CMAKE_BUILD_DIR}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=17 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DCMAKE_INSTALL_PREFIX="${ABSL_INSTALL_DIR}" \
+          -DCMAKE_INSTALL_LIBDIR=lib \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBUILD_TESTING=OFF \
+          -DABSL_BUILD_TESTING=OFF \
+          -DABSL_PROPAGATE_CXX_STD=ON \
+          -DABSL_ENABLE_INSTALL=ON
+    cmake --build "${ABSL_CMAKE_BUILD_DIR}" --parallel "$(nproc)"
+    cmake --install "${ABSL_CMAKE_BUILD_DIR}"
+
+    if [ ! -f "${ABSL_CMAKE_DIR}/abslConfig.cmake" ] || \
+       [ ! -f "${ABSL_INSTALL_DIR}/include/absl/base/config.h" ] || \
+       [ ! -f "${ABSL_INSTALL_DIR}/lib/libabsl_base.a" ]; then
+        echo "Échec : installation statique d'Abseil incomplète."
+        exit 1
+    fi
+
+    printf '%s\n' "${ABSL_BUILD_PROFILE}" > "${ABSL_PROFILE_FILE}"
+    echo "Abseil ${ABSL_VERSION} installé."
+else
+    echo "Abseil ${ABSL_VERSION} est déjà compilé."
+fi
+
+# Installer et compiler RE2 si nécessaire.
+RE2_REBUILD=0
+if [ ! -f "${RE2_LIB}" ] || \
+   [ ! -f "${RE2_INCLUDE}/re2/re2.h" ] || \
+   [ ! -f "${RE2_CMAKE_DIR}/re2Config.cmake" ] || \
+   [ ! -f "${RE2_PROFILE_FILE}" ] || \
+   [ "$(cat "${RE2_PROFILE_FILE}" 2>/dev/null || true)" != \
+     "${RE2_BUILD_PROFILE}" ]; then
+    RE2_REBUILD=1
+fi
+
+if [ "${RE2_REBUILD}" -eq 1 ]; then
+    echo "Installation de RE2 ${RE2_VERSION}..."
+    mkdir -p "${RE2_ROOT}" "${DOWNLOAD_DIR}"
+
+    if [ ! -f "${DOWNLOAD_DIR}/${RE2_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${RE2_TAR}" \
+                "RE2 ${RE2_VERSION}" "${RE2_URLS[@]}"; then
+            echo "Échec du téléchargement de RE2."
+            echo "Astuce : place ${RE2_TAR} manuellement dans"
+            echo "  ${DOWNLOAD_DIR}/"
+            echo "puis relance le script. Le SHA256 sera vérifié."
+            exit 1
+        fi
+    fi
+
+    verify_sha256 "${DOWNLOAD_DIR}/${RE2_TAR}" \
+        "${RE2_SHA256}" "RE2"
+
+    if [ ! -d "${RE2_SOURCE_DIR}" ]; then
+        echo "Décompression de RE2 ${RE2_VERSION}..."
+        tar -xzf "${DOWNLOAD_DIR}/${RE2_TAR}" -C "${RE2_ROOT}"
+    fi
+
+    rm -rf "${RE2_CMAKE_BUILD_DIR}" "${RE2_INSTALL_DIR}"
+    echo "Compilation de RE2 ${RE2_VERSION} (bibliothèque statique)..."
+    cmake -S "${RE2_SOURCE_DIR}" \
+          -B "${RE2_CMAKE_BUILD_DIR}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DCMAKE_INSTALL_PREFIX="${RE2_INSTALL_DIR}" \
+          -DCMAKE_INSTALL_LIBDIR=lib \
+          -DCMAKE_PREFIX_PATH="${ABSL_INSTALL_DIR}" \
+          -Dabsl_DIR="${ABSL_CMAKE_DIR}" \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DBUILD_TESTING=OFF \
+          -DRE2_USE_ICU=OFF \
+          -DRE2_TEST=OFF \
+          -DRE2_BENCHMARK=OFF \
+          -DRE2_BUILD_TESTING=OFF \
+          -DRE2_INSTALL=ON
+    cmake --build "${RE2_CMAKE_BUILD_DIR}" \
+          --target re2 --parallel "$(nproc)"
+    cmake --install "${RE2_CMAKE_BUILD_DIR}"
+
+    if [ ! -f "${RE2_LIB}" ] || \
+       [ ! -f "${RE2_INCLUDE}/re2/re2.h" ] || \
+       [ ! -f "${RE2_CMAKE_DIR}/re2Config.cmake" ]; then
+        echo "Échec : installation statique de RE2 incomplète."
+        exit 1
+    fi
+
+    printf '%s\n' "${RE2_BUILD_PROFILE}" > "${RE2_PROFILE_FILE}"
+    echo "RE2 ${RE2_VERSION} installé."
+else
+    echo "RE2 ${RE2_VERSION} est déjà compilé."
+fi
+
+# Installer et compiler libarchive si nécessaire.
+#
+# La configuration est volontairement minimale : bibliothèque statique,
+# aucun outil ni test amont, TAR natif et filtres gzip, xz, bzip2 et zstd internes uniquement.
+# Le profil enregistré force une reconstruction lorsque les codecs activés
+# changent, même si une ancienne libarchive.a existe déjà dans le cache.
+LIBARCHIVE_REBUILD=0
+if [ ! -f "${LIBARCHIVE_LIB}" ] || \
+   [ ! -f "${LIBARCHIVE_INCLUDE}/archive.h" ] || \
+   [ ! -f "${LIBARCHIVE_INCLUDE}/archive_entry.h" ] || \
+   [ ! -f "${LIBARCHIVE_PROFILE_FILE}" ] || \
+   [ "$(cat "${LIBARCHIVE_PROFILE_FILE}" 2>/dev/null || true)" != \
+     "${LIBARCHIVE_BUILD_PROFILE}" ]; then
+    LIBARCHIVE_REBUILD=1
+fi
+
+if [ "${LIBARCHIVE_REBUILD}" -eq 1 ]; then
+    echo "Installation de libarchive ${LIBARCHIVE_VERSION} avec gzip, xz, bzip2 et zstd..."
+    mkdir -p "${LIBARCHIVE_ROOT}" "${DOWNLOAD_DIR}"
+
+    if [ ! -f "${DOWNLOAD_DIR}/${LIBARCHIVE_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${LIBARCHIVE_TAR}" \
+                "libarchive ${LIBARCHIVE_VERSION}" "${LIBARCHIVE_URL}"; then
+            echo "Échec du téléchargement de libarchive."
+            echo "Astuce : place ${LIBARCHIVE_TAR} manuellement dans"
+            echo "  ${DOWNLOAD_DIR}/"
+            echo "puis relance le script. Le SHA256 sera vérifié."
+            exit 1
+        fi
+    fi
+
+    verify_sha256 "${DOWNLOAD_DIR}/${LIBARCHIVE_TAR}" \
+        "${LIBARCHIVE_SHA256}" "libarchive"
+
+    if [ ! -d "${LIBARCHIVE_SOURCE_DIR}" ]; then
+        echo "Décompression de libarchive ${LIBARCHIVE_VERSION}..."
+        tar -xJf "${DOWNLOAD_DIR}/${LIBARCHIVE_TAR}" \
+            -C "${LIBARCHIVE_ROOT}"
+    fi
+
+    rm -rf "${LIBARCHIVE_CMAKE_BUILD_DIR}"
+    echo "Compilation de libarchive ${LIBARCHIVE_VERSION} (TAR + gzip + xz + bzip2 + zstd)..."
+    cmake -S "${LIBARCHIVE_SOURCE_DIR}" \
+          -B "${LIBARCHIVE_CMAKE_BUILD_DIR}" \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+          -DBUILD_SHARED_LIBS=OFF \
+          -DENABLE_TEST=OFF \
+          -DENABLE_INSTALL=OFF \
+          -DENABLE_TAR=OFF \
+          -DENABLE_CPIO=OFF \
+          -DENABLE_CAT=OFF \
+          -DENABLE_UNZIP=OFF \
+          -DENABLE_OPENSSL=OFF \
+          -DENABLE_MBEDTLS=OFF \
+          -DENABLE_NETTLE=OFF \
+          -DENABLE_LIBB2=OFF \
+          -DENABLE_LZ4=OFF \
+          -DENABLE_LZO=OFF \
+          -DENABLE_LZMA=ON \
+          -DLIBLZMA_LIBRARY="${XZ_LIB}" \
+          -DLIBLZMA_INCLUDE_DIR="${XZ_INCLUDE}" \
+          -DENABLE_ZSTD=ON \
+          -DZSTD_LIBRARY="${ZSTD_LIB}" \
+          -DZSTD_INCLUDE_DIR="${ZSTD_INCLUDE}" \
+          -DENABLE_ZLIB=ON \
+          -DZLIB_LIBRARY="${ZLIB_LIB}" \
+          -DZLIB_INCLUDE_DIR="${ZLIB_INCLUDE}" \
+          -DENABLE_BZip2=ON \
+          -DBZIP2_LIBRARIES="${BZIP2_LIB}" \
+          -DBZIP2_INCLUDE_DIR="${BZIP2_INCLUDE}" \
+          -DENABLE_LIBXML2=OFF \
+          -DENABLE_EXPAT=OFF \
+          -DENABLE_PCREPOSIX=OFF \
+          -DENABLE_PCRE2POSIX=OFF \
+          -DENABLE_LIBGCC=OFF \
+          -DENABLE_ACL=OFF \
+          -DENABLE_XATTR=OFF \
+          -DENABLE_ICONV=OFF \
+          -DENABLE_CNG=OFF \
+          -DENABLE_WERROR=OFF
+
+    cmake --build "${LIBARCHIVE_CMAKE_BUILD_DIR}" \
+          --target archive_static --parallel "$(nproc)"
+
+    if [ ! -f "${LIBARCHIVE_LIB}" ]; then
+        echo "Échec : bibliothèque statique libarchive introuvable après compilation :"
+        echo "  ${LIBARCHIVE_LIB}"
+        exit 1
+    fi
+    if [ ! -f "${LIBARCHIVE_INCLUDE}/archive.h" ] || \
+       [ ! -f "${LIBARCHIVE_INCLUDE}/archive_entry.h" ]; then
+        echo "Échec : headers publics libarchive introuvables après extraction."
+        exit 1
+    fi
+
+    printf '%s\n' "${LIBARCHIVE_BUILD_PROFILE}" > \
+        "${LIBARCHIVE_PROFILE_FILE}"
+    echo "libarchive ${LIBARCHIVE_VERSION} installé avec gzip, xz, bzip2 et zstd."
+else
+    echo "libarchive ${LIBARCHIVE_VERSION} est déjà compilé avec gzip, xz, bzip2 et zstd."
+fi
 
 # Installer nlohmann/json (header-only) si nécessaire
 if [ ! -f "${JSON_INCLUDE_FILE}" ]; then
@@ -574,6 +1220,22 @@ cd "$SCRIPT_DIR" || exit 1
 
 # Créer le répertoire de build pour le projet
 mkdir -p "$PROJECT_BUILD_DIR"
+
+PROJECT_SOURCE_HASH_FILE="${PROJECT_BUILD_DIR}/.babet-source-tree.sha256"
+PROJECT_SOURCE_HASH="$(compute_project_sources_sha256)"
+if [ -z "${PROJECT_SOURCE_HASH}" ]; then
+    echo "Échec du calcul de l'empreinte des sources Babet."
+    exit 1
+fi
+PREVIOUS_PROJECT_SOURCE_HASH=""
+if [ -f "${PROJECT_SOURCE_HASH_FILE}" ]; then
+    PREVIOUS_PROJECT_SOURCE_HASH="$(cat "${PROJECT_SOURCE_HASH_FILE}")"
+fi
+PROJECT_SOURCE_CHANGED=0
+if [ "${PROJECT_SOURCE_HASH}" != "${PREVIOUS_PROJECT_SOURCE_HASH}" ]; then
+    PROJECT_SOURCE_CHANGED=1
+fi
+
 cd "$PROJECT_BUILD_DIR" || exit 1
 
 # --- Génération des modules Lua bundlés ---------------------------
@@ -605,6 +1267,20 @@ cmake "$SCRIPT_DIR" \
     -DCRYPTO_LIB="${CRYPTO_PATH}" \
     -DMINIZ_SRC="${MINIZ_C}" \
     -DMINIZ_INCLUDE="${MINIZ_INSTALL_DIR}" \
+    -DLIBARCHIVE_LIB="${LIBARCHIVE_LIB}" \
+    -DLIBARCHIVE_INCLUDE="${LIBARCHIVE_INCLUDE}" \
+    -DZLIB_LIB="${ZLIB_LIB}" \
+    -DZLIB_INCLUDE="${ZLIB_INCLUDE}" \
+    -DLZMA_LIB="${XZ_LIB}" \
+    -DLZMA_INCLUDE="${XZ_INCLUDE}" \
+    -DBZIP2_LIB="${BZIP2_LIB}" \
+    -DBZIP2_INCLUDE="${BZIP2_INCLUDE}" \
+    -DBZIP2_VERSION="${BZIP2_VERSION}" \
+    -DZSTD_LIB="${ZSTD_LIB}" \
+    -DZSTD_INCLUDE="${ZSTD_INCLUDE}" \
+    -DABSL_CMAKE_DIR="${ABSL_CMAKE_DIR}" \
+    -DRE2_CMAKE_DIR="${RE2_CMAKE_DIR}" \
+    -DRE2_INCLUDE="${RE2_INCLUDE}" \
     -DJSON_INCLUDE="${JSON_INSTALL_DIR}" \
     -DHTTPLIB_INCLUDE="${HTTPLIB_INSTALL_DIR}" \
     -DTOMLPP_INCLUDE="${TOMLPP_INSTALL_DIR}" \
@@ -617,6 +1293,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+if [ "${PROJECT_SOURCE_CHANGED}" -eq 1 ]; then
+    echo "Changement du contenu source détecté : nettoyage du build CMake de Babet..."
+    if ! cmake --build . --target clean; then
+        echo "Échec du nettoyage du build CMake de Babet."
+        exit 1
+    fi
+fi
+
 # Compiler le projet
 make -j"$(nproc)"
 if [ $? -ne 0 ]; then
@@ -624,6 +1308,10 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# L'empreinte n'est validée qu'après une compilation réussie. En cas d'échec,
+# le prochain lancement nettoiera de nouveau le build au lieu d'enregistrer un
+# état partiellement construit comme référence.
+printf '%s\n' "${PROJECT_SOURCE_HASH}" > "${PROJECT_SOURCE_HASH_FILE}"
 
 # Reset complet du dossier test pour partir d'un état propre
 rm -rf "${SCRIPT_DIR}/test"

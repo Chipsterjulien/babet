@@ -8,7 +8,8 @@
  *
  * Expected Lua signature: results, err = babet.find(rootPath, options)
  *   - rootPath: string
- *   - options:  table { mindepth, maxdepth, type, name, iname, path }
+ *   - options:  table { mindepth, maxdepth, type, name, iname, path,
+ *                    glob, iglob, path_glob, path_iglob }
  */
 int lua_find(lua_State *L);
 

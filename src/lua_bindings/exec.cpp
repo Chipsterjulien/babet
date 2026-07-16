@@ -63,7 +63,7 @@ namespace
     {
         out.push_back(cmd); // argv[0] = nom du programme
 
-        if (lua_isnoneornil(L, idx))
+        if (lua_is_none_or_nil(L, idx))
         {
             return true; // pas d'arguments, valide
         }
@@ -77,7 +77,7 @@ namespace
         for (lua_Integer i = 1; i <= n; ++i)
         {
             lua_geti(L, idx, i);
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
                 err = "args must contain only strings";
@@ -108,7 +108,7 @@ namespace
         has_cwd = false;
         has_stdin = false;
         has_timeout = false;
-        if (lua_isnoneornil(L, idx))
+        if (lua_is_none_or_nil(L, idx))
         {
             return true; // pas d'options
         }
@@ -122,7 +122,7 @@ namespace
         lua_getfield(L, idx, "cwd");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
                 err = "opts.cwd must be a string";
@@ -141,7 +141,7 @@ namespace
         lua_getfield(L, idx, "stdin");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
                 err = "opts.stdin must be a string";
@@ -158,7 +158,7 @@ namespace
         lua_getfield(L, idx, "timeout");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TNUMBER)
+            if (!lua_is_strict_number(L, -1))
             {
                 lua_pop(L, 1);
                 err = "opts.timeout must be a number";
@@ -199,7 +199,7 @@ namespace
         lua_getfield(L, idx, "max_output");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TNUMBER)
+            if (!lua_is_strict_number(L, -1))
             {
                 lua_pop(L, 1);
                 err = "opts.max_output must be a number";
@@ -243,8 +243,8 @@ namespace
             lua_pushnil(L);
             while (lua_next(L, env_idx) != 0)
             {
-                if (lua_type(L, -2) != LUA_TSTRING ||
-                    lua_type(L, -1) != LUA_TSTRING)
+                if (!lua_is_strict_string(L, -2) ||
+                    !lua_is_strict_string(L, -1))
                 {
                     lua_pop(L, 3); // value, key, env_table
                     err = "opts.env must map strings to strings";
@@ -507,7 +507,8 @@ namespace
 int lua_exec(lua_State *L)
 {
     // --- validation des arguments Lua -------------------------------
-    if (lua_gettop(L) < 1 || lua_type(L, 1) != LUA_TSTRING)
+    if (!lua_arity_between(L, 1, 3) ||
+        !lua_is_strict_string(L, 1))
     {
         return luaL_error(L, "Expected a string as first argument (command)");
     }

@@ -12,11 +12,11 @@
 > and good for starting a fire — like this binary.
 
 A standalone Lua 5.5 binary for Linux scripting and automation, written
-in C++23. Embeds OpenSSL, SQLite, miniz, nlohmann/json, cpp-httplib,
-and tomlplusplus statically — one binary, no system dependencies
-beyond glibc.
+in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
+libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
+statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.5.0**. See the
+Current stable and audited release: **2.6.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
@@ -31,7 +31,7 @@ Can be used in three modes:
    `babet.json`, `babet.http`, `babet.sqlite`,
    `babet.socket`, `babet.inotify`, `babet.workers`,
    `babet.user`, `babet.exec`, the streaming `babet.spawn`,
-   `babet.pipeline` / `babet.spawnPipeline`, secure ZIP handling through
+   `babet.pipeline` / `babet.spawnPipeline`, secure ZIP and TAR handling through
    `babet.archive`, direct-to-file `babet.http.download`, and more.
 
 ## Quick start
@@ -45,8 +45,8 @@ cd babet
 ```
 
 The build script vendors and compiles all its dependencies. The only
-prerequisites on your system are a C++23 compiler, CMake, `wget`, and
-`unzip`.
+prerequisites on your system are a C++23 compiler, CMake 3.22 or newer, `wget`, `unzip`,
+and `xz`.
 
 ### Download a large HTTP response without buffering it
 
@@ -69,7 +69,7 @@ The response is written to a same-directory temporary file and atomically
 committed only for a final 2xx status. Existing destinations are preserved on
 network, TLS, size, disk, and non-2xx failures.
 
-### Create, inspect, and extract a ZIP archive securely
+### Create, inspect, and extract ZIP or TAR securely
 
 ```lua
 local created, err = babet.archive.create("project", "project.zip", {
@@ -78,24 +78,49 @@ local created, err = babet.archive.create("project", "project.zip", {
 })
 assert(created, err)
 
+local tar_created
+tar_created, err = babet.archive.create("project", "project.tar")
+assert(tar_created, err)
+assert(tar_created.format == "tar")
+
 local info, err = babet.archive.list("upload.zip", {
     max_entries = 2000,
     max_total_size = 512 * 1024 * 1024,
 })
 assert(info, err)
 
+local tar_info
+tar_info, err = babet.archive.list("source.tar.xz")
+assert(tar_info, err)
+assert(tar_info.format == "tar")
+assert(tar_info.compression == "xz")
+
 local result
-result, err = babet.archive.extract("upload.zip", "restore", {
+result, err = babet.archive.extract("source.tar", "restore", {
     overwrite = false,
 })
 assert(result, err)
+
+local one
+one, err = babet.archive.extractFile(
+    "source.tar", "docs/readme.txt", "readme.txt")
+assert(one, err)
 ```
 
-Creation rejects source symlinks, unsupported filesystem objects, unsafe entry
-names, and an output inside the source tree. Extraction rejects absolute paths,
-`..` components, ZIP symlinks, and symlinked destination parents. Archives are
-published atomically as a whole; extracted files are validated and published
-atomically per file.
+ZIP creation, listing, and extraction continue to use miniz. Plain, gzip-,
+xz-, bzip2-, and zstd-compressed TAR operations use the statically linked
+libarchive, zlib, XZ Utils/liblzma, libbz2, and libzstd backends. Readers detect
+format and compression from the contents; `archive.create()` infers TAR from
+`.tar`, gzip TAR from `.tar.gz` or `.tgz`, xz TAR from `.tar.xz` or `.txz`,
+bzip2 TAR from `.tar.bz2`, `.tbz2`, or `.tbz`, and zstd TAR from `.tar.zst`,
+`.tar.zstd`, or `.tzst`. It accepts `format = "tar"`, `format = "tar.gz"`,
+`format = "tar.xz"`, `format = "tar.bz2"`, or `format = "tar.zst"`. Creation rejects source
+symlinks, unsupported filesystem objects, unsafe entry names, and an output
+inside the source tree.
+Extraction rejects absolute paths, `..` components, archive links and special
+types, sparse TAR files, and symlinked destination parents. Archives are
+published atomically as a whole; extracted files are staged before publication
+and published atomically per file.
 
 ## Pre-release validation
 

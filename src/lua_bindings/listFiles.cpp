@@ -94,15 +94,22 @@ optional_string listFilesHelper(lua_State *L, const fs::path &basePath, const fs
  */
 int lua_listFiles(lua_State *L)
 {
-    // Ensure at least one argument is passed
-    if (lua_gettop(L) < 1)
+    if (!lua_arity_between(L, 1, 2))
     {
-        return luaL_error(L, "Expected at least one argument");
+        return luaL_error(L, "Expected one or two arguments");
+    }
+    if (!lua_is_strict_string(L, 1))
+    {
+        return luaL_error(L, "Expected a string as first argument (path)");
+    }
+    if (!lua_is_optional_strict_boolean(L, 2))
+    {
+        return luaL_error(L, "recursive must be a boolean or nil");
     }
 
-    // Get the directory path from the first argument
     std::string path = luaL_checkstring_without_nul(L, 1, "path");
-    bool recursive = lua_gettop(L) >= 2 ? lua_toboolean(L, 2) : false;
+    const bool recursive = lua_is_strict_boolean(L, 2) &&
+                           lua_toboolean(L, 2);
 
     // Validate the directory path
     fs::path canonical_path(path);

@@ -157,8 +157,23 @@ int lua_gcFileIterator(lua_State *L)
 
 int lua_createFileIterator(lua_State *L)
 {
+    if (!lua_arity_between(L, 1, 2))
+    {
+        return luaL_error(L,
+                          "createFileIterator expects one or two arguments");
+    }
+    if (!lua_is_strict_string(L, 1))
+    {
+        return luaL_error(L, "path must be a string");
+    }
+    if (!lua_is_optional_strict_boolean(L, 2))
+    {
+        return luaL_error(L, "recursive must be a boolean or nil");
+    }
+
     std::string path = luaL_checkstring_without_nul(L, 1, "path");
-    bool recursive = lua_gettop(L) >= 2 && lua_toboolean(L, 2);
+    const bool recursive = lua_is_strict_boolean(L, 2) &&
+                           lua_toboolean(L, 2);
 
     // Construire l'objet d'abord : si ça throw, la pile Lua n'a pas été touchée.
     std::shared_ptr<FileIterator> iter;

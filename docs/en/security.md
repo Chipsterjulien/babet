@@ -72,6 +72,10 @@ accidents and supply-chain tampering :
   `http.max_body_size`. After a socket-read timeout, already consumed bytes
   stay in one shared pending buffer so switching receive methods cannot lose or
   reorder the stream.
+- **Bounded filename matching** provides a non-recursive safe glob engine and
+  RE2-backed regular expressions for `babet.find`. Regex patterns are capped at
+  4096 bytes, compiled with a 1 MiB memory budget, and cannot trigger
+  catastrophic backtracking. RE2-unsupported constructs fail before traversal.
 
 ## What it does *not* protect against
 
@@ -82,9 +86,6 @@ accidents and supply-chain tampering :
 - A determined attacker who has obtained code execution on the
   machine running Babet. The hardening makes accidental
   mistakes loud, not adversarial attacks impossible.
-- Untrusted regular expressions. `babet.find` uses C++ `std::regex`; some
-  ECMAScript patterns can trigger catastrophic backtracking. Validate or
-  predefine regexes instead of accepting them directly from an untrusted user.
 - Long-tail OS-level issues (kernel exploits, container escapes,
   privilege escalation). Babet is an ordinary userland binary.
 

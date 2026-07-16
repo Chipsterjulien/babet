@@ -162,6 +162,16 @@ do
     v, e = babet.listFiles("/n/existe/pas")
     ok_fail("listFiles(bad) -> (nil, err)", v, e)
 
+    ok_raises("LOT 11 listFiles path is a strict string",
+        function() return babet.listFiles(42) end,
+        "string")
+    ok_raises("LOT 11 listFiles recursive is a strict boolean",
+        function() return babet.listFiles(SB, 1) end,
+        "boolean")
+    ok_raises("LOT 11 listFiles rejects excess arguments",
+        function() return babet.listFiles(SB, false, "extra") end,
+        "one or two arguments")
+
     v, e = babet.getMode(sb("probe.txt"))
     ok_val("getMode(probe.txt)", v, e, function(x) return type(x) == "number" end)
 
@@ -849,6 +859,18 @@ do
     babet.touch(sb("treesrc/a.txt"))
     ok_act("copyTree(treesrc -> treedst)",
         babet.copyTree(sb("treesrc"), sb("treedst")))
+
+    ok_raises("LOT 11 copyTree continue_on_error is a strict boolean",
+        function()
+            return babet.copyTree(sb("treesrc"), sb("treedst2"), 1)
+        end,
+        "boolean")
+    ok_raises("LOT 11 copyTree rejects excess arguments",
+        function()
+            return babet.copyTree(
+                sb("treesrc"), sb("treedst2"), false, "extra")
+        end,
+        "two string arguments")
 
     -- Audit documentation FS : le troisième argument vaut true par défaut.
     -- Un type d'entrée non pris en charge produit donc un warning, les autres
@@ -1650,7 +1672,8 @@ do
     ok_raises("LOT 3 find: NUL root rejected",
         function() return babet.find(SB .. "\0ignored", { type = "f" }) end,
         "NUL")
-    for _, field in ipairs({ "type", "name", "iname", "path" }) do
+    for _, field in ipairs({ "type", "name", "iname", "path", "glob", "iglob",
+        "path_glob", "path_iglob" }) do
         local opts = {}
         opts[field] = "f\0ignored"
         local nv, ne = babet.find(SB, opts)
@@ -1658,10 +1681,10 @@ do
             nv, ne)
     end
 
-    -- find with ECMAScript regex : trouve tous les fichiers .txt
+    -- find with RE2 regex : trouve tous les fichiers .txt
     -- of the sandbox (we created several during previous tests)
     local results_txt, e_txt = babet.find(SB, { type = "f", name = ".*\\.txt$" })
-    ok_val("find with ECMAScript regex (.*\\.txt$)", results_txt, e_txt,
+    ok_val("find with RE2 regex (.*\\.txt$)", results_txt, e_txt,
         function(x) return type(x) == "table" and #x > 0 end)
 
     -- find with iname (case-insensitive)
@@ -1669,8 +1692,8 @@ do
     ok_val("find iname case-insensitive", results_ci, e_ci,
         function(x) return type(x) == "table" and #x > 0 end)
 
-    -- LOT 4/6 : chaque regex est compilée une seule fois par appel, puis
-    -- réutilisée pour toutes les entrées du parcours, sans cache permanent.
+    -- LOT 4/6/10 : chaque regex RE2 est compilée une seule fois par appel,
+    -- puis réutilisée pour toutes les entrées du parcours, sans cache permanent.
     local path_cache_ok = true
     for _ = 1, 50 do
         local pr, pe = babet.find(SB, { type = "f", path = ".*\\.txt$" })
@@ -1695,8 +1718,8 @@ do
     ok("LOT 6 find accepts many distinct regexes without permanent cache",
         dynamic_regex_ok)
 
-    -- Concurrent find from multiple workers. Regex objects now live only for
-    -- one call, so workers share no mutable cache and need no mutex.
+    -- Concurrent find from multiple workers. Les objets RE2 vivent seulement
+    -- le temps d'un appel : aucun cache mutable n'est partagé entre workers.
     do
         local W = babet.workers
         local jobs = {}
@@ -1722,8 +1745,192 @@ do
                 all_ok = false
             end
         end
-        ok("concurrent find x4 workers (per-call regex objects)",
+        ok("concurrent find x4 workers (per-call RE2 objects)",
             all_ok)
+    end
+
+    -- Lot 9 : globs bornés, sans std::regex ni backtracking récursif.
+    -- Le langage est volontairement réduit : '*', '**', '?', et '\\'
+    -- pour échapper l'octet suivant. Les correspondances sont ancrées sur
+    -- le nom ou le chemin complet selon l'option.
+    do
+        local G = sb("find_glob")
+        assert(babet.mkdir(G .. "/sub/deep"))
+
+        local function put(path, data)
+            local file = assert(io.open(path, "wb"))
+            assert(file:write(data or "x"))
+            assert(file:close())
+        end
+
+        put(G .. "/root.lua")
+        put(G .. "/root.txt")
+        put(G .. "/sub/a.lua")
+        put(G .. "/sub/deep/b.LUA")
+        put(G .. "/sub/deep/photo.JPG")
+        put(G .. "/sub/deep/literal*.txt")
+        put(G .. "/sub/deep/[abc]")
+        local byte_name = "byte_" .. string.char(255) .. ".txt"
+        put(G .. "/" .. byte_name)
+        -- A 200-byte basename makes the nested-repetition regression
+        -- meaningful: std::regex could backtrack catastrophically here,
+        -- whereas RE2 must finish in linear time.
+        put(G .. "/" .. string.rep("a", 200))
+
+        -- Lot 10 : les champs historiques utilisent RE2 avec un budget mémoire
+        -- explicite. name/iname restent des correspondances complètes ; path
+        -- reste une recherche partielle dans le chemin complet.
+        local v, e = babet.find(G, { type = "f", name = "a\\.lua" })
+        ok("LOT 10 RE2 name keeps full-match semantics",
+            type(v) == "table" and e == nil and #v == 1)
+
+        v, e = babet.find(G, { type = "f", name = "lua" })
+        ok("LOT 10 RE2 name does not perform a partial search",
+            type(v) == "table" and e == nil and #v == 0)
+
+        v, e = babet.find(G, {
+            type = "f",
+            path = "find_glob/sub/deep",
+        })
+        ok("LOT 10 RE2 path keeps partial-search semantics",
+            type(v) == "table" and e == nil and #v >= 4)
+
+        v, e = babet.find(G, { type = "f", name = "(a)\\1" })
+        ok_fail("LOT 10 RE2 rejects backreferences", v, e)
+
+        v, e = babet.find(G, { type = "f", name = "a(?=\\.lua)" })
+        ok_fail("LOT 10 RE2 rejects look-ahead assertions", v, e)
+
+        v, e = babet.find(G, { type = "f", name = "(?<=a)\\.lua" })
+        ok_fail("LOT 10 RE2 rejects look-behind assertions", v, e)
+
+        v, e = babet.find(G, { type = "f", name = "(" })
+        ok_fail("LOT 10 RE2 reports invalid syntax cleanly", v, e)
+
+        v, e = babet.find(G, {
+            type = "f",
+            name = string.rep("a", 4097),
+        })
+        ok_fail("LOT 10 find enforces the 4096-byte regex limit", v, e)
+
+        v, e = babet.find(G, {
+            type = "f",
+            name = string.rep("a", 4096),
+        })
+        ok("LOT 10 find accepts the exact regex size boundary",
+            type(v) == "table" and e == nil and #v == 0)
+
+        v, e = babet.find(G, {
+            type = "f",
+            name = "(a+)+b",
+        })
+        ok("LOT 10 nested repetitions remain bounded under RE2",
+            type(v) == "table" and e == nil)
+
+        v, e = babet.find(G, {
+            type = "f",
+            name = "byte_.*\\.txt",
+        })
+        ok("LOT 10 RE2 Latin-1 mode accepts non-UTF-8 path bytes",
+            type(v) == "table" and e == nil and #v == 1)
+
+        local re2_job = babet.workers.spawn([[
+            local r, err = babet.find(worker.args.root, {
+                type = "f",
+                iname = ".*\\.LUA$",
+            })
+            if not r then return { error = err } end
+            return { count = #r }
+        ]], { root = G })
+        local re2_joined, re2_value = re2_job:join()
+        ok("LOT 10 RE2 matching works in a worker",
+            re2_joined == true and type(re2_value) == "table"
+            and re2_value.count == 3 and re2_value.error == nil)
+
+        local v, e = babet.find(G, { type = "f", glob = "*.lua" })
+        ok("LOT 9 find glob matches the complete basename",
+            type(v) == "table" and e == nil and #v == 2)
+
+        v, e = babet.find(G, { type = "f", iglob = "*.lua" })
+        ok("LOT 9 find iglob is ASCII case-insensitive",
+            type(v) == "table" and e == nil and #v == 3)
+
+        v, e = babet.find(G, { type = "f", glob = "?.lua" })
+        ok("LOT 9 find glob '?' matches exactly one byte",
+            type(v) == "table" and e == nil and #v == 1)
+
+        v, e = babet.find(G, {
+            type = "f",
+            glob = "literal\\*.txt",
+        })
+        ok("LOT 9 find glob backslash escapes a wildcard",
+            type(v) == "table" and e == nil and #v == 1)
+
+        v, e = babet.find(G, { type = "f", glob = "[abc]" })
+        ok("LOT 9 find glob treats unsupported brackets literally",
+            type(v) == "table" and e == nil and #v == 1)
+
+        v, e = babet.find(G, {
+            type = "f",
+            path_glob = "**/find_glob/*/*.lua",
+        })
+        ok("LOT 9 path_glob '*' does not cross a slash",
+            type(v) == "table" and e == nil and #v == 1)
+
+        v, e = babet.find(G, {
+            type = "f",
+            path_iglob = "**/find_glob/**/*.lua",
+        })
+        ok("LOT 9 path_iglob '**' crosses directory separators",
+            type(v) == "table" and e == nil and #v == 2)
+
+        v, e = babet.find(G, {
+            type = "f",
+            path_glob = "find_glob/**/*.lua",
+        })
+        ok("LOT 9 path_glob is anchored to the complete path",
+            type(v) == "table" and e == nil and #v == 0)
+
+        v, e = babet.find(G, {
+            type = "f",
+            name = ".*\\.lua$",
+            glob = "a*",
+        })
+        ok("LOT 9 regex and glob filters combine with logical AND",
+            type(v) == "table" and e == nil and #v == 1)
+
+        v, e = babet.find(G, { glob = "abc\\" })
+        ok_fail("LOT 9 find rejects a trailing glob escape", v, e)
+
+        v, e = babet.find(G, {
+            glob = string.rep("a", 4097),
+        })
+        ok_fail("LOT 9 find enforces the 4096-byte glob limit", v, e)
+
+        v, e = babet.find(G, {
+            glob = string.rep("a", 4096),
+        })
+        ok("LOT 9 find accepts the exact glob size boundary",
+            type(v) == "table" and e == nil and #v == 0)
+
+        v, e = babet.find(G, {
+            glob = string.rep("*a", 1000) .. "b",
+        })
+        ok("LOT 9 hostile-looking glob remains bounded",
+            type(v) == "table" and e == nil)
+
+        local job = babet.workers.spawn([[
+            local r, err = babet.find(worker.args.root, {
+                type = "f",
+                glob = "*.lua",
+            })
+            if not r then return { error = err } end
+            return { count = #r }
+        ]], { root = G })
+        local joined, value = job:join()
+        ok("LOT 9 safe glob works in a worker",
+            joined == true and type(value) == "table"
+            and value.count == 2 and value.error == nil)
     end
 
     -- =================================================================
@@ -1814,7 +2021,36 @@ do
             tostring(ev):find('"f" or "d"', 1, true) ~= nil,
             "err=" .. tostring(ev))
         rv, ev = babet.find(P, { type = 42 })
-        ok_fail("find type=42 (coercé '42') -> (nil, err)", rv, ev)
+        ok_fail("LOT 11 find type=42 -> (nil, err)", rv, ev)
+        ok("  message mentionne 'string'",
+            tostring(ev):find("string", 1, true) ~= nil,
+            "err=" .. tostring(ev))
+
+        rv, ev = babet.find(P, { maxdepth = "1" })
+        ok_fail("LOT 11 find maxdepth numeric string rejected", rv, ev)
+        ok("  message mentionne 'integer'",
+            tostring(ev):find("integer", 1, true) ~= nil,
+            "err=" .. tostring(ev))
+
+        for _, field in ipairs({
+            "name", "iname", "path", "glob", "iglob",
+            "path_glob", "path_iglob",
+        }) do
+            local opts = { [field] = 42 }
+            local bad_value, bad_err = babet.find(P, opts)
+            ok_fail("LOT 11 find " .. field .. " is a strict string",
+                bad_value, bad_err)
+            ok("  " .. field .. " error mentions string",
+                tostring(bad_err):find("string", 1, true) ~= nil,
+                "err=" .. tostring(bad_err))
+        end
+
+        ok_raises("LOT 11 find root is a strict string",
+            function() return babet.find(42) end,
+            "string")
+        ok_raises("LOT 11 find rejects excess arguments",
+            function() return babet.find(P, nil, "extra") end,
+            "one or two arguments")
     end
 
     -- Régression fs:: jetants (revue ChatGPT post-v2.2.0) : sur un
@@ -1904,6 +2140,18 @@ do
     ok_raises("LOT 3 createFileIterator: NUL path rejected",
         function() return babet.createFileIterator(SB .. "\0ignored") end,
         "NUL")
+
+    ok_raises("LOT 11 createFileIterator path is a strict string",
+        function() return babet.createFileIterator(42) end,
+        "string")
+    ok_raises("LOT 11 createFileIterator recursive is a strict boolean",
+        function() return babet.createFileIterator(SB, 1) end,
+        "boolean")
+    ok_raises("LOT 11 createFileIterator rejects excess arguments",
+        function()
+            return babet.createFileIterator(SB, false, "extra")
+        end,
+        "one or two arguments")
 
     -- LOT 5B : un lien cassé est une entrée valide, mais pas un fichier
     -- régulier utilisable. Il doit être ignoré sans faire échouer tout
@@ -2019,6 +2267,11 @@ do
         pcall(function() return babet.exec() end) == false)
     ok("DOC 3 exec: command must be a strict string",
         pcall(function() return babet.exec(42) end) == false)
+
+    ok("LOT 11 exec rejects excess arguments",
+        pcall(function()
+            return babet.exec("echo", {}, {}, "extra")
+        end) == false)
 
     local bad_args, bad_args_err = babet.exec("echo", "hello")
     ok_fail("DOC 3 exec: args non-table -> (nil, err)",
@@ -6245,6 +6498,13 @@ do
     ok("DOC 3 signal name is a strict string",
         pcall(S.ignore, 15) == false)
 
+    ok("LOT 11 signal.handle rejects excess arguments",
+        pcall(S.handle, "USR1", nil, "extra") == false)
+    ok("LOT 11 signal.ignore rejects excess arguments",
+        pcall(S.ignore, "USR1", "extra") == false)
+    ok("LOT 11 signal.default rejects excess arguments",
+        pcall(S.default, "USR1", "extra") == false)
+
     -- ----- validation des arguments ---------------------------------
     -- Signal inconnu : luaL_error -> pcall.ok == false
     do
@@ -9788,6 +10048,11 @@ do
         pcall(function() return W.spawn("return 1", nil, 42) end)
         == false)
 
+    ok("LOT 11 workers.spawn rejects excess arguments",
+        pcall(function()
+            return W.spawn("return 1", nil, nil, "extra")
+        end) == false)
+
     -- ----- refus de sérialisation : function ----------------------
 
     do
@@ -10365,6 +10630,15 @@ do
             pcall(function()
                 W.spawn("return 1", nil, { inbox_capacity = "2" })
             end) == false)
+
+        ok("LOT 11 inbox_capacity floating integer rejected",
+            pcall(function()
+                W.spawn("return 1", nil, { inbox_capacity = 2.0 })
+            end) == false)
+        ok("LOT 11 outbox_capacity floating integer rejected",
+            pcall(function()
+                W.spawn("return 1", nil, { outbox_capacity = 2.0 })
+            end) == false)
         ok("DOC 3 inbox_capacity > 1000000 rejected",
             pcall(function()
                 W.spawn("return 1", nil, { inbox_capacity = 1000001 })
@@ -10810,7 +11084,7 @@ end
 
 -- =====================================================================
 print("")
-print("=== secure ZIP archives ===")
+print("=== secure archives (ZIP and TAR) ===")
 
 do
     local root = sb("archive")
@@ -10911,6 +11185,171 @@ do
         return write_bytes(path, zip64_eocd .. locator .. eocd)
     end
 
+    local function tar_text_field(value, width)
+        value = value or ""
+        assert(#value <= width, "TAR field is too long")
+        return value .. string.rep("\0", width - #value)
+    end
+
+    local function tar_octal_field(value, width)
+        value = value or 0
+        local digits = string.format("%0" .. tostring(width - 1) .. "o", value)
+        assert(#digits <= width - 1, "TAR octal field is too large")
+        return digits .. "\0"
+    end
+
+    local function tar_name_fields(name)
+        if #name <= 100 then return name, "" end
+        for i = #name, 1, -1 do
+            if name:sub(i, i) == "/" then
+                local prefix = name:sub(1, i - 1)
+                local leaf = name:sub(i + 1)
+                if #prefix <= 155 and #leaf <= 100 and #leaf > 0 then
+                    return leaf, prefix
+                end
+            end
+        end
+        error("TAR path does not fit in a ustar header: " .. name)
+    end
+
+    local function tar_header(entry)
+        local name, prefix = tar_name_fields(assert(entry.name))
+        local typeflag = entry.typeflag or "0"
+        local data = entry.data or ""
+        local size = entry.size
+        if size == nil then
+            size = (typeflag == "0" or typeflag == "\0" or typeflag == "x"
+                or typeflag == "L") and #data or 0
+        end
+
+        local header = table.concat({
+            tar_text_field(name, 100),
+            tar_octal_field(entry.mode or tonumber("644", 8), 8),
+            tar_octal_field(entry.uid or 0, 8),
+            tar_octal_field(entry.gid or 0, 8),
+            tar_octal_field(size, 12),
+            tar_octal_field(entry.mtime or 0, 12),
+            string.rep(" ", 8),
+            typeflag,
+            tar_text_field(entry.linkname, 100),
+            "ustar\0",
+            "00",
+            tar_text_field(entry.uname or "root", 32),
+            tar_text_field(entry.gname or "root", 32),
+            tar_octal_field(entry.devmajor or 0, 8),
+            tar_octal_field(entry.devminor or 0, 8),
+            tar_text_field(prefix, 155),
+            string.rep("\0", 12),
+        })
+        assert(#header == 512)
+
+        local checksum = 0
+        for i = 1, #header do checksum = checksum + header:byte(i) end
+        local encoded_checksum = string.format("%06o\0 ", checksum)
+        assert(#encoded_checksum == 8)
+        header = header:sub(1, 148) .. encoded_checksum .. header:sub(157)
+        return header, data, size
+    end
+
+    local function pax_record(key, value)
+        local body = key .. "=" .. value .. "\n"
+        local length = #body + 2
+        while true do
+            local record = tostring(length) .. " " .. body
+            if #record == length then return record end
+            length = #record
+        end
+    end
+
+    local function make_tar(path, entries, opts)
+        opts = opts or {}
+        local parts = {}
+
+        local function emit(entry)
+            local header, data, size = tar_header(entry)
+            parts[#parts + 1] = header
+            parts[#parts + 1] = data
+            local padding = (512 - (size % 512)) % 512
+            if padding > 0 then
+                parts[#parts + 1] = string.rep("\0", padding)
+            end
+        end
+
+        for index, source_entry in ipairs(entries) do
+            local entry = {}
+            for key, value in pairs(source_entry) do entry[key] = value end
+
+            if source_entry.gnu_longname then
+                emit({
+                    name = "././@LongLink",
+                    typeflag = "L",
+                    mode = tonumber("644", 8),
+                    data = source_entry.name .. "\0",
+                })
+                entry.name = "gnu-long-name-" .. tostring(index)
+                entry.gnu_longname = nil
+            elseif source_entry.pax_path then
+                emit({
+                    name = "PaxHeader/path-" .. tostring(index),
+                    typeflag = "x",
+                    mode = tonumber("644", 8),
+                    data = pax_record("path", source_entry.name),
+                })
+                entry.name = "pax-path-" .. tostring(index)
+                entry.pax_path = nil
+            end
+            emit(entry)
+        end
+
+        if not opts.omit_end_blocks then
+            parts[#parts + 1] = string.rep("\0", 1024)
+        end
+        return write_bytes(path, table.concat(parts))
+    end
+
+    local function make_old_gnu_sparse_tar(path)
+        local sparse_descriptor = tar_octal_field(1024, 12)
+            .. tar_octal_field(4, 12)
+        local empty_descriptor = tar_octal_field(0, 12)
+            .. tar_octal_field(0, 12)
+        local header = table.concat({
+            tar_text_field("sparse.bin", 100),
+            tar_octal_field(tonumber("644", 8), 8),
+            tar_octal_field(0, 8),
+            tar_octal_field(0, 8),
+            tar_octal_field(4, 12), -- condensed payload size
+            tar_octal_field(0, 12),
+            string.rep(" ", 8),
+            "S", -- old GNU sparse regular file
+            tar_text_field("", 100),
+            "ustar  \0",
+            tar_text_field("root", 32),
+            tar_text_field("root", 32),
+            tar_octal_field(0, 8),
+            tar_octal_field(0, 8),
+            tar_octal_field(0, 12), -- atime
+            tar_octal_field(0, 12), -- ctime
+            tar_octal_field(0, 12), -- legacy offset field
+            string.rep("\0", 4),
+            "\0",
+            sparse_descriptor,
+            empty_descriptor,
+            empty_descriptor,
+            empty_descriptor,
+            "\0", -- no extended sparse map block
+            tar_octal_field(2048, 12), -- expanded size
+            string.rep("\0", 17),
+        })
+        assert(#header == 512)
+        local checksum = 0
+        for i = 1, #header do checksum = checksum + header:byte(i) end
+        local encoded_checksum = string.format("%06o\0 ", checksum)
+        header = header:sub(1, 148) .. encoded_checksum .. header:sub(157)
+        return write_bytes(path,
+            header .. "DATA" .. string.rep("\0", 508)
+            .. string.rep("\0", 1024))
+    end
+
     local function no_archive_temporaries(path)
         local result = babet.exec("find", {
             path, "-name", ".babet-archive-*", "-print",
@@ -10947,12 +11386,700 @@ do
             .. " available=" .. tostring(available))
     end
 
+    ;(function()
+    -- TAR listing and extraction --------------------------------------
+    -- ZIP remains handled by miniz. libarchive handles TAR streams with
+    -- either no outer compression or the built-in gzip filter. Other filters
+    -- remain disabled until their dedicated lots.
+    local ustar_long_name = string.rep("p", 120) .. "/" .. string.rep("n", 80)
+    local gnu_long_name = string.rep("g", 130) .. "/"
+        .. string.rep("h", 130) .. "/file.txt"
+    local pax_long_name = string.rep("x", 140) .. "/"
+        .. string.rep("y", 140) .. "/data.bin"
+    local valid_tar = root .. "/valid-tar.data"
+    assert(make_tar(valid_tar, {
+        { name = "dir/", typeflag = "5", mode = tonumber("711", 8) },
+        { name = "dir/hello.txt", data = "bonjour\n", mode = tonumber("640", 8) },
+        { name = "binary.bin", data = "\0A\0B", mode = tonumber("601", 8) },
+        { name = "hello-link", typeflag = "2", linkname = "dir/hello.txt",
+          mode = tonumber("777", 8) },
+        { name = "hello-hardlink", typeflag = "1", linkname = "dir/hello.txt",
+          mode = tonumber("644", 8) },
+        { name = "named-pipe", typeflag = "6", mode = tonumber("600", 8) },
+        { name = "char-device", typeflag = "3", devmajor = 1, devminor = 3,
+          mode = tonumber("600", 8) },
+        { name = "block-device", typeflag = "4", devmajor = 8, devminor = 0,
+          mode = tonumber("600", 8) },
+        { name = ustar_long_name, data = "ustar", mode = tonumber("644", 8) },
+        { name = gnu_long_name, data = "gnu", gnu_longname = true,
+          mode = tonumber("644", 8) },
+        { name = pax_long_name, data = "pax", pax_path = true,
+          mode = tonumber("644", 8) },
+    }))
+
+    local tar_list, tar_list_err = babet.archive.list(valid_tar)
+    ok_val("archive.list detects uncompressed TAR by content",
+        tar_list, tar_list_err, function(value)
+            return value.format == "tar"
+                and value.compression == "none"
+                and value.count == 11
+                and value.total_size == 23
+                and value.archive_size == babet.fileSize(valid_tar)
+                and value.zip64 == nil
+        end)
+    ok("archive.list keeps ZIP-only metadata nil for TAR entries",
+        tar_list and tar_list.entries[2]
+        and tar_list.entries[2].compressed_size == nil
+        and tar_list.entries[2].crc32 == nil
+        and tar_list.entries[2].compression_method == nil
+        and tar_list.entries[2].encrypted == false
+        and tar_list.entries[2].supported == true
+        and tar_list.entries[2].sparse == false)
+    ok("archive.list reports TAR regular-file metadata",
+        tar_list and tar_list.entries[2]
+        and tar_list.entries[2].name == "dir/hello.txt"
+        and tar_list.entries[2].path == "dir/hello.txt"
+        and tar_list.entries[2].type == "file"
+        and tar_list.entries[2].size == 8
+        and tar_list.entries[2].unix_mode == tonumber("640", 8)
+        and tar_list.entries[2].safe_path == true
+        and tar_list.entries[2].extractable == true
+        and tar_list.entries[2].reason == nil)
+    ok("archive.list reports TAR symlink target and refusal",
+        tar_list and tar_list.entries[4]
+        and tar_list.entries[4].type == "symlink"
+        and tar_list.entries[4].link_target == "dir/hello.txt"
+        and tar_list.entries[4].extractable == false
+        and tar_list.entries[4].reason == "symlink entries are refused")
+    ok("archive.list reports TAR hard-link target and refusal",
+        tar_list and tar_list.entries[5]
+        and tar_list.entries[5].type == "hardlink"
+        and tar_list.entries[5].link_target == "dir/hello.txt"
+        and tar_list.entries[5].extractable == false
+        and tar_list.entries[5].reason == "hard link entries are refused")
+    ok("archive.list identifies TAR special filesystem types",
+        tar_list and tar_list.entries[6].type == "fifo"
+        and tar_list.entries[7].type == "character_device"
+        and tar_list.entries[8].type == "block_device"
+        and tar_list.entries[6].extractable == false
+        and tar_list.entries[7].extractable == false
+        and tar_list.entries[8].extractable == false)
+    ok("archive.list supports ustar prefix paths",
+        tar_list and tar_list.entries[9].name == ustar_long_name
+        and tar_list.entries[9].safe_path == true)
+    ok("archive.list supports GNU TAR long names",
+        tar_list and tar_list.entries[10].name == gnu_long_name
+        and tar_list.entries[10].size == 3)
+    ok("archive.list supports pax path headers",
+        tar_list and tar_list.entries[11].name == pax_long_name
+        and tar_list.entries[11].size == 3)
+
+    local safe_tar = root .. "/safe.tar"
+    assert(make_tar(safe_tar, {
+        { name = "dir/", typeflag = "5", mode = tonumber("2711", 8) },
+        { name = "dir/hello.txt", data = "bonjour\n",
+          mode = tonumber("4640", 8) },
+        { name = "binary.bin", data = "\0A\0B", mode = tonumber("601", 8) },
+        { name = "empty.txt", data = "", mode = tonumber("600", 8) },
+        { name = "implicit/deep/file.txt", data = "deep",
+          mode = tonumber("644", 8) },
+    }))
+    local safe_tar_list, safe_tar_list_err = babet.archive.list(safe_tar)
+    ok_val("archive.list marks safe TAR files and directories extractable",
+        safe_tar_list, safe_tar_list_err, function(value)
+            return value.format == "tar" and value.count == 5
+                and value.entries[1].extractable == true
+                and value.entries[2].extractable == true
+                and value.entries[1].reason == nil
+                and value.entries[2].reason == nil
+        end)
+
+    local tar_default_out = root .. "/tar-default"
+    local tar_default, tar_default_err = babet.archive.extract(
+        safe_tar, tar_default_out)
+    ok_val("archive.extract extracts an uncompressed TAR",
+        tar_default, tar_default_err, function(value)
+            return value.files == 4 and value.directories == 1
+                and value.bytes == 16 and value.path == tar_default_out
+        end)
+    ok("archive.extract TAR preserves text, binary and empty contents",
+        read_bytes(tar_default_out .. "/dir/hello.txt") == "bonjour\n"
+        and read_bytes(tar_default_out .. "/binary.bin") == "\0A\0B"
+        and read_bytes(tar_default_out .. "/empty.txt") == ""
+        and read_bytes(tar_default_out .. "/implicit/deep/file.txt") == "deep")
+    ok("archive.extract TAR creates implicit parent directories safely",
+        babet.isDir(tar_default_out .. "/implicit") == true
+        and babet.isDir(tar_default_out .. "/implicit/deep") == true)
+    ok("archive.extract TAR uses safe default permissions",
+        babet.getMode(tar_default_out .. "/dir") == tonumber("755", 8)
+        and babet.getMode(tar_default_out .. "/dir/hello.txt")
+            == tonumber("644", 8))
+    ok("archive.extract TAR leaves no staging files",
+        no_archive_temporaries(tar_default_out))
+
+    local tar_again, tar_again_err = babet.archive.extract(
+        safe_tar, tar_default_out)
+    ok_fail("archive.extract TAR refuses overwrite by default",
+        tar_again, tar_again_err)
+    ok("failed TAR overwrite preserves existing contents",
+        read_bytes(tar_default_out .. "/dir/hello.txt") == "bonjour\n")
+
+    local tar_preserve_out = root .. "/tar-preserve"
+    local tar_preserve, tar_preserve_err = babet.archive.extract(
+        safe_tar, tar_preserve_out, { preserve_permissions = true })
+    ok_val("archive.extract TAR preserves safe Unix permissions",
+        tar_preserve, tar_preserve_err)
+    ok("archive.extract TAR strips setuid/setgid bits",
+        babet.getMode(tar_preserve_out .. "/dir") == tonumber("711", 8)
+        and babet.getMode(tar_preserve_out .. "/dir/hello.txt")
+            == tonumber("640", 8)
+        and babet.getMode(tar_preserve_out .. "/binary.bin")
+            == tonumber("601", 8))
+
+    local tar_replacement = root .. "/tar-replacement.tar"
+    assert(make_tar(tar_replacement, {
+        { name = "dir/", typeflag = "5" },
+        { name = "dir/hello.txt", data = "remplacé\n" },
+    }))
+    local tar_replaced, tar_replaced_err = babet.archive.extract(
+        tar_replacement, tar_default_out, { overwrite = true })
+    ok_val("archive.extract TAR overwrite=true publishes atomically",
+        tar_replaced, tar_replaced_err, function(value)
+            return value.files == 1 and value.directories == 1
+                and value.bytes == 10
+        end)
+    ok("archive.extract TAR overwrite replaces only selected paths",
+        read_bytes(tar_default_out .. "/dir/hello.txt") == "remplacé\n"
+        and read_bytes(tar_default_out .. "/binary.bin") == "\0A\0B")
+
+    local tar_worker, tar_worker_err = babet.workers.spawn([[
+local info, err = babet.archive.list(worker.args.path)
+if not info then error(err) end
+return { format = info.format, count = info.count, total_size = info.total_size }
+]], { path = valid_tar })
+    ok("archive.list TAR starts in a worker",
+        tar_worker ~= nil and tar_worker_err == nil, tostring(tar_worker_err))
+    if tar_worker then
+        local joined, value = tar_worker:join()
+        ok("archive.list TAR succeeds in a worker",
+            joined == true and type(value) == "table"
+            and value.format == "tar" and value.count == 11
+            and value.total_size == 23,
+            inspect(value))
+    end
+
+    local worker_extract_out = root .. "/tar-worker-out"
+    local tar_extract_worker, tar_extract_worker_err = babet.workers.spawn([[
+local result, err = babet.archive.extract(
+    worker.args.archive, worker.args.destination)
+if not result then error(err) end
+return result
+]], { archive = safe_tar, destination = worker_extract_out })
+    ok("archive.extract TAR starts in a worker",
+        tar_extract_worker ~= nil and tar_extract_worker_err == nil,
+        tostring(tar_extract_worker_err))
+    if tar_extract_worker then
+        local joined, value = tar_extract_worker:join()
+        ok("archive.extract TAR succeeds in a worker",
+            joined == true and type(value) == "table"
+            and value.files == 4 and value.directories == 1
+            and value.bytes == 16,
+            inspect(value))
+        ok("archive.extract TAR worker publishes expected data",
+            read_bytes(worker_extract_out .. "/dir/hello.txt") == "bonjour\n")
+    end
+
+    local concat_first = root .. "/concat-first.tar"
+    local concat_second = root .. "/concat-second.tar"
+    local concatenated_tar = root .. "/concatenated.tar"
+    assert(make_tar(concat_first, {
+        { name = "first.txt", data = "first" },
+    }))
+    assert(make_tar(concat_second, {
+        { name = "second.txt", data = "second" },
+    }))
+    assert(write_bytes(concatenated_tar,
+        assert(read_bytes(concat_first)) .. assert(read_bytes(concat_second))))
+    local concatenated_list, concatenated_err =
+        babet.archive.list(concatenated_tar)
+    ok_val("archive.list inspects concatenated TAR archives",
+        concatenated_list, concatenated_err, function(value)
+            return value.format == "tar" and value.count == 2
+                and value.total_size == 11
+                and value.entries[1].name == "first.txt"
+                and value.entries[2].name == "second.txt"
+        end)
+    local concatenated_out = root .. "/concatenated-out"
+    local concatenated_extract, concatenated_extract_err =
+        babet.archive.extract(concatenated_tar, concatenated_out)
+    ok_val("archive.extract traverses concatenated TAR archives",
+        concatenated_extract, concatenated_extract_err, function(value)
+            return value.files == 2 and value.directories == 0
+                and value.bytes == 11
+        end)
+    ok("archive.extract publishes every concatenated TAR member",
+        read_bytes(concatenated_out .. "/first.txt") == "first"
+        and read_bytes(concatenated_out .. "/second.txt") == "second")
+
+    local sparse_tar = root .. "/sparse.tar"
+    assert(make_old_gnu_sparse_tar(sparse_tar))
+    local sparse_tar_list, sparse_tar_list_err = babet.archive.list(sparse_tar)
+    ok_val("archive.list identifies an old GNU sparse TAR entry",
+        sparse_tar_list, sparse_tar_list_err, function(value)
+            return value.format == "tar" and value.count == 1
+                and value.total_size == 2048
+                and value.entries[1].name == "sparse.bin"
+                and value.entries[1].size == 2048
+                and value.entries[1].sparse == true
+                and value.entries[1].extractable == false
+                and value.entries[1].reason == "sparse TAR entries are refused"
+        end)
+    local sparse_tar_out = root .. "/sparse-tar-out"
+    local sparse_tar_extract, sparse_tar_extract_err = babet.archive.extract(
+        sparse_tar, sparse_tar_out)
+    ok_fail("archive.extract refuses sparse TAR files before writing",
+        sparse_tar_extract, sparse_tar_extract_err)
+    ok("sparse TAR refusal creates no destination",
+        babet.fileExists(sparse_tar_out) == false)
+
+    local compressed_tar = root .. "/empty.tar.gz"
+    assert(write_bytes(compressed_tar, string.char(
+        31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 99, 96, 24, 5, 163,
+        96, 20, 140, 84, 0, 0, 46, 175, 181, 239, 0, 4, 0, 0)))
+    local compressed_tar_list, compressed_tar_err =
+        babet.archive.list(compressed_tar)
+    ok_val("archive.list accepts gzip-compressed TAR by content",
+        compressed_tar_list, compressed_tar_err, function(value)
+            return value.format == "tar" and value.compression == "gzip"
+                and value.count == 0 and value.total_size == 0
+        end)
+
+    local empty_tar = root .. "/empty.tar"
+    assert(write_bytes(empty_tar, string.rep("\0", 1024)))
+    local empty_tar_list, empty_tar_err = babet.archive.list(empty_tar)
+    ok_val("archive.list accepts a standard empty TAR",
+        empty_tar_list, empty_tar_err, function(value)
+            return value.format == "tar" and value.count == 0
+                and value.total_size == 0 and #value.entries == 0
+        end)
+    local empty_tar_out = root .. "/empty-tar-out"
+    local empty_tar_extract, empty_tar_extract_err = babet.archive.extract(
+        empty_tar, empty_tar_out)
+    ok_val("archive.extract accepts an empty TAR",
+        empty_tar_extract, empty_tar_extract_err, function(value)
+            return value.files == 0 and value.directories == 0
+                and value.bytes == 0
+        end)
+    ok("archive.extract empty TAR creates the destination root",
+        babet.isDir(empty_tar_out) == true)
+
+    local unsafe_tar = root .. "/unsafe.tar"
+    assert(make_tar(unsafe_tar, {
+        { name = "../escape", data = "1" },
+        { name = "/absolute", data = "2" },
+        { name = "a\\b", data = "3" },
+        { name = "C:/drive", data = "4" },
+        { name = "a//b", data = "5" },
+        { name = "a/./b", data = "6" },
+    }))
+    local unsafe_tar_list, unsafe_tar_err = babet.archive.list(unsafe_tar)
+    ok_val("archive.list inspects unsafe TAR paths without extracting",
+        unsafe_tar_list, unsafe_tar_err,
+        function(value) return value.count == 6 end)
+    ok("archive.list applies ZIP path policy to TAR entries",
+        unsafe_tar_list
+        and unsafe_tar_list.entries[1].safe_path == false
+        and unsafe_tar_list.entries[2].safe_path == false
+        and unsafe_tar_list.entries[3].safe_path == false
+        and unsafe_tar_list.entries[4].safe_path == false
+        and unsafe_tar_list.entries[5].safe_path == false
+        and unsafe_tar_list.entries[6].safe_path == false)
+    local unsafe_tar_out = root .. "/unsafe-tar-out"
+    local unsafe_tar_extract, unsafe_tar_extract_err = babet.archive.extract(
+        unsafe_tar, unsafe_tar_out)
+    ok_fail("archive.extract refuses unsafe TAR paths before writing",
+        unsafe_tar_extract, unsafe_tar_extract_err)
+    ok("unsafe TAR extraction creates no destination",
+        babet.fileExists(unsafe_tar_out) == false)
+
+    local tar_limited, tar_limited_err = babet.archive.list(
+        valid_tar, { max_entries = 10 })
+    ok_fail("archive.list TAR enforces max_entries",
+        tar_limited, tar_limited_err)
+    tar_limited, tar_limited_err = babet.archive.list(
+        valid_tar, { max_entry_size = 7 })
+    ok_fail("archive.list TAR enforces max_entry_size",
+        tar_limited, tar_limited_err)
+    tar_limited, tar_limited_err = babet.archive.list(
+        valid_tar, { max_total_size = 22 })
+    ok_fail("archive.list TAR enforces max_total_size",
+        tar_limited, tar_limited_err)
+    local tar_exact, tar_exact_err = babet.archive.list(valid_tar, {
+        max_entries = 11,
+        max_entry_size = 8,
+        max_total_size = 23,
+        max_compression_ratio = 1,
+    })
+    ok_val("archive.list TAR accepts exact limits",
+        tar_exact, tar_exact_err,
+        function(value) return value.count == 11 and value.total_size == 23 end)
+    local tar_limited_out = root .. "/tar-limited-out"
+    local tar_extract_limited, tar_extract_limited_err = babet.archive.extract(
+        safe_tar, tar_limited_out, { max_total_size = 15 })
+    ok_fail("archive.extract TAR applies anti-bomb limits before writing",
+        tar_extract_limited, tar_extract_limited_err)
+    ok("archive.extract TAR limit failure creates no destination",
+        babet.fileExists(tar_limited_out) == false)
+
+    local linked_tar = root .. "/valid-tar-link"
+    local tar_link_created = babet.exec("ln", { "-s", "valid-tar.data", linked_tar })
+    ok("TAR archive symlink fixture created",
+        type(tar_link_created) == "table" and tar_link_created.code == 0)
+    local linked_tar_list, linked_tar_err = babet.archive.list(linked_tar)
+    ok_val("archive.list follows a symlink to a regular TAR",
+        linked_tar_list, linked_tar_err,
+        function(value) return value.format == "tar" and value.count == 11 end)
+    local linked_safe_tar = root .. "/safe-tar-link"
+    local linked_safe_created = babet.exec(
+        "ln", { "-s", "safe.tar", linked_safe_tar })
+    ok("safe TAR archive symlink fixture created",
+        type(linked_safe_created) == "table" and linked_safe_created.code == 0)
+    local linked_safe_out = root .. "/linked-safe-out"
+    local linked_safe_extract, linked_safe_extract_err = babet.archive.extract(
+        linked_safe_tar, linked_safe_out)
+    ok_val("archive.extract follows a symlink to a regular TAR",
+        linked_safe_extract, linked_safe_extract_err,
+        function(value) return value.files == 4 and value.bytes == 16 end)
+    ok("archive.extract symlinked TAR source content",
+        read_bytes(linked_safe_out .. "/binary.bin") == "\0A\0B")
+
+    local duplicate_tar = root .. "/duplicate.tar"
+    assert(make_tar(duplicate_tar, {
+        { name = "same.txt", data = "first" },
+        { name = "same.txt", data = "second" },
+    }))
+    local duplicate_tar_out = root .. "/duplicate-tar-out"
+    local duplicate_tar_extract, duplicate_tar_extract_err =
+        babet.archive.extract(duplicate_tar, duplicate_tar_out)
+    ok_fail("archive.extract refuses duplicate TAR output paths",
+        duplicate_tar_extract, duplicate_tar_extract_err)
+    ok("duplicate TAR refusal creates no destination",
+        babet.fileExists(duplicate_tar_out) == false)
+
+    local conflict_tar = root .. "/conflict.tar"
+    assert(make_tar(conflict_tar, {
+        { name = "node", data = "file" },
+        { name = "node/child.txt", data = "child" },
+    }))
+    local conflict_tar_out = root .. "/conflict-tar-out"
+    local conflict_tar_extract, conflict_tar_extract_err =
+        babet.archive.extract(conflict_tar, conflict_tar_out)
+    ok_fail("archive.extract refuses TAR file/directory conflicts",
+        conflict_tar_extract, conflict_tar_extract_err)
+    ok("TAR path-conflict refusal creates no destination",
+        babet.fileExists(conflict_tar_out) == false)
+
+    local tar_parent_target = root .. "/tar-parent-target"
+    assert(babet.mkdir(tar_parent_target))
+    local tar_parent_link = root .. "/tar-parent-link"
+    local tar_parent_linked = babet.exec(
+        "ln", { "-s", "tar-parent-target", tar_parent_link })
+    ok("TAR destination-parent symlink fixture created",
+        type(tar_parent_linked) == "table" and tar_parent_linked.code == 0)
+    local tar_parent_attack, tar_parent_attack_err = babet.archive.extract(
+        safe_tar, tar_parent_link .. "/out")
+    ok_fail("archive.extract TAR refuses a symlinked destination parent",
+        tar_parent_attack, tar_parent_attack_err)
+    ok("TAR destination-parent refusal writes nothing through the symlink",
+        babet.fileExists(tar_parent_target .. "/out") == false)
+
+    local nonregular_payload_tar = root .. "/nonregular-payload.tar"
+    assert(make_tar(nonregular_payload_tar, {
+        { name = "directory/", typeflag = "5", size = 1, data = "x" },
+    }))
+    local nonregular_payload_list, nonregular_payload_err =
+        babet.archive.list(nonregular_payload_tar)
+    ok_fail("archive.list rejects data attached to a non-regular TAR entry",
+        nonregular_payload_list, nonregular_payload_err)
+
+    local damaged_tar = root .. "/damaged.tar"
+    local valid_tar_bytes = assert(read_bytes(valid_tar))
+    assert(write_bytes(damaged_tar, "X" .. valid_tar_bytes:sub(2)))
+    local damaged_tar_list, damaged_tar_err = babet.archive.list(damaged_tar)
+    ok_fail("archive.list rejects a TAR with an invalid header checksum",
+        damaged_tar_list, damaged_tar_err)
+
+    local trailing_tar = root .. "/trailing-garbage.tar"
+    assert(write_bytes(trailing_tar, valid_tar_bytes .. "NOT-A-TAR"))
+    local trailing_tar_list, trailing_tar_err = babet.archive.list(trailing_tar)
+    ok_fail("archive.list rejects non-TAR trailing data",
+        trailing_tar_list, trailing_tar_err)
+
+    local truncated_tar = root .. "/truncated.tar"
+    assert(make_tar(truncated_tar, {
+        { name = "truncated.bin", data = "short", size = 1024 },
+    }, { omit_end_blocks = true }))
+    local truncated_tar_list, truncated_tar_err = babet.archive.list(truncated_tar)
+    ok_fail("archive.list detects truncated TAR entry data",
+        truncated_tar_list, truncated_tar_err)
+
+    local tar_extract_out = root .. "/tar-special-out"
+    local tar_extract, tar_extract_err = babet.archive.extract(
+        valid_tar, tar_extract_out)
+    ok_fail("archive.extract TAR refuses links and special filesystem types",
+        tar_extract, tar_extract_err)
+    ok("refused special TAR extraction creates no destination",
+        babet.fileExists(tar_extract_out) == false)
+
+    local compressed_tar_out = root .. "/compressed-tar-out"
+    local compressed_tar_extract, compressed_tar_extract_err =
+        babet.archive.extract(compressed_tar, compressed_tar_out)
+    ok_val("archive.extract accepts an empty gzip-compressed TAR",
+        compressed_tar_extract, compressed_tar_extract_err,
+        function(value)
+            return value.files == 0 and value.directories == 0
+                and value.bytes == 0
+        end)
+    ok("empty gzip-compressed TAR creates the destination root",
+        babet.isDir(compressed_tar_out) == true)
+
+    local truncated_tar_out = root .. "/truncated-tar-out"
+    local truncated_tar_extract, truncated_tar_extract_err =
+        babet.archive.extract(truncated_tar, truncated_tar_out)
+    ok_fail("archive.extract rejects truncated TAR data before publication",
+        truncated_tar_extract, truncated_tar_extract_err)
+    ok("truncated TAR extraction creates no destination",
+        babet.fileExists(truncated_tar_out) == false)
+
+    local tar_single_path = root .. "/tar-single.txt"
+    local tar_single, tar_single_err = babet.archive.extractFile(
+        valid_tar, "dir/hello.txt", tar_single_path)
+    ok_val("archive.extractFile extracts one TAR entry from a mixed archive",
+        tar_single, tar_single_err, function(value)
+            return value.bytes == 8 and value.path == tar_single_path
+                and value.entry == "dir/hello.txt"
+        end)
+    ok("archive.extractFile TAR content is binary-safe and independently named",
+        read_bytes(tar_single_path) == "bonjour\n"
+        and babet.fileExists(root .. "/dir/hello.txt") == false)
+    ok("archive.extractFile TAR uses safe default permissions",
+        babet.getMode(tar_single_path) == tonumber("644", 8))
+    ok("archive.extractFile TAR leaves no staging files",
+        no_archive_temporaries(root))
+
+    assert(write_bytes(tar_single_path, "existing"))
+    local tar_single_again, tar_single_again_err = babet.archive.extractFile(
+        safe_tar, "dir/hello.txt", tar_single_path)
+    ok_fail("archive.extractFile TAR refuses overwrite by default",
+        tar_single_again, tar_single_again_err)
+    ok("failed TAR extractFile preserves the existing destination",
+        read_bytes(tar_single_path) == "existing")
+    local tar_single_overwrite, tar_single_overwrite_err =
+        babet.archive.extractFile(safe_tar, "dir/hello.txt", tar_single_path, {
+            overwrite = true,
+        })
+    ok_val("archive.extractFile TAR overwrite=true",
+        tar_single_overwrite, tar_single_overwrite_err,
+        function(value) return value.bytes == 8 end)
+    ok("archive.extractFile TAR overwrite publishes atomically",
+        read_bytes(tar_single_path) == "bonjour\n")
+
+    local tar_single_mode_path = root .. "/tar-single-mode.txt"
+    local tar_single_mode, tar_single_mode_err = babet.archive.extractFile(
+        safe_tar, "dir/hello.txt", tar_single_mode_path, {
+            preserve_permissions = true,
+        })
+    ok_val("archive.extractFile TAR preserve_permissions",
+        tar_single_mode, tar_single_mode_err)
+    ok("archive.extractFile TAR preserves only ordinary permission bits",
+        babet.getMode(tar_single_mode_path) == tonumber("640", 8))
+
+    local tar_binary_path = root .. "/tar-single-binary.bin"
+    local tar_binary, tar_binary_err = babet.archive.extractFile(
+        safe_tar, "binary.bin", tar_binary_path)
+    ok_val("archive.extractFile TAR extracts binary data",
+        tar_binary, tar_binary_err,
+        function(value) return value.bytes == 4 end)
+    ok("archive.extractFile TAR preserves embedded NUL bytes",
+        read_bytes(tar_binary_path) == "\0A\0B")
+
+    local tar_empty_path = root .. "/tar-single-empty.txt"
+    local tar_empty_file, tar_empty_file_err = babet.archive.extractFile(
+        safe_tar, "empty.txt", tar_empty_path)
+    ok_val("archive.extractFile TAR extracts an empty regular file",
+        tar_empty_file, tar_empty_file_err,
+        function(value) return value.bytes == 0 end)
+    ok("archive.extractFile TAR publishes the empty file",
+        read_bytes(tar_empty_path) == "")
+
+    local tar_long_path = root .. "/tar-single-long.txt"
+    local tar_long, tar_long_err = babet.archive.extractFile(
+        valid_tar, pax_long_name, tar_long_path)
+    ok_val("archive.extractFile TAR selects the decoded pax pathname",
+        tar_long, tar_long_err,
+        function(value) return value.entry == pax_long_name and value.bytes == 3 end)
+    ok("archive.extractFile TAR pax content",
+        read_bytes(tar_long_path) == "pax")
+
+    local tar_missing_path = root .. "/tar-single-missing.txt"
+    local tar_missing, tar_missing_err = babet.archive.extractFile(
+        safe_tar, "missing.txt", tar_missing_path)
+    ok_fail("archive.extractFile TAR reports a missing entry",
+        tar_missing, tar_missing_err)
+    ok("missing TAR extractFile creates no output",
+        babet.fileExists(tar_missing_path) == false)
+
+    local tar_directory_path = root .. "/tar-single-directory"
+    local tar_directory, tar_directory_err = babet.archive.extractFile(
+        safe_tar, "dir/", tar_directory_path)
+    ok_fail("archive.extractFile TAR refuses a directory entry",
+        tar_directory, tar_directory_err)
+    ok("directory TAR extractFile creates no output",
+        babet.fileExists(tar_directory_path) == false)
+
+    local tar_symlink_path = root .. "/tar-single-symlink"
+    local tar_symlink, tar_symlink_err = babet.archive.extractFile(
+        valid_tar, "hello-link", tar_symlink_path)
+    ok_fail("archive.extractFile TAR refuses a symlink entry",
+        tar_symlink, tar_symlink_err)
+    ok("symlink TAR extractFile creates no output",
+        babet.fileExists(tar_symlink_path) == false)
+
+    local tar_duplicate_path = root .. "/tar-single-duplicate.txt"
+    local tar_duplicate, tar_duplicate_err = babet.archive.extractFile(
+        duplicate_tar, "same.txt", tar_duplicate_path)
+    ok_fail("archive.extractFile TAR refuses an ambiguous duplicate name",
+        tar_duplicate, tar_duplicate_err)
+    ok("ambiguous TAR extractFile creates no output",
+        babet.fileExists(tar_duplicate_path) == false)
+
+    local tar_unsafe_path = root .. "/tar-single-unsafe.txt"
+    local tar_unsafe, tar_unsafe_err = babet.archive.extractFile(
+        unsafe_tar, "../escape", tar_unsafe_path)
+    ok_fail("archive.extractFile TAR refuses a selected unsafe path",
+        tar_unsafe, tar_unsafe_err)
+    ok("unsafe TAR extractFile creates no output",
+        babet.fileExists(tar_unsafe_path) == false)
+
+    local mixed_path_tar = root .. "/mixed-path.tar"
+    assert(make_tar(mixed_path_tar, {
+        { name = "../unsafe.txt", data = "unsafe" },
+        { name = "safe.txt", data = "safe" },
+    }))
+    local mixed_safe_path = root .. "/tar-single-safe.txt"
+    local mixed_safe, mixed_safe_err = babet.archive.extractFile(
+        mixed_path_tar, "safe.txt", mixed_safe_path)
+    ok_val("archive.extractFile TAR may select a safe entry from a mixed archive",
+        mixed_safe, mixed_safe_err,
+        function(value) return value.bytes == 4 end)
+    ok("archive.extractFile TAR mixed-archive content",
+        read_bytes(mixed_safe_path) == "safe"
+        and babet.fileExists(root .. "/unsafe.txt") == false)
+
+    local tar_limited_single_path = root .. "/tar-single-limited.txt"
+    local tar_limited_single, tar_limited_single_err = babet.archive.extractFile(
+        safe_tar, "empty.txt", tar_limited_single_path, {
+            max_total_size = 15,
+        })
+    ok_fail("archive.extractFile TAR applies limits to the whole archive",
+        tar_limited_single, tar_limited_single_err)
+    ok("limited TAR extractFile creates no output",
+        babet.fileExists(tar_limited_single_path) == false)
+
+    local tar_sparse_path = root .. "/tar-single-sparse.bin"
+    local tar_sparse, tar_sparse_err = babet.archive.extractFile(
+        sparse_tar, "sparse.bin", tar_sparse_path)
+    ok_fail("archive.extractFile TAR refuses a selected sparse file",
+        tar_sparse, tar_sparse_err)
+    ok("selected sparse TAR extractFile creates no output",
+        babet.fileExists(tar_sparse_path) == false)
+
+    local sparse_then_safe_tar = root .. "/sparse-then-safe.tar"
+    assert(write_bytes(sparse_then_safe_tar,
+        assert(read_bytes(sparse_tar)) .. assert(read_bytes(concat_second))))
+    local after_sparse_path = root .. "/tar-single-after-sparse.txt"
+    local after_sparse, after_sparse_err = babet.archive.extractFile(
+        sparse_then_safe_tar, "second.txt", after_sparse_path)
+    ok_val("archive.extractFile TAR skips an unrelated sparse member safely",
+        after_sparse, after_sparse_err,
+        function(value) return value.bytes == 6 end)
+    ok("archive.extractFile TAR reads a selected concatenated member",
+        read_bytes(after_sparse_path) == "second")
+
+    local tar_compressed_single_path = root .. "/tar-single-compressed"
+    local tar_compressed_single, tar_compressed_single_err =
+        babet.archive.extractFile(
+            compressed_tar, "anything", tar_compressed_single_path)
+    ok_fail("archive.extractFile reports a missing entry in an empty gzip TAR",
+        tar_compressed_single, tar_compressed_single_err)
+    ok("missing gzip TAR extractFile creates no output",
+        babet.fileExists(tar_compressed_single_path) == false)
+
+    local tar_truncated_single_path = root .. "/tar-single-truncated"
+    local tar_truncated_single, tar_truncated_single_err =
+        babet.archive.extractFile(
+            truncated_tar, "truncated.bin", tar_truncated_single_path)
+    ok_fail("archive.extractFile rejects truncated TAR before publication",
+        tar_truncated_single, tar_truncated_single_err)
+    ok("truncated TAR extractFile creates no output",
+        babet.fileExists(tar_truncated_single_path) == false)
+
+    local tar_link_single_path = root .. "/tar-single-linked-source.txt"
+    local tar_link_single, tar_link_single_err = babet.archive.extractFile(
+        linked_safe_tar, "dir/hello.txt", tar_link_single_path)
+    ok_val("archive.extractFile follows a symlink to a regular TAR",
+        tar_link_single, tar_link_single_err,
+        function(value) return value.bytes == 8 end)
+    ok("archive.extractFile linked TAR source content",
+        read_bytes(tar_link_single_path) == "bonjour\n")
+
+    local tar_single_target = root .. "/tar-single-target.txt"
+    assert(write_bytes(tar_single_target, "outside"))
+    local tar_single_link = root .. "/tar-single-link.txt"
+    local tar_single_linked = babet.exec(
+        "ln", { "-s", "tar-single-target.txt", tar_single_link })
+    ok("TAR extractFile destination symlink fixture created",
+        type(tar_single_linked) == "table" and tar_single_linked.code == 0)
+    local tar_link_attack, tar_link_attack_err = babet.archive.extractFile(
+        safe_tar, "dir/hello.txt", tar_single_link, { overwrite = true })
+    ok_fail("archive.extractFile TAR refuses a symlink destination",
+        tar_link_attack, tar_link_attack_err)
+    ok("TAR extractFile symlink target remains unchanged",
+        read_bytes(tar_single_target) == "outside")
+
+    local tar_extract_file_worker_path = root .. "/tar-single-worker.txt"
+    local tar_extract_file_worker, tar_extract_file_worker_err =
+        babet.workers.spawn([[
+local result, err = babet.archive.extractFile(
+    worker.args.archive, worker.args.entry, worker.args.destination)
+if not result then error(err) end
+return result
+]], {
+            archive = safe_tar,
+            entry = "dir/hello.txt",
+            destination = tar_extract_file_worker_path,
+        })
+    ok("archive.extractFile TAR starts in a worker",
+        tar_extract_file_worker ~= nil and tar_extract_file_worker_err == nil,
+        tostring(tar_extract_file_worker_err))
+    if tar_extract_file_worker then
+        local joined, value = tar_extract_file_worker:join()
+        ok("archive.extractFile TAR succeeds in a worker",
+            joined == true and type(value) == "table"
+            and value.bytes == 8 and value.entry == "dir/hello.txt",
+            inspect(value))
+        ok("archive.extractFile TAR worker publishes expected data",
+            read_bytes(tar_extract_file_worker_path) == "bonjour\n")
+    end
+    end)()
+
     local empty_zip = root .. "/empty.zip"
     assert(make_zip(empty_zip, {}))
     local empty_list, empty_list_err = babet.archive.list(empty_zip)
     ok_val("archive.list(empty ZIP)", empty_list, empty_list_err,
         function(value)
-            return value.count == 0 and value.total_size == 0
+            return value.format == "zip" and value.compression == "none"
+                and value.count == 0 and value.total_size == 0
                 and #value.entries == 0 and value.zip64 == false
         end)
     local empty_out = root .. "/empty-out"
@@ -10996,6 +12123,8 @@ do
     ok_val("archive.list(valid)", listed, list_err, function(value)
         return type(value) == "table"
             and type(value.entries) == "table"
+            and value.format == "zip"
+            and value.compression == "none"
             and value.count == 5
             and value.total_size == 4108
             and value.archive_size == babet.fileSize(valid_zip)
@@ -11630,6 +12759,8 @@ return result.files
             return value.files == 3 and value.directories == 2
                 and value.bytes == 6 + 5 + #(string.rep("compress-me-", 2048))
                 and value.path == created_zip
+                and value.format == "zip"
+                and value.compression == "none"
                 and value.compression_level == 6
                 and value.deterministic == true
         end)
@@ -11678,6 +12809,1322 @@ return result.files
         read_bytes(create_roundtrip .. "/nested/binary.bin") == "A\0B\255C")
     ok("archive.create round-trip preserves empty directories",
         babet.isDir(create_roundtrip .. "/nested/empty") == true)
+
+    -- archive.create TAR (lot 4) --------------------------------------
+    do
+        local created_tar = root .. "/created.tar"
+        local tar_created, tar_created_err = babet.archive.create(
+            create_source, created_tar)
+        ok_val("archive.create infers uncompressed TAR from .tar",
+            tar_created, tar_created_err, function(value)
+                return value.files == 3 and value.directories == 2
+                    and value.bytes == 6 + 5 + #(string.rep("compress-me-", 2048))
+                    and value.path == created_tar
+                    and value.format == "tar"
+                    and value.compression == "none"
+                    and value.compression_level == nil
+                    and value.deterministic == true
+            end)
+        ok("archive.create TAR publishes the destination",
+            babet.isFile(created_tar) == true)
+        local created_tar_mode, created_tar_mode_err = babet.getMode(created_tar)
+        ok("archive.create TAR publishes with mode 0644",
+            created_tar_mode == tonumber("644", 8) and created_tar_mode_err == nil,
+            tostring(created_tar_mode_err))
+
+        local created_tar_list, created_tar_list_err = babet.archive.list(created_tar)
+        ok_val("archive.create TAR output is readable by archive.list",
+            created_tar_list, created_tar_list_err,
+            function(value)
+                return value.format == "tar" and value.compression == "none"
+                    and value.count == 5
+            end)
+        ok("archive.create TAR orders entries deterministically",
+            created_tar_list
+            and created_tar_list.entries[1].name == "alpha.txt"
+            and created_tar_list.entries[2].name == "nested/"
+            and created_tar_list.entries[3].name == "nested/binary.bin"
+            and created_tar_list.entries[4].name == "nested/empty/"
+            and created_tar_list.entries[5].name == "nested/repeated.txt")
+        ok("archive.create TAR writes safe portable permission metadata",
+            created_tar_list
+            and created_tar_list.entries[1].unix_mode == tonumber("644", 8)
+            and created_tar_list.entries[2].unix_mode == tonumber("755", 8))
+
+        local tar_roundtrip = root .. "/tar-create-roundtrip"
+        local tar_roundtrip_result, tar_roundtrip_err = babet.archive.extract(
+            created_tar, tar_roundtrip)
+        ok_val("archive.create TAR output extracts successfully",
+            tar_roundtrip_result, tar_roundtrip_err)
+        ok("archive.create TAR round-trip preserves text",
+            read_bytes(tar_roundtrip .. "/alpha.txt") == "alpha\n")
+        ok("archive.create TAR round-trip preserves binary bytes",
+            read_bytes(tar_roundtrip .. "/nested/binary.bin") == "A\0B\255C")
+        ok("archive.create TAR round-trip preserves empty directories",
+            babet.isDir(tar_roundtrip .. "/nested/empty") == true)
+
+        local tar_deterministic_a = root .. "/deterministic-a.tar"
+        local tar_deterministic_b = root .. "/deterministic-b.tar"
+        local tda, tda_err = babet.archive.create(create_source, tar_deterministic_a)
+        local tdb, tdb_err = babet.archive.create(create_source, tar_deterministic_b)
+        ok_val("archive.create TAR deterministic fixture A", tda, tda_err)
+        ok_val("archive.create TAR deterministic fixture B", tdb, tdb_err)
+        ok("archive.create TAR is byte-for-byte deterministic by default",
+            read_bytes(tar_deterministic_a) == read_bytes(tar_deterministic_b))
+
+        local function raw_tar_mtime(path)
+            local raw = read_bytes(path)
+            if not raw or #raw < 148 then return nil end
+            local field = raw:sub(137, 148):gsub("%z.*", ""):gsub(" ", "")
+            if field == "" then return 0 end
+            return tonumber(field, 8)
+        end
+        ok("archive.create TAR deterministic timestamp is Unix epoch zero",
+            raw_tar_mtime(created_tar) == 0,
+            tostring(raw_tar_mtime(created_tar)))
+
+        local tar_timestamp_source = root .. "/tar-timestamp-source"
+        assert(babet.mkdir(tar_timestamp_source))
+        assert(write_bytes(tar_timestamp_source .. "/stamp.txt", "timestamp"))
+        local tar_timestamp_set = babet.exec("touch", {
+            "-m", "-t", "200102030405.06", tar_timestamp_source .. "/stamp.txt",
+        })
+        ok("archive.create TAR source timestamp fixture created",
+            type(tar_timestamp_set) == "table" and tar_timestamp_set.code == 0,
+            tar_timestamp_set and tar_timestamp_set.stderr)
+        local tar_stat = babet.exec("stat", {
+            "-c", "%Y", tar_timestamp_source .. "/stamp.txt",
+        })
+        local tar_expected_mtime = tar_stat and tonumber(tar_stat.stdout)
+        local nondeterministic_tar = root .. "/nondeterministic.tar"
+        local ntar, ntar_err = babet.archive.create(
+            tar_timestamp_source, nondeterministic_tar,
+            { deterministic = false })
+        ok_val("archive.create TAR accepts deterministic=false",
+            ntar, ntar_err,
+            function(value)
+                return value.format == "tar" and value.deterministic == false
+            end)
+        ok("archive.create TAR deterministic=false stores source mtime",
+            tar_expected_mtime ~= nil
+            and raw_tar_mtime(nondeterministic_tar) == tar_expected_mtime,
+            string.format("actual=%s expected=%s",
+                tostring(raw_tar_mtime(nondeterministic_tar)),
+                tostring(tar_expected_mtime)))
+
+        local tar_old_source = root .. "/tar-old-source"
+        assert(babet.mkdir(tar_old_source))
+        assert(write_bytes(tar_old_source .. "/old.txt", "old"))
+        local tar_old_set = babet.exec("touch", {
+            "-m", "-d", "@0", tar_old_source .. "/old.txt",
+        })
+        ok("archive.create TAR pre-1980 timestamp fixture created",
+            type(tar_old_set) == "table" and tar_old_set.code == 0,
+            tar_old_set and tar_old_set.stderr)
+        local tar_old_result, tar_old_err = babet.archive.create(
+            tar_old_source, root .. "/old-timestamp.tar",
+            { deterministic = false })
+        ok_val("archive.create TAR accepts timestamps outside the ZIP DOS range",
+            tar_old_result, tar_old_err)
+        ok("archive.create TAR preserves the 1970 timestamp",
+            raw_tar_mtime(root .. "/old-timestamp.tar") == 0,
+            tostring(raw_tar_mtime(root .. "/old-timestamp.tar")))
+
+        local tar_without_dirs = root .. "/without-directories.tar"
+        local tar_no_dirs, tar_no_dirs_err = babet.archive.create(
+            create_source, tar_without_dirs, { include_directories = false })
+        ok_val("archive.create TAR include_directories=false",
+            tar_no_dirs, tar_no_dirs_err,
+            function(value)
+                return value.files == 3 and value.directories == 0
+            end)
+        local tar_no_dirs_list = babet.archive.list(tar_without_dirs)
+        ok("archive.create TAR omits explicit directories when requested",
+            tar_no_dirs_list and tar_no_dirs_list.count == 3)
+        local tar_no_dirs_out = root .. "/tar-no-dirs-out"
+        local tar_no_dirs_extract = babet.archive.extract(
+            tar_without_dirs, tar_no_dirs_out)
+        ok("archive.create TAR without directory entries still extracts",
+            tar_no_dirs_extract ~= nil
+            and read_bytes(tar_no_dirs_out .. "/nested/binary.bin") == "A\0B\255C")
+        ok("archive.create TAR cannot represent omitted empty directories",
+            babet.isDir(tar_no_dirs_out .. "/nested/empty") == false)
+
+        local uppercase_tar = root .. "/uppercase.TAR"
+        local uppercase_tar_result, uppercase_tar_err = babet.archive.create(
+            create_source, uppercase_tar)
+        ok_val("archive.create infers TAR from a case-insensitive .tar suffix",
+            uppercase_tar_result, uppercase_tar_err,
+            function(value) return value.format == "tar" end)
+
+        local explicit_tar = root .. "/explicit-format.data"
+        local explicit_tar_result, explicit_tar_err = babet.archive.create(
+            create_source, explicit_tar, { format = "tar" })
+        ok_val("archive.create format='tar' overrides an unknown extension",
+            explicit_tar_result, explicit_tar_err,
+            function(value) return value.format == "tar" end)
+        local explicit_tar_list = babet.archive.list(explicit_tar)
+        ok("archive.create explicit TAR is detected from content",
+            explicit_tar_list and explicit_tar_list.format == "tar")
+
+        local explicit_zip = root .. "/explicit-zip.tar.gz"
+        local explicit_zip_result, explicit_zip_err = babet.archive.create(
+            create_source, explicit_zip, { format = "zip" })
+        ok_val("archive.create format='zip' overrides a compressed TAR-looking extension",
+            explicit_zip_result, explicit_zip_err,
+            function(value) return value.format == "zip" end)
+        local explicit_zip_list = babet.archive.list(explicit_zip)
+        ok("archive.create explicit ZIP is detected from content",
+            explicit_zip_list and explicit_zip_list.format == "zip")
+
+        local legacy_extension = root .. "/legacy-extension.data"
+        local legacy_zip, legacy_zip_err = babet.archive.create(
+            create_source, legacy_extension)
+        ok_val("archive.create keeps ZIP as the fallback for unknown extensions",
+            legacy_zip, legacy_zip_err,
+            function(value) return value.format == "zip" end)
+        local legacy_zip_list = babet.archive.list(legacy_extension)
+        ok("archive.create unknown-extension fallback is a ZIP",
+            legacy_zip_list and legacy_zip_list.format == "zip")
+
+        do
+            local gzip_tar = root .. "/created.tar.gz"
+            local gzip_created, gzip_created_err = babet.archive.create(
+                create_source, gzip_tar)
+            ok_val("archive.create infers gzip TAR from .tar.gz",
+                gzip_created, gzip_created_err, function(value)
+                    return value.files == 3 and value.directories == 2
+                        and value.format == "tar"
+                        and value.compression == "gzip"
+                        and value.compression_level == 6
+                        and value.deterministic == true
+                end)
+            local gzip_raw = read_bytes(gzip_tar)
+            ok("archive.create gzip TAR writes the gzip signature",
+                gzip_raw and gzip_raw:byte(1) == 0x1f
+                and gzip_raw:byte(2) == 0x8b)
+            local gz_mtime_1, gz_mtime_2, gz_mtime_3, gz_mtime_4
+            if gzip_raw then
+                gz_mtime_1, gz_mtime_2, gz_mtime_3, gz_mtime_4 =
+                    gzip_raw:byte(5, 8)
+            end
+            ok("archive.create gzip header omits wall-clock timestamps",
+                gz_mtime_1 == 0 and gz_mtime_2 == 0
+                and gz_mtime_3 == 0 and gz_mtime_4 == 0)
+
+            local gzip_list, gzip_list_err = babet.archive.list(gzip_tar)
+            ok_val("archive.list detects created gzip TAR",
+                gzip_list, gzip_list_err, function(value)
+                    return value.format == "tar"
+                        and value.compression == "gzip"
+                        and value.count == 5
+                        and value.total_size == 6 + 5
+                            + #(string.rep("compress-me-", 2048))
+                        and value.zip64 == nil
+                end)
+            ok("archive.list gzip TAR keeps ZIP-only entry metadata nil",
+                gzip_list and gzip_list.entries[1]
+                and gzip_list.entries[1].compressed_size == nil
+                and gzip_list.entries[1].crc32 == nil
+                and gzip_list.entries[1].compression_method == nil)
+
+            local disguised_gzip = root .. "/gzip-content.data"
+            assert(write_bytes(disguised_gzip, assert(gzip_raw)))
+            local disguised_list, disguised_list_err =
+                babet.archive.list(disguised_gzip)
+            ok_val("archive.list detects gzip TAR independently of extension",
+                disguised_list, disguised_list_err, function(value)
+                    return value.format == "tar"
+                        and value.compression == "gzip"
+                end)
+
+            local tgz_path = root .. "/created-alias.tgz"
+            local tgz_result, tgz_err = babet.archive.create(
+                create_source, tgz_path)
+            ok_val("archive.create infers gzip TAR from .tgz",
+                tgz_result, tgz_err, function(value)
+                    return value.format == "tar"
+                        and value.compression == "gzip"
+                end)
+            local tgz_list = babet.archive.list(tgz_path)
+            ok("archive.create .tgz output is detected as gzip TAR",
+                tgz_list and tgz_list.compression == "gzip")
+
+            local uppercase_tgz = root .. "/uppercase.TAR.GZ"
+            local uppercase_gzip, uppercase_gzip_err = babet.archive.create(
+                create_source, uppercase_tgz)
+            ok_val("archive.create gzip TAR suffix matching is case-insensitive",
+                uppercase_gzip, uppercase_gzip_err,
+                function(value) return value.compression == "gzip" end)
+
+            local explicit_gzip = root .. "/explicit-gzip.data"
+            local explicit_gzip_result, explicit_gzip_err =
+                babet.archive.create(create_source, explicit_gzip, {
+                    format = "tar.gz",
+                    compression_level = 9,
+                })
+            ok_val("archive.create format='tar.gz' overrides extension",
+                explicit_gzip_result, explicit_gzip_err, function(value)
+                    return value.format == "tar"
+                        and value.compression == "gzip"
+                        and value.compression_level == 9
+                end)
+            local explicit_gzip_list = babet.archive.list(explicit_gzip)
+            ok("archive.create explicit gzip TAR is detected from content",
+                explicit_gzip_list
+                and explicit_gzip_list.compression == "gzip")
+
+            local explicit_plain_tgz = root .. "/explicit-plain.tgz"
+            local explicit_plain_result, explicit_plain_err =
+                babet.archive.create(create_source, explicit_plain_tgz, {
+                    format = "tar",
+                })
+            ok_val("archive.create format='tar' overrides a .tgz suffix",
+                explicit_plain_result, explicit_plain_err,
+                function(value) return value.compression == "none" end)
+            local explicit_plain_list = babet.archive.list(explicit_plain_tgz)
+            ok("explicit uncompressed TAR is detected from content",
+                explicit_plain_list
+                and explicit_plain_list.compression == "none")
+
+            local gzip_deterministic_a = root .. "/gzip-deterministic-a.tar.gz"
+            local gzip_deterministic_b = root .. "/gzip-deterministic-b.tar.gz"
+            local gda, gda_err = babet.archive.create(
+                create_source, gzip_deterministic_a)
+            local gdb, gdb_err = babet.archive.create(
+                create_source, gzip_deterministic_b)
+            ok_val("archive.create gzip deterministic fixture A", gda, gda_err)
+            ok_val("archive.create gzip deterministic fixture B", gdb, gdb_err)
+            ok("archive.create gzip TAR is byte-for-byte deterministic",
+                read_bytes(gzip_deterministic_a)
+                    == read_bytes(gzip_deterministic_b))
+
+            local concatenated_gzip = root .. "/concatenated-gzip.tar.gz"
+            assert(write_bytes(concatenated_gzip,
+                assert(read_bytes(gzip_deterministic_a))
+                    .. assert(read_bytes(gzip_deterministic_b))))
+            local concatenated_gzip_list, concatenated_gzip_list_err =
+                babet.archive.list(concatenated_gzip)
+            ok_val("archive.list traverses concatenated gzip members and TAR streams",
+                concatenated_gzip_list, concatenated_gzip_list_err,
+                function(value)
+                    return value.compression == "gzip" and value.count == 10
+                end)
+            local concatenated_gzip_out = root .. "/concatenated-gzip-out"
+            local concatenated_gzip_extract, concatenated_gzip_extract_err =
+                babet.archive.extract(
+                    concatenated_gzip, concatenated_gzip_out)
+            ok_fail("archive.extract rejects duplicate paths across concatenated gzip TAR streams",
+                concatenated_gzip_extract, concatenated_gzip_extract_err)
+            ok("concatenated gzip duplicate refusal creates no destination",
+                babet.fileExists(concatenated_gzip_out) == false)
+
+            local gzip_stored = root .. "/gzip-level-zero.tar.gz"
+            local gzip_stored_result, gzip_stored_err = babet.archive.create(
+                create_source, gzip_stored, { compression_level = 0 })
+            ok_val("archive.create gzip accepts compression_level=0",
+                gzip_stored_result, gzip_stored_err,
+                function(value) return value.compression_level == 0 end)
+            ok("archive.create gzip level zero remains readable",
+                babet.archive.list(gzip_stored) ~= nil)
+
+            local gzip_roundtrip = root .. "/gzip-roundtrip"
+            local gzip_extract, gzip_extract_err = babet.archive.extract(
+                gzip_tar, gzip_roundtrip)
+            ok_val("archive.extract extracts a gzip TAR",
+                gzip_extract, gzip_extract_err, function(value)
+                    return value.files == 3 and value.directories == 2
+                end)
+            ok("archive.extract gzip TAR preserves text and binary data",
+                read_bytes(gzip_roundtrip .. "/alpha.txt") == "alpha\n"
+                and read_bytes(gzip_roundtrip .. "/nested/binary.bin")
+                    == "A\0B\255C")
+            ok("archive.extract gzip TAR preserves empty directories",
+                babet.isDir(gzip_roundtrip .. "/nested/empty") == true)
+
+            local gzip_single = root .. "/gzip-single.bin"
+            local gzip_single_result, gzip_single_err =
+                babet.archive.extractFile(
+                    gzip_tar, "nested/binary.bin", gzip_single)
+            ok_val("archive.extractFile extracts from a gzip TAR",
+                gzip_single_result, gzip_single_err,
+                function(value) return value.bytes == 5 end)
+            ok("archive.extractFile gzip TAR is binary-safe",
+                read_bytes(gzip_single) == "A\0B\255C")
+
+            local gzip_ratio_source = root .. "/gzip-ratio-source"
+            assert(babet.mkdir(gzip_ratio_source))
+            assert(write_bytes(gzip_ratio_source .. "/large.txt",
+                string.rep("A", 256 * 1024)))
+            local gzip_ratio_archive = root .. "/gzip-ratio.tar.gz"
+            assert(babet.archive.create(
+                gzip_ratio_source, gzip_ratio_archive,
+                { compression_level = 9 }))
+            ok("archive.list gzip TAR accepts the default ratio limit",
+                babet.archive.list(gzip_ratio_archive) ~= nil)
+            local gzip_ratio_rejected, gzip_ratio_rejected_err =
+                babet.archive.list(gzip_ratio_archive, {
+                    max_compression_ratio = 2,
+                })
+            ok_fail("archive.list gzip TAR enforces max_compression_ratio",
+                gzip_ratio_rejected, gzip_ratio_rejected_err)
+            local gzip_ratio_out = root .. "/gzip-ratio-out"
+            local gzip_ratio_extract, gzip_ratio_extract_err =
+                babet.archive.extract(gzip_ratio_archive, gzip_ratio_out, {
+                    max_compression_ratio = 2,
+                })
+            ok_fail("archive.extract gzip TAR applies ratio limits before writing",
+                gzip_ratio_extract, gzip_ratio_extract_err)
+            ok("gzip ratio refusal creates no destination",
+                babet.fileExists(gzip_ratio_out) == false)
+            local gzip_ratio_single = root .. "/gzip-ratio-single"
+            local gzip_ratio_file, gzip_ratio_file_err =
+                babet.archive.extractFile(
+                    gzip_ratio_archive, "large.txt", gzip_ratio_single, {
+                        max_compression_ratio = 2,
+                    })
+            ok_fail("archive.extractFile gzip TAR applies ratio limits to the whole archive",
+                gzip_ratio_file, gzip_ratio_file_err)
+            ok("gzip ratio extractFile refusal creates no output",
+                babet.fileExists(gzip_ratio_single) == false)
+
+            local padded_gzip = root .. "/padded.tar.gz"
+            assert(write_bytes(padded_gzip, gzip_raw .. string.rep("\0", 32)))
+            local padded_gzip_list, padded_gzip_err =
+                babet.archive.list(padded_gzip)
+            ok_val("archive.list accepts standard zero padding after a gzip member",
+                padded_gzip_list, padded_gzip_err,
+                function(value) return value.compression == "gzip" end)
+
+            local trailing_gzip = root .. "/trailing-garbage.tar.gz"
+            assert(write_bytes(trailing_gzip, gzip_raw .. "X"))
+            local trailing_gzip_list, trailing_gzip_err =
+                babet.archive.list(trailing_gzip)
+            ok_fail("archive.list rejects non-gzip trailing data after a gzip member",
+                trailing_gzip_list, trailing_gzip_err)
+
+            local corrupt_gzip = root .. "/corrupt.tar.gz"
+            local crc_position = #gzip_raw - 7
+            local corrupted = gzip_raw:sub(1, crc_position - 1)
+                .. string.char(gzip_raw:byte(crc_position) ~ 1)
+                .. gzip_raw:sub(crc_position + 1)
+            assert(write_bytes(corrupt_gzip, corrupted))
+            local corrupt_gzip_list, corrupt_gzip_list_err =
+                babet.archive.list(corrupt_gzip)
+            ok_fail("archive.list rejects a gzip TAR with a corrupt trailer",
+                corrupt_gzip_list, corrupt_gzip_list_err)
+            local corrupt_gzip_out = root .. "/corrupt-gzip-out"
+            local corrupt_gzip_extract, corrupt_gzip_extract_err =
+                babet.archive.extract(corrupt_gzip, corrupt_gzip_out)
+            ok_fail("archive.extract rejects corrupt gzip before publication",
+                corrupt_gzip_extract, corrupt_gzip_extract_err)
+            ok("corrupt gzip extraction creates no destination",
+                babet.fileExists(corrupt_gzip_out) == false)
+            local corrupt_gzip_single = root .. "/corrupt-gzip-single"
+            local corrupt_gzip_file, corrupt_gzip_file_err =
+                babet.archive.extractFile(
+                    corrupt_gzip, "alpha.txt", corrupt_gzip_single)
+            ok_fail("archive.extractFile rejects corrupt gzip before publication",
+                corrupt_gzip_file, corrupt_gzip_file_err)
+            ok("corrupt gzip extractFile creates no output",
+                babet.fileExists(corrupt_gzip_single) == false)
+
+            local gzip_worker_code = [[
+    local created, create_err = babet.archive.create(
+        worker.args.source, worker.args.archive,
+        { format = "tar.gz" })
+    if not created then error(create_err) end
+    local listed, list_err = babet.archive.list(worker.args.archive)
+    if not listed then error(list_err) end
+    local extracted, extract_err = babet.archive.extractFile(
+        worker.args.archive, "alpha.txt", worker.args.output)
+    if not extracted then error(extract_err) end
+    return listed.compression
+    ]]
+            local gzip_worker = babet.workers.spawn(gzip_worker_code, {
+                source = create_source,
+                archive = root .. "/worker.tar.gz",
+                output = root .. "/worker-gzip-alpha.txt",
+            })
+            ok("gzip TAR operations start in a worker", gzip_worker ~= nil)
+            local gzip_worker_ok, gzip_worker_compression = false, nil
+            if gzip_worker then
+                gzip_worker_ok, gzip_worker_compression = gzip_worker:join()
+            end
+            ok("gzip TAR operations succeed in a worker",
+                gzip_worker_ok == true
+                and gzip_worker_compression == "gzip")
+            ok("gzip TAR worker publishes expected data",
+                read_bytes(root .. "/worker-gzip-alpha.txt") == "alpha\n");
+
+            -- Keep the separator: the next parenthesized function is a new
+            -- statement, not a call on the nil result returned by ok().
+            (function()
+                local xz_tar = root .. "/created.tar.xz"
+                local xz_created, xz_created_err = babet.archive.create(
+                    create_source, xz_tar)
+                ok_val("archive.create infers xz TAR from .tar.xz",
+                    xz_created, xz_created_err, function(value)
+                        return value.files == 3 and value.directories == 2
+                            and value.format == "tar"
+                            and value.compression == "xz"
+                            and value.compression_level == 6
+                            and value.deterministic == true
+                    end)
+                local xz_raw = read_bytes(xz_tar)
+                ok("archive.create xz TAR writes the xz signature",
+                    xz_raw and xz_raw:sub(1, 6) == string.char(0xFD) .. "7zXZ\0")
+
+                local xz_list, xz_list_err = babet.archive.list(xz_tar)
+                ok_val("archive.list detects created xz TAR",
+                    xz_list, xz_list_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "xz"
+                            and value.count == 5
+                            and value.total_size == 6 + 5
+                                + #(string.rep("compress-me-", 2048))
+                    end)
+                ok("archive.list xz TAR keeps ZIP-only metadata nil",
+                    xz_list and xz_list.entries[1]
+                    and xz_list.entries[1].compressed_size == nil
+                    and xz_list.entries[1].crc32 == nil
+                    and xz_list.entries[1].compression_method == nil)
+
+                local disguised_xz = root .. "/xz-content.data"
+                assert(write_bytes(disguised_xz, assert(xz_raw)))
+                local disguised_xz_list, disguised_xz_err =
+                    babet.archive.list(disguised_xz)
+                ok_val("archive.list detects xz TAR independently of extension",
+                    disguised_xz_list, disguised_xz_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "xz"
+                    end)
+
+                local txz_path = root .. "/created-alias.txz"
+                local txz_result, txz_err = babet.archive.create(
+                    create_source, txz_path)
+                ok_val("archive.create infers xz TAR from .txz",
+                    txz_result, txz_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "xz"
+                    end)
+                local txz_list = babet.archive.list(txz_path)
+                ok("archive.create .txz output is detected as xz TAR",
+                    txz_list and txz_list.compression == "xz")
+
+                local uppercase_xz = root .. "/uppercase.TAR.XZ"
+                local uppercase_xz_result, uppercase_xz_err =
+                    babet.archive.create(create_source, uppercase_xz)
+                ok_val("archive.create xz suffix matching is case-insensitive",
+                    uppercase_xz_result, uppercase_xz_err,
+                    function(value) return value.compression == "xz" end)
+
+                local explicit_xz = root .. "/explicit-xz.data"
+                local explicit_xz_result, explicit_xz_err =
+                    babet.archive.create(create_source, explicit_xz, {
+                        format = "tar.xz",
+                        compression_level = 9,
+                    })
+                ok_val("archive.create format='tar.xz' overrides extension",
+                    explicit_xz_result, explicit_xz_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "xz"
+                            and value.compression_level == 9
+                    end)
+                local explicit_xz_list = babet.archive.list(explicit_xz)
+                ok("archive.create explicit xz TAR is detected from content",
+                    explicit_xz_list
+                    and explicit_xz_list.compression == "xz")
+
+                local explicit_plain_txz = root .. "/explicit-plain.txz"
+                local explicit_plain_txz_result, explicit_plain_txz_err =
+                    babet.archive.create(create_source, explicit_plain_txz, {
+                        format = "tar",
+                    })
+                ok_val("archive.create format='tar' overrides a .txz suffix",
+                    explicit_plain_txz_result, explicit_plain_txz_err,
+                    function(value) return value.compression == "none" end)
+                local explicit_plain_txz_list =
+                    babet.archive.list(explicit_plain_txz)
+                ok("explicit uncompressed .txz is detected from content",
+                    explicit_plain_txz_list
+                    and explicit_plain_txz_list.compression == "none")
+
+                local xz_deterministic_a = root .. "/xz-deterministic-a.tar.xz"
+                local xz_deterministic_b = root .. "/xz-deterministic-b.tar.xz"
+                local xda, xda_err = babet.archive.create(
+                    create_source, xz_deterministic_a)
+                local xdb, xdb_err = babet.archive.create(
+                    create_source, xz_deterministic_b)
+                ok_val("archive.create xz deterministic fixture A", xda, xda_err)
+                ok_val("archive.create xz deterministic fixture B", xdb, xdb_err)
+                ok("archive.create xz TAR is byte-for-byte deterministic",
+                    read_bytes(xz_deterministic_a)
+                        == read_bytes(xz_deterministic_b))
+
+                local xz_level_zero = root .. "/xz-level-zero.tar.xz"
+                local xz_zero, xz_zero_err = babet.archive.create(
+                    create_source, xz_level_zero,
+                    { compression_level = 0 })
+                ok_val("archive.create xz accepts compression_level=0",
+                    xz_zero, xz_zero_err,
+                    function(value) return value.compression_level == 0 end)
+                ok("archive.create xz level zero remains readable",
+                    babet.archive.list(xz_level_zero) ~= nil)
+
+                local xz_roundtrip = root .. "/xz-roundtrip"
+                local xz_extract, xz_extract_err = babet.archive.extract(
+                    xz_tar, xz_roundtrip)
+                ok_val("archive.extract extracts an xz TAR",
+                    xz_extract, xz_extract_err, function(value)
+                        return value.files == 3 and value.directories == 2
+                    end)
+                ok("archive.extract xz TAR preserves text and binary data",
+                    read_bytes(xz_roundtrip .. "/alpha.txt") == "alpha\n"
+                    and read_bytes(xz_roundtrip .. "/nested/binary.bin")
+                        == "A\0B\255C")
+                ok("archive.extract xz TAR preserves empty directories",
+                    babet.isDir(xz_roundtrip .. "/nested/empty") == true)
+
+                local xz_single = root .. "/xz-single.bin"
+                local xz_single_result, xz_single_err =
+                    babet.archive.extractFile(
+                        xz_tar, "nested/binary.bin", xz_single)
+                ok_val("archive.extractFile extracts from an xz TAR",
+                    xz_single_result, xz_single_err,
+                    function(value) return value.bytes == 5 end)
+                ok("archive.extractFile xz TAR is binary-safe",
+                    read_bytes(xz_single) == "A\0B\255C")
+
+                local xz_ratio_source = root .. "/xz-ratio-source"
+                assert(babet.mkdir(xz_ratio_source))
+                assert(write_bytes(xz_ratio_source .. "/large.txt",
+                    string.rep("A", 16 * 1024)))
+                local xz_ratio_archive = root .. "/xz-ratio.tar.xz"
+                assert(babet.archive.create(
+                    xz_ratio_source, xz_ratio_archive,
+                    { compression_level = 9 }))
+                ok("archive.list xz TAR accepts the default ratio limit",
+                    babet.archive.list(xz_ratio_archive) ~= nil)
+                local xz_ratio_rejected, xz_ratio_rejected_err =
+                    babet.archive.list(xz_ratio_archive, {
+                        max_compression_ratio = 2,
+                    })
+                ok_fail("archive.list xz TAR enforces max_compression_ratio",
+                    xz_ratio_rejected, xz_ratio_rejected_err)
+                local xz_ratio_out = root .. "/xz-ratio-out"
+                local xz_ratio_extract, xz_ratio_extract_err =
+                    babet.archive.extract(xz_ratio_archive, xz_ratio_out, {
+                        max_compression_ratio = 2,
+                    })
+                ok_fail("archive.extract xz TAR applies ratio limits before writing",
+                    xz_ratio_extract, xz_ratio_extract_err)
+                ok("xz ratio refusal creates no destination",
+                    babet.fileExists(xz_ratio_out) == false)
+                local xz_ratio_single = root .. "/xz-ratio-single"
+                local xz_ratio_file, xz_ratio_file_err =
+                    babet.archive.extractFile(
+                        xz_ratio_archive, "large.txt", xz_ratio_single, {
+                            max_compression_ratio = 2,
+                        })
+                ok_fail("archive.extractFile xz TAR applies ratio limits to the whole archive",
+                    xz_ratio_file, xz_ratio_file_err)
+                ok("xz ratio extractFile refusal creates no output",
+                    babet.fileExists(xz_ratio_single) == false)
+
+                local corrupt_xz = root .. "/corrupt.tar.xz"
+                local corrupt_position = math.max(13, #xz_raw // 2)
+                local corrupt_xz_raw = xz_raw:sub(1, corrupt_position - 1)
+                    .. string.char(xz_raw:byte(corrupt_position) ~ 1)
+                    .. xz_raw:sub(corrupt_position + 1)
+                assert(write_bytes(corrupt_xz, corrupt_xz_raw))
+                local corrupt_xz_list, corrupt_xz_list_err =
+                    babet.archive.list(corrupt_xz)
+                ok_fail("archive.list rejects a corrupt xz TAR",
+                    corrupt_xz_list, corrupt_xz_list_err)
+                local corrupt_xz_out = root .. "/corrupt-xz-out"
+                local corrupt_xz_extract, corrupt_xz_extract_err =
+                    babet.archive.extract(corrupt_xz, corrupt_xz_out)
+                ok_fail("archive.extract rejects corrupt xz before publication",
+                    corrupt_xz_extract, corrupt_xz_extract_err)
+                ok("corrupt xz extraction creates no destination",
+                    babet.fileExists(corrupt_xz_out) == false)
+                local corrupt_xz_single = root .. "/corrupt-xz-single"
+                local corrupt_xz_file, corrupt_xz_file_err =
+                    babet.archive.extractFile(
+                        corrupt_xz, "alpha.txt", corrupt_xz_single)
+                ok_fail("archive.extractFile rejects corrupt xz before publication",
+                    corrupt_xz_file, corrupt_xz_file_err)
+                ok("corrupt xz extractFile creates no output",
+                    babet.fileExists(corrupt_xz_single) == false)
+
+                local xz_worker_code = [[
+    local created, create_err = babet.archive.create(
+        worker.args.source, worker.args.archive,
+        { format = "tar.xz" })
+    if not created then error(create_err) end
+    local listed, list_err = babet.archive.list(worker.args.archive)
+    if not listed then error(list_err) end
+    local extracted, extract_err = babet.archive.extractFile(
+        worker.args.archive, "alpha.txt", worker.args.output)
+    if not extracted then error(extract_err) end
+    return listed.compression
+    ]]
+                local xz_worker = babet.workers.spawn(xz_worker_code, {
+                    source = create_source,
+                    archive = root .. "/worker.tar.xz",
+                    output = root .. "/worker-xz-alpha.txt",
+                })
+                ok("xz TAR operations start in a worker", xz_worker ~= nil)
+                local xz_worker_ok, xz_worker_compression = false, nil
+                if xz_worker then
+                    xz_worker_ok, xz_worker_compression = xz_worker:join()
+                end
+                ok("xz TAR operations succeed in a worker",
+                    xz_worker_ok == true
+                    and xz_worker_compression == "xz")
+                ok("xz TAR worker publishes expected data",
+                    read_bytes(root .. "/worker-xz-alpha.txt") == "alpha\n")
+            end)()
+
+            ;(function()
+                local bzip2_tar = root .. "/created.tar.bz2"
+                local bzip2_created, bzip2_created_err = babet.archive.create(
+                    create_source, bzip2_tar)
+                ok_val("archive.create infers bzip2 TAR from .tar.bz2",
+                    bzip2_created, bzip2_created_err, function(value)
+                        return value.files == 3 and value.directories == 2
+                            and value.format == "tar"
+                            and value.compression == "bzip2"
+                            and value.compression_level == 6
+                            and value.deterministic == true
+                    end)
+                local bzip2_raw = read_bytes(bzip2_tar)
+                ok("archive.create bzip2 TAR writes the BZh signature",
+                    bzip2_raw and bzip2_raw:sub(1, 3) == "BZh")
+
+                local bzip2_list, bzip2_list_err =
+                    babet.archive.list(bzip2_tar)
+                ok_val("archive.list detects created bzip2 TAR",
+                    bzip2_list, bzip2_list_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "bzip2"
+                            and value.count == 5
+                            and value.total_size == 6 + 5
+                                + #(string.rep("compress-me-", 2048))
+                    end)
+                ok("archive.list bzip2 TAR keeps ZIP-only metadata nil",
+                    bzip2_list and bzip2_list.entries[1]
+                    and bzip2_list.entries[1].compressed_size == nil
+                    and bzip2_list.entries[1].crc32 == nil
+                    and bzip2_list.entries[1].compression_method == nil)
+
+                local disguised_bzip2 = root .. "/bzip2-content.data"
+                assert(write_bytes(disguised_bzip2, assert(bzip2_raw)))
+                local disguised_bzip2_list, disguised_bzip2_err =
+                    babet.archive.list(disguised_bzip2)
+                ok_val("archive.list detects bzip2 TAR independently of extension",
+                    disguised_bzip2_list, disguised_bzip2_err,
+                    function(value)
+                        return value.format == "tar"
+                            and value.compression == "bzip2"
+                    end)
+
+                local tbz2_path = root .. "/created-alias.tbz2"
+                local tbz2_result, tbz2_err = babet.archive.create(
+                    create_source, tbz2_path)
+                ok_val("archive.create infers bzip2 TAR from .tbz2",
+                    tbz2_result, tbz2_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "bzip2"
+                    end)
+                local tbz2_list = babet.archive.list(tbz2_path)
+                ok("archive.create .tbz2 output is detected as bzip2 TAR",
+                    tbz2_list and tbz2_list.compression == "bzip2")
+
+                local tbz_path = root .. "/created-short-alias.tbz"
+                local tbz_result, tbz_err = babet.archive.create(
+                    create_source, tbz_path)
+                ok_val("archive.create infers bzip2 TAR from .tbz",
+                    tbz_result, tbz_err, function(value)
+                        return value.compression == "bzip2"
+                    end)
+
+                local uppercase_bzip2 = root .. "/uppercase.TAR.BZ2"
+                local uppercase_bzip2_result, uppercase_bzip2_err =
+                    babet.archive.create(create_source, uppercase_bzip2)
+                ok_val("archive.create bzip2 suffix matching is case-insensitive",
+                    uppercase_bzip2_result, uppercase_bzip2_err,
+                    function(value) return value.compression == "bzip2" end)
+
+                local explicit_bzip2 = root .. "/explicit-bzip2.data"
+                local explicit_bzip2_result, explicit_bzip2_err =
+                    babet.archive.create(create_source, explicit_bzip2, {
+                        format = "tar.bz2",
+                        compression_level = 9,
+                    })
+                ok_val("archive.create format='tar.bz2' overrides extension",
+                    explicit_bzip2_result, explicit_bzip2_err,
+                    function(value)
+                        return value.format == "tar"
+                            and value.compression == "bzip2"
+                            and value.compression_level == 9
+                    end)
+                local explicit_bzip2_list =
+                    babet.archive.list(explicit_bzip2)
+                ok("archive.create explicit bzip2 TAR is detected from content",
+                    explicit_bzip2_list
+                    and explicit_bzip2_list.compression == "bzip2")
+
+                local explicit_plain_tbz2 = root .. "/explicit-plain.tbz2"
+                local explicit_plain_tbz2_result, explicit_plain_tbz2_err =
+                    babet.archive.create(create_source, explicit_plain_tbz2, {
+                        format = "tar",
+                    })
+                ok_val("archive.create format='tar' overrides a .tbz2 suffix",
+                    explicit_plain_tbz2_result, explicit_plain_tbz2_err,
+                    function(value) return value.compression == "none" end)
+                local explicit_plain_tbz2_list =
+                    babet.archive.list(explicit_plain_tbz2)
+                ok("explicit uncompressed .tbz2 is detected from content",
+                    explicit_plain_tbz2_list
+                    and explicit_plain_tbz2_list.compression == "none")
+
+                local bzip2_deterministic_a =
+                    root .. "/bzip2-deterministic-a.tar.bz2"
+                local bzip2_deterministic_b =
+                    root .. "/bzip2-deterministic-b.tar.bz2"
+                local bda, bda_err = babet.archive.create(
+                    create_source, bzip2_deterministic_a)
+                local bdb, bdb_err = babet.archive.create(
+                    create_source, bzip2_deterministic_b)
+                ok_val("archive.create bzip2 deterministic fixture A",
+                    bda, bda_err)
+                ok_val("archive.create bzip2 deterministic fixture B",
+                    bdb, bdb_err)
+                ok("archive.create bzip2 TAR is byte-for-byte deterministic",
+                    read_bytes(bzip2_deterministic_a)
+                        == read_bytes(bzip2_deterministic_b))
+
+                local bzip2_level_one = root .. "/bzip2-level-one.tar.bz2"
+                local bzip2_one, bzip2_one_err = babet.archive.create(
+                    create_source, bzip2_level_one,
+                    { compression_level = 1 })
+                ok_val("archive.create bzip2 accepts compression_level=1",
+                    bzip2_one, bzip2_one_err,
+                    function(value) return value.compression_level == 1 end)
+                ok("archive.create bzip2 level one remains readable",
+                    babet.archive.list(bzip2_level_one) ~= nil)
+
+                local bzip2_zero, bzip2_zero_err = babet.archive.create(
+                    create_source, root .. "/bzip2-level-zero.tar.bz2",
+                    { compression_level = 0 })
+                ok_fail("archive.create bzip2 rejects compression_level=0",
+                    bzip2_zero, bzip2_zero_err)
+
+                local bzip2_out = root .. "/bzip2-out"
+                local bzip2_extract, bzip2_extract_err =
+                    babet.archive.extract(bzip2_tar, bzip2_out)
+                ok_val("archive.extract extracts a bzip2 TAR",
+                    bzip2_extract, bzip2_extract_err)
+                ok("archive.extract bzip2 TAR preserves text and binary data",
+                    read_bytes(bzip2_out .. "/alpha.txt") == "alpha\n"
+                    and read_bytes(bzip2_out .. "/nested/binary.bin")
+                        == "A\0B\255C")
+                ok("archive.extract bzip2 TAR preserves empty directories",
+                    babet.isDir(bzip2_out .. "/nested/empty") == true)
+
+                local bzip2_single = root .. "/bzip2-single.bin"
+                local bzip2_file, bzip2_file_err = babet.archive.extractFile(
+                    bzip2_tar, "nested/binary.bin", bzip2_single)
+                ok_val("archive.extractFile extracts from a bzip2 TAR",
+                    bzip2_file, bzip2_file_err)
+                ok("archive.extractFile bzip2 TAR is binary-safe",
+                    read_bytes(bzip2_single) == "A\0B\255C")
+
+                local ratio_source = root .. "/bzip2-ratio-source"
+                assert(babet.mkdir(ratio_source))
+                assert(write_bytes(ratio_source .. "/ratio.txt",
+                    string.rep("A", 16 * 1024)))
+                local ratio_archive = root .. "/bzip2-ratio.tar.bz2"
+                local ratio_created, ratio_created_err =
+                    babet.archive.create(ratio_source, ratio_archive, {
+                        compression_level = 9,
+                    })
+                ok_val("archive.create bzip2 ratio fixture",
+                    ratio_created, ratio_created_err)
+                local ratio_default, ratio_default_err =
+                    babet.archive.list(ratio_archive)
+                ok_val("archive.list bzip2 TAR accepts the default ratio limit",
+                    ratio_default, ratio_default_err)
+                local ratio_limited, ratio_limited_err =
+                    babet.archive.list(ratio_archive, {
+                        max_compression_ratio = 2,
+                    })
+                ok_fail("archive.list bzip2 TAR enforces max_compression_ratio",
+                    ratio_limited, ratio_limited_err)
+                local ratio_out = root .. "/bzip2-ratio-out"
+                local ratio_extract, ratio_extract_err =
+                    babet.archive.extract(ratio_archive, ratio_out, {
+                        max_compression_ratio = 2,
+                    })
+                ok_fail("archive.extract bzip2 TAR applies ratio limits before writing",
+                    ratio_extract, ratio_extract_err)
+                ok("bzip2 ratio refusal creates no destination",
+                    babet.fileExists(ratio_out) == false)
+                local ratio_single = root .. "/bzip2-ratio-single"
+                local ratio_file, ratio_file_err =
+                    babet.archive.extractFile(
+                        ratio_archive, "ratio.txt", ratio_single, {
+                            max_compression_ratio = 2,
+                        })
+                ok_fail("archive.extractFile bzip2 TAR applies ratio limits to the whole archive",
+                    ratio_file, ratio_file_err)
+                ok("bzip2 ratio extractFile refusal creates no output",
+                    babet.fileExists(ratio_single) == false)
+
+                local corrupt_bzip2 = root .. "/corrupt.tar.bz2"
+                local corrupt_position = 20
+                local corrupt_bzip2_raw = bzip2_raw:sub(1, corrupt_position - 1)
+                    .. string.char(bzip2_raw:byte(corrupt_position) ~ 1)
+                    .. bzip2_raw:sub(corrupt_position + 1)
+                assert(write_bytes(corrupt_bzip2, corrupt_bzip2_raw))
+                local corrupt_bzip2_list, corrupt_bzip2_list_err =
+                    babet.archive.list(corrupt_bzip2)
+                ok_fail("archive.list rejects a corrupt bzip2 TAR",
+                    corrupt_bzip2_list, corrupt_bzip2_list_err)
+                local corrupt_bzip2_out = root .. "/corrupt-bzip2-out"
+                local corrupt_bzip2_extract, corrupt_bzip2_extract_err =
+                    babet.archive.extract(corrupt_bzip2, corrupt_bzip2_out)
+                ok_fail("archive.extract rejects corrupt bzip2 before publication",
+                    corrupt_bzip2_extract, corrupt_bzip2_extract_err)
+                ok("corrupt bzip2 extraction creates no destination",
+                    babet.fileExists(corrupt_bzip2_out) == false)
+                local corrupt_bzip2_single =
+                    root .. "/corrupt-bzip2-single"
+                local corrupt_bzip2_file, corrupt_bzip2_file_err =
+                    babet.archive.extractFile(
+                        corrupt_bzip2, "alpha.txt", corrupt_bzip2_single)
+                ok_fail("archive.extractFile rejects corrupt bzip2 before publication",
+                    corrupt_bzip2_file, corrupt_bzip2_file_err)
+                ok("corrupt bzip2 extractFile creates no output",
+                    babet.fileExists(corrupt_bzip2_single) == false)
+
+                local bzip2_worker_code = [[
+    local created, create_err = babet.archive.create(
+        worker.args.source, worker.args.archive,
+        { format = "tar.bz2" })
+    if not created then error(create_err) end
+    local listed, list_err = babet.archive.list(worker.args.archive)
+    if not listed then error(list_err) end
+    local extracted, extract_err = babet.archive.extractFile(
+        worker.args.archive, "alpha.txt", worker.args.output)
+    if not extracted then error(extract_err) end
+    return listed.compression
+    ]]
+                local bzip2_worker = babet.workers.spawn(bzip2_worker_code, {
+                    source = create_source,
+                    archive = root .. "/worker.tar.bz2",
+                    output = root .. "/worker-bzip2-alpha.txt",
+                })
+                ok("bzip2 TAR operations start in a worker",
+                    bzip2_worker ~= nil)
+                local bzip2_worker_ok, bzip2_worker_compression = false, nil
+                if bzip2_worker then
+                    bzip2_worker_ok, bzip2_worker_compression =
+                        bzip2_worker:join()
+                end
+                ok("bzip2 TAR operations succeed in a worker",
+                    bzip2_worker_ok == true
+                    and bzip2_worker_compression == "bzip2")
+                ok("bzip2 TAR worker publishes expected data",
+                    read_bytes(root .. "/worker-bzip2-alpha.txt")
+                        == "alpha\n")
+            end)()
+
+            ;(function()
+                local zstd_tar = root .. "/created.tar.zst"
+                local zstd_created, zstd_created_err = babet.archive.create(
+                    create_source, zstd_tar)
+                ok_val("archive.create infers zstd TAR from .tar.zst",
+                    zstd_created, zstd_created_err, function(value)
+                        return value.files == 3 and value.directories == 2
+                            and value.format == "tar"
+                            and value.compression == "zstd"
+                            and value.compression_level == 6
+                            and value.deterministic == true
+                    end)
+                local zstd_raw = read_bytes(zstd_tar)
+                ok("archive.create zstd TAR writes the zstd signature",
+                    zstd_raw and zstd_raw:sub(1, 4)
+                        == string.char(0x28, 0xB5, 0x2F, 0xFD))
+
+                local zstd_list, zstd_list_err =
+                    babet.archive.list(zstd_tar)
+                ok_val("archive.list detects created zstd TAR",
+                    zstd_list, zstd_list_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "zstd"
+                            and value.count == 5
+                            and value.total_size == 6 + 5
+                                + #(string.rep("compress-me-", 2048))
+                    end)
+                ok("archive.list zstd TAR keeps ZIP-only metadata nil",
+                    zstd_list and zstd_list.entries[1]
+                    and zstd_list.entries[1].compressed_size == nil
+                    and zstd_list.entries[1].crc32 == nil
+                    and zstd_list.entries[1].compression_method == nil)
+
+                local disguised_zstd = root .. "/zstd-content.data"
+                assert(write_bytes(disguised_zstd, assert(zstd_raw)))
+                local disguised_zstd_list, disguised_zstd_err =
+                    babet.archive.list(disguised_zstd)
+                ok_val("archive.list detects zstd TAR independently of extension",
+                    disguised_zstd_list, disguised_zstd_err,
+                    function(value)
+                        return value.format == "tar"
+                            and value.compression == "zstd"
+                    end)
+
+                local tzst_path = root .. "/created-alias.tzst"
+                local tzst_result, tzst_err = babet.archive.create(
+                    create_source, tzst_path)
+                ok_val("archive.create infers zstd TAR from .tzst",
+                    tzst_result, tzst_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "zstd"
+                    end)
+                local tzst_list = babet.archive.list(tzst_path)
+                ok("archive.create .tzst output is detected as zstd TAR",
+                    tzst_list and tzst_list.compression == "zstd")
+
+                local tar_zstd_path = root .. "/created-long-alias.tar.zstd"
+                local tar_zstd_result, tar_zstd_err = babet.archive.create(
+                    create_source, tar_zstd_path)
+                ok_val("archive.create infers zstd TAR from .tar.zstd",
+                    tar_zstd_result, tar_zstd_err, function(value)
+                        return value.compression == "zstd"
+                    end)
+
+                local uppercase_zstd = root .. "/uppercase.TAR.ZST"
+                local uppercase_zstd_result, uppercase_zstd_err =
+                    babet.archive.create(create_source, uppercase_zstd)
+                ok_val("archive.create zstd suffix matching is case-insensitive",
+                    uppercase_zstd_result, uppercase_zstd_err,
+                    function(value) return value.compression == "zstd" end)
+
+                local explicit_zstd = root .. "/explicit-zstd.data"
+                local explicit_zstd_result, explicit_zstd_err =
+                    babet.archive.create(create_source, explicit_zstd, {
+                        format = "tar.zst",
+                        compression_level = 19,
+                    })
+                ok_val("archive.create format='tar.zst' overrides extension",
+                    explicit_zstd_result, explicit_zstd_err,
+                    function(value)
+                        return value.format == "tar"
+                            and value.compression == "zstd"
+                            and value.compression_level == 19
+                    end)
+                local explicit_zstd_list = babet.archive.list(explicit_zstd)
+                ok("archive.create explicit zstd TAR is detected from content",
+                    explicit_zstd_list
+                    and explicit_zstd_list.compression == "zstd")
+
+                local explicit_plain_tzst = root .. "/explicit-plain.tzst"
+                local explicit_plain_tzst_result, explicit_plain_tzst_err =
+                    babet.archive.create(create_source, explicit_plain_tzst, {
+                        format = "tar",
+                    })
+                ok_val("archive.create format='tar' overrides a .tzst suffix",
+                    explicit_plain_tzst_result, explicit_plain_tzst_err,
+                    function(value) return value.compression == "none" end)
+                local explicit_plain_tzst_list =
+                    babet.archive.list(explicit_plain_tzst)
+                ok("explicit uncompressed .tzst is detected from content",
+                    explicit_plain_tzst_list
+                    and explicit_plain_tzst_list.compression == "none")
+
+                local zstd_deterministic_a =
+                    root .. "/zstd-deterministic-a.tar.zst"
+                local zstd_deterministic_b =
+                    root .. "/zstd-deterministic-b.tar.zst"
+                local zda, zda_err = babet.archive.create(
+                    create_source, zstd_deterministic_a)
+                local zdb, zdb_err = babet.archive.create(
+                    create_source, zstd_deterministic_b)
+                ok_val("archive.create zstd deterministic fixture A",
+                    zda, zda_err)
+                ok_val("archive.create zstd deterministic fixture B",
+                    zdb, zdb_err)
+                ok("archive.create zstd TAR is byte-for-byte deterministic",
+                    read_bytes(zstd_deterministic_a)
+                        == read_bytes(zstd_deterministic_b))
+
+                local zstd_level_zero = root .. "/zstd-level-zero.tar.zst"
+                local zstd_zero, zstd_zero_err = babet.archive.create(
+                    create_source, zstd_level_zero,
+                    { compression_level = 0 })
+                ok_val("archive.create zstd accepts compression_level=0",
+                    zstd_zero, zstd_zero_err,
+                    function(value) return value.compression_level == 0 end)
+                ok("archive.create zstd level zero remains readable",
+                    babet.archive.list(zstd_level_zero) ~= nil)
+
+                local zstd_level_nineteen =
+                    root .. "/zstd-level-nineteen.tar.zst"
+                local zstd_nineteen, zstd_nineteen_err =
+                    babet.archive.create(create_source, zstd_level_nineteen,
+                        { compression_level = 19 })
+                ok_val("archive.create zstd accepts compression_level=19",
+                    zstd_nineteen, zstd_nineteen_err,
+                    function(value) return value.compression_level == 19 end)
+
+                local zstd_twenty, zstd_twenty_err = babet.archive.create(
+                    create_source, root .. "/zstd-level-twenty.tar.zst",
+                    { compression_level = 20 })
+                ok_fail("archive.create zstd rejects compression_level=20",
+                    zstd_twenty, zstd_twenty_err)
+
+                local zstd_out = root .. "/zstd-out"
+                local zstd_extract, zstd_extract_err =
+                    babet.archive.extract(zstd_tar, zstd_out)
+                ok_val("archive.extract extracts a zstd TAR",
+                    zstd_extract, zstd_extract_err)
+                ok("archive.extract zstd TAR preserves text and binary data",
+                    read_bytes(zstd_out .. "/alpha.txt") == "alpha\n"
+                    and read_bytes(zstd_out .. "/nested/binary.bin")
+                        == "A\0B\255C")
+                ok("archive.extract zstd TAR preserves empty directories",
+                    babet.isDir(zstd_out .. "/nested/empty") == true)
+
+                local zstd_single = root .. "/zstd-single.bin"
+                local zstd_file, zstd_file_err = babet.archive.extractFile(
+                    zstd_tar, "nested/binary.bin", zstd_single)
+                ok_val("archive.extractFile extracts from a zstd TAR",
+                    zstd_file, zstd_file_err)
+                ok("archive.extractFile zstd TAR is binary-safe",
+                    read_bytes(zstd_single) == "A\0B\255C")
+
+                local ratio_source = root .. "/zstd-ratio-source"
+                assert(babet.mkdir(ratio_source))
+                assert(write_bytes(ratio_source .. "/ratio.txt",
+                    string.rep("A", 16 * 1024)))
+                local ratio_archive = root .. "/zstd-ratio.tar.zst"
+                local ratio_created, ratio_created_err =
+                    babet.archive.create(ratio_source, ratio_archive, {
+                        compression_level = 19,
+                    })
+                ok_val("archive.create zstd ratio fixture",
+                    ratio_created, ratio_created_err)
+                local ratio_default, ratio_default_err =
+                    babet.archive.list(ratio_archive)
+                ok_val("archive.list zstd TAR accepts the default ratio limit",
+                    ratio_default, ratio_default_err)
+                local ratio_limited, ratio_limited_err =
+                    babet.archive.list(ratio_archive, {
+                        max_compression_ratio = 2,
+                    })
+                ok_fail("archive.list zstd TAR enforces max_compression_ratio",
+                    ratio_limited, ratio_limited_err)
+                local ratio_out = root .. "/zstd-ratio-out"
+                local ratio_extract, ratio_extract_err =
+                    babet.archive.extract(ratio_archive, ratio_out, {
+                        max_compression_ratio = 2,
+                    })
+                ok_fail("archive.extract zstd TAR applies ratio limits before writing",
+                    ratio_extract, ratio_extract_err)
+                ok("zstd ratio refusal creates no destination",
+                    babet.fileExists(ratio_out) == false)
+                local ratio_single = root .. "/zstd-ratio-single"
+                local ratio_file, ratio_file_err =
+                    babet.archive.extractFile(
+                        ratio_archive, "ratio.txt", ratio_single, {
+                            max_compression_ratio = 2,
+                        })
+                ok_fail("archive.extractFile zstd TAR applies ratio limits to the whole archive",
+                    ratio_file, ratio_file_err)
+                ok("zstd ratio extractFile refusal creates no output",
+                    babet.fileExists(ratio_single) == false)
+
+                local concatenated_zstd = root .. "/concatenated.tar.zst"
+                local second_zstd_raw = read_bytes(zstd_deterministic_b)
+                assert(write_bytes(concatenated_zstd,
+                    assert(zstd_raw) .. assert(second_zstd_raw)))
+                local concatenated_list, concatenated_list_err =
+                    babet.archive.list(concatenated_zstd)
+                ok_val("archive.list traverses concatenated zstd frames and TAR streams",
+                    concatenated_list, concatenated_list_err,
+                    function(value) return value.count == 10 end)
+                local concatenated_out = root .. "/concatenated-zstd-out"
+                local concatenated_extract, concatenated_extract_err =
+                    babet.archive.extract(concatenated_zstd, concatenated_out)
+                ok_fail("archive.extract rejects duplicate paths across concatenated zstd TAR streams",
+                    concatenated_extract, concatenated_extract_err)
+                ok("concatenated zstd duplicate refusal creates no destination",
+                    babet.fileExists(concatenated_out) == false)
+
+                local trailing_zstd = root .. "/trailing.tar.zst"
+                assert(write_bytes(trailing_zstd, assert(zstd_raw) .. "X"))
+                local trailing_zstd_list, trailing_zstd_list_err =
+                    babet.archive.list(trailing_zstd)
+                ok_fail("archive.list rejects non-zstd trailing data after a zstd TAR",
+                    trailing_zstd_list, trailing_zstd_list_err)
+                local trailing_zstd_out = root .. "/trailing-zstd-out"
+                local trailing_zstd_extract, trailing_zstd_extract_err =
+                    babet.archive.extract(trailing_zstd, trailing_zstd_out)
+                ok_fail("archive.extract rejects zstd trailing data before publication",
+                    trailing_zstd_extract, trailing_zstd_extract_err)
+                ok("zstd trailing-data refusal creates no destination",
+                    babet.fileExists(trailing_zstd_out) == false)
+
+                local corrupt_zstd = root .. "/corrupt.tar.zst"
+                local corrupt_position = #zstd_raw - 2
+                local corrupt_zstd_raw = zstd_raw:sub(1, corrupt_position - 1)
+                    .. string.char(zstd_raw:byte(corrupt_position) ~ 1)
+                    .. zstd_raw:sub(corrupt_position + 1)
+                assert(write_bytes(corrupt_zstd, corrupt_zstd_raw))
+                local corrupt_zstd_list, corrupt_zstd_list_err =
+                    babet.archive.list(corrupt_zstd)
+                ok_fail("archive.list rejects a corrupt zstd TAR",
+                    corrupt_zstd_list, corrupt_zstd_list_err)
+                local corrupt_zstd_out = root .. "/corrupt-zstd-out"
+                local corrupt_zstd_extract, corrupt_zstd_extract_err =
+                    babet.archive.extract(corrupt_zstd, corrupt_zstd_out)
+                ok_fail("archive.extract rejects corrupt zstd before publication",
+                    corrupt_zstd_extract, corrupt_zstd_extract_err)
+                ok("corrupt zstd extraction creates no destination",
+                    babet.fileExists(corrupt_zstd_out) == false)
+                local corrupt_zstd_single = root .. "/corrupt-zstd-single"
+                local corrupt_zstd_file, corrupt_zstd_file_err =
+                    babet.archive.extractFile(
+                        corrupt_zstd, "alpha.txt", corrupt_zstd_single)
+                ok_fail("archive.extractFile rejects corrupt zstd before publication",
+                    corrupt_zstd_file, corrupt_zstd_file_err)
+                ok("corrupt zstd extractFile creates no output",
+                    babet.fileExists(corrupt_zstd_single) == false)
+
+                local zstd_worker_code = [[
+    local created, create_err = babet.archive.create(
+        worker.args.source, worker.args.archive,
+        { format = "tar.zst" })
+    if not created then error(create_err) end
+    local listed, list_err = babet.archive.list(worker.args.archive)
+    if not listed then error(list_err) end
+    local extracted, extract_err = babet.archive.extractFile(
+        worker.args.archive, "alpha.txt", worker.args.output)
+    if not extracted then error(extract_err) end
+    return listed.compression
+    ]]
+                local zstd_worker = babet.workers.spawn(zstd_worker_code, {
+                    source = create_source,
+                    archive = root .. "/worker.tar.zst",
+                    output = root .. "/worker-zstd-alpha.txt",
+                })
+                ok("zstd TAR operations start in a worker",
+                    zstd_worker ~= nil)
+                local zstd_worker_ok, zstd_worker_compression = false, nil
+                if zstd_worker then
+                    zstd_worker_ok, zstd_worker_compression =
+                        zstd_worker:join()
+                end
+                ok("zstd TAR operations succeed in a worker",
+                    zstd_worker_ok == true
+                    and zstd_worker_compression == "zstd")
+                ok("zstd TAR worker publishes expected data",
+                    read_bytes(root .. "/worker-zstd-alpha.txt")
+                        == "alpha\n")
+            end)()
+        end
+
+        local tar_level, tar_level_err = babet.archive.create(
+            create_source, root .. "/invalid-level.tar",
+            { compression_level = 0 })
+        ok_fail("archive.create rejects compression_level for inferred TAR",
+            tar_level, tar_level_err)
+        local explicit_tar_level, explicit_tar_level_err = babet.archive.create(
+            create_source, root .. "/invalid-explicit-level.data",
+            { format = "tar", compression_level = 0 })
+        ok_fail("archive.create rejects compression_level for explicit TAR",
+            explicit_tar_level, explicit_tar_level_err)
+
+        local tar_overwrite_path = root .. "/overwrite.tar"
+        assert(write_bytes(tar_overwrite_path, "keep"))
+        local tar_overwrite_refused, tar_overwrite_refused_err =
+            babet.archive.create(create_source, tar_overwrite_path)
+        ok_fail("archive.create TAR refuses overwrite by default",
+            tar_overwrite_refused, tar_overwrite_refused_err)
+        ok("archive.create TAR overwrite refusal preserves destination",
+            read_bytes(tar_overwrite_path) == "keep")
+        local tar_overwrite, tar_overwrite_err = babet.archive.create(
+            create_source, tar_overwrite_path, { overwrite = true })
+        ok_val("archive.create TAR overwrite=true publishes atomically",
+            tar_overwrite, tar_overwrite_err)
+        ok("archive.create TAR overwritten output is valid",
+            babet.archive.list(tar_overwrite_path) ~= nil)
+
+        local empty_tar_source = root .. "/empty-tar-source"
+        assert(babet.mkdir(empty_tar_source))
+        local empty_created_tar = root .. "/empty-created.tar"
+        local empty_tar, empty_tar_err = babet.archive.create(
+            empty_tar_source, empty_created_tar)
+        ok_val("archive.create supports an empty TAR source directory",
+            empty_tar, empty_tar_err,
+            function(value)
+                return value.files == 0 and value.directories == 0
+            end)
+        local empty_tar_list = babet.archive.list(empty_created_tar)
+        ok("archive.create empty TAR produces an empty archive",
+            empty_tar_list and empty_tar_list.count == 0)
+
+        local long_tar_source = root .. "/long-tar-source"
+        local long_tar_component = string.rep("p", 180)
+        assert(babet.mkdir(long_tar_source .. "/" .. long_tar_component))
+        assert(write_bytes(long_tar_source .. "/" .. long_tar_component .. "/x.txt",
+            "pax-long-name"))
+        local long_tar = root .. "/long-path.tar"
+        local long_tar_result, long_tar_err = babet.archive.create(
+            long_tar_source, long_tar)
+        ok_val("archive.create TAR emits pax headers for long paths",
+            long_tar_result, long_tar_err)
+        local long_tar_list = babet.archive.list(long_tar)
+        ok("archive.create TAR preserves a path longer than ustar name fields",
+            long_tar_list and long_tar_list.entries[2]
+            and long_tar_list.entries[2].name == long_tar_component .. "/x.txt")
+        local long_tar_out = root .. "/long-tar-out"
+        local long_tar_extract = babet.archive.extract(long_tar, long_tar_out)
+        ok("archive.create TAR long-path archive extracts safely",
+            long_tar_extract ~= nil
+            and read_bytes(long_tar_out .. "/" .. long_tar_component .. "/x.txt")
+                == "pax-long-name")
+
+        local tar_worker_code = [[
+    local result, err = babet.archive.create(
+        worker.args.source, worker.args.destination, { format = "tar" })
+    if not result then error(err) end
+    return result.format
+    ]]
+        local tar_worker_a = babet.workers.spawn(tar_worker_code, {
+            source = create_source, destination = root .. "/worker-a.tar",
+        })
+        local tar_worker_b = babet.workers.spawn(tar_worker_code, {
+            source = create_source, destination = root .. "/worker-b.tar",
+        })
+        ok("archive.create TAR starts safely in concurrent workers",
+            tar_worker_a ~= nil and tar_worker_b ~= nil)
+        local tar_worker_a_ok, tar_worker_a_format = false, nil
+        local tar_worker_b_ok, tar_worker_b_format = false, nil
+        if tar_worker_a and tar_worker_b then
+            tar_worker_a_ok, tar_worker_a_format = tar_worker_a:join()
+            tar_worker_b_ok, tar_worker_b_format = tar_worker_b:join()
+        end
+        ok("archive.create TAR succeeds concurrently in worker states",
+            tar_worker_a_ok == true and tar_worker_a_format == "tar"
+            and tar_worker_b_ok == true and tar_worker_b_format == "tar")
+        ok("concurrent deterministic TAR outputs are identical",
+            read_bytes(root .. "/worker-a.tar")
+                == read_bytes(root .. "/worker-b.tar"))
+    end
 
     local deterministic_a = root .. "/deterministic-a.zip"
     local deterministic_b = root .. "/deterministic-b.zip"
@@ -11976,6 +14423,18 @@ return result.files
     create_bad, create_bad_err = babet.archive.create(
         create_source, root .. "/bad-create.zip", { [1] = true })
     ok_fail("archive.create option keys must be strings", create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { format = 42 })
+    ok_fail("archive.create format is a strict string",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { format = "rar" })
+    ok_fail("archive.create rejects an unknown format",
+        create_bad, create_bad_err)
+    create_bad, create_bad_err = babet.archive.create(
+        create_source, root .. "/bad-create.zip", { format = "tar\0zip" })
+    ok_fail("archive.create rejects NUL in format",
+        create_bad, create_bad_err)
     create_bad, create_bad_err = babet.archive.create(
         create_source, root .. "/bad-create.zip", { compression_level = 1.0 })
     ok_fail("archive.create compression_level is a strict integer",

@@ -277,7 +277,7 @@ namespace
         lua_pushnil(L);
         while (lua_next(L, qidx) != 0)
         {
-            if (lua_type(L, -2) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -2))
             {
                 lua_pop(L, 2);
                 err = "http: query keys must be strings";
@@ -401,7 +401,7 @@ namespace
 
         // --- url (requis) ---------------------------------------------
         lua_getfield(L, opts_idx, "url");
-        if (lua_type(L, -1) != LUA_TSTRING)
+        if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 1);
             return push_fail(L, "http: 'url' (string) is required");
@@ -425,7 +425,7 @@ namespace
         lua_getfield(L, opts_idx, "method");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
                 return push_fail(L, "http: 'method' must be a string");
@@ -446,7 +446,7 @@ namespace
         lua_getfield(L, opts_idx, "body");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
                 return push_fail(L, "http: 'body' must be a string");
@@ -464,7 +464,7 @@ namespace
         lua_getfield(L, opts_idx, "timeout");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TNUMBER)
+            if (!lua_is_strict_number(L, -1))
             {
                 lua_pop(L, 1);
                 return push_fail(L, "http: 'timeout' must be a number");
@@ -510,7 +510,7 @@ namespace
         lua_getfield(L, opts_idx, "verify");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TBOOLEAN)
+            if (!lua_is_strict_boolean(L, -1))
             {
                 lua_pop(L, 1);
                 return push_fail(L, "http: 'verify' must be a boolean");
@@ -525,7 +525,7 @@ namespace
         lua_getfield(L, opts_idx, "ca_cert");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TSTRING)
+            if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
                 return push_fail(L, "http: 'ca_cert' must be a string");
@@ -545,7 +545,7 @@ namespace
         lua_getfield(L, opts_idx, "follow_redirects");
         if (!lua_isnil(L, -1))
         {
-            if (lua_type(L, -1) != LUA_TBOOLEAN)
+            if (!lua_is_strict_boolean(L, -1))
             {
                 lua_pop(L, 1);
                 return push_fail(
@@ -568,7 +568,7 @@ namespace
         lua_getfield(L, opts_idx, limit_field);
         if (!lua_isnil(L, -1))
         {
-            if (!lua_isinteger(L, -1))
+            if (!lua_is_strict_integer(L, -1))
             {
                 lua_pop(L, 1);
                 return push_fail(L, std::string("http: '") + limit_field +
@@ -619,7 +619,7 @@ namespace
             lua_pushnil(L);
             while (lua_next(L, hidx) != 0)
             {
-                if (lua_type(L, -2) != LUA_TSTRING)
+                if (!lua_is_strict_string(L, -2))
                 {
                     lua_pop(L, 2);
                     return push_fail(L, "http: header names must be strings");
@@ -952,7 +952,7 @@ int lua_http_get(lua_State *L)
 
     lua_newtable(L);
     int dst = lua_gettop(L);
-    if (!lua_isnoneornil(L, 2))
+    if (!lua_is_none_or_nil(L, 2))
     {
         luaL_checktype(L, 2, LUA_TTABLE);
         shallow_merge(L, 2, dst);
@@ -987,7 +987,7 @@ int lua_http_post(lua_State *L)
 
     lua_newtable(L);
     int dst = lua_gettop(L);
-    if (!lua_isnoneornil(L, opts_arg))
+    if (!lua_is_none_or_nil(L, opts_arg))
     {
         luaL_checktype(L, opts_arg, LUA_TTABLE);
         shallow_merge(L, opts_arg, dst);

@@ -673,7 +673,9 @@ local files = assert(babet.listFiles("collection", true))
 -- un lien collection/externe -> /autre/dossier n’est pas suivi
 ```
 
-Le second argument est facultatif et vaut `false` par défaut.
+Le second argument est facultatif et vaut `false` par défaut. Lorsqu’il est
+présent, il doit être un booléen Lua strict : nombres et chaînes ne sont pas
+convertis. La fonction accepte exactement un ou deux arguments.
 
 <a id="createfileiterator"></a>
 ### `babet.createFileIterator(path, recursive?)`
@@ -725,7 +727,9 @@ Comportement des symlinks :
   création en échec avec `(nil, err)`.
 
 Après `close()`, appeler `next()` lève une erreur Lua. Oublier `close()` n’est
-pas fatal : le garbage collector finit par libérer l’objet.
+pas fatal : le garbage collector finit par libérer l’objet. L’argument
+facultatif `recursive` doit être un booléen Lua strict et le constructeur
+accepte exactement un ou deux arguments.
 
 <a id="find"></a>
 ### `babet.find(path, opts?)`
@@ -748,27 +752,70 @@ pas incluse.
 | Option | Type | Défaut | Effet |
 | --- | --- | --- | --- |
 | `type` | string | aucun filtre | `"f"` pour fichiers, `"d"` pour dossiers |
-| `name` | string | absent | regex ECMAScript sur le nom seul, sensible à la casse |
-| `iname` | string | absent | regex ECMAScript sur le nom seul, insensible à la casse |
-| `path` | string | absent | regex ECMAScript recherchée dans le chemin complet |
+| `glob` | string | absent | glob borné sur le nom complet, sensible à la casse |
+| `iglob` | string | absent | glob borné sur le nom complet, casse ASCII ignorée |
+| `path_glob` | string | absent | glob borné sur le chemin complet renvoyé, sensible à la casse |
+| `path_iglob` | string | absent | glob borné sur le chemin complet renvoyé, casse ASCII ignorée |
+| `name` | string | absent | regex RE2 sur le nom complet, sensible à la casse |
+| `iname` | string | absent | regex RE2 sur le nom complet, insensible à la casse |
+| `path` | string | absent | regex RE2 recherchée dans le chemin complet |
 | `mindepth` | integer | `0` | profondeur minimale incluse |
 | `maxdepth` | integer | sans limite pratique | profondeur maximale incluse |
 
-Toutes les options présentes sont combinées avec un **ET logique**.
+Toutes les options présentes sont combinées avec un **ET logique**. Un motif
+vide agit comme un filtre absent, conformément au comportement historique des
+champs regex.
 
-#### Rechercher des fichiers par extension
+#### Filtres glob sûrs
 
-`name` utilise une correspondance sur le nom complet, pas une recherche de
-sous-chaîne :
+Utilise les champs glob pour les recherches ordinaires sur les noms de
+fichiers, en particulier lorsque le motif peut provenir d’une personne non
+fiable :
 
 ```lua
 local lua_files = assert(babet.find("src", {
     type = "f",
-    name = ".*\\.lua$",
+    glob = "*.lua",
+}))
+
+local images = assert(babet.find("assets", {
+    type = "f",
+    iglob = "*.jpg",
 }))
 ```
 
-#### Recherche insensible à la casse
+Le langage glob est volontairement réduit :
+
+- `*` : zéro ou plusieurs octets sauf `/` ;
+- `**` : zéro ou plusieurs octets, y compris `/` ;
+- `?` : exactement un octet sauf `/` ;
+- `\x` : octet littéral `x`.
+
+La correspondance est ancrée sur la totalité du nom ou du chemin. Les crochets,
+accolades et extensions glob du shell n’ont aucune signification particulière
+et sont comparés littéralement. Chaque motif est limité à 4096 octets. Le
+moteur n’utilise aucun backtracking récursif : son travail reste borné de façon
+polynomiale par la taille du motif et du candidat.
+
+`path_glob` et `path_iglob` comparent le chemin complet renvoyé en utilisant
+`/` comme séparateur. Il faut employer `**` lorsqu’un joker doit traverser des
+dossiers :
+
+```lua
+local tests = assert(babet.find(".", {
+    type = "f",
+    path_glob = "**/tests/**/*.lua",
+}))
+```
+
+Les variantes insensibles à la casse ne replient que les lettres ASCII. Les
+octets UTF-8 hors ASCII sont comparés exactement, ce qui rend le comportement
+indépendant de la locale du processus.
+
+#### Expressions régulières RE2 bornées
+
+Les champs historiques `name`, `iname` et `path` utilisent désormais le moteur
+RE2 lié statiquement. `name` et `iname` correspondent au nom complet :
 
 ```lua
 local images = assert(babet.find("assets", {
@@ -777,9 +824,7 @@ local images = assert(babet.find("assets", {
 }))
 ```
 
-#### Filtrer le chemin complet
-
-`path` utilise une recherche dans le chemin complet :
+`path` effectue une recherche regex partielle dans le chemin complet :
 
 ```lua
 local tests = assert(babet.find(".", {
@@ -787,6 +832,21 @@ local tests = assert(babet.find(".", {
     path = "/tests/",
 }))
 ```
+
+Chaque regex est limitée à 4096 octets et compilée avec un budget mémoire RE2
+de 1 Mio. La correspondance reste linéaire : lorsque le cache DFA atteint son
+budget, RE2 utilise son NFA borné au lieu d’un backtracking exponentiel. Babet
+active le mode Latin-1 de RE2 afin que chaque octet d’un chemin Linux reste
+traitable, y compris pour un nom qui n’est pas un UTF-8 valide. `iname`
+désactive la sensibilité à la casse dans RE2, sans consulter la locale du
+processus.
+
+RE2 refuse volontairement les constructions qui nécessitent du backtracking ou
+un état non régulier, notamment les références arrière et les assertions de
+regard avant/arrière. Un tel motif fait échouer tout l’appel avec `(nil, err)`.
+Utilise les globs sûrs pour les filtres simples et RE2 lorsqu’un regroupement,
+une alternative, une classe de caractères ou une répétition bornée est vraiment
+utile.
 
 #### Limiter la profondeur
 
@@ -817,16 +877,9 @@ suivent néanmoins une cible valide : un symlink vers un fichier peut donc
 correspondre à `type = "f"`, et un symlink vers un dossier peut apparaître
 avec `type = "d"` sans que son contenu soit parcouru.
 
-Une regex invalide ou une erreur de parcours fait échouer tout l’appel avec
-`(nil, err)`. Il n’existe pas de mode « continuer malgré les erreurs » pour
-`find`.
-
-Le moteur utilisé est `std::regex` en mode ECMAScript. Certains motifs, par
-exemple des répétitions ambiguës imbriquées, peuvent provoquer un backtracking
-exponentiel. Il ne faut donc pas transmettre directement une regex fournie par
-une personne non fiable dans `name`, `iname` ou `path` : un motif hostile peut
-occuper le thread ou le worker appelant pendant très longtemps. Cet
-avertissement concerne la regex elle-même, pas les noms de fichiers ordinaires.
+Une regex invalide ou trop longue, un glob invalide ou trop long, ou une erreur de parcours
+fait échouer tout l’appel avec `(nil, err)`. Il n’existe pas de mode « continuer
+malgré les erreurs » pour `find`.
 
 <a id="fs-copy-move"></a>
 ## Copier et déplacer
@@ -871,7 +924,9 @@ assert(babet.copyTree("site", "backup/site"))
 
 #### Valeur par défaut de `continue_on_error`
 
-Le troisième argument est facultatif et vaut **`true` par défaut**.
+Le troisième argument est facultatif et vaut **`true` par défaut**. Lorsqu’il
+est présent, il doit être un booléen Lua strict ; la fonction accepte exactement
+deux ou trois arguments.
 
 Cela signifie qu’en cas d’erreur limitée à une entrée :
 
@@ -1235,7 +1290,8 @@ reste `(nil, err)`.
   non récursive.
 - **`copy` pour un fichier, `copyTree` pour un arbre** : aucune surcharge
   implicite selon le type de la source.
-- **Pas de glob dédié** : utilise `find` avec une regex ECMAScript.
+- **Le glob est un filtre de `find`, pas une fonction autonome** : utilise
+  `glob`, `iglob`, `path_glob` ou `path_iglob` dans `babet.find`.
 - **Pas de tri automatique** : appelle `table.sort` lorsqu’un ordre stable est
   nécessaire.
 - **Pas de préservation complète des métadonnées dans les copies** : les

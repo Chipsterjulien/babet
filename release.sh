@@ -9,7 +9,7 @@
 #   3. strip du binaire
 #   4. sha256 du binaire strippé
 #   5. tarball babet-<version>-linux-<arch>.tar.gz
-#      (contient : babet, README, changelogs, LICENSE et notes.md)
+#      (contient : babet, README, changelogs, licences et notes.md)
 #   6. sha256 du tarball
 #
 # Sortie : tout dans le répertoire dist/ à la racine du projet.
@@ -144,6 +144,16 @@ echo "[2/6] Préparation de dist/..."
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
+# Les licences de libarchive, zlib, XZ Utils/liblzma, bzip2/libbz2,
+# Zstandard/libzstd, RE2 et Abseil imposent que leurs notices accompagnent toute
+# distribution binaire. On les place également à la racine de dist/ pour le cas
+# où le binaire seul est publié en dehors du tarball.
+if [[ ! -f "${SCRIPT_DIR}/THIRD_PARTY_NOTICES.md" ]]; then
+    echo "ERREUR: THIRD_PARTY_NOTICES.md introuvable à la racine" >&2
+    exit 1
+fi
+cp "${SCRIPT_DIR}/THIRD_PARTY_NOTICES.md" "${DIST_DIR}/"
+
 # Nom versionné du binaire pour la distribution hors tarball.
 # Important : on inclut arch ET version pour qu'on puisse stocker
 # côte à côte sur GitHub Releases plusieurs binaires (x86_64,
@@ -175,14 +185,15 @@ echo "[5/6] Création du tarball..."
 TARBALL_BASENAME="${PROJECT_NAME}-${VERSION}-${ARCH_TAG}"
 TARBALL_FILE="${DIST_DIR}/${TARBALL_BASENAME}.tar.gz"
 
-# Liste des fichiers à inclure. README_fr.md et notes.md sont
+# Liste des fichiers à inclure. README.fr.md et notes.md sont
 # optionnels (ne plantent pas le script s'ils manquent).
 INCLUDE_FILES=("${PROJECT_NAME}")
 [[ -f "${SCRIPT_DIR}/README.md" ]]    && INCLUDE_FILES+=("README.md")    || echo "      WARN: README.md absent" >&2
-[[ -f "${SCRIPT_DIR}/README_fr.md" ]] && INCLUDE_FILES+=("README_fr.md")
+[[ -f "${SCRIPT_DIR}/README.fr.md" ]] && INCLUDE_FILES+=("README.fr.md")
 [[ -f "${SCRIPT_DIR}/CHANGELOG.md" ]] && INCLUDE_FILES+=("CHANGELOG.md")
 [[ -f "${SCRIPT_DIR}/CHANGELOG.fr.md" ]] && INCLUDE_FILES+=("CHANGELOG.fr.md")
 [[ -f "${SCRIPT_DIR}/LICENSE" ]]      && INCLUDE_FILES+=("LICENSE")      || { echo "ERREUR: LICENSE introuvable à la racine" >&2 ; exit 1; }
+[[ -f "${SCRIPT_DIR}/THIRD_PARTY_NOTICES.md" ]] && INCLUDE_FILES+=("THIRD_PARTY_NOTICES.md") || { echo "ERREUR: THIRD_PARTY_NOTICES.md introuvable à la racine" >&2 ; exit 1; }
 [[ -f "${SCRIPT_DIR}/notes.md" ]]     && INCLUDE_FILES+=("notes.md")
 
 # Stage : on copie les fichiers à inclure dans un sous-dossier nommé

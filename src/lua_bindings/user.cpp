@@ -278,7 +278,7 @@ namespace
             out.name = name;
             return out;
         }
-        if (t == LUA_TNUMBER && lua_isinteger(L, arg_idx))
+        if (t == LUA_TNUMBER && lua_is_strict_integer(L, arg_idx))
         {
             // Pas de coercion silencieuse pour les floats : un user
             // qui passe 1.5 a probablement un bug, on lui dit.
@@ -320,7 +320,7 @@ namespace
     // babet.user.get(name_or_uid) -> table | (nil, err)
     int lua_user_get(lua_State *L)
     {
-        if (lua_gettop(L) < 1)
+        if (!lua_arity_is(L, 1))
         {
             return luaL_error(L,
                               "user.get: missing argument (name or uid)");
@@ -368,7 +368,7 @@ namespace
     // une vraie panne NSS, il utilise get() qui retourne un message.
     int lua_user_exists(lua_State *L)
     {
-        if (lua_gettop(L) < 1)
+        if (!lua_arity_is(L, 1))
         {
             return luaL_error(L,
                               "user.exists: missing argument (name or uid)");

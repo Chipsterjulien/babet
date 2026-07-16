@@ -1,4 +1,5 @@
 #include "joinPath.hpp"
+#include "lua_utils.hpp"
 #include <string>
 #include <cstring>
 #include <vector>
@@ -31,7 +32,7 @@ std::optional<std::string> get_segments(lua_State *L, std::vector<std::string> &
         for (lua_Integer i = 1; i <= n; ++i)
         {
             lua_geti(L, 1, i); // pousse t[i] au sommet
-            if (!lua_isstring(L, -1))
+            if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
                 return "Table contains non-string elements";
@@ -63,7 +64,7 @@ std::optional<std::string> get_segments(lua_State *L, std::vector<std::string> &
         segments.reserve(n);
         for (int i = 1; i <= n; ++i)
         {
-            if (!lua_isstring(L, i))
+            if (!lua_is_strict_string(L, i))
             {
                 return "All arguments must be strings";
             }
