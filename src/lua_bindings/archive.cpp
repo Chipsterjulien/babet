@@ -1,6 +1,7 @@
 #include "archive.hpp"
 #include "lua_utils.hpp"
 #include "project_core/archive_tar.hpp"
+#include "project_core/safe_glob.hpp"
 
 #include <miniz.h>
 
@@ -49,6 +50,10 @@ constexpr std::uint64_t HARD_MAX_TOTAL_NAME_BYTES = 64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t HARD_MAX_OUTPUT_DIRECTORIES = 100000;
 constexpr std::size_t HARD_MAX_CREATE_DEPTH = 256;
 constexpr std::uint64_t HARD_MAX_SCANNED_SOURCE_NODES = 100000;
+constexpr std::size_t HARD_MAX_CREATE_FILTER_PATTERNS = 256;
+constexpr std::uint64_t HARD_MAX_CREATE_FILTER_BYTES = 256ULL * 1024ULL;
+constexpr std::uint64_t HARD_MAX_CREATE_FILTER_EVALUATIONS = 1000000ULL;
+constexpr std::uint64_t HARD_MAX_CREATE_FILTER_WORK = 100000000ULL;
 constexpr std::uint64_t HARD_MAX_OUTPUT_DIRECTORY_PATH_BYTES =
     64ULL * 1024ULL * 1024ULL;
 constexpr std::size_t HARD_MAX_MINIZ_ALLOCATED_BYTES =
@@ -2267,6 +2272,10 @@ struct ArchiveCreateOptions
     bool overwrite = false;
     bool deterministic = true;
     bool include_directories = true;
+    std::vector<babet::safe_glob::Pattern> include_patterns;
+    std::vector<babet::safe_glob::Pattern> exclude_patterns;
+    std::uint64_t filter_evaluations = 0;
+    std::uint64_t filter_work = 0;
     CreateArchiveFormat format = CreateArchiveFormat::zip;
     bool format_explicit = false;
 };
@@ -2279,7 +2288,13 @@ enum class CreateEntryKind
 
 struct CreateEntry
 {
+    // Path stored in the archive. For the historical string form this is
+    // relative to the source directory. For an explicit source list it is
+    // rooted at the selected source basename.
     fs::path relative;
+    // Path used to reopen the pinned source from source_roots[source_index].
+    fs::path source_relative;
+    std::size_t source_index = 0;
     CreateEntryKind kind = CreateEntryKind::regular;
     std::uint64_t size = 0;
     dev_t device = 0;
@@ -2374,7 +2389,7 @@ bool validate_create_option_keys(lua_State *L, int idx, std::string &err)
     static const std::unordered_set<std::string> allowed = {
         "max_entries", "max_file_size", "max_total_size",
         "compression_level", "overwrite", "deterministic",
-        "include_directories", "format"};
+        "include_directories", "include", "exclude", "format"};
     idx = lua_absindex(L, idx);
     lua_pushnil(L);
     while (lua_next(L, idx) != 0)
@@ -2396,6 +2411,118 @@ bool validate_create_option_keys(lua_State *L, int idx, std::string &err)
         }
         lua_pop(L, 1);
     }
+    return true;
+}
+
+bool collect_create_glob_list(
+    lua_State *L, int options_index, const char *field_name,
+    std::vector<babet::safe_glob::Pattern> &patterns,
+    std::size_t &total_patterns, std::uint64_t &total_pattern_bytes,
+    std::string &err)
+{
+    raw_getfield(L, options_index, field_name);
+    if (lua_is_none_or_nil(L, -1))
+    {
+        lua_pop(L, 1);
+        return true;
+    }
+    if (lua_type(L, -1) != LUA_TTABLE)
+    {
+        lua_pop(L, 1);
+        err = std::string("opts.") + field_name +
+              " must be a dense array of glob strings";
+        return false;
+    }
+
+    const int list_index = lua_absindex(L, -1);
+    const std::size_t count = lua_rawlen(L, list_index);
+    std::size_t seen = 0;
+    lua_pushnil(L);
+    while (lua_next(L, list_index) != 0)
+    {
+        if (!lua_is_strict_integer(L, -2))
+        {
+            lua_pop(L, 3);
+            err = std::string("opts.") + field_name +
+                  " must be a dense array of glob strings";
+            return false;
+        }
+        const lua_Integer key = lua_tointeger(L, -2);
+        if (key < 1 || static_cast<std::size_t>(key) > count)
+        {
+            lua_pop(L, 3);
+            err = std::string("opts.") + field_name +
+                  " must be a dense array of glob strings";
+            return false;
+        }
+        ++seen;
+        lua_pop(L, 1);
+    }
+    if (seen != count)
+    {
+        lua_pop(L, 1);
+        err = std::string("opts.") + field_name +
+              " must be a dense array of glob strings";
+        return false;
+    }
+    if (count > HARD_MAX_CREATE_FILTER_PATTERNS - total_patterns)
+    {
+        lua_pop(L, 1);
+        err = "archive: include/exclude filters exceed the internal 256-pattern limit";
+        return false;
+    }
+
+    patterns.reserve(count);
+    for (std::size_t index = 1; index <= count; ++index)
+    {
+        lua_rawgeti(L, list_index, static_cast<lua_Integer>(index));
+        if (!lua_is_strict_string(L, -1))
+        {
+            lua_pop(L, 2);
+            err = std::string("opts.") + field_name + "[" +
+                  std::to_string(index) + "] must be a string";
+            return false;
+        }
+        size_t length = 0;
+        const char *data = lua_tolstring(L, -1, &length);
+        if (length == 0)
+        {
+            lua_pop(L, 2);
+            err = std::string("opts.") + field_name + "[" +
+                  std::to_string(index) + "] must not be empty";
+            return false;
+        }
+        if (std::memchr(data, '\0', length) != nullptr)
+        {
+            lua_pop(L, 2);
+            err = std::string("opts.") + field_name + "[" +
+                  std::to_string(index) + "] must not contain NUL bytes";
+            return false;
+        }
+        if (length > HARD_MAX_CREATE_FILTER_BYTES - total_pattern_bytes)
+        {
+            lua_pop(L, 2);
+            err = "archive: include/exclude filters exceed the internal 256 KiB pattern-byte limit";
+            return false;
+        }
+
+        babet::safe_glob::Pattern compiled;
+        const std::optional<std::string> compile_error =
+            babet::safe_glob::compile(std::string_view(data, length), false,
+                                      compiled);
+        if (compile_error.has_value())
+        {
+            lua_pop(L, 2);
+            err = std::string("opts.") + field_name + "[" +
+                  std::to_string(index) + "]: " + *compile_error;
+            return false;
+        }
+        lua_pop(L, 1);
+        patterns.push_back(std::move(compiled));
+        ++total_patterns;
+        total_pattern_bytes += length;
+    }
+    lua_pop(L, 1);
     return true;
 }
 
@@ -2429,6 +2556,17 @@ bool collect_create_options(lua_State *L, int idx,
         return false;
     }
 
+    std::size_t total_patterns = 0;
+    std::uint64_t total_pattern_bytes = 0;
+    if (!collect_create_glob_list(L, idx, "include",
+                                  options.include_patterns, total_patterns,
+                                  total_pattern_bytes, err) ||
+        !collect_create_glob_list(L, idx, "exclude",
+                                  options.exclude_patterns, total_patterns,
+                                  total_pattern_bytes, err))
+    {
+        return false;
+    }
     raw_getfield(L, idx, "compression_level");
     if (!lua_is_optional_strict_integer(L, -1))
     {
@@ -2502,6 +2640,85 @@ bool collect_create_options(lua_State *L, int idx,
     }
     else
     {
+        lua_pop(L, 1);
+    }
+    return true;
+}
+
+bool collect_explicit_create_sources(lua_State *L, int idx,
+                                     std::vector<fs::path> &sources,
+                                     std::string &err)
+{
+    if (lua_type(L, idx) != LUA_TTABLE)
+    {
+        err = "archive: source must be a directory string or a dense array of paths";
+        return false;
+    }
+    idx = lua_absindex(L, idx);
+    const std::size_t count = lua_rawlen(L, idx);
+    if (count == 0)
+    {
+        err = "archive: explicit source list must not be empty";
+        return false;
+    }
+    if (count > static_cast<std::size_t>(HARD_MAX_ENTRIES))
+    {
+        err = "archive: explicit source list exceeds the internal 100000-source limit";
+        return false;
+    }
+
+    std::size_t seen = 0;
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0)
+    {
+        if (!lua_is_strict_integer(L, -2))
+        {
+            lua_pop(L, 2);
+            err = "archive: explicit source list must be a dense array of strings";
+            return false;
+        }
+        const lua_Integer key = lua_tointeger(L, -2);
+        if (key < 1 || static_cast<std::size_t>(key) > count)
+        {
+            lua_pop(L, 2);
+            err = "archive: explicit source list must be a dense array of strings";
+            return false;
+        }
+        ++seen;
+        lua_pop(L, 1);
+    }
+    if (seen != count)
+    {
+        err = "archive: explicit source list must be a dense array of strings";
+        return false;
+    }
+
+    sources.clear();
+    sources.reserve(count);
+    for (std::size_t i = 1; i <= count; ++i)
+    {
+        lua_geti(L, idx, static_cast<lua_Integer>(i));
+        if (!lua_is_strict_string(L, -1))
+        {
+            lua_pop(L, 1);
+            err = "archive: explicit source list must contain only strings";
+            return false;
+        }
+        std::size_t length = 0;
+        const char *data = lua_tolstring(L, -1, &length);
+        if (data == nullptr || std::memchr(data, '\0', length) != nullptr)
+        {
+            lua_pop(L, 1);
+            err = "archive: explicit source path must not contain NUL bytes";
+            return false;
+        }
+        if (length == 0)
+        {
+            lua_pop(L, 1);
+            err = "archive: explicit source path must not be empty";
+            return false;
+        }
+        sources.emplace_back(std::string(data, length));
         lua_pop(L, 1);
     }
     return true;
@@ -2789,15 +3006,228 @@ bool checked_add_total(std::uint64_t current, std::uint64_t added,
     return true;
 }
 
-bool scan_create_directory(int directory_fd, const fs::path &relative,
-                           std::size_t depth,
-                           const ArchiveCreateOptions &options,
+bool validate_create_archive_path(const fs::path &archive_path,
+                                  CreateEntryKind kind,
+                                  std::string &err)
+{
+    const std::string name = archive_path.generic_string();
+    if (name.empty() || name.size() > MAX_ARCHIVE_PATH_BYTES)
+    {
+        err = "archive: source entry path is empty or exceeds 4096 bytes: '" +
+              name + "'";
+        return false;
+    }
+    if (!is_valid_utf8(name))
+    {
+        err = "archive: source entry path contains invalid UTF-8 bytes";
+        return false;
+    }
+    std::string normalized;
+    std::string reason;
+    const EntryKind path_kind = kind == CreateEntryKind::directory
+                                    ? EntryKind::directory
+                                    : EntryKind::regular;
+    if (!validate_entry_path(name, path_kind, normalized, reason) ||
+        normalized != name)
+    {
+        err = "archive: unsafe source entry path '" + name + "': " + reason;
+        return false;
+    }
+    return true;
+}
+
+bool append_create_entry(const fs::path &archive_path,
+                         const fs::path &source_relative,
+                         std::size_t source_index,
+                         CreateEntryKind kind, const struct stat &st,
+                         const ArchiveCreateOptions &options,
+                         std::vector<CreateEntry> &entries,
+                         std::uint64_t &total_size,
+                         std::uint64_t &total_name_bytes,
+                         std::string &err)
+{
+    if (!validate_create_archive_path(archive_path, kind, err))
+    {
+        return false;
+    }
+    if (entries.size() >= options.max_entries)
+    {
+        err = "archive: source exceeds opts.max_entries";
+        return false;
+    }
+
+    const std::string archive_name = archive_path.generic_string();
+    std::uint64_t updated_names = 0;
+    if (!checked_add_total(total_name_bytes, archive_name.size(),
+                           HARD_MAX_TOTAL_NAME_BYTES, updated_names))
+    {
+        err = "archive: source entry names exceed the internal 64 MiB limit";
+        return false;
+    }
+
+    std::uint64_t size = 0;
+    if (kind == CreateEntryKind::regular)
+    {
+        if (st.st_size < 0 ||
+            static_cast<std::uint64_t>(st.st_size) > options.max_file_size)
+        {
+            err = "archive: source file exceeds opts.max_file_size: '" +
+                  archive_name + "'";
+            return false;
+        }
+        size = static_cast<std::uint64_t>(st.st_size);
+        std::uint64_t updated_total = 0;
+        if (!checked_add_total(total_size, size, options.max_total_size,
+                               updated_total))
+        {
+            err = "archive: source exceeds opts.max_total_size";
+            return false;
+        }
+        total_size = updated_total;
+    }
+
+    total_name_bytes = updated_names;
+    CreateEntry item;
+    item.relative = archive_path;
+    item.source_relative = source_relative;
+    item.source_index = source_index;
+    item.kind = kind;
+    item.size = size;
+    item.device = st.st_dev;
+    item.inode = st.st_ino;
+    item.modified = st.st_mtim;
+    item.changed = st.st_ctim;
+    entries.push_back(std::move(item));
+    return true;
+}
+
+enum class CreateFilterDecision
+{
+    included,
+    excluded,
+    not_included,
+};
+
+bool consume_create_filter_work(ArchiveCreateOptions &options,
+                                const babet::safe_glob::Pattern &pattern,
+                                std::string_view text, std::string &err)
+{
+    const std::uint64_t states =
+        static_cast<std::uint64_t>(pattern.token_count()) + 1;
+    const std::uint64_t bytes = static_cast<std::uint64_t>(text.size()) + 1;
+    if (states > HARD_MAX_CREATE_FILTER_WORK / bytes)
+    {
+        err = "archive: glob filtering exceeds the internal 100000000-cell work limit";
+        return false;
+    }
+    const std::uint64_t work = states * bytes;
+    if (work > HARD_MAX_CREATE_FILTER_WORK - options.filter_work)
+    {
+        err = "archive: glob filtering exceeds the internal 100000000-cell work limit";
+        return false;
+    }
+    options.filter_work += work;
+    return true;
+}
+
+bool create_pattern_matches(ArchiveCreateOptions &options,
+                            const babet::safe_glob::Pattern &pattern,
+                            std::string_view archive_path, bool directory,
+                            bool &matched, std::string &err)
+{
+    if (options.filter_evaluations >= HARD_MAX_CREATE_FILTER_EVALUATIONS)
+    {
+        err = "archive: glob filtering exceeds the internal 1000000-evaluation limit";
+        return false;
+    }
+    ++options.filter_evaluations;
+    if (!consume_create_filter_work(options, pattern, archive_path, err))
+    {
+        return false;
+    }
+    matched = pattern.matches(archive_path);
+    if (matched || !directory)
+    {
+        return true;
+    }
+
+    std::string directory_path(archive_path);
+    directory_path.push_back('/');
+    if (!consume_create_filter_work(options, pattern, directory_path, err))
+    {
+        return false;
+    }
+    matched = pattern.matches(directory_path);
+    return true;
+}
+
+bool create_patterns_match_any(
+    ArchiveCreateOptions &options,
+    const std::vector<babet::safe_glob::Pattern> &patterns,
+    std::string_view archive_path, bool directory, bool &matched,
+    std::string &err)
+{
+    matched = false;
+    for (const babet::safe_glob::Pattern &pattern : patterns)
+    {
+        bool current = false;
+        if (!create_pattern_matches(options, pattern, archive_path, directory,
+                                    current, err))
+        {
+            return false;
+        }
+        if (current)
+        {
+            matched = true;
+        }
+    }
+    return true;
+}
+
+bool classify_create_path(ArchiveCreateOptions &options,
+                          const fs::path &archive_path, bool directory,
+                          CreateFilterDecision &decision, std::string &err)
+{
+    const std::string name = archive_path.generic_string();
+    bool matched = false;
+    if (!create_patterns_match_any(options, options.exclude_patterns, name,
+                                   directory, matched, err))
+    {
+        return false;
+    }
+    if (matched)
+    {
+        decision = CreateFilterDecision::excluded;
+        return true;
+    }
+    if (options.include_patterns.empty())
+    {
+        decision = CreateFilterDecision::included;
+        return true;
+    }
+    if (!create_patterns_match_any(options, options.include_patterns, name,
+                                   directory, matched, err))
+    {
+        return false;
+    }
+    decision = matched ? CreateFilterDecision::included
+                       : CreateFilterDecision::not_included;
+    return true;
+}
+
+bool scan_create_directory(int directory_fd,
+                           const fs::path &archive_relative,
+                           const fs::path &source_relative,
+                           std::size_t source_index, std::size_t depth,
+                           ArchiveCreateOptions &options,
                            std::vector<CreateEntry> &entries,
                            std::uint64_t &total_size,
                            std::uint64_t &total_name_bytes,
                            std::uint64_t &scanned_nodes,
+                           bool &selected_any,
                            std::string &err)
 {
+    selected_any = false;
     const int duplicate = ::openat(directory_fd, ".",
                                    O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                        O_NOFOLLOW);
@@ -2852,76 +3282,36 @@ bool scan_create_directory(int directory_fd, const fs::path &relative,
                       AT_SYMLINK_NOFOLLOW) != 0)
         {
             err = "archive: cannot inspect source entry '" +
-                  (relative / name).generic_string() + "': " +
+                  (archive_relative / name).generic_string() + "': " +
                   std::strerror(errno);
             return false;
         }
-        const fs::path child = relative / name;
-        const std::string child_name = child.generic_string();
-        if (child_name.empty() || child_name.size() > MAX_ARCHIVE_PATH_BYTES)
+        const fs::path archive_child = archive_relative / name;
+        const fs::path source_child = source_relative / name;
+        const bool is_directory = S_ISDIR(st.st_mode);
+        CreateFilterDecision filter_decision =
+            CreateFilterDecision::not_included;
+        if (!classify_create_path(options, archive_child, is_directory,
+                                  filter_decision, err))
         {
-            err = "archive: source entry path is empty or exceeds 4096 bytes: '" +
-                  child_name + "'";
             return false;
         }
-        if (!is_valid_utf8(child_name))
+        if (filter_decision == CreateFilterDecision::excluded)
         {
-            err = "archive: source entry path contains invalid UTF-8 bytes";
-            return false;
+            // Excluded directories are deliberately pruned before opening.
+            // Excluded non-directories, including special objects, are ignored.
+            continue;
         }
-        std::string normalized_name;
-        std::string path_reason;
-        const EntryKind path_kind = S_ISDIR(st.st_mode)
-                                        ? EntryKind::directory
-                                        : EntryKind::regular;
-        if (!validate_entry_path(child_name, path_kind, normalized_name,
-                                 path_reason) ||
-            normalized_name != child_name)
+
+        if (is_directory)
         {
-            err = "archive: unsafe source entry path '" + child_name +
-                  "': " + path_reason;
-            return false;
-        }
-        if (S_ISLNK(st.st_mode))
-        {
-            err = "archive: source contains a symlink entry: '" +
-                  child.generic_string() + "'";
-            return false;
-        }
-        if (S_ISDIR(st.st_mode))
-        {
-            if (options.include_directories)
-            {
-                if (entries.size() >= options.max_entries)
-                {
-                    err = "archive: source exceeds opts.max_entries";
-                    return false;
-                }
-                std::uint64_t updated_names = 0;
-                if (!checked_add_total(total_name_bytes, child_name.size(),
-                                       HARD_MAX_TOTAL_NAME_BYTES,
-                                       updated_names))
-                {
-                    err = "archive: source entry names exceed the internal 64 MiB limit";
-                    return false;
-                }
-                total_name_bytes = updated_names;
-                CreateEntry item;
-                item.relative = child;
-                item.kind = CreateEntryKind::directory;
-                item.device = st.st_dev;
-                item.inode = st.st_ino;
-                item.modified = st.st_mtim;
-                item.changed = st.st_ctim;
-                entries.push_back(std::move(item));
-            }
             ScopedFd child_fd(::openat(directory_fd, name.c_str(),
                                        O_RDONLY | O_DIRECTORY | O_CLOEXEC |
                                            O_NOFOLLOW));
             if (child_fd.get() < 0)
             {
                 err = "archive: cannot securely open source directory '" +
-                      child.generic_string() + "': " +
+                      archive_child.generic_string() + "': " +
                       std::strerror(errno);
                 return false;
             }
@@ -2930,66 +3320,135 @@ bool scan_create_directory(int directory_fd, const fs::path &relative,
                 err = "archive: source tree exceeds the internal depth limit of 256";
                 return false;
             }
-            if (!scan_create_directory(child_fd.get(), child, depth + 1,
+
+            bool child_selected = false;
+            if (!scan_create_directory(child_fd.get(), archive_child,
+                                       source_child, source_index, depth + 1,
                                        options, entries, total_size,
-                                       total_name_bytes, scanned_nodes, err))
+                                       total_name_bytes, scanned_nodes,
+                                       child_selected, err))
             {
                 return false;
             }
+
+            bool directory_added = false;
+            if (options.include_directories &&
+                (filter_decision == CreateFilterDecision::included ||
+                 child_selected))
+            {
+                if (!append_create_entry(archive_child, source_child,
+                                         source_index,
+                                         CreateEntryKind::directory, st,
+                                         options, entries, total_size,
+                                         total_name_bytes, err))
+                {
+                    return false;
+                }
+                directory_added = true;
+            }
+            if (child_selected || directory_added)
+            {
+                selected_any = true;
+            }
             continue;
+        }
+
+        if (filter_decision == CreateFilterDecision::not_included)
+        {
+            continue;
+        }
+        if (S_ISLNK(st.st_mode))
+        {
+            err = "archive: source contains a symlink entry: '" +
+                  archive_child.generic_string() + "'";
+            return false;
         }
         if (!S_ISREG(st.st_mode))
         {
             err = "archive: unsupported source entry type: '" +
-                  child.generic_string() + "'";
+                  archive_child.generic_string() + "'";
             return false;
         }
-        if (st.st_size < 0 ||
-            static_cast<std::uint64_t>(st.st_size) > options.max_file_size)
+        if (!append_create_entry(archive_child, source_child, source_index,
+                                 CreateEntryKind::regular, st, options,
+                                 entries, total_size, total_name_bytes, err))
         {
-            err = "archive: source file exceeds opts.max_file_size: '" +
-                  child.generic_string() + "'";
             return false;
         }
-        if (entries.size() >= options.max_entries)
-        {
-            err = "archive: source exceeds opts.max_entries";
-            return false;
-        }
-        std::uint64_t updated_total = 0;
-        if (!checked_add_total(total_size,
-                               static_cast<std::uint64_t>(st.st_size),
-                               options.max_total_size, updated_total))
-        {
-            err = "archive: source exceeds opts.max_total_size";
-            return false;
-        }
-        total_size = updated_total;
-        std::uint64_t updated_names = 0;
-        if (!checked_add_total(total_name_bytes, child_name.size(),
-                               HARD_MAX_TOTAL_NAME_BYTES, updated_names))
-        {
-            err = "archive: source entry names exceed the internal 64 MiB limit";
-            return false;
-        }
-        total_name_bytes = updated_names;
-        CreateEntry item;
-        item.relative = child;
-        item.kind = CreateEntryKind::regular;
-        item.size = static_cast<std::uint64_t>(st.st_size);
-        item.device = st.st_dev;
-        item.inode = st.st_ino;
-        item.modified = st.st_mtim;
-        item.changed = st.st_ctim;
-        entries.push_back(std::move(item));
+        selected_any = true;
     }
     return true;
 }
 
-bool open_source_entry(int root_fd, const CreateEntry &entry,
-                       ScopedFd &result, std::string &err)
+bool normalize_explicit_source_path(const fs::path &input,
+                                    fs::path &normalized,
+                                    std::string &archive_root,
+                                    std::string &err)
 {
-    ScopedFd current(::fcntl(root_fd, F_DUPFD_CLOEXEC, 3));
+    if (input.empty())
+    {
+        err = "archive: explicit source path must not be empty";
+        return false;
+    }
+    for (const fs::path &component : input)
+    {
+        if (component == "..")
+        {
+            err = "archive: explicit source paths must not contain '..' components";
+            return false;
+        }
+    }
+    normalized = input.lexically_normal();
+    while (!normalized.empty() && normalized.filename().empty() &&
+           normalized != normalized.root_path())
+    {
+        normalized = normalized.parent_path();
+    }
+    if (normalized.empty() || normalized == "." ||
+        normalized == normalized.root_path())
+    {
+        err = "archive: explicit source path must have a stable final name";
+        return false;
+    }
+    const fs::path leaf = normalized.filename();
+    if (leaf.empty() || leaf == "." || leaf == "..")
+    {
+        err = "archive: explicit source path must have a stable final name";
+        return false;
+    }
+    archive_root = leaf.generic_string();
+    return true;
+}
+
+bool create_entries_have_unique_names(const std::vector<CreateEntry> &entries,
+                                      std::string &err)
+{
+    std::unordered_set<std::string> names;
+    names.reserve(entries.size());
+    for (const CreateEntry &entry : entries)
+    {
+        const std::string name = entry.relative.generic_string();
+        if (!names.insert(name).second)
+        {
+            err = "archive: source list produces a duplicate archive entry: '" +
+                  name + "'";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool open_source_entry(const std::vector<ScopedFd> &source_roots,
+                       const CreateEntry &entry, ScopedFd &result,
+                       std::string &err)
+{
+    if (entry.source_index >= source_roots.size())
+    {
+        err = "archive: internal source plan mismatch";
+        return false;
+    }
+    ScopedFd current(::fcntl(source_roots[entry.source_index].get(),
+                             F_DUPFD_CLOEXEC, 3));
     if (current.get() < 0)
     {
         err = "archive: cannot duplicate source root descriptor: " +
@@ -2997,9 +3456,12 @@ bool open_source_entry(int root_fd, const CreateEntry &entry,
         return false;
     }
     std::vector<fs::path> components;
-    for (const fs::path &component : entry.relative)
+    for (const fs::path &component : entry.source_relative)
     {
-        components.push_back(component);
+        if (!is_dot_component(component))
+        {
+            components.push_back(component);
+        }
     }
     for (std::size_t i = 0; i < components.size(); ++i)
     {
@@ -3313,9 +3775,9 @@ bool source_file_unchanged(int fd, const CreateEntry &entry,
 class TarCreationSource final : public babet::archive_tar::CreationSource
 {
 public:
-    TarCreationSource(int source_root_fd,
+    TarCreationSource(const std::vector<ScopedFd> &source_roots,
                       const std::vector<CreateEntry> &entries) noexcept
-        : source_root_fd_(source_root_fd), entries_(entries)
+        : source_roots_(source_roots), entries_(entries)
     {
     }
 
@@ -3336,7 +3798,7 @@ public:
             err = "archive: internal TAR creation plan mismatch";
             return false;
         }
-        if (!open_source_entry(source_root_fd_, planned, active_fd_, err))
+        if (!open_source_entry(source_roots_, planned, active_fd_, err))
         {
             return false;
         }
@@ -3398,7 +3860,7 @@ public:
     }
 
 private:
-    int source_root_fd_ = -1;
+    const std::vector<ScopedFd> &source_roots_;
     const std::vector<CreateEntry> &entries_;
     ScopedFd active_fd_;
     std::optional<std::size_t> active_index_;
@@ -3432,67 +3894,250 @@ int lua_archive_create(lua_State *L)
     {
         return luaL_error(L, "archive.create expects 2 or 3 arguments");
     }
-    const std::string_view source_view =
-        luaL_checkstring_view_without_nul(L, 1, "source directory");
+    const int source_type = lua_type(L, 1);
+    if (source_type != LUA_TSTRING && source_type != LUA_TTABLE)
+    {
+        return luaL_error(
+            L, "archive.create source must be a directory string or a dense array of paths");
+    }
+    const bool legacy_directory_source = source_type == LUA_TSTRING;
+    const std::string_view legacy_source_view = legacy_directory_source
+                                                    ? luaL_checkstring_view_without_nul(
+                                                          L, 1, "source directory")
+                                                    : std::string_view{};
     const std::string_view destination_view =
         luaL_checkstring_view_without_nul(L, 2, "archive destination");
 
-    ArchiveCreateOptions options;
+    std::vector<fs::path> source_paths;
     std::string err;
-    if (!collect_create_options(L, 3, options, err))
+    if (legacy_directory_source)
+    {
+        if (legacy_source_view.empty())
+        {
+            return push_fail(L, "archive: source directory must not be empty");
+        }
+        source_paths.emplace_back(std::string(legacy_source_view));
+    }
+    else if (!collect_explicit_create_sources(L, 1, source_paths, err))
     {
         return push_fail(L, err);
     }
-    if (source_view.empty())
+
+    ArchiveCreateOptions options;
+    if (!collect_create_options(L, 3, options, err))
     {
-        return push_fail(L, "archive: source directory must not be empty");
+        return push_fail(L, err);
     }
     if (destination_view.empty())
     {
         return push_fail(L, "archive: archive destination must not be empty");
     }
 
-    const fs::path source{std::string(source_view)};
     const fs::path destination{std::string(destination_view)};
     if (!resolve_create_format(destination, options, err))
     {
         return push_fail(L, err);
     }
 
-    bool destination_inside_source = false;
-    if (!path_is_within(destination, source, destination_inside_source, err))
-    {
-        return push_fail(L, err);
-    }
-    if (destination_inside_source)
-    {
-        return push_fail(L,
-                         "archive: archive destination must not be inside the source directory");
-    }
-
-    ScopedFd source_fd;
-    if (!open_directory_without_symlinks(source, source_fd,
-                                         "source directory", err))
-    {
-        return push_fail(L, err);
-    }
-
+    std::vector<ScopedFd> source_roots;
+    source_roots.reserve(source_paths.size());
     std::vector<CreateEntry> entries;
     std::uint64_t total_size = 0;
     std::uint64_t total_name_bytes = 0;
     std::uint64_t scanned_nodes = 0;
-    if (!scan_create_directory(source_fd.get(), fs::path(), 0, options,
-                               entries, total_size, total_name_bytes,
-                               scanned_nodes, err))
+
+    if (legacy_directory_source)
     {
-        return push_fail(L, err);
+        bool destination_inside_source = false;
+        if (!path_is_within(destination, source_paths[0],
+                            destination_inside_source, err))
+        {
+            return push_fail(L, err);
+        }
+        if (destination_inside_source)
+        {
+            return push_fail(
+                L, "archive: archive destination must not be inside the source directory");
+        }
+
+        ScopedFd source_fd;
+        if (!open_directory_without_symlinks(source_paths[0], source_fd,
+                                             "source directory", err))
+        {
+            return push_fail(L, err);
+        }
+        source_roots.push_back(std::move(source_fd));
+        bool selected_any = false;
+        if (!scan_create_directory(source_roots[0].get(), fs::path(),
+                                   fs::path(), 0, 0, options, entries,
+                                   total_size, total_name_bytes, scanned_nodes,
+                                   selected_any, err))
+        {
+            return push_fail(L, err);
+        }
     }
+    else
+    {
+        std::unordered_set<std::string> top_level_names;
+        top_level_names.reserve(source_paths.size());
+        for (std::size_t source_index = 0;
+             source_index < source_paths.size(); ++source_index)
+        {
+            if (scanned_nodes >= HARD_MAX_SCANNED_SOURCE_NODES)
+            {
+                return push_fail(
+                    L, "archive: source list exceeds the internal 100000-node scan limit");
+            }
+            ++scanned_nodes;
+
+            fs::path normalized_source;
+            std::string archive_root;
+            if (!normalize_explicit_source_path(source_paths[source_index],
+                                                normalized_source,
+                                                archive_root, err))
+            {
+                return push_fail(L, err);
+            }
+            if (!top_level_names.insert(archive_root).second)
+            {
+                return push_fail(
+                    L, "archive: explicit sources have a colliding top-level name: '" +
+                           archive_root + "'");
+            }
+
+            bool destination_inside_source = false;
+            if (!path_is_within(destination, normalized_source,
+                                destination_inside_source, err))
+            {
+                return push_fail(L, err);
+            }
+            if (destination_inside_source)
+            {
+                return push_fail(
+                    L, "archive: archive destination must not be inside an explicit source");
+            }
+
+            fs::path parent = normalized_source.parent_path();
+            if (parent.empty())
+            {
+                parent = ".";
+            }
+            const std::string leaf = normalized_source.filename().string();
+            ScopedFd parent_fd;
+            if (!open_directory_without_symlinks(parent, parent_fd,
+                                                 "explicit source parent", err))
+            {
+                return push_fail(L, err);
+            }
+            struct stat st{};
+            if (::fstatat(parent_fd.get(), leaf.c_str(), &st,
+                          AT_SYMLINK_NOFOLLOW) != 0)
+            {
+                return push_fail(
+                    L, "archive: cannot inspect explicit source '" +
+                           normalized_source.string() + "': " +
+                           std::strerror(errno));
+            }
+            if (S_ISLNK(st.st_mode))
+            {
+                return push_fail(
+                    L, "archive: explicit source must not be a symlink: '" +
+                           normalized_source.string() + "'");
+            }
+
+            if (S_ISREG(st.st_mode))
+            {
+                source_roots.push_back(std::move(parent_fd));
+                CreateFilterDecision filter_decision =
+                    CreateFilterDecision::not_included;
+                if (!classify_create_path(options, fs::path(archive_root),
+                                          false, filter_decision, err))
+                {
+                    return push_fail(L, err);
+                }
+                if (filter_decision == CreateFilterDecision::included &&
+                    !append_create_entry(fs::path(archive_root),
+                                         fs::path(leaf), source_index,
+                                         CreateEntryKind::regular, st, options,
+                                         entries, total_size,
+                                         total_name_bytes, err))
+                {
+                    return push_fail(L, err);
+                }
+                continue;
+            }
+            if (!S_ISDIR(st.st_mode))
+            {
+                return push_fail(
+                    L, "archive: unsupported explicit source type: '" +
+                           normalized_source.string() + "'");
+            }
+
+            ScopedFd directory_fd(::openat(
+                parent_fd.get(), leaf.c_str(),
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+            if (directory_fd.get() < 0)
+            {
+                return push_fail(
+                    L, "archive: cannot securely open explicit source directory '" +
+                           normalized_source.string() + "': " +
+                           std::strerror(errno));
+            }
+            struct stat opened_directory{};
+            if (::fstat(directory_fd.get(), &opened_directory) != 0 ||
+                !S_ISDIR(opened_directory.st_mode) ||
+                opened_directory.st_dev != st.st_dev ||
+                opened_directory.st_ino != st.st_ino)
+            {
+                return push_fail(
+                    L, "archive: explicit source directory changed while being opened: '" +
+                           normalized_source.string() + "'");
+            }
+            source_roots.push_back(std::move(directory_fd));
+            CreateFilterDecision root_filter =
+                CreateFilterDecision::not_included;
+            if (!classify_create_path(options, fs::path(archive_root), true,
+                                      root_filter, err))
+            {
+                return push_fail(L, err);
+            }
+            if (root_filter == CreateFilterDecision::excluded)
+            {
+                continue;
+            }
+
+            bool descendants_selected = false;
+            if (!scan_create_directory(
+                    source_roots.back().get(), fs::path(archive_root),
+                    fs::path(), source_index, 0, options, entries, total_size,
+                    total_name_bytes, scanned_nodes, descendants_selected,
+                    err))
+            {
+                return push_fail(L, err);
+            }
+            if (options.include_directories &&
+                (root_filter == CreateFilterDecision::included ||
+                 descendants_selected) &&
+                !append_create_entry(fs::path(archive_root), fs::path(),
+                                     source_index, CreateEntryKind::directory,
+                                     st, options, entries, total_size,
+                                     total_name_bytes, err))
+            {
+                return push_fail(L, err);
+            }
+        }
+    }
+
     std::sort(entries.begin(), entries.end(),
               [](const CreateEntry &a, const CreateEntry &b)
               {
                   return a.relative.generic_string() <
                          b.relative.generic_string();
               });
+    if (!create_entries_have_unique_names(entries, err))
+    {
+        return push_fail(L, err);
+    }
 
     MZ_TIME_T fixed_time{};
     bool write_zip64 = false;
@@ -3534,7 +4179,7 @@ int lua_archive_create(lua_State *L)
     {
         const std::vector<babet::archive_tar::CreateEntry> tar_entries =
             make_tar_create_entries(entries);
-        TarCreationSource tar_source(source_fd.get(), entries);
+        TarCreationSource tar_source(source_roots, entries);
         const babet::archive_tar::Compression tar_compression =
             options.format == CreateArchiveFormat::tar_gzip
                 ? babet::archive_tar::Compression::gzip
@@ -3607,7 +4252,7 @@ int lua_archive_create(lua_State *L)
             }
 
             ScopedFd input_fd;
-            if (!open_source_entry(source_fd.get(), entry, input_fd, err))
+            if (!open_source_entry(source_roots, entry, input_fd, err))
             {
                 return push_fail(L, err);
             }
@@ -3663,6 +4308,8 @@ int lua_archive_create(lua_State *L)
     lua_setfield(L, -2, "directories");
     push_u64(L, total_size);
     lua_setfield(L, -2, "bytes");
+    push_u64(L, source_paths.size());
+    lua_setfield(L, -2, "sources");
     lua_pushlstring(L, destination_view.data(), destination_view.size());
     lua_setfield(L, -2, "path");
     lua_pushstring(L, options.format == CreateArchiveFormat::zip ? "zip"
@@ -3695,6 +4342,10 @@ int lua_archive_create(lua_State *L)
     lua_setfield(L, -2, "compression_level");
     lua_pushboolean(L, options.deterministic);
     lua_setfield(L, -2, "deterministic");
+    push_u64(L, options.include_patterns.size());
+    lua_setfield(L, -2, "include_patterns");
+    push_u64(L, options.exclude_patterns.size());
+    lua_setfield(L, -2, "exclude_patterns");
     lua_pushnil(L);
     return 2;
 }

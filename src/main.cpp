@@ -3,6 +3,7 @@
 #include "lua_bindings/blake2b.hpp"
 #include "lua_bindings/blake2s.hpp"
 #include "lua_bindings/chdir.hpp"
+#include "lua_bindings/compression.hpp"
 #include "lua_bindings/copy.hpp"
 #include "lua_bindings/copyTree.hpp"
 #include "lua_bindings/crc32.hpp"
@@ -255,6 +256,9 @@ void register_babet(lua_State *L)
     lua_pushcfunction(L, lua_createFileIterator);
     lua_setfield(L, -2, "createFileIterator");
 
+    // Sous-table babet.compression (flux gzip/xz/bzip2/zstd autonomes).
+    register_compression(L);
+
     // Sous-table babet.archive (ZIP miniz + TAR/libarchive, gzip compris).
     // Même précondition de pile que les autres sous-modules.
     register_archive(L);
@@ -456,7 +460,7 @@ static int run_tool_script(const fs::path &anchorDir,
 int main(int argc, char *argv[])
 {
     // === ÉTAPE -1 : vérifier les backends d'archive liés ============
-    // La 2.6.0 utilise libarchive, zlib, liblzma, libbz2 et libzstd
+    // La 2.7.0 utilise libarchive, zlib, liblzma, libbz2 et libzstd
     // statiquement pour TAR/gzip/xz/bzip2/zstd, tout en conservant miniz pour
     // ZIP. Ces contrôles détectent
     // immédiatement un mélange header/bibliothèque dans les builds personnalisés.

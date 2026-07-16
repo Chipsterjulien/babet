@@ -1,28 +1,20 @@
-Babet 2.6.0 roadmap
+Babet 2.7.0 roadmap
 ====================
 
-[x] Evaluate libarchive and define the multi-format archive API.
-[x] Add secure TAR inspection and extraction.
-[x] Add deterministic TAR creation.
-[x] Add .tar.gz/.tgz, .tar.xz/.txz, .tar.bz2/.tbz2/.tbz and
-    .tar.zst/.tar.zstd/.tzst support.
-[x] Define the 2.6.0 boundary for standalone gzip/xz/bzip2/zstd streams:
-    keep them outside the archive API until a dedicated raw-stream contract is
-    designed.
-[x] Complement std::regex in babet.find with a bounded safe glob mode.
-[x] Replace the legacy regex implementation with locally built static RE2 and
-    preserve the documented matching semantics.
-[x] Introduce shared strict Lua validation helpers without changing public
-    contracts.
-[x] Evaluate archive creation from explicit file lists and exclusion rules:
-    defer the feature until archive-root, collision and symlink semantics are
-    specified by a concrete use case.
+[x] Define the standalone compressed-stream API outside babet.archive.
+[x] Add secure gzip/xz/bzip2/zstd compression and automatic decompression.
+[x] Add pinned sources, bounded output, concatenated-member support, atomic
+    publication, strict Lua validation, worker registration, tests, and FR/EN
+    documentation for the first compression lot.
+[x] Add strictly validated format-specific compression levels.
+[x] Extend archive creation to accept an explicit source list.
+[x] Define deterministic archive entry names, duplicate/collision handling,
+    absolute-path policy, and symlink rules for explicit source lists.
+[x] Add include/exclude rules backed by the bounded safe glob engine.
 [x] Audit code, tests, FR/EN documentation, examples and PDF manuals before
-    release, using the same standard as 2.5.0.
+    release, using the same standard as 2.6.0.
 
 Deferred ideas retained in notes.md:
-- standalone compressed streams with a dedicated raw-stream API;
-- archive creation from explicit lists and exclusion rules;
 - parent-side PATH resolution followed by execve;
 - worker-to-worker channels;
 - cooperative cancellation design;

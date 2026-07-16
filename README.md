@@ -16,7 +16,7 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.6.0**. See the
+Current stable and audited release: **2.7.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
@@ -32,7 +32,8 @@ Can be used in three modes:
    `babet.socket`, `babet.inotify`, `babet.workers`,
    `babet.user`, `babet.exec`, the streaming `babet.spawn`,
    `babet.pipeline` / `babet.spawnPipeline`, secure ZIP and TAR handling through
-   `babet.archive`, direct-to-file `babet.http.download`, and more.
+   `babet.archive`, standalone gzip/xz/bzip2/zstd streams through
+   `babet.compression`, direct-to-file `babet.http.download`, and more.
 
 ## Quick start
 
@@ -69,6 +70,28 @@ The response is written to a same-directory temporary file and atomically
 committed only for a final 2xx status. Existing destinations are preserved on
 network, TLS, size, disk, and non-2xx failures.
 
+
+### Compress or decompress a standalone stream
+
+```lua
+local ok, err = babet.compression.compress(
+    "database.dump", "database.dump.zst", "zstd",
+    { overwrite = true }
+)
+assert(ok, err)
+
+ok, err = babet.compression.decompress(
+    "database.dump.zst", "database.dump",
+    { overwrite = true, max_output_size = 4 * 1024 * 1024 * 1024 }
+)
+assert(ok, err)
+```
+
+The decompressor detects gzip, xz, bzip2, or zstd from the stream bytes.
+Sources and destinations must be regular files reached without symlink parent
+components; output is staged in the destination directory and published
+atomically. The default decompression ceiling is 1 GiB.
+
 ### Create, inspect, and extract ZIP or TAR securely
 
 ```lua
@@ -82,6 +105,17 @@ local tar_created
 tar_created, err = babet.archive.create("project", "project.tar")
 assert(tar_created, err)
 assert(tar_created.format == "tar")
+
+local selected
+selected, err = babet.archive.create({
+    "bin/babet",
+    "README.md",
+    "docs",
+}, "release.tar.zst", {
+    include = { "babet", "README.md", "docs/**" },
+    exclude = { "docs/drafts/**", "**/*.tmp" },
+})
+assert(selected, err)
 
 local info, err = babet.archive.list("upload.zip", {
     max_entries = 2000,
@@ -114,9 +148,14 @@ format and compression from the contents; `archive.create()` infers TAR from
 `.tar`, gzip TAR from `.tar.gz` or `.tgz`, xz TAR from `.tar.xz` or `.txz`,
 bzip2 TAR from `.tar.bz2`, `.tbz2`, or `.tbz`, and zstd TAR from `.tar.zst`,
 `.tar.zstd`, or `.tzst`. It accepts `format = "tar"`, `format = "tar.gz"`,
-`format = "tar.xz"`, `format = "tar.bz2"`, or `format = "tar.zst"`. Creation rejects source
-symlinks, unsupported filesystem objects, unsafe entry names, and an output
-inside the source tree.
+`format = "tar.xz"`, `format = "tar.bz2"`, or `format = "tar.zst"`.
+The first argument may also be a dense list of unrelated regular files and
+directories: each source is rooted at its final basename, collisions are
+rejected, and list order does not affect deterministic output. Creation also
+accepts bounded, case-sensitive `include` and `exclude` safe-glob arrays matched
+against final archive paths; exclusions win and excluded directories are
+pruned. Creation rejects selected source symlinks, unsupported filesystem
+objects, unsafe entry names, and an output inside any source tree.
 Extraction rejects absolute paths, `..` components, archive links and special
 types, sparse TAR files, and symlinked destination parents. Archives are
 published atomically as a whole; extracted files are staged before publication

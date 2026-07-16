@@ -32,15 +32,25 @@ Le travail de durcissement dans Babet protège les usages
   pendant l'opération ne peut pas rediriger une écriture vers une cible
   extérieure. Les gardes `is_within()` empêchent en plus de choisir une
   destination résolue dans la source.
-- **Création et extraction ZIP confinées** : `babet.archive` refuse les chemins de source de création et de
-  destination de sortie/extraction lorsqu’ils sont symlinkés, les objets source non pris en charge, les noms
-  source non UTF-8, une sortie dans l’arbre source, les chemins d’entrée absolus,
+- **Création et extraction d’archives confinées** : `babet.archive` refuse les chemins de source de création et de
+  destination de sortie/extraction lorsqu’ils sont symlinkés, les objets source sélectionnés non pris en charge, les noms
+  source sélectionnés non UTF-8, une sortie dans l’arbre source, les chemins d’entrée absolus,
   les composants `.`/`..`, les backslashes, les doublons, les symlinks ZIP et
   les types spéciaux. Les archives à lire sont ouvertes une fois et doivent se
   résoudre vers un fichier régulier, ce qui écarte notamment les FIFO bloquants.
   La destination est parcourue avec des descripteurs et
   `O_NOFOLLOW`; chaque fichier est décompressé dans un temporaire du même
-  répertoire, soumis à des limites anti-bombe, puis publié atomiquement.
+  répertoire, soumis à des limites anti-bombe, puis publié atomiquement. Les
+  règles `include`/`exclude` de création réutilisent le moteur de glob sûr non
+  récursif, élaguent les dossiers exclus avant ouverture et bornent chaque
+  motif, le texte cumulé, les évaluations, le travail de correspondance et le
+  nombre de motifs.
+- **Confinement des flux compressés autonomes** : `babet.compression` accepte
+  uniquement de véritables fichiers source réguliers, refuse les composants de
+  chemin symlinkés et les destinations sur le même inode, épingle puis revérifie
+  le descripteur source, borne la sortie décompressée, vérifie l’intégrité du
+  codec, refuse les octets finaux parasites, prépare la sortie à côté de la
+  destination et la publie atomiquement.
 - **Cleanup borné des groupes de processus** dans `babet.exec` couvre aussi
   la phase `chdir`/`exec`, les erreurs internes de polling et le cas où un
   enfant ferme ses pipes tout en continuant à tourner. Au timeout, TERM puis
@@ -82,8 +92,10 @@ Le travail de durcissement dans Babet protège les usages
   afin de ne pas être perdus ou réordonnés si le script change de méthode.
 - **Filtrage borné des noms** : les champs regex `name`, `iname` et `path`
   de `babet.find` utilisent RE2 avec une limite de 4096 octets et un budget
-  mémoire de 1 Mio par expression ; les globs sûrs disposent eux aussi d’une
-  limite de 4096 octets et d’un automate non récursif. Les références arrière
+  mémoire de 1 Mio par expression ; les globs sûrs de `babet.find` et de la
+  création d’archives disposent eux aussi d’une limite de 4096 octets et d’un
+  automate non récursif. Les listes de création ajoutent des plafonds cumulés
+  sur le nombre, les octets et le travail de correspondance. Les références arrière
   et assertions d’anticipation/rétrospection ne font volontairement pas partie
   de la syntaxe RE2.
 

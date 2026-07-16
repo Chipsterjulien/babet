@@ -6,7 +6,7 @@ The `babet.archive` submodule creates, inspects, and extracts **ZIP**, **TAR**,
 and **gzip-, xz-, bzip2-, or zstd-compressed TAR** archives without calling an external command:
 
 ```lua
-babet.archive.create(source, archive [, opts])
+babet.archive.create(source_or_sources, archive [, opts])
 babet.archive.list(archive [, opts])
 babet.archive.extract(archive, destination [, opts])
 babet.archive.extractFile(archive, entry, destination [, opts])
@@ -22,8 +22,8 @@ and compression from the contents. For `create()`, `.tar` selects plain TAR,
 `.tar.gz` and `.tgz` select gzip-compressed TAR, `.tar.xz` or `.txz` select
 xz-compressed TAR, `.tar.bz2`, `.tbz2`, or `.tbz` select bzip2-compressed
 TAR, and `.tar.zst`, `.tar.zstd`, or `.tzst` select zstd-compressed TAR.
-`opts.format` can override the extension. Standalone compressed streams are not
-enabled.
+`opts.format` can override the extension. Standalone compressed streams are
+handled separately by [`babet.compression`](compression.md).
 
 All four functions use the usual result contract:
 
@@ -35,8 +35,9 @@ end
 ```
 
 They return `(result, nil)` on success and `(nil, message)` on failure. Wrong
-arity or a mandatory argument that is not a string raises a Lua error. An
-invalid option table returns `(nil, message)`.
+arity, a destination that is not a string, or a source that is neither a string
+nor a table raises a Lua error. Invalid source lists and option tables return
+`(nil, message)`.
 
 ## Contents
 
@@ -58,19 +59,38 @@ invalid option table returns `(nil, message)`.
 
 ```lua
 local result, err = babet.archive.create(
-    source,
+    source_or_sources,
     archive
     [, opts]
 )
 ```
 
-`source` must be an existing directory. Babet archives its contents, not the
-source directory name itself. Traversal is descriptor-based and does not follow
-symlinks. A symlink anywhere in the source path or tree, or a FIFO, socket,
-device, or other unsupported object, makes the operation fail before the
-archive is published. Entry names produced by `create()` must be valid UTF-8.
-Linux permits arbitrary bytes in filenames, but Babet rejects names that cannot
-be represented safely and consistently in both supported output formats.
+The first argument supports two distinct contracts:
+
+- a **string** preserves the historical behavior: it must name an existing
+  directory, and Babet archives its contents without including the source
+  directory name itself;
+- a **non-empty dense array** (`1..n`, no holes or extra keys) explicitly
+  selects regular files and/or directories, possibly from unrelated locations.
+  Each source is rooted at its final component: `/tmp/report.txt` becomes
+  `report.txt`, while `/opt/project/docs` becomes `docs/` with all descendants.
+  Absolute sources are accepted, but host path prefixes are never exposed in
+  the archive.
+
+In list mode, the final component must be stable: `.` and the filesystem root
+are rejected, as is every `..` component. Two sources with the same final
+component collide and fail, even when their descendants would differ. Repeating
+the same source therefore fails as well. Input list order does not affect the
+result: entries are always sorted by archive name.
+
+In both modes traversal is descriptor-based and follows no symlink. A symlink
+in a top-level source path always fails. Within a traversed tree, a selected
+symlink, FIFO, socket, device, or other unsupported object fails the operation
+before the archive is published; an object removed by the filters is not
+opened. Entry names
+produced by `create()` must be valid UTF-8. Linux permits arbitrary bytes in
+filenames, but Babet refuses names that cannot be represented safely and
+consistently in both output formats.
 
 ### Output format
 
@@ -105,6 +125,8 @@ Creation options:
 | `overwrite` | `false` | atomically replaces an existing regular archive |
 | `deterministic` | `true` | stable entry order and fixed format-specific timestamps |
 | `include_directories` | `true` | emits explicit directory entries, including empty directories |
+| `include` | none | dense array of case-sensitive safe-glob patterns selecting archive entry paths |
+| `exclude` | none | dense array of case-sensitive safe-glob patterns removed after inclusion; exclusion always wins |
 | `max_entries` | `10000` | maximum output entries; hard ceiling `100000` |
 | `max_file_size` | `256 * 1024 * 1024` | maximum source-file size; hard ceiling 8 GiB |
 | `max_total_size` | `1024 * 1024 * 1024` | maximum source bytes; hard ceiling 64 GiB |
@@ -119,19 +141,66 @@ All integer options require strict Lua integers. Boolean options require real
 Lua booleans. Unknown keys are rejected. `format` is case-sensitive and does
 not accept aliases.
 
-The complete source tree is scanned before the output temporary file is
-created. Entry names are limited to 4096 bytes each and 64 MiB cumulatively.
-The scan also has fixed ceilings of 100000 filesystem nodes and 256 directory
-levels, independently of `include_directories`. Files are then reopened through
-the source directory descriptor with `O_NOFOLLOW`. Device, inode, size,
+### Include and exclude filters
+
+`include` and `exclude` are optional dense arrays of non-empty Lua strings. An
+absent or empty `include` list keeps the historical behaviour and initially
+selects every supported entry. A non-empty `include` list selects an entry when
+at least one pattern matches. `exclude` is then applied and always wins, even
+when the same path also matches `include`.
+
+Patterns are matched against the complete path that will be stored in the
+archive, using `/` as the separator. The historical string form therefore
+matches paths relative to the source directory, while explicit-list sources
+include their final basename (`docs/readme.md`, `report.txt`, and so on).
+Matching is anchored, byte-oriented, and case-sensitive:
+
+- `*` matches zero or more bytes except `/`;
+- `**` matches zero or more bytes including `/`;
+- `?` matches exactly one byte except `/`;
+- `\x` quotes the following byte `x`.
+
+Directories are tested both as `path` and `path/`. Consequently `build/**`
+selects or excludes the `build/` directory itself as well as its descendants.
+A directly excluded directory is pruned before it is opened, so nothing below
+it is inspected or archived. When a deep file is included,
+`include_directories = true` still emits every required parent directory even
+if those parents do not directly match `include`. A matched empty directory is
+preserved only when directory entries are enabled. With
+`include_directories = false`, only selected regular files are emitted and
+parents remain implicit.
+
+Filtering defines the selected archive plan. A symlink, FIFO, socket, device,
+or invalid UTF-8 filename that is excluded or does not match a non-empty
+`include` list is ignored; the same object still fails creation when selected.
+The explicit paths supplied as top-level sources are always validated first and
+must themselves remain regular files or real directories reached without
+symlinks. It is valid for all filters to select nothing: Babet then creates a
+valid empty ZIP or TAR.
+
+The safe-glob engine has no recursive backtracking. Each pattern is limited to
+4096 bytes. `include` and `exclude` together are limited to 256 patterns and
+256 KiB of pattern text, one million pattern evaluations, and a fixed
+100,000,000-cell matching-work budget per creation call. Exceeding any limit fails before publication. Pattern
+order does not affect selection or deterministic archive bytes.
+
+All source paths are validated and each non-pruned directory tree is scanned
+before the temporary output file is created. `max_entries`, `max_file_size`,
+and `max_total_size` apply only to entries selected by the filters. Each
+selected archive name is limited to 4096 bytes and their sum to 64 MiB.
+Traversal still has fixed ceilings of 100000 sources/filesystem objects and 256
+directory levels, independent of `include_directories`; descendants of a
+pruned directory are not visited. Files are then reopened from
+their pinned source descriptor with `O_NOFOLLOW`. Device, inode, size,
 modification time, and change time are checked before and after streaming; a
-file changed during creation causes a failure and the temporary archive is
-removed.
+file modified during creation fails the operation and removes the temporary
+output.
 
 The destination parent must already exist and may not contain symlink or `..`
 components. The destination itself must be absent unless `overwrite = true`,
-and it may never be a symlink or directory. An archive cannot be written inside
-the source tree, avoiding accidental self-inclusion.
+and it may never be a symlink or directory. The archive cannot be created
+inside the historical source directory or any explicitly selected directory,
+and cannot directly replace a selected regular file.
 
 The result includes the selected format:
 
@@ -140,22 +209,28 @@ The result includes the selected format:
     files = 12,
     directories = 3,
     bytes = 987654,
+    sources = 1,
     path = "backup.tar",
     format = "tar",
     compression = "none",
     compression_level = nil,
     deterministic = true,
+    include_patterns = 0,
+    exclude_patterns = 0,
 }
 ```
 
-For ZIP and gzip-, xz-, bzip2-, or zstd-compressed TAR,
-`compression_level` is the effective integer level. For plain TAR it is `nil`. Archive-level `compression`
+`sources` is the number of supplied paths: `1` for the historical single
+source-directory contract, or the explicit list length. `include_patterns`
+and `exclude_patterns` report the number of compiled patterns supplied for
+that call. For ZIP and gzip-, xz-, bzip2-, or zstd-compressed TAR,
+`compression_level` is the effective
+integer level. For plain TAR it is `nil`. Archive-level `compression`
 is `"gzip"`, `"xz"`, `"bzip2"`, or `"zstd"` for compressed TAR and `"none"` otherwise. ZIP entry compression remains reported through the ZIP-specific
 per-entry metadata returned by `list()`.
 
-With the default deterministic mode, identical directory contents, format,
-libarchive/miniz/zlib/liblzma/libbz2/libzstd versions, and options produce byte-for-byte
-identical archives:
+With the default deterministic mode, identical directory contents, format, pinned
+dependency versions, and options produce byte-for-byte identical archives:
 
 - ZIP entries use the fixed DOS timestamp 1980-01-01 00:00:00;
 - TAR entries use Unix epoch zero, UID/GID `0`, empty owner/group names, mode
@@ -190,7 +265,8 @@ secure reopen fail. Concurrent directory renames are not reported as a
 transactional conflict.
 
 When `include_directories = false`, empty directories cannot be represented and
-are therefore omitted. Parent directories needed by regular files are recreated
+are therefore omitted. In an explicit list, regular files still retain the
+selected directory basename as their prefix. Required parents are recreated
 implicitly during extraction.
 
 Examples:
@@ -201,6 +277,22 @@ local zip, err = babet.archive.create("project", "project.zip", {
     overwrite = true,
 })
 assert(zip, err)
+
+local selected, list_err = babet.archive.create({
+    "bin/babet",
+    "README.md",
+    "docs",
+}, "release.tar.zst", {
+    compression_level = 19,
+})
+assert(selected, list_err)
+-- Entries: babet, README.md, docs/, docs/...
+
+local filtered, filter_err = babet.archive.create("project", "source-only.tar.zst", {
+    include = { "src/**", "README.md" },
+    exclude = { "src/generated/**", "**/*.tmp" },
+})
+assert(filtered, filter_err)
 
 local tar
 tar, err = babet.archive.create("project", "project.tar", {
@@ -625,16 +717,24 @@ UIDs, GIDs, ACLs, extended attributes, and timestamps are not restored.
 
 ## Supported entry types
 
-| Type | ZIP/TAR `create()` | ZIP/TAR `list()` | ZIP/TAR `extract()` | ZIP/TAR `extractFile()` |
+| Type | `create()` | `list()` | `extract()` | `extractFile()` |
 | --- | --- | --- | --- | --- |
-| regular file | supported; ZIP/gzip/xz accept levels `0` through `9`, bzip2 accepts `1` through `9`, zstd accepts `0` through `19`, plain TAR stores raw data | inspected in ZIP and plain/gzip/xz/bzip2/zstd TAR | supported in ZIP and plain/gzip/xz/bzip2/zstd TAR, except sparse TAR | supported in ZIP and plain/gzip/xz/bzip2/zstd TAR, except sparse TAR |
-| directory | supported when `include_directories = true` | inspected in ZIP and TAR | supported in ZIP and TAR | cannot be selected |
-| sparse TAR file | never created | identified in TAR | rejected | rejected when selected; ignored when unrelated |
-| symlink | always rejected | identified in ZIP and TAR | always rejected | rejected |
-| hard link | not created | identified in TAR | rejected | rejected when selected |
-| FIFO, socket, device, or unknown filesystem type | always rejected | identified when the format exposes it | rejected | rejected |
-| encrypted entry | not created | identified in ZIP | rejected | rejected |
-| unknown ZIP compression method | not created | identified | rejected | rejected |
+| regular file | supported | inspected | supported, except sparse TAR | supported, except sparse TAR |
+| directory | supported when enabled | inspected | supported | not selectable |
+| sparse TAR file | never created | identified in TAR | rejected | rejected if selected |
+| symlink | rejected if selected | identified | rejected | rejected |
+| hard link | never created | identified in TAR | rejected | rejected if selected |
+| FIFO, socket, device, unknown type | rejected if selected | identified when exposed | rejected | rejected |
+| encrypted entry | never created | identified in ZIP | rejected | rejected |
+| unknown ZIP compression method | never created | identified | rejected | rejected |
+
+During creation, a symlink or special filesystem object that is removed by the
+filters is ignored rather than opened. Directory entries are emitted only when
+`include_directories = true`.
+
+For regular-file creation, ZIP, gzip, and xz accept compression levels `0`
+through `9`; bzip2 accepts `1` through `9`; zstd accepts `0` through `19`;
+plain TAR stores the source bytes without compression.
 
 A ZIP entry that resembles a hard link but is encoded as a regular file is
 treated as an independent regular file; no link is created.
@@ -672,8 +772,8 @@ that continuously renames directories can make the operation fail and turn
 temporary-file cleanup into a best-effort action.
 
 Plain, gzip-, xz-, bzip2-, and zstd-compressed TAR creation is supported.
-Standalone compression streams remain rejected until their API and safety
-policy are defined and audited separately.
+Standalone compression streams remain intentionally outside this archive API
+and are handled by [`babet.compression`](compression.md).
 
 Multi-disk archives are not a supported target. ZIP64 is accepted when miniz
 can read it, while still being subject to the configured limits.

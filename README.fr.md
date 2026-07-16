@@ -1,3 +1,5 @@
+> [English](README.md) | **Français**
+
 <p align="center">
   <img src="docs/assets/babet-closed.png" alt="Babet — pomme de pin" width="200">
 </p>
@@ -15,7 +17,7 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.6.0**. Voir le
+Version stable et auditée actuelle : **2.7.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
@@ -29,7 +31,8 @@ Babet s’utilise de trois façons :
    `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`,
    `babet.inotify`, `babet.workers`, `babet.user`, `babet.exec`, le streaming
    `babet.spawn`, les pipelines `babet.pipeline` / `babet.spawnPipeline`, les
-   archives ZIP et TAR sécurisées `babet.archive` et le téléchargement direct
+   archives ZIP et TAR sécurisées `babet.archive`, les flux autonomes
+   gzip/xz/bzip2/zstd via `babet.compression` et le téléchargement direct
    `babet.http.download`.
 
 ## Démarrage rapide
@@ -66,6 +69,29 @@ La réponse est écrite dans un temporaire du même dossier, puis validée
 atomiquement uniquement pour un statut final 2xx. Une destination existante est
 préservée après erreur réseau, TLS, taille, disque ou statut non-2xx.
 
+
+### Compresser ou décompresser un flux autonome
+
+```lua
+local ok, err = babet.compression.compress(
+    "base.dump", "base.dump.zst", "zstd",
+    { overwrite = true }
+)
+assert(ok, err)
+
+ok, err = babet.compression.decompress(
+    "base.dump.zst", "base.dump",
+    { overwrite = true, max_output_size = 4 * 1024 * 1024 * 1024 }
+)
+assert(ok, err)
+```
+
+Le décompresseur détecte gzip, xz, bzip2 ou zstd à partir des octets du flux.
+Les sources et destinations doivent être des fichiers réguliers accessibles
+sans composant parent symlinké ; la sortie est préparée dans le dossier
+destination puis publiée atomiquement. Le plafond de décompression par défaut
+est de 1 Gio.
+
 ### Créer, inspecter et extraire ZIP ou TAR en sécurité
 
 ```lua
@@ -79,6 +105,17 @@ local tar_created
 tar_created, err = babet.archive.create("projet", "projet.tar")
 assert(tar_created, err)
 assert(tar_created.format == "tar")
+
+local selection
+selection, err = babet.archive.create({
+    "bin/babet",
+    "README.fr.md",
+    "docs",
+}, "publication.tar.zst", {
+    include = { "babet", "README.fr.md", "docs/**" },
+    exclude = { "docs/brouillons/**", "**/*.tmp" },
+})
+assert(selection, err)
 
 local info, err = babet.archive.list("upload.zip", {
     max_entries = 2000,
@@ -112,9 +149,15 @@ lecteurs détectent le format et la compression à partir du contenu ;
 de `.tar.xz` ou `.txz`, TAR bzip2 de `.tar.bz2`, `.tbz2` ou `.tbz`, et TAR zstd
 de `.tar.zst`, `.tar.zstd` ou `.tzst`. Il accepte `format = "tar"`,
 `format = "tar.gz"`, `format = "tar.xz"`, `format = "tar.bz2"` ou
-`format = "tar.zst"`. La création refuse les symlinks source,
-objets non pris en charge, noms
-d’entrée dangereux et toute sortie située dans l’arbre source. L’extraction
+`format = "tar.zst"`. Le premier argument peut aussi être une liste dense de
+fichiers et répertoires sans racine commune : chaque source est rangée sous son
+nom final, les collisions sont refusées et l’ordre de la liste n’affecte pas la
+sortie déterministe. La création accepte aussi des tableaux bornés de globs sûrs
+`include` et `exclude`, sensibles à la casse et appliqués aux chemins finaux de
+l’archive ; les exclusions gagnent et les dossiers exclus sont élagués. La
+création refuse les symlinks sélectionnés, objets non pris en charge, noms
+d’entrée dangereux et toute sortie située dans un arbre source.
+L’extraction
 refuse les chemins absolus, composants `..`, liens et types spéciaux de
 l’archive, fichiers TAR sparse et parents symlinkés. Les fichiers extraits sont
 tous préparés avant publication, puis publiés atomiquement un par un.

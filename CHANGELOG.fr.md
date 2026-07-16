@@ -6,6 +6,97 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.7.0] - 2026-07-16
+
+### Résumé de la version
+
+Babet 2.7.0 ajoute une API sécurisée dédiée aux flux compressés autonomes et
+étend la création d’archives aux sources explicites multi-racines ainsi qu’aux
+filtres bornés d’inclusion/exclusion, tout en conservant les contrats ZIP et TAR
+audités de la série 2.6.
+
+- passage de la version source à 2.7.0 ;
+- ajout de `babet.compression.compress(source, destination, format [, opts])` ;
+- ajout de `babet.compression.decompress(source, destination [, opts])` ;
+- prise en charge des flux autonomes gzip, xz, bzip2 et zstd ;
+- détection du format de décompression par signature plutôt que par extension ;
+- acceptation des membres/flux/frames concaténés valides et refus des octets
+  arbitraires ajoutés en fin de flux ;
+- vérification des informations d’intégrité et refus des flux corrompus ou
+  tronqués ;
+- traitement en streaming avec buffers bornés de 64 Kio, sans charger les
+  fichiers complets dans Lua ;
+- ajout de `max_output_size` pour la décompression (1 Gio par défaut, plafond
+  dur de 64 Gio) ;
+- épinglage des descripteurs source, refus des symlinks source/destination et
+  des composants parents symlinkés, détection des destinations sur le même
+  inode et revérification de la taille/des timestamps avant publication ;
+- staging dans le dossier destination et publication atomique, avec
+  `overwrite = false` par défaut ;
+- enregistrement du module dans l’état Lua principal et les workers ;
+- ajout de validations strictes et de tests binaires, fichiers vides, limites,
+  corruption, données finales, symlinks, liens physiques, workers et nettoyage ;
+- ajout de la documentation complète française et anglaise du module ;
+- ajout de l’option stricte `level` avec des plages et valeurs par défaut
+  stables : gzip 0-9 (défaut 6), xz 0-9 (défaut 6), bzip2 1-9 (défaut 9) et
+  zstd 1-22 (défaut 3) ;
+- refus des flottants, chaînes numériques et niveaux hors limites avant
+  l’ouverture de la source, avec diagnostics propres au format et tests de
+  régression ;
+- extension de `babet.archive.create()` afin que son premier argument puisse
+  être une table dense non vide de fichiers réguliers et répertoires explicites,
+  tout en conservant le contrat historique à répertoire unique sous forme de
+  chaîne ;
+- placement de chaque source explicite sous son dernier composant, acceptation
+  des chemins absolus sans exposer les préfixes hôte, conservation du préfixe
+  des répertoires lorsque leurs entrées sont omises, et ajout de
+  `result.sources` ;
+- refus des listes vides, trouées ou hétérogènes, de `..`, des racines sans nom
+  stable, des symlinks source ou parents, des objets non pris en charge, des
+  doublons/collisions de noms racine et des destinations situées dans une
+  source sélectionnée ;
+- épinglage d’un descripteur racine par source, application globale des limites
+  d’entrées/taille/nœuds/profondeur, tri indépendant de l’ordre de la liste et
+  prise en charge identique de ZIP, TAR brut/compressé, workers, publication
+  atomique et sortie déterministe ;
+- ajout des tableaux denses stricts `include` et `exclude` à
+  `archive.create()`, comparés de manière sensible à la casse aux chemins finaux
+  de l’archive avec le moteur de glob sûr borné existant ; les exclusions
+  gagnent toujours et les dossiers exclus sont élagués avant ouverture ;
+- conservation des dossiers parents nécessaires aux correspondances profondes,
+  prise en charge des dossiers vides sélectionnés et des archives vides valides,
+  application cohérente aux sources historiques et listes explicites, et
+  ignorance des objets spéciaux non sélectionnés tout en continuant à les
+  refuser lorsqu’ils sont retenus ;
+- bornage du filtrage à 4096 octets par motif, 256 motifs cumulés, 256 Kio de
+  texte total, un million d’évaluations de motifs et un budget fixe de
+  100 000 000 cellules, avec validation stricte
+  des tableaux/chaînes/NUL/échappements, tests workers, parité ZIP/TAR, ordre
+  déterministe et documentation française/anglaise synchronisée ;
+- achèvement de l’audit final fonction par fonction des bindings C++ modifiés,
+  tests Lua, exemples, documentations française/anglaise, notes de sécurité,
+  procédure de publication et manuels PDF générés.
+
+Validation fonctionnelle finale de cette version :
+
+- 2844 PASS / 0 FAIL en mode dossier ;
+- 2831 PASS / 0 FAIL en mode embarqué ;
+- 2831 PASS / 0 FAIL en mode embarqué via `PATH` ;
+- 9/9 modes validés sous ASan + UBSan ;
+- 9/9 modes validés de nouveau avec le build normal final.
+
+La barrière de publication exécute en plus les tests TLS locaux et les smoke
+tests réseau via `./run_tests.sh --release` avant la création du tag.
+
+## [2.6.1] - 2026-07-16
+
+### Version de maintenance
+
+- passage de la version patch à 2.6.1 ;
+- régénération et republication des manuels PDF français et anglais afin que la
+  documentation générée corresponde aux sources documentaires de la 2.6.0 ;
+- aucune modification du runtime ni de l’API publique.
+
 ## [2.6.0] - 2026-07-16
 
 ### Résumé de la version

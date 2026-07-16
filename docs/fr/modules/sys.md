@@ -117,9 +117,9 @@ Cette restriction évite des courses de données entre threads.
 Les quatre constantes décrivent le binaire Babet qui exécute le script.
 
 ```lua
-print(babet.VERSION)       -- par exemple "2.6.0"
+print(babet.VERSION)       -- par exemple "2.7.0"
 print(babet.VERSION_MAJOR) -- par exemple 2
-print(babet.VERSION_MINOR) -- par exemple 5
+print(babet.VERSION_MINOR) -- par exemple 7
 print(babet.VERSION_PATCH) -- par exemple 0
 ```
 
@@ -149,7 +149,7 @@ local function version_at_least(major, minor, patch)
     return true
 end
 
-assert(version_at_least(2, 6, 0), "Babet >= 2.6.0 requis")
+assert(version_at_least(2, 7, 0), "Babet >= 2.7.0 requis")
 ```
 
 La cohérence suivante est garantie par les tests :

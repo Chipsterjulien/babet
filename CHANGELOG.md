@@ -6,6 +6,91 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.7.0] - 2026-07-16
+
+### Release summary
+
+Babet 2.7.0 adds a dedicated secure API for standalone compressed streams and
+extends archive creation with explicit multi-root sources plus bounded
+include/exclude filtering, while preserving the audited ZIP and TAR contracts
+from the 2.6 series.
+
+- bumped the source version to 2.7.0;
+- added `babet.compression.compress(source, destination, format [, opts])`;
+- added `babet.compression.decompress(source, destination [, opts])`;
+- supports standalone gzip, xz, bzip2, and zstd streams;
+- detects decompression format from magic bytes rather than filename
+  extensions;
+- accepts valid concatenated members/streams/frames and rejects arbitrary
+  trailing bytes;
+- verifies codec integrity data and rejects corrupted or truncated streams;
+- streams through bounded 64 KiB buffers without loading whole files into Lua;
+- added `max_output_size` for decompression (1 GiB default, 64 GiB hard cap);
+- pins source descriptors, rejects source/destination symlinks and parent
+  symlink components, detects same-inode destinations, and revalidates source
+  size/timestamps before publication;
+- stages output in the destination directory and publishes atomically, with
+  `overwrite = false` by default;
+- registered the module in main and worker Lua states;
+- added strict argument/option validation and binary, empty-file, limit,
+  corruption, trailing-data, symlink, hard-link, worker, and cleanup tests;
+- added complete English and French module documentation;
+- added strict `level` selection for compression with stable per-format
+  defaults and ranges: gzip 0-9 (default 6), xz 0-9 (default 6), bzip2 1-9
+  (default 9), and zstd 1-22 (default 3);
+- rejects floats, numeric strings, and out-of-range levels before opening the
+  source, with format-specific diagnostics and regression coverage;
+- extended `babet.archive.create()` so its first argument may be a non-empty
+  dense array of explicit regular-file and directory paths while preserving
+  the historical single-directory string contract;
+- roots every explicit source at its final basename, accepts absolute sources
+  without leaking host path prefixes, preserves directory prefixes when
+  directory entries are omitted, and reports the selected path count through
+  `result.sources`;
+- rejects empty/sparse/mixed source tables, `..`, unstable root names, source
+  symlinks and symlinked parents, unsupported filesystem objects, duplicate or
+  colliding top-level basenames, and destinations inside any selected source;
+- pins one descriptor root per explicit source, applies entry/size/node/depth
+  limits across the complete list, sorts final archive names independently of
+  input order, and supports the same ZIP and compressed/uncompressed TAR
+  backends, workers, atomic publication, and deterministic output;
+- added strict `include` and `exclude` dense arrays to `archive.create()`,
+  matched case-sensitively against final archive paths through the existing
+  bounded safe-glob engine; exclusions always win and excluded directories are
+  pruned before opening;
+- retains required parent directory entries for deep matches, supports matched
+  empty directories and valid empty archives, applies filters consistently to
+  historical and explicit-list sources, and ignores unselected special objects
+  while continuing to reject them when selected;
+- bounds filtering to 4096 bytes per pattern, 256 combined patterns, 256 KiB of
+  total pattern text, one million pattern evaluations, and a fixed
+  100,000,000-cell matching-work budget, with
+  strict table/string/NUL/escape validation, worker coverage, ZIP/TAR parity,
+  deterministic-order tests, and synchronized English/French documentation;
+- completed the final function-by-function audit of the changed C++ bindings,
+  Lua tests, examples, English/French documentation, security notes, release
+  checklist, and generated PDF manuals.
+
+Final core validation for this release:
+
+- 2844 PASS / 0 FAIL in folder mode;
+- 2831 PASS / 0 FAIL in embedded mode;
+- 2831 PASS / 0 FAIL in embedded mode through `PATH`;
+- 9/9 runtime modes passed under ASan + UBSan;
+- 9/9 runtime modes passed again with the final normal build.
+
+The release gate additionally runs the local TLS and network smoke tests through
+`./run_tests.sh --release` before the commit is tagged.
+
+## [2.6.1] - 2026-07-16
+
+### Maintenance release
+
+- bumped the patch version to 2.6.1;
+- regenerated and republished the English and French PDF manuals so the
+  generated documentation matches the 2.6.0 source documentation;
+- made no runtime or public API change.
+
 ## [2.6.0] - 2026-07-16
 
 ### Release summary

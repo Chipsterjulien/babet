@@ -11084,6 +11084,471 @@ end
 
 -- =====================================================================
 print("")
+print("=== standalone compression streams ===")
+
+do
+    local root = sb("compression")
+    babet.rmdirAll(root)
+    assert(babet.mkdir(root))
+
+    local function write_bytes(path, data)
+        local file, open_err = io.open(path, "wb")
+        if not file then return nil, open_err end
+        local wrote, write_err = file:write(data)
+        local closed, close_err = file:close()
+        if not wrote then return nil, write_err end
+        if closed == nil then return nil, close_err end
+        return true
+    end
+
+    local function read_bytes(path)
+        local file, open_err = io.open(path, "rb")
+        if not file then return nil, open_err end
+        local data = file:read("a")
+        local closed, close_err = file:close()
+        if data == nil then return nil, "cannot read file" end
+        if closed == nil then return nil, close_err end
+        return data
+    end
+
+    local function no_compression_temporaries()
+        local result = babet.exec("find", {
+            root, "-name", ".babet-compression-*", "-print",
+        }, { timeout = 5 })
+        return type(result) == "table" and result.code == 0
+            and result.stdout == ""
+    end
+
+    ok("compression submodule registered",
+        type(babet.compression) == "table"
+        and type(babet.compression.compress) == "function"
+        and type(babet.compression.decompress) == "function")
+
+    local compression_worker, compression_worker_err = babet.workers.spawn([[
+        return type(babet.compression) == "table"
+            and type(babet.compression.compress) == "function"
+            and type(babet.compression.decompress) == "function"
+    ]])
+    ok_val("compression submodule registered in worker states",
+        compression_worker, compression_worker_err)
+    if compression_worker then
+        local joined, available = compression_worker:join()
+        ok("compression functions available in a worker",
+            joined == true and available == true,
+            "joined=" .. tostring(joined)
+            .. " available=" .. tostring(available))
+    end
+
+    local payload = "Babet compression 2.7.0\n"
+        .. string.rep("abc\0def\n", 8192)
+        .. "fin\0"
+    local source = root .. "/payload.bin"
+    assert(write_bytes(source, payload))
+
+    local formats = {
+        { name = "gzip", suffix = ".gz", min_level = 0,
+          max_level = 9, default_level = 6 },
+        { name = "xz", suffix = ".xz", min_level = 0,
+          max_level = 9, default_level = 6 },
+        { name = "bzip2", suffix = ".bz2", min_level = 1,
+          max_level = 9, default_level = 9 },
+        { name = "zstd", suffix = ".zst", min_level = 1,
+          max_level = 22, default_level = 3 },
+    }
+
+    for _, format in ipairs(formats) do
+        local compressed = root .. "/payload" .. format.suffix
+        local restored = root .. "/restored-" .. format.name .. ".bin"
+
+        local compressed_ok, compressed_err = babet.compression.compress(
+            source, compressed, format.name)
+        ok_act("compression.compress round-trip source (" .. format.name .. ")",
+            compressed_ok, compressed_err)
+
+        local restored_ok, restored_err = babet.compression.decompress(
+            compressed, restored, { max_output_size = #payload })
+        ok_act("compression.decompress auto-detects " .. format.name,
+            restored_ok, restored_err)
+        local restored_data, restored_read_err = read_bytes(restored)
+        ok("compression " .. format.name .. " preserves binary bytes",
+            restored_data == payload,
+            restored_read_err or ("size=" .. tostring(restored_data and #restored_data)))
+
+        local concat_a_source = root .. "/concat-a.bin"
+        local concat_b_source = root .. "/concat-b.bin"
+        assert(write_bytes(concat_a_source, "left\0"))
+        assert(write_bytes(concat_b_source, "right"))
+        local concat_a = root .. "/concat-a-" .. format.name
+        local concat_b = root .. "/concat-b-" .. format.name
+        assert(babet.compression.compress(
+            concat_a_source, concat_a, format.name))
+        assert(babet.compression.compress(
+            concat_b_source, concat_b, format.name))
+        local concatenated = root .. "/concatenated-" .. format.name
+        assert(write_bytes(concatenated,
+            assert(read_bytes(concat_a)) .. assert(read_bytes(concat_b))))
+        local concatenated_out = concatenated .. ".out"
+        local concatenated_ok, concatenated_err =
+            babet.compression.decompress(concatenated, concatenated_out, {
+                max_output_size = 10,
+            })
+        ok("compression accepts concatenated " .. format.name .. " members",
+            concatenated_ok == true and concatenated_err == nil
+            and read_bytes(concatenated_out) == "left\0right",
+            "err=" .. tostring(concatenated_err))
+
+        local duplicate_ok, duplicate_err = babet.compression.compress(
+            source, compressed, format.name)
+        ok_fail("compression refuses an existing destination ("
+            .. format.name .. ")", duplicate_ok, duplicate_err)
+
+        local overwrite_ok, overwrite_err = babet.compression.compress(
+            source, compressed, format.name, { overwrite = true })
+        ok_act("compression overwrite=true replaces atomically ("
+            .. format.name .. ")", overwrite_ok, overwrite_err)
+
+        babet.remove(restored)
+        local limited_ok, limited_err = babet.compression.decompress(
+            compressed, restored, { max_output_size = #payload - 1 })
+        ok_fail("compression enforces max_output_size ("
+            .. format.name .. ")", limited_ok, limited_err)
+        local limited_exists = babet.fileExists(restored)
+        ok("compression limit leaves no destination (" .. format.name .. ")",
+            limited_exists == false)
+
+        local encoded = assert(read_bytes(compressed))
+        local truncated = root .. "/truncated-" .. format.name
+        assert(write_bytes(truncated, encoded:sub(1, -2)))
+        local truncated_out = root .. "/truncated-out-" .. format.name
+        local truncated_ok, truncated_err = babet.compression.decompress(
+            truncated, truncated_out)
+        ok_fail("compression rejects truncated " .. format.name .. " streams",
+            truncated_ok, truncated_err)
+        ok("truncated " .. format.name .. " leaves no output",
+            babet.fileExists(truncated_out) == false)
+
+        local trailing = root .. "/trailing-" .. format.name
+        assert(write_bytes(trailing, encoded .. "junk"))
+        local trailing_out = root .. "/trailing-out-" .. format.name
+        local trailing_ok, trailing_err = babet.compression.decompress(
+            trailing, trailing_out)
+        ok_fail("compression rejects trailing data after "
+            .. format.name, trailing_ok, trailing_err)
+        ok("trailing-data failure leaves no output (" .. format.name .. ")",
+            babet.fileExists(trailing_out) == false)
+
+        -- Corrupt format-specific integrity metadata rather than merely
+        -- truncating the stream. Babet-generated zstd frames deliberately
+        -- carry the optional content checksum.
+        local corrupt_position
+        if format.name == "gzip" then
+            corrupt_position = #encoded - 7 -- CRC32 trailer
+        elseif format.name == "xz" then
+            corrupt_position = #encoded - 7 -- stream footer/check metadata
+        elseif format.name == "bzip2" then
+            corrupt_position = #encoded - 4 -- combined CRC/end marker
+        else
+            corrupt_position = #encoded -- zstd content checksum
+        end
+        local corrupted = encoded:sub(1, corrupt_position - 1)
+            .. string.char(encoded:byte(corrupt_position) ~ 1)
+            .. encoded:sub(corrupt_position + 1)
+        local corrupt = root .. "/corrupt-" .. format.name
+        assert(write_bytes(corrupt, corrupted))
+        local corrupt_out = root .. "/corrupt-out-" .. format.name
+        local corrupt_ok, corrupt_err = babet.compression.decompress(
+            corrupt, corrupt_out)
+        ok_fail("compression rejects corrupt " .. format.name
+            .. " integrity data", corrupt_ok, corrupt_err)
+        ok("corrupt " .. format.name .. " leaves no output",
+            babet.fileExists(corrupt_out) == false)
+    end
+
+    -- Format-specific compression levels are strict Lua integers. The
+    -- explicit default must be byte-for-byte identical to the implicit
+    -- default, and each lowest accepted level must remain decodable.
+    for _, format in ipairs(formats) do
+        local implicit = root .. "/payload" .. format.suffix
+        local explicit_default = root .. "/explicit-default-"
+            .. format.name .. format.suffix
+        local explicit_ok, explicit_err = babet.compression.compress(
+            source, explicit_default, format.name, {
+                level = format.default_level,
+            })
+        ok_act("compression accepts explicit default level ("
+            .. format.name .. ")", explicit_ok, explicit_err)
+        ok("compression default level is reproducible ("
+            .. format.name .. ")",
+            explicit_ok == true
+            and read_bytes(explicit_default) == read_bytes(implicit))
+
+        local lowest = root .. "/lowest-level-" .. format.name
+            .. format.suffix
+        local lowest_out = lowest .. ".out"
+        local lowest_ok, lowest_err = babet.compression.compress(
+            source, lowest, format.name, { level = format.min_level })
+        local lowest_restore_ok, lowest_restore_err =
+            babet.compression.decompress(lowest, lowest_out, {
+                max_output_size = #payload,
+            })
+        ok("compression accepts and decodes the lowest " .. format.name
+            .. " level",
+            lowest_ok == true and lowest_err == nil
+            and lowest_restore_ok == true and lowest_restore_err == nil
+            and read_bytes(lowest_out) == payload,
+            "compress_err=" .. tostring(lowest_err)
+            .. " decompress_err=" .. tostring(lowest_restore_err))
+
+        local boundary_ok, boundary_err = babet.compression.compress(
+            root .. "/missing-source",
+            root .. "/boundary-" .. format.name, format.name, {
+                level = format.max_level,
+            })
+        ok("compression accepts the highest " .. format.name
+            .. " level during validation",
+            boundary_ok == nil and type(boundary_err) == "string"
+            and boundary_err:find("source", 1, true) ~= nil
+            and boundary_err:find("opts.level", 1, true) == nil,
+            "err=" .. tostring(boundary_err))
+
+        local below_ok, below_err = babet.compression.compress(
+            source, root .. "/below-" .. format.name, format.name, {
+                level = format.min_level - 1,
+            })
+        ok_fail("compression rejects a " .. format.name
+            .. " level below the supported range", below_ok, below_err)
+        ok("compression reports the lower " .. format.name
+            .. " level bound",
+            type(below_err) == "string"
+            and below_err:find("opts.level for " .. format.name, 1, true)
+                ~= nil
+            and below_err:find(tostring(format.min_level), 1, true) ~= nil,
+            "err=" .. tostring(below_err))
+
+        local above_ok, above_err = babet.compression.compress(
+            source, root .. "/above-" .. format.name, format.name, {
+                level = format.max_level + 1,
+            })
+        ok_fail("compression rejects a " .. format.name
+            .. " level above the supported range", above_ok, above_err)
+        ok("compression reports the upper " .. format.name
+            .. " level bound",
+            type(above_err) == "string"
+            and above_err:find(tostring(format.max_level), 1, true) ~= nil,
+            "err=" .. tostring(above_err))
+    end
+
+    local empty = root .. "/empty.bin"
+    assert(write_bytes(empty, ""))
+    for _, format in ipairs(formats) do
+        local compressed = empty .. format.suffix
+        local restored = compressed .. ".out"
+        local compressed_ok, compressed_err = babet.compression.compress(
+            empty, compressed, format.name)
+        local restored_ok, restored_err = babet.compression.decompress(
+            compressed, restored, { max_output_size = 1 })
+        local restored_data = restored_ok and read_bytes(restored) or nil
+        ok("compression empty-file round-trip (" .. format.name .. ")",
+            compressed_ok == true and compressed_err == nil
+            and restored_ok == true and restored_err == nil
+            and restored_data == "",
+            "compress_err=" .. tostring(compressed_err)
+            .. " decompress_err=" .. tostring(restored_err))
+    end
+
+    local unknown_ok, unknown_err = babet.compression.compress(
+        source, root .. "/unknown", "zip")
+    ok_fail("compression rejects an unknown format", unknown_ok, unknown_err)
+
+    local plain_out = root .. "/plain.out"
+    local plain_ok, plain_err = babet.compression.decompress(source, plain_out)
+    ok_fail("compression rejects an uncompressed input", plain_ok, plain_err)
+    ok("unrecognised input leaves no output",
+        babet.fileExists(plain_out) == false)
+
+    local same_ok, same_err = babet.compression.compress(
+        source, source, "gzip", { overwrite = true })
+    ok_fail("compression refuses identical source and destination",
+        same_ok, same_err)
+    ok("identical-path refusal preserves the source",
+        read_bytes(source) == payload)
+
+    local hardlink = root .. "/payload-hardlink"
+    local hardlink_result = babet.exec("ln", { source, hardlink })
+    assert(type(hardlink_result) == "table" and hardlink_result.code == 0)
+    local hardlink_ok, hardlink_err = babet.compression.compress(
+        source, hardlink, "gzip", { overwrite = true })
+    ok_fail("compression refuses a destination hard-linked to the source",
+        hardlink_ok, hardlink_err)
+    ok("hard-link refusal preserves the source",
+        read_bytes(source) == payload)
+
+    local source_link = root .. "/source-link"
+    assert(babet.link("payload.bin", source_link))
+    local source_link_ok, source_link_err = babet.compression.compress(
+        source_link, root .. "/source-link.gz", "gzip")
+    ok_fail("compression refuses a symlink source",
+        source_link_ok, source_link_err)
+
+    local destination_target = root .. "/destination-target"
+    assert(write_bytes(destination_target, "unchanged"))
+    local destination_link = root .. "/destination-link"
+    assert(babet.link("destination-target", destination_link))
+    local destination_link_ok, destination_link_err =
+        babet.compression.compress(source, destination_link, "gzip", {
+            overwrite = true,
+        })
+    ok_fail("compression refuses a symlink destination",
+        destination_link_ok, destination_link_err)
+    ok("symlink destination target remains unchanged",
+        read_bytes(destination_target) == "unchanged")
+
+    local real_parent = root .. "/real-parent"
+    assert(babet.mkdir(real_parent))
+    local parent_link = root .. "/parent-link"
+    assert(babet.link("real-parent", parent_link))
+    local parent_link_ok, parent_link_err = babet.compression.compress(
+        source, parent_link .. "/escape.gz", "gzip")
+    ok_fail("compression refuses symlink components in destination parent",
+        parent_link_ok, parent_link_err)
+    ok("symlink-parent refusal creates no escaped file",
+        babet.fileExists(real_parent .. "/escape.gz") == false)
+
+    local source_parent_link = root .. "/source-parent-link"
+    assert(babet.link(".", source_parent_link))
+    local source_parent_ok, source_parent_err = babet.compression.compress(
+        source_parent_link .. "/payload.bin",
+        root .. "/source-parent.gz", "gzip")
+    ok_fail("compression refuses symlink components in source parent",
+        source_parent_ok, source_parent_err)
+
+    local source_dotdot_ok, source_dotdot_err = babet.compression.compress(
+        real_parent .. "/../payload.bin", root .. "/source-dotdot.gz",
+        "gzip")
+    ok_fail("compression refuses '..' in the source parent path",
+        source_dotdot_ok, source_dotdot_err)
+    local destination_dotdot_ok, destination_dotdot_err =
+        babet.compression.compress(source,
+            real_parent .. "/../destination-dotdot.gz", "gzip")
+    ok_fail("compression refuses '..' in the destination parent path",
+        destination_dotdot_ok, destination_dotdot_err)
+
+    local directory_ok, directory_err = babet.compression.compress(
+        root, root .. "/directory.gz", "gzip")
+    ok_fail("compression source must be a regular file",
+        directory_ok, directory_err)
+    local destination_directory_ok, destination_directory_err =
+        babet.compression.compress(source, real_parent, "gzip", {
+            overwrite = true,
+        })
+    ok_fail("compression destination must be a regular file",
+        destination_directory_ok, destination_directory_err)
+
+    ok_raises("compression source is a strict string",
+        function()
+            return babet.compression.compress(42, root .. "/x.gz", "gzip")
+        end, "string")
+    ok_raises("compression destination is a strict string",
+        function()
+            return babet.compression.compress(source, 42, "gzip")
+        end, "string")
+    ok_raises("compression format is a strict string",
+        function()
+            return babet.compression.compress(source, root .. "/x.gz", 42)
+        end, "string")
+    ok_raises("compression rejects source NUL",
+        function()
+            return babet.compression.compress(
+                source .. "\0ignored", root .. "/x.gz", "gzip")
+        end, "NUL")
+    ok_raises("compression.compress rejects excess arguments",
+        function()
+            return babet.compression.compress(
+                source, root .. "/x.gz", "gzip", {}, "extra")
+        end, "3 or 4 arguments")
+    ok_raises("compression.decompress rejects excess arguments",
+        function()
+            return babet.compression.decompress(source, plain_out, {}, "extra")
+        end, "2 or 3 arguments")
+
+    local invalid_ok, invalid_err = babet.compression.compress(
+        source, root .. "/invalid.gz", "gzip", "bad")
+    ok_fail("compression opts must be a table", invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.compress(
+        source, root .. "/invalid.gz", "gzip", { overwrite = 1 })
+    ok_fail("compression overwrite is a strict boolean",
+        invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.compress(
+        source, root .. "/invalid.gz", "gzip", { level = 1.5 })
+    ok_fail("compression level must be a Lua integer",
+        invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.compress(
+        source, root .. "/invalid.gz", "gzip", { level = "6" })
+    ok_fail("compression level rejects numeric strings",
+        invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.compress(
+        source, root .. "/invalid.gz", "gzip", { unknown = true })
+    ok_fail("compression rejects unknown options", invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.compress(
+        source, root .. "/invalid.gz", "gzip", { max_output_size = 1 })
+    ok_fail("compression.compress rejects decompression-only options",
+        invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.decompress(
+        root .. "/payload.gz", root .. "/invalid.out", { level = 6 })
+    ok_fail("compression.decompress rejects compression-only options",
+        invalid_ok, invalid_err)
+
+    local sample_gzip = root .. "/payload.gz"
+
+    local renamed_gzip = root .. "/payload-without-extension.bin"
+    assert(write_bytes(renamed_gzip, assert(read_bytes(sample_gzip))))
+    local renamed_out = root .. "/payload-without-extension.out"
+    local renamed_ok, renamed_err = babet.compression.decompress(
+        renamed_gzip, renamed_out, { max_output_size = #payload })
+    ok("compression detection ignores the filename extension",
+        renamed_ok == true and renamed_err == nil
+        and read_bytes(renamed_out) == payload,
+        "err=" .. tostring(renamed_err))
+
+    local sample_mode, sample_mode_err = babet.getMode(sample_gzip)
+    ok("compression publishes final files with mode 0644",
+        sample_mode == tonumber("644", 8) and sample_mode_err == nil,
+        "mode=" .. tostring(sample_mode)
+        .. " err=" .. tostring(sample_mode_err))
+
+    local preserved_after_failure = root .. "/preserved-after-failure.out"
+    assert(write_bytes(preserved_after_failure, "sentinel"))
+    local failed_overwrite, failed_overwrite_err =
+        babet.compression.decompress(root .. "/truncated-gzip",
+            preserved_after_failure, { overwrite = true })
+    ok_fail("failed decompression preserves an overwritten destination",
+        failed_overwrite, failed_overwrite_err)
+    ok("failed overwrite leaves the previous destination bytes unchanged",
+        read_bytes(preserved_after_failure) == "sentinel")
+
+    invalid_ok, invalid_err = babet.compression.decompress(
+        sample_gzip, root .. "/invalid.out", { max_output_size = 1.5 })
+    ok_fail("compression max_output_size must be a Lua integer",
+        invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.decompress(
+        sample_gzip, root .. "/invalid.out", { max_output_size = 0 })
+    ok_fail("compression rejects max_output_size zero",
+        invalid_ok, invalid_err)
+    invalid_ok, invalid_err = babet.compression.decompress(
+        sample_gzip, root .. "/invalid.out", {
+            max_output_size = 68719476737,
+        })
+    ok_fail("compression rejects max_output_size above 64 GiB",
+        invalid_ok, invalid_err)
+
+    ok("compression leaves no staging files",
+        no_compression_temporaries())
+
+    babet.rmdirAll(root)
+end
+
+-- =====================================================================
+print("")
 print("=== secure archives (ZIP and TAR) ===")
 
 do
@@ -12758,6 +13223,7 @@ return result.files
         created, created_err, function(value)
             return value.files == 3 and value.directories == 2
                 and value.bytes == 6 + 5 + #(string.rep("compress-me-", 2048))
+                and value.sources == 1
                 and value.path == created_zip
                 and value.format == "zip"
                 and value.compression == "none"
@@ -14232,6 +14698,632 @@ return result.files
     ok("archive.create empty source produces an empty ZIP",
         type(empty_created_list) == "table" and empty_created_list.count == 0)
 
+    do
+    -- archive.create explicit source lists (2.7.0 lot 3) --------------
+    local list_a = root .. "/list-a"
+    local list_b = root .. "/list-b"
+    assert(babet.mkdir(list_a))
+    assert(babet.mkdir(list_b .. "/nested"))
+    assert(write_bytes(list_a .. "/report.txt", "report"))
+    assert(write_bytes(list_b .. "/root.txt", "root"))
+    assert(write_bytes(list_b .. "/nested/data.bin", "A\0B"))
+
+    local explicit_sources = {
+        list_a .. "/report.txt",
+        list_b .. "/", -- trailing slash keeps the stable basename list-b
+    }
+    local explicit_zip = root .. "/explicit-list.zip"
+    local explicit, explicit_err = babet.archive.create(
+        explicit_sources, explicit_zip)
+    ok_val("archive.create accepts an explicit file/directory source list",
+        explicit, explicit_err, function(value)
+            return value.sources == 2 and value.files == 3
+                and value.directories == 2 and value.bytes == 13
+                and value.format == "zip"
+        end)
+    local explicit_list, explicit_list_err = babet.archive.list(explicit_zip)
+    ok_val("archive.create explicit-list ZIP is readable",
+        explicit_list, explicit_list_err)
+    local explicit_names = {}
+    if explicit_list then
+        for _, item in ipairs(explicit_list.entries) do
+            explicit_names[item.name] = true
+        end
+    end
+    ok("explicit sources use deterministic top-level basenames",
+        explicit_names["report.txt"] == true
+        and explicit_names["list-b/"] == true
+        and explicit_names["list-b/root.txt"] == true
+        and explicit_names["list-b/nested/"] == true
+        and explicit_names["list-b/nested/data.bin"] == true)
+
+    local explicit_out = root .. "/explicit-list-out"
+    local explicit_extracted, explicit_extract_err = babet.archive.extract(
+        explicit_zip, explicit_out)
+    ok_val("explicit-list ZIP extracts successfully",
+        explicit_extracted, explicit_extract_err)
+    ok("explicit-list extraction preserves unrelated sources",
+        read_bytes(explicit_out .. "/report.txt") == "report"
+        and read_bytes(explicit_out .. "/list-b/root.txt") == "root"
+        and read_bytes(explicit_out .. "/list-b/nested/data.bin") == "A\0B")
+
+    local single_directory_zip = root .. "/single-directory-list.zip"
+    local single_directory, single_directory_err = babet.archive.create(
+        { list_b }, single_directory_zip)
+    ok_val("a directory in an explicit list keeps its basename",
+        single_directory, single_directory_err,
+        function(value) return value.sources == 1 and value.files == 2 end)
+    local single_directory_list = babet.archive.list(single_directory_zip)
+    ok("explicit-list directory root differs deliberately from legacy mode",
+        single_directory_list and single_directory_list.entries[1]
+        and single_directory_list.entries[1].name == "list-b/")
+
+    local no_directory_entries = root .. "/explicit-no-directories.zip"
+    local no_directories, no_directories_err = babet.archive.create(
+        explicit_sources, no_directory_entries,
+        { include_directories = false })
+    ok_val("explicit source lists support include_directories=false",
+        no_directories, no_directories_err,
+        function(value) return value.files == 3 and value.directories == 0 end)
+    local no_directories_list = babet.archive.list(no_directory_entries)
+    ok("explicit-list files retain directory prefixes without directory entries",
+        no_directories_list and no_directories_list.count == 3
+        and no_directories_list.entries[1].name == "list-b/nested/data.bin"
+        and no_directories_list.entries[2].name == "list-b/root.txt"
+        and no_directories_list.entries[3].name == "report.txt")
+
+    local explicit_tar = root .. "/explicit-list.tar"
+    local explicit_tar_result, explicit_tar_err = babet.archive.create(
+        explicit_sources, explicit_tar)
+    ok_val("explicit source lists work with TAR backends",
+        explicit_tar_result, explicit_tar_err,
+        function(value)
+            return value.sources == 2 and value.format == "tar"
+                and value.compression == "none"
+        end)
+    local explicit_tar_list = babet.archive.list(explicit_tar)
+    ok("explicit-list TAR preserves the same entry names",
+        explicit_tar_list and explicit_tar_list.count == 5
+        and explicit_tar_list.entries[1].name == "list-b/")
+
+    local explicit_order_a = root .. "/explicit-order-a.zip"
+    local explicit_order_b = root .. "/explicit-order-b.zip"
+    local order_a, order_a_err = babet.archive.create(
+        { list_a .. "/report.txt", list_b }, explicit_order_a)
+    local order_b, order_b_err = babet.archive.create(
+        { list_b, list_a .. "/report.txt" }, explicit_order_b)
+    ok_val("explicit-list deterministic fixture A", order_a, order_a_err)
+    ok_val("explicit-list deterministic fixture B", order_b, order_b_err)
+    ok("explicit-list output is independent of source-list order",
+        read_bytes(explicit_order_a) == read_bytes(explicit_order_b))
+
+    local absolute_report = startDir .. "/" .. list_a .. "/report.txt"
+    local absolute_zip = root .. "/explicit-absolute.zip"
+    local absolute_result, absolute_err = babet.archive.create(
+        { absolute_report }, absolute_zip)
+    ok_val("explicit source lists accept absolute paths",
+        absolute_result, absolute_err,
+        function(value) return value.sources == 1 and value.files == 1 end)
+    local absolute_list = babet.archive.list(absolute_zip)
+    ok("absolute explicit sources never leak host path components",
+        absolute_list and absolute_list.count == 1
+        and absolute_list.entries[1].name == "report.txt")
+
+    local explicit_worker_code = [[
+local result, err = babet.archive.create(
+    worker.args.sources, worker.args.destination)
+if not result then error(err) end
+return result.sources
+]]
+    local explicit_worker = babet.workers.spawn(explicit_worker_code, {
+        sources = explicit_sources,
+        destination = root .. "/explicit-worker.zip",
+    })
+    ok("explicit source list starts safely in a worker",
+        explicit_worker ~= nil)
+    local explicit_worker_ok, explicit_worker_sources = false, nil
+    if explicit_worker then
+        explicit_worker_ok, explicit_worker_sources = explicit_worker:join()
+    end
+    ok("explicit source list succeeds in a worker",
+        explicit_worker_ok == true and explicit_worker_sources == 2)
+
+    local collision_a = root .. "/collision-a"
+    local collision_b = root .. "/collision-b"
+    assert(babet.mkdir(collision_a))
+    assert(babet.mkdir(collision_b))
+    assert(write_bytes(collision_a .. "/same.txt", "a"))
+    assert(write_bytes(collision_b .. "/same.txt", "b"))
+    local collision_path = root .. "/explicit-collision.zip"
+    local collision, collision_err = babet.archive.create({
+        collision_a .. "/same.txt",
+        collision_b .. "/same.txt",
+    }, collision_path)
+    ok_fail("explicit source lists reject colliding top-level basenames",
+        collision, collision_err)
+    ok("explicit-list collision failure leaves no output",
+        babet.fileExists(collision_path) == false)
+
+    local duplicate_path = root .. "/explicit-duplicate.zip"
+    local duplicate, duplicate_err = babet.archive.create({
+        list_a .. "/report.txt",
+        list_a .. "/report.txt",
+    }, duplicate_path)
+    ok_fail("explicit source lists reject duplicate source entries",
+        duplicate, duplicate_err)
+    ok("explicit-list duplicate failure leaves no output",
+        babet.fileExists(duplicate_path) == false)
+
+    local empty_list, empty_list_err = babet.archive.create(
+        {}, root .. "/explicit-empty.zip")
+    ok_fail("archive.create rejects an empty explicit source list",
+        empty_list, empty_list_err)
+    local sparse_list, sparse_list_err = babet.archive.create(
+        { [2] = list_b }, root .. "/explicit-sparse.zip")
+    ok_fail("archive.create requires a dense explicit source list",
+        sparse_list, sparse_list_err)
+    local keyed_list, keyed_list_err = babet.archive.create(
+        { list_b, extra = list_a }, root .. "/explicit-keyed.zip")
+    ok_fail("archive.create rejects non-array keys in explicit sources",
+        keyed_list, keyed_list_err)
+    local typed_list, typed_list_err = babet.archive.create(
+        { list_b, 42 }, root .. "/explicit-typed.zip")
+    ok_fail("archive.create explicit sources require strict strings",
+        typed_list, typed_list_err)
+    local nul_list, nul_list_err = babet.archive.create(
+        { list_b .. "\0ignored" }, root .. "/explicit-nul.zip")
+    ok_fail("archive.create rejects NUL in explicit source paths",
+        nul_list, nul_list_err)
+    local blank_list, blank_list_err = babet.archive.create(
+        { "" }, root .. "/explicit-blank.zip")
+    ok_fail("archive.create rejects empty explicit source paths",
+        blank_list, blank_list_err)
+    local unstable_name, unstable_name_err = babet.archive.create(
+        { "." }, root .. "/explicit-dot.zip")
+    ok_fail("archive.create requires stable explicit top-level names",
+        unstable_name, unstable_name_err)
+    local root_source, root_source_err = babet.archive.create(
+        { "/" }, root .. "/explicit-root.zip")
+    ok_fail("archive.create rejects filesystem root as an explicit source",
+        root_source, root_source_err)
+    local dotdot_list, dotdot_list_err = babet.archive.create(
+        { root .. "/other/../list-b" }, root .. "/explicit-dotdot.zip")
+    ok_fail("archive.create rejects '..' in explicit source paths",
+        dotdot_list, dotdot_list_err)
+    local missing_list, missing_list_err = babet.archive.create(
+        { root .. "/missing-explicit" }, root .. "/explicit-missing.zip")
+    ok_fail("archive.create rejects missing explicit sources",
+        missing_list, missing_list_err)
+
+    local explicit_link = root .. "/explicit-source-link"
+    local make_explicit_link = babet.exec("ln", { "-s", "list-b", explicit_link })
+    ok("explicit source symlink fixture created",
+        type(make_explicit_link) == "table" and make_explicit_link.code == 0)
+    local linked_list, linked_list_err = babet.archive.create(
+        { explicit_link }, root .. "/explicit-link.zip")
+    ok_fail("archive.create rejects symlinks in explicit source lists",
+        linked_list, linked_list_err)
+
+    local explicit_parent_target = root .. "/explicit-parent-target"
+    assert(babet.mkdir(explicit_parent_target))
+    assert(write_bytes(explicit_parent_target .. "/inside.txt", "inside"))
+    local explicit_parent_link = root .. "/explicit-parent-link"
+    assert(babet.exec("ln", {
+        "-s", "explicit-parent-target", explicit_parent_link,
+    }).code == 0)
+    local linked_parent_list, linked_parent_list_err = babet.archive.create(
+        { explicit_parent_link .. "/inside.txt" },
+        root .. "/explicit-parent-link.zip")
+    ok_fail("archive.create rejects symlink components in explicit paths",
+        linked_parent_list, linked_parent_list_err)
+
+    local explicit_fifo = root .. "/explicit-fifo"
+    assert(babet.exec("mkfifo", { explicit_fifo }).code == 0)
+    local fifo_list, fifo_list_err = babet.archive.create(
+        { explicit_fifo }, root .. "/explicit-fifo.zip")
+    ok_fail("archive.create rejects unsupported explicit source types",
+        fifo_list, fifo_list_err)
+    babet.exec("rm", { "-f", explicit_fifo })
+
+    local inside_explicit, inside_explicit_err = babet.archive.create(
+        { list_b }, list_b .. "/inside-explicit.zip")
+    ok_fail("archive.create refuses output inside an explicit directory source",
+        inside_explicit, inside_explicit_err)
+    ok("explicit inside-source refusal leaves no output",
+        babet.fileExists(list_b .. "/inside-explicit.zip") == false)
+
+    local list_limit, list_limit_err = babet.archive.create(
+        explicit_sources, root .. "/explicit-limit.zip", { max_entries = 4 })
+    ok_fail("archive.create applies max_entries across explicit sources",
+        list_limit, list_limit_err)
+    local list_total_limit, list_total_limit_err = babet.archive.create(
+        explicit_sources, root .. "/explicit-total-limit.zip",
+        { max_total_size = 12 })
+    ok_fail("archive.create applies max_total_size across explicit sources",
+        list_total_limit, list_total_limit_err)
+
+    local invalid_top_name = root .. "/explicit-invalid-\255.txt"
+    assert(write_bytes(invalid_top_name, "invalid"))
+    local invalid_top, invalid_top_err = babet.archive.create(
+        { invalid_top_name }, root .. "/explicit-invalid-name.zip")
+    ok_fail("archive.create rejects invalid UTF-8 explicit top-level names",
+        invalid_top, invalid_top_err)
+    babet.remove(invalid_top_name)
+
+    ;(function()
+    -- archive.create include/exclude safe globs (2.7.0 lot 4) ---------
+    local filter_source = root .. "/filter-source"
+    assert(babet.mkdir(filter_source .. "/src/private"))
+    assert(babet.mkdir(filter_source .. "/src/empty"))
+    assert(babet.mkdir(filter_source .. "/docs"))
+    assert(babet.mkdir(filter_source .. "/cache"))
+    assert(write_bytes(filter_source .. "/top.txt", "top"))
+    assert(write_bytes(filter_source .. "/top.log", "log"))
+    assert(write_bytes(filter_source .. "/literal*.dat", "literal"))
+    assert(write_bytes(filter_source .. "/src/main.lua", "return 1"))
+    assert(write_bytes(filter_source .. "/src/util.cpp", "int x;"))
+    assert(write_bytes(filter_source .. "/src/private/secret.lua", "secret"))
+    assert(write_bytes(filter_source .. "/docs/readme.md", "readme"))
+    assert(write_bytes(filter_source .. "/docs/draft.tmp", "draft"))
+    assert(write_bytes(filter_source .. "/cache/data.bin", "cache"))
+
+    local function archive_name_set(path)
+        local info, info_err = babet.archive.list(path)
+        if not info then return nil, info_err end
+        local set = {}
+        for _, item in ipairs(info.entries) do set[item.name] = true end
+        return set, info
+    end
+
+    local selected_zip = root .. "/filtered-selected.zip"
+    local selected, selected_err = babet.archive.create(
+        filter_source, selected_zip, {
+            include = { "src/*.lua", "docs/**" },
+            exclude = { "docs/*.tmp" },
+        })
+    ok_val("archive.create accepts bounded include/exclude globs",
+        selected, selected_err, function(value)
+            return value.files == 2 and value.directories == 2
+                and value.include_patterns == 2
+                and value.exclude_patterns == 1
+        end)
+    local selected_names, selected_info = archive_name_set(selected_zip)
+    ok("include patterns match complete archive paths and '*' stays in one component",
+        selected_names and selected_info.count == 4
+        and selected_names["docs/"] == true
+        and selected_names["docs/readme.md"] == true
+        and selected_names["src/"] == true
+        and selected_names["src/main.lua"] == true
+        and selected_names["src/private/secret.lua"] ~= true
+        and selected_names["docs/draft.tmp"] ~= true)
+
+    local parent_zip = root .. "/filtered-parent.zip"
+    local parent_result, parent_err = babet.archive.create(
+        filter_source, parent_zip, {
+            include = { "src/private/secret.lua" },
+        })
+    ok_val("included deep files retain required parent directory entries",
+        parent_result, parent_err,
+        function(value) return value.files == 1 and value.directories == 2 end)
+    local parent_names, parent_info = archive_name_set(parent_zip)
+    ok("only the selected deep file and its parents are emitted",
+        parent_names and parent_info.count == 3
+        and parent_names["src/"] == true
+        and parent_names["src/private/"] == true
+        and parent_names["src/private/secret.lua"] == true)
+
+    local no_parent_zip = root .. "/filtered-no-parent.zip"
+    local no_parent, no_parent_err = babet.archive.create(
+        filter_source, no_parent_zip, {
+            include = { "src/private/secret.lua" },
+            include_directories = false,
+        })
+    ok_val("include filters respect include_directories=false",
+        no_parent, no_parent_err,
+        function(value) return value.files == 1 and value.directories == 0 end)
+    local no_parent_list = babet.archive.list(no_parent_zip)
+    ok("filtered creation can rely on implicit extraction parents",
+        no_parent_list and no_parent_list.count == 1
+        and no_parent_list.entries[1].name == "src/private/secret.lua")
+
+    local empty_dir_zip = root .. "/filtered-empty-dir.zip"
+    local empty_dir, empty_dir_err = babet.archive.create(
+        filter_source, empty_dir_zip, { include = { "src/empty/" } })
+    ok_val("a directory pattern can select an empty directory",
+        empty_dir, empty_dir_err,
+        function(value) return value.files == 0 and value.directories == 2 end)
+    local empty_dir_names, empty_dir_info = archive_name_set(empty_dir_zip)
+    ok("selected empty directories retain their parent path",
+        empty_dir_names and empty_dir_info.count == 2
+        and empty_dir_names["src/"] == true
+        and empty_dir_names["src/empty/"] == true)
+
+    local excluded_zip = root .. "/filtered-excluded.zip"
+    local excluded, excluded_err = babet.archive.create(
+        filter_source, excluded_zip, {
+            include = { "**" },
+            exclude = { "src/private/**", "cache/**", "*.log" },
+        })
+    ok_val("exclude patterns override include patterns",
+        excluded, excluded_err)
+    local excluded_names = archive_name_set(excluded_zip)
+    ok("excluded directories are pruned and excluded files are absent",
+        excluded_names
+        and excluded_names["top.txt"] == true
+        and excluded_names["top.log"] ~= true
+        and excluded_names["src/private/"] ~= true
+        and excluded_names["src/private/secret.lua"] ~= true
+        and excluded_names["cache/"] ~= true
+        and excluded_names["cache/data.bin"] ~= true)
+
+    local exclude_only_zip = root .. "/filtered-exclude-only.zip"
+    local exclude_only, exclude_only_err = babet.archive.create(
+        filter_source, exclude_only_zip, {
+            exclude = { "**/*.tmp", "cache/**" },
+        })
+    ok_val("exclude filters work without an include list",
+        exclude_only, exclude_only_err)
+    local exclude_only_names = archive_name_set(exclude_only_zip)
+    ok("exclude-only creation otherwise preserves historical selection",
+        exclude_only_names
+        and exclude_only_names["top.txt"] == true
+        and exclude_only_names["src/private/secret.lua"] == true
+        and exclude_only_names["docs/draft.tmp"] ~= true
+        and exclude_only_names["cache/data.bin"] ~= true)
+
+    local top_only_zip = root .. "/filtered-top-only.zip"
+    local top_only, top_only_err = babet.archive.create(
+        filter_source, top_only_zip, { include = { "*.txt" } })
+    ok_val("single-star include remains component-local",
+        top_only, top_only_err,
+        function(value) return value.files == 1 and value.directories == 0 end)
+    local top_only_list = babet.archive.list(top_only_zip)
+    ok("component-local star does not cross directory separators",
+        top_only_list and top_only_list.count == 1
+        and top_only_list.entries[1].name == "top.txt")
+
+    local escaped_zip = root .. "/filtered-escaped.zip"
+    local escaped, escaped_err = babet.archive.create(
+        filter_source, escaped_zip, { include = { "literal\\*.dat" } })
+    ok_val("glob escaping selects literal wildcard bytes",
+        escaped, escaped_err)
+    local escaped_list = babet.archive.list(escaped_zip)
+    ok("escaped star is stored as a literal filename",
+        escaped_list and escaped_list.count == 1
+        and escaped_list.entries[1].name == "literal*.dat")
+
+    local case_zip = root .. "/filtered-case.zip"
+    local case_result, case_err = babet.archive.create(
+        filter_source, case_zip, { include = { "TOP.TXT" } })
+    ok_val("archive include globs are case-sensitive",
+        case_result, case_err,
+        function(value) return value.files == 0 and value.directories == 0 end)
+    local case_list = babet.archive.list(case_zip)
+    ok("a filter with no matches creates a valid empty archive",
+        case_list and case_list.count == 0)
+
+    local empty_include_zip = root .. "/filtered-empty-include.zip"
+    local empty_include, empty_include_err = babet.archive.create(
+        filter_source, empty_include_zip, { include = {}, exclude = {} })
+    ok_val("empty include/exclude arrays are accepted as no-op filters",
+        empty_include, empty_include_err,
+        function(value)
+            return value.files == 9 and value.directories == 5
+                and value.include_patterns == 0
+                and value.exclude_patterns == 0
+        end)
+
+    local ignored = filter_source .. "/ignored"
+    assert(babet.mkdir(ignored))
+    assert(babet.exec("ln", { "-s", "../top.txt", ignored .. "/link" }).code == 0)
+    assert(babet.exec("mkfifo", { ignored .. "/pipe" }).code == 0)
+    local pruned_zip = root .. "/filtered-pruned.zip"
+    local pruned, pruned_err = babet.archive.create(
+        filter_source, pruned_zip, { exclude = { "ignored/**" } })
+    ok_val("an excluded directory is pruned before unsafe descendants are opened",
+        pruned, pruned_err)
+    local pruned_names = archive_name_set(pruned_zip)
+    ok("pruned directory entries and descendants are absent",
+        pruned_names and pruned_names["ignored/"] ~= true
+        and pruned_names["ignored/link"] ~= true
+        and pruned_names["ignored/pipe"] ~= true)
+    babet.exec("rm", { "-rf", ignored })
+
+    local optional_fifo = filter_source .. "/not-selected.fifo"
+    assert(babet.exec("mkfifo", { optional_fifo }).code == 0)
+    local skipped_special, skipped_special_err = babet.archive.create(
+        filter_source, root .. "/filtered-skipped-special.zip", {
+            include = { "top.txt" },
+        })
+    ok_val("unselected special filesystem objects are ignored",
+        skipped_special, skipped_special_err)
+    local selected_special, selected_special_err = babet.archive.create(
+        filter_source, root .. "/filtered-selected-special.zip", {
+            include = { "not-selected.fifo" },
+        })
+    ok_fail("selected special filesystem objects remain rejected",
+        selected_special, selected_special_err)
+    babet.exec("rm", { "-f", optional_fifo })
+
+    local invalid_filtered_name = filter_source .. "/ignored-\255.bin"
+    assert(write_bytes(invalid_filtered_name, "invalid"))
+    local ignored_invalid, ignored_invalid_err = babet.archive.create(
+        filter_source, root .. "/filtered-invalid-ignored.zip", {
+            include = { "top.txt" },
+        })
+    ok_val("unselected invalid UTF-8 names do not enter the archive plan",
+        ignored_invalid, ignored_invalid_err)
+    babet.remove(invalid_filtered_name)
+
+    local explicit_filtered_zip = root .. "/explicit-filtered.zip"
+    local explicit_filtered, explicit_filtered_err = babet.archive.create(
+        explicit_sources, explicit_filtered_zip, {
+            include = { "report.txt", "list-b/nested/**" },
+        })
+    ok_val("include filters use final archive names for explicit sources",
+        explicit_filtered, explicit_filtered_err,
+        function(value)
+            return value.sources == 2 and value.files == 2
+                and value.directories == 2
+        end)
+    local explicit_filtered_names, explicit_filtered_info =
+        archive_name_set(explicit_filtered_zip)
+    ok("explicit-source filters keep required selected roots",
+        explicit_filtered_names and explicit_filtered_info.count == 4
+        and explicit_filtered_names["report.txt"] == true
+        and explicit_filtered_names["list-b/"] == true
+        and explicit_filtered_names["list-b/nested/"] == true
+        and explicit_filtered_names["list-b/nested/data.bin"] == true
+        and explicit_filtered_names["list-b/root.txt"] ~= true)
+
+    local explicit_excluded, explicit_excluded_err = babet.archive.create(
+        explicit_sources, root .. "/explicit-filter-excluded.zip", {
+            include = { "**" },
+            exclude = { "report.txt" },
+        })
+    ok_val("exclude can remove a complete explicit file source",
+        explicit_excluded, explicit_excluded_err,
+        function(value) return value.sources == 2 and value.files == 2 end)
+
+    local filtered_tar_a = root .. "/filtered-a.tar"
+    local filtered_tar_b = root .. "/filtered-b.tar"
+    local filtered_a, filtered_a_err = babet.archive.create(
+        filter_source, filtered_tar_a, {
+            include = { "docs/**", "src/*.lua" },
+            exclude = { "docs/*.tmp" },
+        })
+    local filtered_b, filtered_b_err = babet.archive.create(
+        filter_source, filtered_tar_b, {
+            include = { "src/*.lua", "docs/**" },
+            exclude = { "docs/*.tmp" },
+        })
+    ok_val("safe-glob filters work with TAR creation",
+        filtered_a, filtered_a_err,
+        function(value) return value.format == "tar" and value.files == 2 end)
+    ok_val("filtered TAR comparison fixture is created",
+        filtered_b, filtered_b_err)
+    ok("filter-list order does not affect deterministic archive bytes",
+        read_bytes(filtered_tar_a) == read_bytes(filtered_tar_b))
+
+    local filter_worker_code = [[
+local result, err = babet.archive.create(
+    worker.args.source, worker.args.destination, {
+        include = { "src/*.lua" },
+        exclude = { "src/private/**" },
+    })
+if not result then error(err) end
+return { result.files, result.directories, result.include_patterns,
+         result.exclude_patterns }
+]]
+    local filter_worker = babet.workers.spawn(filter_worker_code, {
+        source = filter_source,
+        destination = root .. "/filtered-worker.zip",
+    })
+    ok("archive filters start safely in a worker", filter_worker ~= nil)
+    local filter_worker_ok, filter_worker_result = false, nil
+    if filter_worker then
+        filter_worker_ok, filter_worker_result = filter_worker:join()
+    end
+    ok("archive filters succeed in worker Lua states",
+        filter_worker_ok == true and type(filter_worker_result) == "table"
+        and filter_worker_result[1] == 1 and filter_worker_result[2] == 1
+        and filter_worker_result[3] == 1 and filter_worker_result[4] == 1)
+
+    local bad_include_type, bad_include_type_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-type.zip", { include = "*.txt" })
+    ok_fail("archive.create include must be a dense array",
+        bad_include_type, bad_include_type_err)
+    local bad_exclude_type, bad_exclude_type_err = babet.archive.create(
+        filter_source, root .. "/bad-exclude-type.zip", { exclude = false })
+    ok_fail("archive.create exclude must be a dense array",
+        bad_exclude_type, bad_exclude_type_err)
+    local sparse_filter, sparse_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-sparse.zip", {
+            include = { [1] = "*.txt", [3] = "*.lua" },
+        })
+    ok_fail("archive.create filter arrays must not contain holes",
+        sparse_filter, sparse_filter_err)
+    local keyed_filter, keyed_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-key.zip", {
+            include = { "*.txt", extra = "*.lua" },
+        })
+    ok_fail("archive.create filter arrays reject non-array keys",
+        keyed_filter, keyed_filter_err)
+    local typed_filter, typed_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-value.zip", {
+            include = { "*.txt", 42 },
+        })
+    ok_fail("archive.create filters require strict string values",
+        typed_filter, typed_filter_err)
+    local empty_filter, empty_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-empty.zip", { include = { "" } })
+    ok_fail("archive.create rejects empty glob patterns",
+        empty_filter, empty_filter_err)
+    local nul_filter, nul_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-nul.zip", {
+            exclude = { "bad\0pattern" },
+        })
+    ok_fail("archive.create rejects NUL bytes in glob patterns",
+        nul_filter, nul_filter_err)
+    local escape_filter, escape_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-escape.zip", {
+            include = { "trailing\\" },
+        })
+    ok_fail("archive.create rejects a trailing glob escape",
+        escape_filter, escape_filter_err)
+    local long_filter, long_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-long.zip", {
+            include = { string.rep("x", 4097) },
+        })
+    ok_fail("archive.create enforces the 4096-byte per-pattern limit",
+        long_filter, long_filter_err)
+
+    local max_pattern, max_pattern_err = babet.archive.create(
+        filter_source, root .. "/filter-4096.zip", {
+            include = { string.rep("x", 4096) },
+        })
+    ok_val("archive.create accepts a 4096-byte glob pattern",
+        max_pattern, max_pattern_err,
+        function(value) return value.files == 0 and value.directories == 0 end)
+
+    local too_many_patterns = {}
+    for i = 1, 257 do too_many_patterns[i] = "never-" .. i end
+    local many_filter, many_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-count.zip", {
+            include = too_many_patterns,
+        })
+    ok_fail("archive.create enforces the combined 256-pattern limit",
+        many_filter, many_filter_err)
+
+    local too_many_pattern_bytes = {}
+    for i = 1, 65 do
+        too_many_pattern_bytes[i] = string.rep(string.char(64 + (i % 26)), 4096)
+    end
+    local bytes_filter, bytes_filter_err = babet.archive.create(
+        filter_source, root .. "/bad-filter-bytes.zip", {
+            include = too_many_pattern_bytes,
+        })
+    ok_fail("archive.create enforces the combined 256 KiB pattern limit",
+        bytes_filter, bytes_filter_err)
+
+    local work_source = root .. "/filter-work-source"
+    assert(babet.mkdir(work_source))
+    assert(write_bytes(work_source .. "/" .. string.rep("a", 250), "a"))
+    assert(write_bytes(work_source .. "/" .. string.rep("b", 250), "b"))
+    local expensive_patterns = {}
+    for i = 1, 64 do expensive_patterns[i] = string.rep("z", 4096) end
+    local work_filter, work_filter_err = babet.archive.create(
+        work_source, root .. "/bad-filter-work.zip", {
+            include = expensive_patterns,
+        })
+    ok_fail("archive.create bounds cumulative glob matching work",
+        work_filter, work_filter_err)
+    ok("glob work-limit failure leaves no archive output",
+        babet.fileExists(root .. "/bad-filter-work.zip") == false)
+    end)()
+
+    end
+
     local inside, inside_err = babet.archive.create(
         create_source, create_source .. "/inside.zip")
     ok_fail("archive.create refuses an output inside the source",
@@ -14479,8 +15571,9 @@ return result.files
             return babet.archive.create(create_source, root .. "/x.zip", nil, true)
         end,
         "expects 2 or 3 arguments")
-    ok_raises("archive.create source is a strict string",
-        function() return babet.archive.create({}, root .. "/x.zip") end)
+    ok_raises("archive.create source must be a string or table",
+        function() return babet.archive.create(42, root .. "/x.zip") end,
+        "directory string or a dense array")
     ok_raises("archive.create destination is a strict string",
         function() return babet.archive.create(create_source, {}) end)
     ok_raises("archive.create rejects NUL in source",

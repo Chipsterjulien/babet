@@ -48,6 +48,7 @@ FILE_TO_ANCHOR = {
     "cookbook":        "ch-cookbook",
     "argparse":        "ch-argparse",
     "archive":         "ch-archive",
+    "compression":     "ch-compression",
     "exec":            "ch-exec",
     "fs":              "ch-fs",
     "http":            "ch-http",

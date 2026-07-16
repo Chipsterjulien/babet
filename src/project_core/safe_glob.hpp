@@ -36,6 +36,10 @@ class Pattern
     {
         return case_insensitive_;
     }
+    [[nodiscard]] std::size_t token_count() const noexcept
+    {
+        return tokens_.size();
+    }
 
   private:
     friend std::optional<std::string> compile(std::string_view, bool,

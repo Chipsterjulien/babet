@@ -29,14 +29,22 @@ accidents and supply-chain tampering :
   during the operation, cannot redirect a write to an outside target. The
   `is_within()` guards additionally reject a destination resolving inside
   the source.
-- **Confined ZIP creation and extraction**: `babet.archive` refuses symlinked creation-source and
-  output/extraction-destination paths, unsupported source objects, non-UTF-8 source names,
+- **Confined archive creation and extraction**: `babet.archive` refuses symlinked creation-source and
+  output/extraction-destination paths, selected unsupported source objects, non-UTF-8 selected source names,
   outputs inside the source tree, absolute archive-entry paths, `.`/`..`
   components, backslashes, duplicates, ZIP symlinks, and special filesystem
   types. Input archives are opened once and must resolve to a regular file,
   excluding blocking FIFO sources. It walks the destination through descriptors with
   `O_NOFOLLOW`; each file is decompressed into a same-directory temporary,
-  checked against anti-bomb limits, then published atomically.
+  checked against anti-bomb limits, then published atomically. Creation-side
+  `include`/`exclude` rules reuse the non-recursive safe-glob engine, prune
+  excluded directories before opening, and enforce per-pattern, cumulative
+  pattern-text, pattern-evaluation, matching-work, and pattern-count limits.
+- **Standalone compression confinement**: `babet.compression` accepts only real
+  regular source files, rejects symlink path components and same-inode
+  destinations, pins and revalidates the source descriptor, bounds decompressed
+  output, verifies codec integrity, rejects trailing junk, stages output beside
+  the destination, and publishes atomically.
 - **Bounded process-group cleanup** in `babet.exec` also covers the
   `chdir`/`exec` launch phase, internal polling failures, and children that
   close all pipes while continuing to run. On timeout, TERM then KILL target
@@ -72,10 +80,12 @@ accidents and supply-chain tampering :
   `http.max_body_size`. After a socket-read timeout, already consumed bytes
   stay in one shared pending buffer so switching receive methods cannot lose or
   reorder the stream.
-- **Bounded filename matching** provides a non-recursive safe glob engine and
-  RE2-backed regular expressions for `babet.find`. Regex patterns are capped at
-  4096 bytes, compiled with a 1 MiB memory budget, and cannot trigger
-  catastrophic backtracking. RE2-unsupported constructs fail before traversal.
+- **Bounded filename matching** provides a non-recursive safe glob engine for
+  `babet.find` and archive creation, plus RE2-backed regular expressions for
+  `babet.find`. Regex patterns are capped at 4096 bytes, compiled with a 1 MiB
+  memory budget, and cannot trigger catastrophic backtracking. Archive filter
+  lists add cumulative count, byte, and matching-work ceilings. RE2-unsupported
+  constructs fail before traversal.
 
 ## What it does *not* protect against
 

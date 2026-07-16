@@ -1,8 +1,8 @@
 # Notes - known deferred work
 
-This file lists known topics intentionally left outside Babet 2.6.0. They are
-not hidden defects: each item records the current behavior, the remaining risk,
-and the reason it was not included in the release.
+This file lists known topics intentionally left outside the current Babet
+development roadmap. They are not hidden defects: each item records the current
+behavior, the remaining risk, and the reason it is deferred.
 
 ## 1. Resolve PATH in the parent and use only `execve`
 
@@ -68,41 +68,7 @@ replace inotify, abstract executable-path discovery, and add tested CI targets.
 platforms. A portability patch should be tested on the target OS rather than
 written blind.
 
-## 5. Standalone compressed streams
-
-**Current state**: Babet 2.6.0 creates, lists, extracts, and selectively extracts
-ZIP archives plus plain, gzip-, xz-, bzip2-, and zstd-compressed TAR archives.
-Archive readers detect format and compression from the contents. TAR operations
-use the statically linked libarchive stack and retain the bounded, pinned-source,
-confined-destination, atomic-publication, and worker guarantees documented by
-`babet.archive`.
-
-**Deliberate boundary**: standalone `.gz`, `.xz`, `.bz2`, and `.zst` streams
-that contain one raw payload rather than a TAR archive are not accepted by the
-public archive API.
-
-**Why deferred**: a raw compressed stream has no portable entry name or archive
-metadata and therefore needs a separate API contract for destination naming,
-limits, overwrite behavior, result metadata, and concatenated-member handling.
-Silently treating it as a one-entry archive would make those decisions implicit.
-
-## 6. Archive creation from lists and exclusion rules
-
-**Current state**: `babet.archive.create(source_directory, archive, opts)` walks
-one real source directory through pinned descriptors, refuses source symlinks
-and unsupported filesystem objects, orders entries deterministically, and
-publishes the completed archive atomically.
-
-**Deliberate boundary**: 2.6.0 does not accept an arbitrary list of unrelated
-source paths and does not expose include/exclude pattern rules.
-
-**Why deferred**: lists and exclusions require a stable policy for archive root
-names, collisions, paths outside a common root, symlinks, empty directories,
-and interaction with deterministic ordering. The directory API already covers
-the intended release use cases without adding an ambiguous second creation
-model.
-
-## 7. Linear-time or otherwise bounded pattern matching
+## 5. Linear-time or otherwise bounded pattern matching
 
 **Current state**: `babet.find()` offers bounded `glob`, `iglob`, `path_glob`,
 and `path_iglob` filters implemented by a small non-recursive matcher with a
@@ -116,9 +82,9 @@ RE2 intentionally does not implement constructs whose matching cost cannot be
 kept linear, notably backreferences and look-around assertions. Scripts that
 need only wildcard filename filtering should prefer the simpler glob fields.
 
-## 8. Shared strict Lua argument validators
+## 6. Shared strict Lua argument validators
 
-**Current state**: 2.6.0 provides shared allocation-free helpers for exact and
+**Current state**: since 2.6.0, Babet provides shared allocation-free helpers for exact and
 bounded arity, strict Lua strings, numbers, integers and booleans, optional
 `nil`, and strings passed to NUL-terminated native APIs. Public bindings use
 those helpers to avoid accidental number-to-string coercion and silent numeric
@@ -130,8 +96,9 @@ that require destruction are alive.
 
 ## Validation note
 
-Valgrind is not a release requirement. Babet 2.6.0 is validated with ASan and
-UBSan, followed by a clean normal rebuild and network smoke tests through:
+Valgrind is not a release requirement. Babet release candidates are validated
+with ASan and UBSan, followed by a clean normal rebuild and network smoke tests
+through:
 
 ```sh
 ./run_tests.sh --release

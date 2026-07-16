@@ -7,7 +7,7 @@ Le sous-module `babet.archive` crée, inspecte et extrait des archives **ZIP**,
 commande externe :
 
 ```lua
-babet.archive.create(source, archive [, opts])
+babet.archive.create(source_ou_sources, archive [, opts])
 babet.archive.list(archive [, opts])
 babet.archive.extract(archive, destination [, opts])
 babet.archive.extractFile(archive, entry, destination [, opts])
@@ -20,8 +20,8 @@ Zstandard/libzstd, également liés statiquement. Les lecteurs détectent le con
 du contenu. Pour `create()`, `.tar` sélectionne un TAR brut, `.tar.gz` et
 `.tgz` un TAR gzip, `.tar.xz` ou `.txz` un TAR xz, `.tar.bz2`, `.tbz2` ou
 `.tbz` un TAR bzip2, et `.tar.zst`, `.tar.zstd` ou `.tzst` un TAR zstd.
-`opts.format` peut remplacer l’extension. Les flux compressés simples ne sont
-pas encore activés.
+`opts.format` peut remplacer l’extension. Les flux compressés autonomes sont
+traités séparément par [`babet.compression`](compression.md).
 
 Les quatre fonctions suivent le contrat habituel :
 
@@ -33,8 +33,9 @@ end
 ```
 
 Elles renvoient `(résultat, nil)` en cas de succès et `(nil, message)` en cas
-d’échec. Une mauvaise arité ou un argument obligatoire qui n’est pas une
-chaîne provoque une erreur Lua. Une table d’options invalide renvoie
+d’échec. Une mauvaise arité, une destination obligatoire qui n’est pas une
+chaîne, ou une source qui n’est ni une chaîne ni une table provoque une erreur
+Lua. Une liste de sources ou une table d’options invalide renvoie
 `(nil, message)`.
 
 ## Table des matières
@@ -57,20 +58,41 @@ chaîne provoque une erreur Lua. Une table d’options invalide renvoie
 
 ```lua
 local result, err = babet.archive.create(
-    source,
+    source_ou_sources,
     archive
     [, opts]
 )
 ```
 
-`source` doit être un répertoire existant. Babet archive son contenu, pas le
-nom du répertoire source lui-même. Le parcours utilise des descripteurs et ne
-suit aucun symlink. Un symlink dans le chemin ou l’arbre source, ainsi qu’un
-FIFO, socket, périphérique ou autre objet non pris en charge, fait échouer
-l’opération avant la publication de l’archive. Les noms d’entrées produits par
-`create()` doivent être en UTF-8 valide. Linux autorise des noms contenant des
-octets arbitraires, mais Babet refuse ceux qui ne peuvent pas être représentés
-de manière sûre et cohérente dans les deux formats de sortie.
+Le premier argument accepte deux contrats distincts :
+
+- une **chaîne** conserve le comportement historique : elle doit désigner un
+  répertoire existant, et Babet archive son contenu sans inclure le nom du
+  répertoire source lui-même ;
+- une **table séquentielle non vide** (`1..n`, sans trou ni autre clé) sélectionne
+  explicitement des fichiers réguliers et/ou des répertoires provenant
+  éventuellement d’emplacements différents. Chaque source est placée sous son
+  dernier composant : `/tmp/rapport.txt` devient `rapport.txt`, et
+  `/opt/projet/docs` devient `docs/` avec tout son contenu. Une source absolue
+  est acceptée, mais aucun composant du chemin hôte n’est exposé dans
+  l’archive.
+
+Dans le mode liste, le dernier composant doit être stable : `.` et la racine du
+système de fichiers sont refusés, ainsi que tout composant `..`. Deux sources
+ayant le même dernier composant sont une collision et font échouer l’opération,
+même si leurs contenus internes seraient différents. Répéter la même source est
+donc également refusé. L’ordre fourni par la table ne modifie pas l’ordre final :
+les entrées sont toujours triées par leur nom d’archive.
+
+Dans les deux modes, le parcours utilise des descripteurs et ne suit aucun
+symlink. Un symlink dans le chemin d’une source de premier niveau est toujours
+refusé. Dans un arbre parcouru, un symlink, FIFO, socket, périphérique ou autre
+objet non pris en charge fait échouer l’opération lorsqu’il est sélectionné ;
+un objet retiré par les filtres n’est pas ouvert. Les noms d’entrées produits
+par `create()` doivent
+être en UTF-8 valide. Linux autorise des noms contenant des octets arbitraires,
+mais Babet refuse ceux qui ne peuvent pas être représentés de manière sûre et
+cohérente dans les deux formats de sortie.
 
 ### Format de sortie
 
@@ -106,6 +128,8 @@ Options de création :
 | `overwrite` | `false` | remplace atomiquement une archive régulière existante |
 | `deterministic` | `true` | ordre stable et dates fixes propres au format |
 | `include_directories` | `true` | émet les entrées de dossiers, y compris les dossiers vides |
+| `include` | aucune | tableau dense de globs sûrs sensibles à la casse sélectionnant les chemins d’entrée |
+| `exclude` | aucune | tableau dense de globs sûrs retirés après inclusion ; l’exclusion gagne toujours |
 | `max_entries` | `10000` | nombre maximal d’entrées ; plafond fixe `100000` |
 | `max_file_size` | `256 * 1024 * 1024` | taille maximale d’un fichier source ; plafond fixe 8 Gio |
 | `max_total_size` | `1024 * 1024 * 1024` | somme maximale des octets source ; plafond fixe 64 Gio |
@@ -120,20 +144,71 @@ Toutes les options entières exigent de vrais entiers Lua. Les options
 booléennes exigent de vrais booléens Lua. Les clés inconnues sont refusées.
 `format` est sensible à la casse et n’accepte aucun alias.
 
-L’arbre source complet est analysé avant la création du fichier temporaire de
-sortie. Chaque nom est borné à 4096 octets et leur somme à 64 Mio. Le parcours
-possède aussi des plafonds fixes de 100000 objets du système de fichiers et 256
-niveaux de répertoires, indépendamment de `include_directories`. Les fichiers
-sont ensuite rouverts depuis le descripteur du répertoire source avec
-`O_NOFOLLOW`. Le périphérique, l’inode, la taille, la date de modification et
-la date de changement sont vérifiés avant et après la lecture en flux ; un
-fichier modifié pendant la création provoque un échec et la suppression du
-temporaire.
+### Filtres d’inclusion et d’exclusion
+
+`include` et `exclude` sont des tableaux denses facultatifs de chaînes Lua non
+vides. Une liste `include` absente ou vide conserve le comportement historique
+et sélectionne initialement toutes les entrées prises en charge. Avec une liste
+`include` non vide, une entrée est sélectionnée si au moins un motif
+correspond. `exclude` est ensuite appliqué et gagne toujours, même lorsque le
+même chemin correspond aussi à `include`.
+
+Les motifs s’appliquent au chemin complet qui sera stocké dans l’archive, avec
+`/` comme séparateur. La forme historique à chaîne utilise donc des chemins
+relatifs au répertoire source, tandis qu’une liste explicite inclut le nom final
+de chaque source (`docs/readme.md`, `report.txt`, etc.). La correspondance est
+ancrée, orientée octets et sensible à la casse :
+
+- `*` correspond à zéro ou plusieurs octets sauf `/` ;
+- `**` correspond à zéro ou plusieurs octets, y compris `/` ;
+- `?` correspond à exactement un octet sauf `/` ;
+- `\x` protège l’octet suivant `x`.
+
+Un répertoire est testé sous les formes `chemin` et `chemin/`. Ainsi,
+`build/**` sélectionne ou exclut le dossier `build/` lui-même ainsi que tous ses
+descendants. Un dossier directement exclu est élagué avant son ouverture : rien
+de son sous-arbre n’est inspecté ni archivé. Lorsqu’un fichier profond est
+inclus, `include_directories = true` conserve tous ses dossiers parents
+nécessaires même s’ils ne correspondent pas directement à `include`. Un dossier
+vide correspondant à un motif n’est conservé que si les entrées de dossiers
+sont activées. Avec `include_directories = false`, seuls les fichiers réguliers
+sélectionnés sont émis et leurs parents restent implicites.
+
+Le filtrage définit le plan réellement sélectionné. Un symlink, FIFO, socket,
+périphérique ou nom UTF-8 invalide qui est exclu, ou qui ne correspond pas à
+une liste `include` non vide, est ignoré ; le même objet fait toujours échouer
+la création lorsqu’il est sélectionné. Les chemins fournis comme sources
+explicites de premier niveau sont toujours validés avant filtrage et doivent
+eux-mêmes rester des fichiers réguliers ou de vrais répertoires accessibles
+sans symlink. Il est valide qu’aucun motif ne corresponde : Babet crée alors un
+ZIP ou TAR vide valide.
+
+Le moteur de glob sûr n’effectue aucun backtracking récursif. Chaque motif est
+limité à 4096 octets. `include` et `exclude` sont limités ensemble à 256 motifs
+et 256 Kio de texte, un million d’évaluations de motifs et un budget fixe de
+100 000 000 cellules de correspondance par création. Dépasser une limite provoque un échec
+avant publication. L’ordre des motifs n’affecte ni la sélection ni les octets
+d’une archive déterministe.
+
+Tous les chemins source sont validés et chaque arbre non élagué est analysé
+avant la création du fichier temporaire de sortie. `max_entries`,
+`max_file_size` et `max_total_size` s’appliquent uniquement aux entrées retenues
+par les filtres. Chaque nom sélectionné est borné à 4096 octets et leur somme à
+64 Mio. Le parcours conserve des plafonds fixes de 100000 sources/objets du
+système de fichiers et 256 niveaux de répertoires, indépendamment de
+`include_directories` ; les descendants d’un dossier élagué ne sont pas
+visités. Les fichiers sont ensuite rouverts depuis leur
+descripteur source épinglé avec `O_NOFOLLOW`. Le périphérique, l’inode, la
+taille, la date de modification et la date de changement sont vérifiés avant et
+après la lecture en flux ; un fichier modifié pendant la création provoque un
+échec et la suppression du temporaire.
 
 Le parent de destination doit déjà exister et ne contenir aucun symlink ni
 composant `..`. La destination doit être absente sauf avec `overwrite = true`,
 et ne peut jamais être un symlink ou un répertoire. L’archive ne peut pas être
-créée dans l’arbre source, ce qui évite son auto-inclusion accidentelle.
+créée dans le répertoire source historique ni dans l’un des répertoires d’une
+liste explicite ; elle ne peut pas non plus remplacer directement un fichier
+sélectionné.
 
 Le résultat indique le format sélectionné :
 
@@ -142,23 +217,30 @@ Le résultat indique le format sélectionné :
     files = 12,
     directories = 3,
     bytes = 987654,
+    sources = 1,
     path = "backup.tar",
     format = "tar",
     compression = "none",
     compression_level = nil,
     deterministic = true,
+    include_patterns = 0,
+    exclude_patterns = 0,
 }
 ```
 
-Pour ZIP et TAR gzip, xz, bzip2 ou zstd, `compression_level` contient le niveau entier
+`sources` contient le nombre de chemins fournis : `1` pour le contrat historique
+à répertoire unique, ou la longueur de la liste explicite.
+`include_patterns` et `exclude_patterns` indiquent le nombre de motifs compilés
+pour l’appel. Pour ZIP et TAR gzip, xz, bzip2 ou zstd, `compression_level`
+contient le niveau entier
 effectif. Pour un TAR brut, il vaut `nil`. Le champ d’archive `compression` vaut
 `"gzip"`, `"xz"`, `"bzip2"` ou `"zstd"` pour un TAR compressé et `"none"` sinon. La compression
 des entrées ZIP reste indiquée par les métadonnées par entrée renvoyées par
 `list()`.
 
-Avec le mode déterministe par défaut, des contenus, un format, des versions de
-libarchive/miniz/zlib/liblzma/libbz2/libzstd et des options identiques produisent des archives
-strictement identiques octet par octet :
+Avec le mode déterministe par défaut, des contenus, un format, des versions de dépendances
+épinglées et des options identiques produisent des archives strictement identiques octet par
+octet :
 
 - les entrées ZIP utilisent la date DOS fixe du 1er janvier 1980 à 00:00:00 ;
 - les entrées TAR utilisent l’époque Unix zéro, les UID/GID `0`, des noms de
@@ -196,8 +278,9 @@ Les renommages concurrents de répertoires ne sont pas signalés comme conflit
 transactionnel.
 
 Avec `include_directories = false`, les répertoires vides ne peuvent pas être
-représentés et sont donc omis. Les parents nécessaires aux fichiers réguliers
-sont recréés implicitement pendant l’extraction.
+représentés et sont donc omis. Dans une liste explicite, le préfixe correspondant
+au nom du répertoire sélectionné reste présent pour ses fichiers réguliers. Les
+parents nécessaires sont recréés implicitement pendant l’extraction.
 
 Exemples :
 
@@ -207,6 +290,22 @@ local zip, err = babet.archive.create("projet", "projet.zip", {
     overwrite = true,
 })
 assert(zip, err)
+
+local selection, list_err = babet.archive.create({
+    "bin/babet",
+    "README.md",
+    "docs",
+}, "publication.tar.zst", {
+    compression_level = 19,
+})
+assert(selection, list_err)
+-- Entrées : babet, README.md, docs/, docs/...
+
+local filtree, filter_err = babet.archive.create("projet", "sources.tar.zst", {
+    include = { "src/**", "README.fr.md" },
+    exclude = { "src/generated/**", "**/*.tmp" },
+})
+assert(filtree, filter_err)
 
 local tar
 tar, err = babet.archive.create("projet", "projet.tar", {
@@ -650,16 +749,24 @@ Les UID, GID, ACL, attributs étendus et dates ne sont pas restaurés.
 
 ## Types d’entrées pris en charge
 
-| Type | ZIP/TAR `create()` | ZIP/TAR `list()` | ZIP/TAR `extract()` | ZIP/TAR `extractFile()` |
+| Type | `create()` | `list()` | `extract()` | `extractFile()` |
 | --- | --- | --- | --- | --- |
-| fichier régulier | pris en charge ; ZIP/gzip/xz acceptent les niveaux `0` à `9`, bzip2 accepte `1` à `9`, zstd accepte `0` à `19`, TAR brut stocke les données | inspecté en ZIP et TAR brut/gzip/xz/bzip2/zstd | pris en charge en ZIP et TAR brut/gzip/xz/bzip2/zstd, sauf TAR sparse | pris en charge en ZIP et TAR brut/gzip/xz/bzip2/zstd, sauf TAR sparse |
-| répertoire | pris en charge avec `include_directories = true` | inspecté en ZIP et TAR | pris en charge en ZIP et TAR | non sélectionnable |
-| fichier TAR sparse | jamais créé | identifié en TAR | refusé | refusé s’il est sélectionné ; ignoré sinon |
-| symlink | toujours refusé | identifié en ZIP et TAR | toujours refusé | refusé |
-| hard link | non créé | identifié en TAR | refusé | refusé s’il est sélectionné |
-| FIFO, socket, périphérique ou type inconnu | toujours refusé | identifié lorsque le format l’expose | refusé | refusé |
-| entrée chiffrée | non créée | identifiée en ZIP | refusée | refusée |
-| méthode de compression ZIP inconnue | non créée | identifiée | refusée | refusée |
+| fichier régulier | pris en charge | inspecté | pris en charge, sauf TAR sparse | pris en charge, sauf TAR sparse |
+| répertoire | pris en charge si activé | inspecté | pris en charge | non sélectionnable |
+| fichier TAR sparse | jamais créé | identifié en TAR | refusé | refusé s’il est sélectionné |
+| symlink | refusé s’il est sélectionné | identifié | refusé | refusé |
+| hard link | jamais créé | identifié en TAR | refusé | refusé s’il est sélectionné |
+| FIFO, socket, périphérique, type inconnu | refusé s’il est sélectionné | identifié si exposé | refusé | refusé |
+| entrée chiffrée | jamais créée | identifiée en ZIP | refusée | refusée |
+| méthode de compression ZIP inconnue | jamais créée | identifiée | refusée | refusée |
+
+Pendant la création, un symlink ou objet spécial retiré par les filtres est
+ignoré plutôt qu’ouvert. Les entrées de répertoires ne sont émises qu’avec
+`include_directories = true`.
+
+Pour la création de fichiers réguliers, ZIP, gzip et xz acceptent les niveaux
+`0` à `9` ; bzip2 accepte `1` à `9` ; zstd accepte `0` à `19` ; un TAR brut
+stocke les octets source sans compression.
 
 Une entrée ZIP qui ressemble à un hard link mais est encodée comme fichier
 régulier est traitée comme un fichier régulier indépendant ; aucun lien n’est
@@ -701,8 +808,8 @@ publication, mais un acteur qui renomme activement des répertoires peut faire
 « meilleur effort ».
 
 La création TAR brute, TAR gzip, TAR xz, TAR bzip2 et TAR zstd est prise en
-charge. Les flux compressés simples restent refusés jusqu’à la définition et
-l’audit séparés de leur API et de leur politique de sécurité.
+charge. Les flux compressés autonomes restent volontairement hors de cette API
+d’archive et sont traités par [`babet.compression`](compression.md).
 
 Les archives multi-disques ne constituent pas une cible prise en charge. ZIP64
 est accepté lorsque miniz peut le lire, tout en restant soumis aux limites
