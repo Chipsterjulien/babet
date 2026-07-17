@@ -22,8 +22,13 @@ EXEC covers:
 - enforcing a separate memory limit for each output stream;
 - terminating the child's process group after a timeout.
 
-It does not provide direct file redirection or an implicit command interpreter.
-To connect several programs without a shell, use
+`babet.exec` does not provide direct file redirection: it captures `stdout`
+and `stderr` in memory. For a controllable process, `babet.spawn` lets you
+configure `stdin`, `stdout`, and `stderr` independently as `pipe`, `inherit`,
+or `null`, and redirect `stdout` and `stderr` to a file.
+
+`babet.exec` also does not provide an implicit command interpreter. To connect
+several programs without a shell, use
 [`babet.pipeline()` or `babet.spawnPipeline()`](pipeline.md).
 
 ## Module contents

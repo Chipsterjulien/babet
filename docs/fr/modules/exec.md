@@ -22,8 +22,14 @@ Le module EXEC couvre :
 - une limite de mémoire distincte pour chaque flux de sortie ;
 - l'arrêt du groupe de processus enfant en cas de timeout.
 
-Il ne fournit pas de redirection directe vers un fichier ni d'interpréteur de
-commandes. Pour relier plusieurs programmes sans shell, utilise
+`babet.exec` ne fournit pas de redirection directe vers un fichier : il capture
+`stdout` et `stderr` en mémoire. Pour lancer un processus pilotable,
+`babet.spawn` permet de configurer séparément `stdin`, `stdout` et `stderr`
+avec les modes `pipe`, `inherit` ou `null`, ainsi que de rediriger `stdout`
+et `stderr` vers un fichier.
+
+`babet.exec` ne fournit pas non plus d'interpréteur de commandes. Pour relier
+plusieurs programmes sans shell, utilise
 [`babet.pipeline()` ou `babet.spawnPipeline()`](pipeline.md).
 
 ## Table des matières du module
