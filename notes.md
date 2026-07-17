@@ -21,26 +21,12 @@ async-signal-safe by POSIX.
 remaining concern is theoretical on the supported Linux/glibc target and does
 not justify another path-resolution implementation without a real use case.
 
-## 2. Independent worker-to-worker channels
+## 2. Forced worker termination
 
-**Current state**: workers expose parent-to-worker and worker-to-parent queues.
-Two workers communicate through the parent.
-
-**Limitation**: parent-mediated routing can become a bottleneck for complex
-pipelines or pub/sub topologies.
-
-**Possible extension**: add `workers.channel()` and pass channel handles to
-multiple workers.
-
-**Why deferred**: the current design covers the intended scripting, bot, and
-parallel-job use cases. A new synchronization primitive should be driven by a
-concrete application rather than speculative API growth.
-
-## 3. Forced worker termination
-
-**Current state**: there is no `worker:kill()`. A worker stops cooperatively,
-usually after `close()` wakes its inbox or after an operation with a timeout
-returns.
+**Current state**: there is no `worker:kill()`. A worker stops cooperatively
+through `job:cancel()` / `worker.cancelled()`, after `close()` wakes its inbox,
+or after a bounded operation returns. Cancellation also wakes a channel wait
+owned by that worker without closing the shared channel for other participants.
 
 **Limitation**: a worker blocked forever in an external operation without a
 timeout cannot be safely stopped from another thread. Garbage collection or a
@@ -51,10 +37,11 @@ mutexes, file descriptors, Lua state, and OpenSSL objects in inconsistent
 states. A safe design would require explicit cancellation points throughout the
 runtime.
 
-**Mitigation**: use bounded socket/process operations and make worker loops poll
-or receive with timeouts when they must remain externally stoppable.
+**Mitigation**: use bounded socket/process operations, call `job:cancel()`, and
+make worker loops check `worker.cancelled()` or return to cancellation-aware
+`worker.recv()` / channel operations when they must remain externally stoppable.
 
-## 4. macOS and BSD portability
+## 3. macOS and BSD portability
 
 **Current state**: Babet targets Linux/glibc. It uses Linux facilities such as
 inotify, `/proc/self/exe`, `accept4`, and `SOCK_CLOEXEC`.
@@ -68,7 +55,7 @@ replace inotify, abstract executable-path discovery, and add tested CI targets.
 platforms. A portability patch should be tested on the target OS rather than
 written blind.
 
-## 5. Linear-time or otherwise bounded pattern matching
+## 4. Linear-time or otherwise bounded pattern matching
 
 **Current state**: `babet.find()` offers bounded `glob`, `iglob`, `path_glob`,
 and `path_iglob` filters implemented by a small non-recursive matcher with a
@@ -82,7 +69,7 @@ RE2 intentionally does not implement constructs whose matching cost cannot be
 kept linear, notably backreferences and look-around assertions. Scripts that
 need only wildcard filename filtering should prefer the simpler glob fields.
 
-## 6. Shared strict Lua argument validators
+## 5. Shared strict Lua argument validators
 
 **Current state**: since 2.6.0, Babet provides shared allocation-free helpers for exact and
 bounded arity, strict Lua strings, numbers, integers and booleans, optional
@@ -94,7 +81,7 @@ truncation while retaining their documented error contracts.
 before conversion and should avoid `luaL_error` while non-trivial C++ objects
 that require destruction are alive.
 
-## 7. Bounded in-memory archive entry reads
+## 6. Bounded in-memory archive entry reads
 
 **Current state**: `babet.archive.extractFile()` securely selects one regular
 entry and publishes it atomically to a caller-chosen destination.

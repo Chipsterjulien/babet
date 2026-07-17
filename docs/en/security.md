@@ -45,6 +45,7 @@ accidents and supply-chain tampering :
   destinations, pins and revalidates the source descriptor, bounds decompressed
   output, verifies codec integrity, rejects trailing junk, stages output beside
   the destination, and publishes atomically.
+- **General atomic file writing**: `writeFileAtomic()` opens every parent without following symlinks, rejects `..`, a final symlink or non-regular destination, and implicit overwrite. Data is written to a private same-directory temporary file, permissions are applied, then the file and directory are synchronized around atomic publication.
 - **Bounded process-group cleanup** in `babet.exec` also covers the
   `chdir`/`exec` launch phase, internal polling failures, and children that
   close all pipes while continuing to run. On timeout, TERM then KILL target

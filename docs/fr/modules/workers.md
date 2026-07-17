@@ -1,10 +1,12 @@
 > [English](../../en/modules/workers.md) | **Français**
 
-# WORKERS — threads OS, états Lua isolés et files de messages
+# WORKERS — threads OS, états Lua isolés, queues et channels
 
 `babet.workers` exécute du code Lua dans de vrais threads POSIX. Chaque worker
 possède son propre `lua_State`, reçoit une copie sérialisée de ses arguments et
-communique avec le parent par deux files de messages bornées.
+communique avec le parent par deux files de messages bornées. Des channels
+partagés peuvent également relier directement le parent et plusieurs workers,
+ou plusieurs workers entre eux, sans retransiter par l'inbox/outbox du parent.
 
 Le module couvre :
 
@@ -12,13 +14,16 @@ Le module couvre :
 - le passage d'une table d'arguments initiale ;
 - la récupération bloquante ou non bloquante du premier résultat ;
 - une inbox parent vers worker et une outbox worker vers parent ;
+- des channels directs, bornés, FIFO, multi-producteurs et
+  multi-consommateurs ;
 - des timeouts et une contre-pression par capacité de queue ;
-- la fermeture coopérative d'un canal ;
+- la fermeture avec drainage et le réveil des appels bloqués ;
 - le chargement des modules Babet, bundlés et utilisateur dans chaque état ;
 - l'isolation de la mémoire Lua entre les threads.
 
-Il ne fournit pas de mémoire Lua partagée, de terminaison forcée, de timeout
-sur `join()`, de pool global ni de canal direct worker vers worker.
+Il ne fournit pas de mémoire Lua partagée, de terminaison forcée, de pool
+global ni de channels entre processus OS distincts. L'annulation disponible
+est strictement coopérative.
 
 ## Table des matières du module
 
@@ -28,6 +33,7 @@ sur `join()`, de pool global ni de canal direct worker vers worker.
   - [`code`](#workers-code)
   - [`args` et `worker.args`](#workers-args)
   - [Capacités des queues](#workers-capacities)
+  - [Transmission de channels par `opts.channels`](#workers-spawn-channels)
   - [Moment où `setenv` et `chdir` sont verrouillés](#workers-process-lock)
 - [Valeurs transférables](#workers-transfer)
   - [Scalaires et chaînes](#workers-transfer-scalars)
@@ -35,14 +41,21 @@ sur `join()`, de pool global ni de canal direct worker vers worker.
   - [Valeurs refusées](#workers-transfer-rejected)
   - [Copies, identité et profondeur](#workers-transfer-copy)
 - [Résultat final du worker](#workers-result)
-  - [`join()` — attendre et consommer](#workers-join)
+  - [`status()` — observer sans consommer](#workers-status)
+  - [`join(timeout?)` — attendre et consommer](#workers-join)
   - [`poll()` — tester et consommer](#workers-poll)
   - [Ne pas combiner `poll()` terminé puis `join()`](#workers-consumption)
 - [Messages parent vers worker](#workers-parent-send)
 - [Messages worker vers parent](#workers-parent-recv)
-- [API `worker.send` et `worker.recv`](#workers-worker-side)
+- [API `worker.send`, `worker.recv` et `worker.cancelled`](#workers-worker-side)
+- [Channels directs partagés](#workers-channels)
+  - [Créer un channel et choisir sa capacité](#workers-channel-create)
+  - [`send` et `recv`](#workers-channel-send-recv)
+  - [`close` et `is_closed`](#workers-channel-close)
+  - [Concurrence, ordre et durée de vie](#workers-channel-lifetime)
 - [Timeouts et raisons d'échec](#workers-timeouts)
 - [`close()` et cycle de vie des queues](#workers-close)
+- [`cancel()` et annulation coopérative](#workers-cancel)
 - [Chargement des modules et environnement du worker](#workers-state)
 - [Exemples complets](#workers-examples)
   - [Calcul simple avec `join`](#workers-example-join)
@@ -52,6 +65,9 @@ sur `join()`, de pool global ni de canal direct worker vers worker.
   - [Envoyer et recevoir `nil`](#workers-example-nil)
   - [Fermeture puis drainage de l'outbox](#workers-example-drain)
   - [Contre-pression et timeout](#workers-example-backpressure)
+  - [Parent vers worker avec un channel](#workers-example-channel-parent-worker)
+  - [Worker vers worker sans relais du parent](#workers-example-channel-worker-worker)
+  - [Plusieurs producteurs et consommateurs](#workers-example-channel-mpmc)
   - [Annulation coopérative](#workers-example-cancel)
   - [Pool borné corrigé](#workers-example-pool)
 - [Interblocages à éviter](#workers-deadlocks)
@@ -71,6 +87,7 @@ avec le worker. Les données traversent uniquement par sérialisation :
 - `args` lors de `spawn` ;
 - `job:send` et `worker.recv` ;
 - `worker.send` et `job:recv` ;
+- les méthodes `send` et `recv` d'un channel partagé ;
 - la première valeur retournée par le chunk.
 
 Il n'existe donc pas de data race sur les objets Lua eux-mêmes. Les effets
@@ -79,21 +96,27 @@ partagés au niveau du système et doivent être coordonnés par l'application.
 
 ### Les résultats utilisent une convention proche de `pcall`
 
-`join()` renvoie :
+`join(timeout?)` renvoie :
 
 ```lua
 true, valeur_metier
 false, message_erreur
+nil, "timeout"
 ```
+
+Le troisième état signifie uniquement que le worker est encore actif. Le
+résultat n'est alors ni rejoint ni consommé.
 
 Cette convention permet au worker de retourner légitimement `nil` :
 
 ```lua
-local ok, value = job:join()
-if ok then
+local ok, value = job:join(0.5)
+if ok == true then
     -- value peut être nil.
-else
+elseif ok == false then
     io.stderr:write(value, "\n")
+else
+    assert(value == "timeout")
 end
 ```
 
@@ -113,23 +136,38 @@ renvoie un diagnostic `result already consumed`.
 
 ```lua
 local job, err = babet.workers.spawn(code, args?, opts?)
+local channel, err = babet.workers.channel(opts?)
 
-local ok, value = job:join()
+local state = job:status()
+local ok, value_or_reason = job:join(timeout?)
 local state, value = job:poll()
+local ok, err = job:cancel()
 
 local ok, err = job:send(value, timeout?)
 local ok, value_or_err = job:recv(timeout?)
 local ok, err = job:close()
+
+local ok, err = channel:send(value, timeout?)
+local ok, value_or_reason = channel:recv(timeout?)
+local ok, err = channel:close()
+local closed = channel:is_closed()
 ```
 
 | API | Résultat principal | Bloquante |
 | --- | --- | --- |
 | `spawn` | `job` ou `(nil, err)` | création seulement |
-| `job:join()` | `(true, result)` ou `(false, err)` | oui, sans timeout |
+| `job:status()` | `"running"`, `"done"` ou `"error"` | non, ne consomme jamais |
+| `job:join(t?)` | `(true, result)`, `(false, err)` ou `(nil, "timeout")` | selon `t` |
 | `job:poll()` | `("running", nil)`, `("done", result)` ou `("error", err)` | non |
+| `job:cancel()` | `(true, nil)` | non |
 | `job:send(v, t?)` | `(true, nil)`, `(false, reason)` ou `(nil, err)` | selon `t` |
 | `job:recv(t?)` | `(true, value)` ou `(false, reason)` | selon `t` |
 | `job:close()` | `(true, nil)` | non |
+| `workers.channel(opts?)` | `channel` ou `(nil, err)` | création seulement |
+| `channel:send(v, t?)` | `(true, nil)`, `(false, reason)` ou `(nil, err)` | selon `t` |
+| `channel:recv(t?)` | `(true, value)`, `(false, reason)` ou `(nil, err)` | selon `t` |
+| `channel:close()` | `(true, nil)` | non |
+| `channel:is_closed()` | booléen | non |
 
 ### Côté worker
 
@@ -137,15 +175,19 @@ Le chunk reçoit une table globale `worker` :
 
 ```lua
 worker.args
+worker.channels
 worker.send(value, timeout?)
 worker.recv(timeout?)
+worker.cancelled()
 ```
 
 | API | Résultat |
 | --- | --- |
 | `worker.args` | copie de `args`, ou `nil` |
+| `worker.channels` | table des handles transmis par `opts.channels` |
 | `worker.send(v, t?)` | `(true, nil)` ou `(false, reason_or_error)` |
 | `worker.recv(t?)` | `(true, value)` ou `(false, reason)` |
+| `worker.cancelled()` | booléen, sans effet de bord |
 
 <a id="workers-spawn"></a>
 ## `spawn(code, args?, opts?)`
@@ -257,11 +299,92 @@ local job = assert(babet.workers.spawn(code, nil, {
 }))
 ```
 
+Toute clé inconnue de `opts` est refusée par une erreur Lua. Cela détecte
+immédiatement les fautes de frappe :
+
+```lua
+babet.workers.spawn("return 1", nil, {
+    inbox_capcity = 16, -- erreur : option inconnue
+})
+```
+
+Les noms d'options doivent être de vraies chaînes sans suffixe NUL caché ; les
+clés numériques sont également refusées.
+
 Une capacité plus grande consomme potentiellement davantage de mémoire et ne
 remplace pas une stratégie de drainage. Une petite capacité applique une
 contre-pression plus tôt.
 
-Les champs inconnus de `opts` sont actuellement ignorés.
+<a id="workers-spawn-channels"></a>
+### Transmission de channels par `opts.channels`
+
+Un channel est une ressource partagée spéciale. Il ne traverse jamais la
+sérialisation JSON de `worker.args` et ne peut pas être envoyé comme un message.
+Il doit être transmis explicitement dans le champ `channels` :
+
+```lua
+local tasks = assert(babet.workers.channel({ capacity = 16 }))
+local results = assert(babet.workers.channel({ capacity = 16 }))
+
+local job = assert(babet.workers.spawn([[
+    local ok, task = worker.channels.tasks:recv(2)
+    if not ok then return task end
+
+    assert(worker.channels.results:send({
+        id = task.id,
+        result = task.value * 2,
+    }, 2))
+
+    return true
+]], nil, {
+    channels = {
+        tasks = tasks,
+        results = results,
+    },
+}))
+```
+
+Dans le nouvel état Lua :
+
+- `worker.channels` existe toujours et vaut une table vide si aucun channel
+  n'a été transmis ;
+- chaque clé de `opts.channels` devient un champ de `worker.channels` ;
+- plusieurs noms peuvent référencer le même channel ;
+- le parent et tous les workers reçoivent des userdata distincts qui pointent
+  vers la même queue C++ ;
+- les noms doivent être des chaînes UTF-8 non vides et sans octet NUL ;
+- chaque valeur doit être un channel créé par `babet.workers.channel()`.
+
+Exemple avec le même channel sous deux noms :
+
+```lua
+local shared = assert(babet.workers.channel())
+
+local job = assert(babet.workers.spawn([[
+    assert(worker.channels.output:send("hello"))
+    local ok, value = worker.channels.input:recv()
+    return ok and value
+]], nil, {
+    channels = {
+        input = shared,
+        output = shared,
+    },
+}))
+```
+
+Un channel placé dans `args` reste un userdata non sérialisable et est refusé :
+
+```lua
+local channel = assert(babet.workers.channel())
+
+local job, err = babet.workers.spawn("return true", {
+    channel = channel,
+})
+
+assert(job == nil)
+assert(err:find("userdata", 1, true))
+```
+
 
 <a id="workers-process-lock"></a>
 ### Moment où `setenv` et `chdir` sont verrouillés
@@ -288,6 +411,7 @@ Le format de transport interne est JSON. Les mêmes règles s'appliquent à :
 
 - `args` ;
 - les messages dans les deux sens ;
+- les messages envoyés dans les channels ;
 - la première valeur de retour du worker.
 
 <a id="workers-transfer-scalars"></a>
@@ -420,23 +544,74 @@ Une erreur Lua non attrapée devient l'état `error`. Le texte transmis est un
 diagnostic, mais Babet n'ajoute pas automatiquement de traceback. Le worker
 peut utiliser `xpcall(..., debug.traceback)` s'il souhaite en construire un.
 
-<a id="workers-join"></a>
-### `join()` — attendre et consommer
+<a id="workers-status"></a>
+### `status()` — observer sans consommer
 
 ```lua
-local ok, value = job:join()
+local state = job:status()
 ```
 
-`join()` :
+`status()` renvoie exactement l'une des chaînes suivantes :
 
-- attend sans timeout la fin de la pthread ;
-- ne ferme aucune queue avant d'attendre ;
-- consomme définitivement le résultat ;
-- renvoie `(true, value)` en terminaison normale ;
-- renvoie `(false, err)` en erreur Lua, erreur interne ou résultat invalide.
+| État | Signification |
+| --- | --- |
+| `"running"` | le chunk ou son nettoyage est encore en cours |
+| `"done"` | le worker a terminé normalement |
+| `"error"` | le worker a terminé avec une erreur |
+
+La méthode ne bloque pas, ne rejoint pas la pthread et ne consomme jamais le
+résultat. Elle reste donc utilisable avant et après `join()` :
 
 ```lua
-local ok, value = job:join()
+while job:status() == "running" do
+    update_interface()
+    babet.sleep(10, "ms")
+end
+
+local ok, result = job:join()
+assert(ok, result)
+assert(job:status() == "done")
+```
+
+`status()` ne distingue volontairement pas un worker en cours d'annulation :
+tant que le chunk n'est pas terminé, l'état reste `"running"`.
+
+<a id="workers-join"></a>
+### `join(timeout?)` — attendre et consommer
+
+```lua
+local ok, value_or_reason = job:join(timeout?)
+```
+
+Le timeout utilise les mêmes secondes que les queues :
+
+- absent ou `nil` : attente indéfinie ;
+- `0` : test immédiat ;
+- nombre fini strictement positif jusqu'à `86400` : attente bornée ;
+- valeur négative, NaN, infinie, chaîne numérique ou argument supplémentaire :
+  erreur Lua levée.
+
+Trois états de retour existent :
+
+```lua
+true, result       -- terminaison normale, résultat consommé
+false, err         -- terminaison en erreur, résultat consommé
+nil, "timeout"     -- worker encore actif, rien n'est consommé
+```
+
+Exemple avec reprise après expiration :
+
+```lua
+local ok, value = job:join(0.05)
+
+if ok == nil then
+    assert(value == "timeout")
+    print("le worker continue")
+
+    -- Le même job reste entièrement utilisable.
+    ok, value = job:join(2)
+end
+
 if ok then
     print("résultat", value)
 else
@@ -444,7 +619,17 @@ else
 end
 ```
 
-Même lorsqu'il renvoie `nil`, un succès reste reconnaissable : `ok == true`.
+Un timeout :
+
+- ne ferme aucune queue ;
+- ne demande aucune annulation ;
+- ne rejoint pas la pthread ;
+- ne consomme ni le résultat ni l'erreur ;
+- permet encore `status`, `send`, `recv`, `close`, `cancel` et un nouvel appel à
+  `join`.
+
+Même lorsqu'un worker retourne légitimement `nil`, un succès reste
+reconnaissable grâce à `ok == true`.
 
 <a id="workers-poll"></a>
 ### `poll()` — tester et consommer
@@ -519,7 +704,8 @@ Résultats :
 - `(true, nil)` : message accepté ;
 - `(false, "full")` : queue pleine avec timeout `0` ;
 - `(false, "timeout")` : queue restée pleine jusqu'à l'échéance ;
-- `(false, "closed")` : inbox fermée ;
+- `(false, "closed")` : inbox fermée par `close()` ou par la fin du worker ;
+- `(false, "cancelled")` : annulation demandée par `cancel()` ;
 - `(nil, err)` : valeur non sérialisable ou erreur interne de sérialisation.
 
 ```lua
@@ -567,19 +753,33 @@ end
 ```
 
 <a id="workers-worker-side"></a>
-## API `worker.send` et `worker.recv`
+## API `worker.send`, `worker.recv` et `worker.cancelled`
 
 Dans le chunk :
 
 ```lua
 local ok, message_or_err = worker.recv(timeout?)
 local ok, err = worker.send(value, timeout?)
+local cancelled = worker.cancelled()
 ```
 
 `worker.recv` lit l'inbox alimentée par `job:send`. `worker.send` écrit dans
-l'outbox lue par `job:recv`.
+l'outbox lue par `job:recv`. `worker.cancelled()` lit sans blocage le drapeau
+posé par `job:cancel()`.
 
-Les règles FIFO, capacités, timeouts et fermeture sont symétriques.
+Après une annulation :
+
+- `worker.cancelled()` renvoie `true` ;
+- le prochain `worker.recv()` renvoie `(false, "cancelled")` et ne livre plus
+  les commandes qui attendaient encore dans l'inbox ; une commande déjà
+  extraite par le worker avant la demande d'annulation peut naturellement être
+  en cours de traitement ;
+- `worker.send()` reste disponible pour un dernier résultat, un diagnostic ou
+  un accusé d'arrêt ;
+- le chunk décide lui-même quand et comment terminer.
+
+Les règles FIFO, capacités, timeouts et fermeture restent symétriques en dehors
+de ce cas d'annulation.
 
 Différence de convention sur une erreur de sérialisation :
 
@@ -590,24 +790,183 @@ Cette différence conserve la convention booléenne du code worker.
 
 ```lua
 local job = assert(babet.workers.spawn([[
-    while true do
-        local ok, message = worker.recv()
-        if not ok then
-            return "inbox closed"
-        end
+    while not worker.cancelled() do
+        local ok, message = worker.recv(0.2)
 
-        local sent, err = worker.send({ echo = message })
-        if not sent then
-            return { send_error = err }
+        if ok then
+            process(message)
+        elseif message == "cancelled" then
+            break
+        elseif message ~= "timeout" then
+            return { error = message }
         end
     end
+
+    worker.send({ stopped = true })
+    return "cancelled"
 ]]))
 ```
+
+
+<a id="workers-channels"></a>
+## Channels directs partagés
+
+Un channel est une file bornée partagée entre le parent et autant de workers
+que nécessaire. Contrairement à l'inbox et à l'outbox d'un `job`, il n'est pas
+attaché à un worker particulier : tout handle du même channel peut produire ou
+consommer des messages.
+
+Le channel est :
+
+- thread-safe ;
+- multi-producteurs et multi-consommateurs ;
+- borné en nombre de messages ;
+- FIFO selon l'ordre d'insertion effectif ;
+- fermé explicitement avec drainage des messages déjà présents.
+
+<a id="workers-channel-create"></a>
+### Créer un channel et choisir sa capacité
+
+```lua
+local channel, err = babet.workers.channel(opts?)
+```
+
+L'unique option est :
+
+```lua
+{
+    capacity = 64,
+}
+```
+
+- défaut : 64 messages ;
+- minimum : 1 ;
+- maximum : 1 000 000 ;
+- la valeur doit être un entier Lua strict ;
+- la capacité compte les messages, pas les octets.
+
+```lua
+local tasks = assert(babet.workers.channel({
+    capacity = 16,
+}))
+```
+
+Les options inconnues, les clés non textuelles, les noms contenant un octet NUL
+et les capacités hors limites lèvent une erreur Lua. Une erreur d'allocation ou
+d'initialisation renvoie `(nil, err)`.
+
+<a id="workers-channel-send-recv"></a>
+### `send` et `recv`
+
+```lua
+local ok, err = channel:send(value, timeout?)
+local ok, value_or_reason = channel:recv(timeout?)
+```
+
+`send` renvoie :
+
+- `(true, nil)` lorsque le message a été ajouté ;
+- `(false, "full")` pour une tentative immédiate sur un channel plein ;
+- `(false, "timeout")` lorsque l'échéance positive expire ;
+- `(false, "closed")` après fermeture ;
+- `(false, "cancelled")` dans un worker dont le job a été annulé ;
+- `(nil, err)` si la valeur n'est pas sérialisable ou en cas d'erreur interne.
+
+`recv` renvoie :
+
+- `(true, value)` lorsqu'un message est retiré ; `value` peut être `nil` ;
+- `(false, "empty")` pour une tentative immédiate sur un channel vide ;
+- `(false, "timeout")` lorsque l'échéance positive expire ;
+- `(false, "closed")` lorsque le channel est fermé **et entièrement drainé** ;
+- `(false, "cancelled")` dans un worker dont le job a été annulé ;
+- `(nil, err)` lors d'une anomalie interne de désérialisation.
+
+```lua
+local channel = assert(babet.workers.channel({ capacity = 1 }))
+
+assert(channel:send(nil, 0))
+
+local ok, value = channel:recv(0)
+assert(ok == true)
+assert(value == nil)
+
+local got, reason = channel:recv(0)
+assert(got == false and reason == "empty")
+```
+
+Les mêmes valeurs JSON que pour les workers sont acceptées. Un channel, un job,
+un socket ou tout autre userdata ne peut pas être envoyé comme message. Pour une
+capture Selenium binaire, envoie de préférence son chemin, ou conserve sa forme
+Base64 puis utilise `babet.base64.decode()` au point de consommation.
+
+Dans un worker, `job:cancel()` réveille également un `channel:send()` ou
+`channel:recv()` bloqué pour **ce worker uniquement**. L'appel renvoie alors
+`(false, "cancelled")` sans fermer le channel partagé ni perturber les autres
+participants. Après annulation, les nouveaux `send` et `recv` de ce worker
+renvoient aussi `"cancelled"`; utilise `worker.send()` pour un dernier accusé
+d'arrêt vers le parent.
+
+<a id="workers-channel-close"></a>
+### `close` et `is_closed`
+
+```lua
+local ok, err = channel:close()
+local closed = channel:is_closed()
+```
+
+`close()` est global et idempotent. Dès son retour :
+
+- aucun nouvel envoi n'est accepté ;
+- `is_closed()` renvoie `true` ;
+- tous les `send()` et `recv()` bloqués sont réveillés ;
+- les messages déjà en file restent disponibles ;
+- après le dernier message, `recv()` renvoie `(false, "closed")`.
+
+```lua
+local channel = assert(babet.workers.channel({ capacity = 2 }))
+assert(channel:send("one"))
+assert(channel:send("two"))
+assert(channel:close())
+assert(channel:close()) -- idempotent
+assert(channel:is_closed())
+
+local ok1, one = channel:recv()
+local ok2, two = channel:recv()
+local ok3, reason = channel:recv()
+
+assert(ok1 and one == "one")
+assert(ok2 and two == "two")
+assert(not ok3 and reason == "closed")
+```
+
+<a id="workers-channel-lifetime"></a>
+### Concurrence, ordre et durée de vie
+
+Tous les handles créés pour un même channel référencent la même structure C++.
+Le parent et chaque état Lua possèdent néanmoins leur propre userdata.
+
+- détruire un handle local ne ferme pas le channel pour les autres ;
+- `close()` ferme explicitement la ressource pour tous les handles ;
+- lorsque la dernière référence disparaît, Babet ferme la queue, réveille les
+  éventuels waiters et détruit les messages restants ;
+- la sortie d'un worker ne rend donc pas invalides les handles encore détenus
+  par le parent ou d'autres workers.
+
+Le FIFO décrit l'ordre d'insertion réel. Deux `send()` concurrents provenant de
+producteurs différents n'ont pas d'ordre déterministe garanti. En revanche, les
+envois successifs d'un même producteur restent ordonnés.
+
+Une grande capacité n'impose aucune limite à la taille individuelle d'un
+message. Comme le transport produit une représentation JSON intermédiaire, les
+messages volumineux sont copiés et peuvent consommer beaucoup de mémoire. Pour
+des données binaires importantes, un fichier publié atomiquement et son chemin
+sont généralement préférables.
 
 <a id="workers-timeouts"></a>
 ## Timeouts et raisons d'échec
 
-Les quatre méthodes de messages partagent le même contrat :
+Les quatre méthodes de messages et `join(timeout?)` partagent les mêmes règles
+de validation des durées :
 
 | `timeout` Lua | Comportement |
 | --- | --- |
@@ -629,6 +988,7 @@ Les raisons de queue sont :
 | `"empty"` | réception immédiate, queue vide |
 | `"timeout"` | échéance positive atteinte |
 | `"closed"` | envoi sur queue fermée, ou réception sur queue fermée et vide |
+| `"cancelled"` | `job:send`, `worker.recv` ou méthode de channel appelée dans un worker annulé |
 
 Des diagnostics internes comme `"out of memory"` ou `"internal mutex error"`
 peuvent exceptionnellement apparaître à la place.
@@ -667,6 +1027,59 @@ local ok, result = job:join()
 Le worker doit traiter `worker.recv() == false, "closed"` comme une condition de
 sortie.
 
+<a id="workers-cancel"></a>
+## `cancel()` et annulation coopérative
+
+```lua
+local ok, err = job:cancel()
+```
+
+`job:cancel()` :
+
+- pose un drapeau atomique visible par `worker.cancelled()` ;
+- ferme l'inbox afin de réveiller immédiatement un `worker.recv()` bloqué ;
+- réveille aussi le `channel:send()` ou `channel:recv()` actuellement bloqué
+  dans ce worker, sans fermer le channel global ;
+- fait renvoyer `(false, "cancelled")` aux futurs `job:send()` ;
+- laisse l'outbox ouverte afin que le worker puisse publier un dernier message ;
+- ne rejoint pas le thread ;
+- ne consomme pas le résultat final ;
+- est idempotent et renvoie toujours `(true, nil)` pour un job valide.
+
+```lua
+assert(job:cancel())
+
+local got, final = job:recv(1)
+if got then
+    print("dernier message", final)
+end
+
+local ok, result = job:join(2)
+if ok == nil then
+    error("le worker n'a pas coopéré dans le délai")
+end
+assert(ok, result)
+```
+
+Ce mécanisme n'utilise jamais `pthread_cancel()` et n'interrompt pas brutalement
+Lua, SQLite, un verrou C++ ou une transaction. Un worker doit donc consulter
+`worker.cancelled()` ou revenir régulièrement dans `worker.recv()`.
+
+Un worker bloqué dans un appel système non interruptible, un `worker.send()`
+sans timeout sur une outbox pleine ou une boucle qui ne vérifie jamais le
+drapeau peut rester actif. Les attentes de channel Babet, elles, sont réveillées
+par l'annulation. Dans ce cas, `join(timeout)` permet au parent de ne
+pas se bloquer, mais Babet ne force pas la terminaison.
+
+`close()` et `cancel()` sont distincts :
+
+- `close()` signifie « aucune autre commande » et laisse drainer les commandes
+  déjà en file ; `worker.recv()` finit par renvoyer `"closed"` ;
+- `cancel()` signifie « abandonne le travail en cours dès que possible » ; les
+  commandes encore en inbox ne sont plus livrées et `worker.recv()` renvoie
+  `"cancelled"`. Une commande déjà extraite avant l'annulation peut être en
+  cours de traitement : l'arrêt reste coopératif.
+
 <a id="workers-state"></a>
 ## Chargement des modules et environnement du worker
 
@@ -677,7 +1090,8 @@ Chaque thread crée un nouvel état Lua et :
 - expose les modules bundlés via `require` ;
 - configure le chargement des modules utilisateur de la même manière que le
   projet parent, en mode dossier ou embarqué ;
-- expose `worker.args`, `worker.send` et `worker.recv` ;
+- expose `worker.args`, `worker.channels`, `worker.send`, `worker.recv` et
+  `worker.cancelled` ;
 - ne copie pas la table globale `arg` du parent : `arg == nil` dans le worker.
 
 ```lua
@@ -889,11 +1303,134 @@ job:close()
 job:join()
 ```
 
-<a id="workers-example-cancel"></a>
-### Annulation coopérative
 
-Il n'existe pas de `job:cancel()`. Le parent envoie une commande, et le worker
-la vérifie périodiquement.
+<a id="workers-example-channel-parent-worker"></a>
+### Parent vers worker avec un channel
+
+```lua
+local tasks = assert(babet.workers.channel({ capacity = 8 }))
+
+local job = assert(babet.workers.spawn([[
+    local ok, task = worker.channels.tasks:recv(2)
+    assert(ok, task)
+    return task.left + task.right
+]], nil, {
+    channels = { tasks = tasks },
+}))
+
+assert(tasks:send({ left = 20, right = 22 }, 2))
+
+local ok, result = job:join(2)
+assert(ok and result == 42)
+```
+
+<a id="workers-example-channel-worker-worker"></a>
+### Worker vers worker sans relais du parent
+
+```lua
+local tasks = assert(babet.workers.channel({ capacity = 16 }))
+local results = assert(babet.workers.channel({ capacity = 16 }))
+
+local producer = assert(babet.workers.spawn([[
+    for i = 1, 10 do
+        assert(worker.channels.tasks:send({ id = i, value = i * 10 }, 2))
+    end
+    return "producer done"
+]], nil, {
+    channels = { tasks = tasks },
+}))
+
+local consumer = assert(babet.workers.spawn([[
+    for _ = 1, 10 do
+        local ok, task = worker.channels.tasks:recv(2)
+        assert(ok, task)
+        assert(worker.channels.results:send({
+            id = task.id,
+            result = task.value * 2,
+        }, 2))
+    end
+    return "consumer done"
+]], nil, {
+    channels = { tasks = tasks, results = results },
+}))
+
+for expected = 1, 10 do
+    local ok, item = results:recv(2)
+    assert(ok, item)
+    assert(item.id == expected)
+    assert(item.result == expected * 20)
+end
+
+assert(producer:join(2))
+assert(consumer:join(2))
+assert(tasks:close())
+assert(results:close())
+```
+
+Le message producteur vers consommateur ne transite jamais par le parent.
+
+<a id="workers-example-channel-mpmc"></a>
+### Plusieurs producteurs et consommateurs
+
+```lua
+local tasks = assert(babet.workers.channel({ capacity = 32 }))
+local results = assert(babet.workers.channel({ capacity = 32 }))
+local jobs = {}
+
+for producer_id = 1, 2 do
+    jobs[#jobs + 1] = assert(babet.workers.spawn([[
+        for i = 1, 100 do
+            assert(worker.channels.tasks:send({
+                producer = worker.args.id,
+                sequence = i,
+            }, 2))
+        end
+        return true
+    ]], { id = producer_id }, {
+        channels = { tasks = tasks },
+    }))
+end
+
+for _ = 1, 2 do
+    jobs[#jobs + 1] = assert(babet.workers.spawn([[
+        while true do
+            local ok, task = worker.channels.tasks:recv(2)
+            if not ok then
+                assert(task == "closed")
+                break
+            end
+            assert(worker.channels.results:send(task, 2))
+        end
+        return true
+    ]], nil, {
+        channels = { tasks = tasks, results = results },
+    }))
+end
+
+assert(jobs[1]:join(3))
+assert(jobs[2]:join(3))
+assert(tasks:close())
+
+local seen = {}
+for _ = 1, 200 do
+    local ok, item = results:recv(3)
+    assert(ok, item)
+    local key = item.producer .. ":" .. item.sequence
+    assert(not seen[key])
+    seen[key] = true
+end
+
+assert(results:close())
+assert(jobs[3]:join(3))
+assert(jobs[4]:join(3))
+```
+
+Avec plusieurs consommateurs, la répartition des messages dépend de
+l'ordonnancement des threads ; elle n'est pas prédictible, mais chaque message
+n'est retiré que par un seul consommateur.
+
+<a id="workers-example-cancel"></a>
+### Annulation coopérative native
 
 ```lua
 local job = assert(babet.workers.spawn([[
@@ -902,19 +1439,15 @@ local job = assert(babet.workers.spawn([[
     for i = 1, worker.args.limit do
         total = total + expensive_step(i)
 
-        if i % 1000 == 0 then
-            local ok, message = worker.recv(0)
-            if ok and message == "stop" then
-                return {
-                    cancelled = true,
-                    partial = total,
-                }
-            elseif not ok and message == "closed" then
-                return {
-                    cancelled = true,
-                    partial = total,
-                }
-            end
+        if i % 1000 == 0 and worker.cancelled() then
+            worker.send({
+                stopped = true,
+                partial = total,
+            })
+            return {
+                cancelled = true,
+                partial = total,
+            }
         end
     end
 
@@ -922,17 +1455,48 @@ local job = assert(babet.workers.spawn([[
 ]], { limit = 1000000 }))
 
 -- Plus tard :
-local sent, err = job:send("stop", 0.5)
-if not sent then
-    io.stderr:write("cancel: ", err, "\n")
+assert(job:cancel())
+
+-- L'outbox reste drainable après cancel().
+local got, progress = job:recv(0.5)
+if got then
+    print("partiel", progress.partial)
 end
 
-local ok, result = job:join()
+local ok, result = job:join(2)
+if ok == nil then
+    error("annulation non observée dans les deux secondes")
+end
 assert(ok, result)
 ```
 
-L'annulation reste coopérative : un worker bloqué dans un appel non interruptible
-ou qui ne consulte jamais sa queue ne s'arrête pas sur ce message.
+Exemple combinant `worker.recv()` et le drapeau :
+
+```lua
+local job = assert(babet.workers.spawn([[
+    while not worker.cancelled() do
+        local ok, command = worker.recv(0.1)
+
+        if ok then
+            execute(command)
+        elseif command == "cancelled" then
+            break
+        elseif command ~= "timeout" then
+            return { error = command }
+        end
+    end
+
+    worker.send({ stopped = true })
+    return "cancelled"
+]]))
+
+assert(job:cancel())
+local ok, result = job:join(2)
+assert(ok and result == "cancelled")
+```
+
+L'annulation reste coopérative : elle ne coupe pas arbitrairement un appel
+système ni du code qui ne consulte jamais le drapeau.
 
 <a id="workers-example-pool"></a>
 ### Pool borné corrigé
@@ -1000,11 +1564,13 @@ local ok, message = worker.recv() -- attend indéfiniment
 job:join() -- attend le worker
 ```
 
-Les deux côtés s'attendent. Ferme d'abord l'inbox ou envoie une commande :
+Les deux côtés s'attendent. Ferme l'inbox, envoie une commande, ou demande
+l'annulation :
 
 ```lua
-job:close()
-job:join()
+job:cancel()
+local ok, result = job:join(2)
+assert(ok ~= nil, result) -- nil signifie que le worker n'a pas encore coopéré
 ```
 
 ### Worker bloqué sur une outbox pleine
@@ -1018,6 +1584,16 @@ Solutions :
 - le worker utilise un timeout fini ;
 - l'outbox possède une capacité adaptée ;
 - le protocole sépare clairement la phase de messages et la phase de join.
+
+### Producteurs bloqués sur un channel plein
+
+Un channel borné peut créer le même cycle d'attente qu'une outbox : les
+producteurs attendent de la place, tandis que le parent appelle `join()` avant
+que les consommateurs aient drainé la queue.
+
+Prévoir explicitement qui consomme, qui ferme le channel et à quel moment. Les
+boucles longues doivent utiliser des timeouts finis ou une stratégie de
+fermeture afin qu'une erreur d'un participant ne bloque pas tous les autres.
 
 ### Oublier que `poll()` consomme
 
@@ -1042,9 +1618,14 @@ Sont notamment levés :
 - `code` absent ou non string ;
 - `args` non table et non `nil` ;
 - `opts` non table et non `nil` ;
+- option inconnue ou nom d'option non chaîne dans `opts` ;
 - capacités non numériques, non entières, hors `1..1 000 000` ;
 - timeout non numérique, négatif, non fini ou supérieur à 86 400 secondes ;
-- appel d'une méthode sur un objet qui n'est pas un job.
+- argument supplémentaire à `join`, `status`, `cancel` ou
+  `worker.cancelled` ;
+- appel d'une méthode sur un objet qui n'est ni le job ni le channel attendu ;
+- arité, option ou capacité invalide de `workers.channel()` ;
+- table `opts.channels` invalide, nom vide/non UTF-8/avec NUL ou valeur qui n'est pas un channel.
 
 ```lua
 local ok, err = pcall(function()
@@ -1060,7 +1641,7 @@ pendant la création :
 
 - `args` non transférables ;
 - échec de sérialisation JSON ;
-- initialisation d'une queue impossible ;
+- initialisation d'une queue ou du signal de terminaison impossible ;
 - échec de `pthread_create`.
 
 ```lua
@@ -1086,17 +1667,21 @@ Le diagnostic ne contient pas automatiquement de traceback complet.
 
 - `job:send` : `(nil, err)` si la valeur ne peut pas être sérialisée ;
 - `worker.send` : `(false, err)` pour la même situation ;
-- `recv` : `(false, err)` sur une anomalie interne de désérialisation.
+- `channel:send` : `(nil, err)` pour la même situation ;
+- `job:recv` et `worker.recv` : `(false, err)` sur une anomalie interne ;
+- `channel:recv` : `(nil, err)` sur une anomalie interne.
 
 <a id="workers-gc"></a>
 ## Garbage collector et destruction
 
 Le userdata possède un `__gc` de sécurité. Lorsqu'il est collecté :
 
-1. l'inbox et l'outbox sont fermées ;
-2. les attentes de queue sont réveillées ;
-3. Babet appelle `pthread_join` si nécessaire ;
-4. les primitives pthread et les chaînes internes sont détruites.
+1. le drapeau d'annulation est posé ;
+2. l'inbox et l'outbox sont fermées ;
+3. les attentes de queue sont réveillées ;
+4. Babet appelle `pthread_join` si nécessaire ;
+5. les primitives pthread, le signal de terminaison et les chaînes internes
+   sont détruits.
 
 Cette séquence évite de libérer un état encore utilisé par un thread. Elle peut
 toutefois bloquer si le worker ne peut pas terminer.
@@ -1104,6 +1689,14 @@ toutefois bloquer si le worker ne peut pas terminer.
 Ne compte pas sur le GC comme mécanisme normal de synchronisation. Conserve le
 job, termine le protocole, puis appelle `join()` ou consomme le résultat avec
 `poll()`.
+
+Les handles de channel possèdent également un `__gc`, mais sa portée est locale :
+il libère uniquement la référence détenue par cet état Lua. Il ne remplace
+jamais `channel:close()` et ne ferme pas la ressource tant que d'autres handles
+existent.
+
+`tostring(channel)` renvoie `WorkerChannel(open)` ou
+`WorkerChannel(closed)` selon l'état global instantané.
 
 `tostring(job)` renvoie une indication comme :
 
@@ -1149,6 +1742,7 @@ Chaque `spawn` crée :
 - un état Lua complet ;
 - les modules Babet ;
 - deux queues et leurs buffers ;
+- les handles des channels explicitement transmis ;
 - des copies JSON des données transférées.
 
 Évite de créer un worker pour une opération minuscule. Regroupe le travail ou
@@ -1159,18 +1753,16 @@ utilise quelques workers persistants lorsque le protocole le permet.
 
 Le module ne fournit pas actuellement :
 
-- `job:join(timeout)` ;
-- `job:cancel()` ou une terminaison forcée ;
-- `worker.cancelled()` ;
+- une terminaison forcée d'un worker ;
 - `job:done()` — utilise `poll()` ;
 - `babet.workers.cpu_count()` ;
 - un pool global réutilisable ;
-- des canaux directs worker vers worker ;
+- des channels entre processus OS distincts ;
 - de la mémoire Lua partagée ;
 - le transfert de fonctions, userdata ou coroutines ;
 - un format binaire pour les messages ;
 - le transfert automatique de plusieurs valeurs de retour.
 
-Une annulation coopérative et un pool borné peuvent être construits en Lua avec
-les exemples de cette page. Pour le nombre de CPU, un programme externe peut
+Un pool borné peut être construit en Lua avec les exemples de cette page. Pour
+le nombre de CPU, un programme externe peut
 être interrogé avec `babet.exec("nproc")`, en vérifiant sa table de résultat.

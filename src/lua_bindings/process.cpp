@@ -34,6 +34,9 @@ struct Process
     int stdin_fd;
     int stdout_fd;
     int stderr_fd;
+    bool stdin_piped;
+    bool stdout_piped;
+    bool stderr_piped;
     int status;
     bool status_valid;
     bool closed;
@@ -52,6 +55,9 @@ Process *push_empty_process(lua_State *L)
     process->stdin_fd = -1;
     process->stdout_fd = -1;
     process->stderr_fd = -1;
+    process->stdin_piped = false;
+    process->stdout_piped = false;
+    process->stderr_piped = false;
     process->status = 0;
     process->status_valid = false;
     process->closed = true;
@@ -67,6 +73,9 @@ void initialize_process(Process *process,
     process->stdin_fd = launched.stdin_fd;
     process->stdout_fd = launched.stdout_fd;
     process->stderr_fd = launched.stderr_fd;
+    process->stdin_piped = launched.stdin_piped;
+    process->stdout_piped = launched.stdout_piped;
+    process->stderr_piped = launched.stderr_piped;
     process->status = 0;
     process->status_valid = false;
     process->closed = false;
@@ -104,7 +113,8 @@ bool validate_spawn_opts_keys(lua_State *L, int idx, std::string &err)
         size_t len = 0;
         const char *data = lua_tolstring(L, -2, &len);
         const std::string_view key(data, len);
-        if (key != "cwd" && key != "env" && key != "launch_timeout")
+        if (key != "cwd" && key != "env" && key != "launch_timeout" &&
+            key != "stdin" && key != "stdout" && key != "stderr")
         {
             err = "unknown spawn option: ";
             err.append(key.data(), key.size());
@@ -114,6 +124,193 @@ bool validate_spawn_opts_keys(lua_State *L, int idx, std::string &err)
         lua_pop(L, 1);
     }
     return true;
+}
+
+bool validate_file_redirection_keys(lua_State *L, int idx,
+                                    const char *label, std::string &err)
+{
+    idx = lua_absindex(L, idx);
+    lua_pushnil(L);
+    while (lua_next(L, idx) != 0)
+    {
+        if (!lua_is_strict_string(L, -2))
+        {
+            lua_pop(L, 2);
+            err = std::string(label) + " keys must be strings";
+            return false;
+        }
+        size_t len = 0;
+        const char *data = lua_tolstring(L, -2, &len);
+        const std::string_view key(data, len);
+        if (key != "file" && key != "append" && key != "permissions")
+        {
+            err = std::string("unknown ") + label + " option: ";
+            err.append(key.data(), key.size());
+            lua_pop(L, 2);
+            return false;
+        }
+        lua_pop(L, 1);
+    }
+    return true;
+}
+
+bool parse_file_redirection(lua_State *L, int idx, const char *label,
+                            babet_process::StreamRedirection &out,
+                            std::string &err)
+{
+    if (!validate_file_redirection_keys(L, idx, label, err))
+    {
+        return false;
+    }
+
+    idx = lua_absindex(L, idx);
+    raw_getfield(L, idx, "file");
+    if (!lua_is_strict_string(L, -1))
+    {
+        lua_pop(L, 1);
+        err = std::string(label) + ".file must be a string";
+        return false;
+    }
+    std::string path;
+    if (!lua_string_without_nul(L, -1, path,
+                                std::string(label) + ".file", err))
+    {
+        lua_pop(L, 1);
+        return false;
+    }
+    lua_pop(L, 1);
+    if (path.empty())
+    {
+        err = std::string(label) + ".file must not be empty";
+        return false;
+    }
+
+    bool append = false;
+    raw_getfield(L, idx, "append");
+    if (!lua_isnil(L, -1))
+    {
+        if (lua_type(L, -1) != LUA_TBOOLEAN)
+        {
+            lua_pop(L, 1);
+            err = std::string(label) + ".append must be a boolean";
+            return false;
+        }
+        append = lua_toboolean(L, -1) != 0;
+    }
+    lua_pop(L, 1);
+
+    mode_t permissions = 0600;
+    raw_getfield(L, idx, "permissions");
+    if (!lua_isnil(L, -1))
+    {
+        if (!lua_is_strict_integer(L, -1))
+        {
+            lua_pop(L, 1);
+            err = std::string(label) +
+                  ".permissions must be an integer between 0 and 0777";
+            return false;
+        }
+        const lua_Integer value = lua_tointeger(L, -1);
+        if (value < 0 || value > 0777)
+        {
+            lua_pop(L, 1);
+            err = std::string(label) +
+                  ".permissions must be between 0 and 0777";
+            return false;
+        }
+        permissions = static_cast<mode_t>(value);
+    }
+    lua_pop(L, 1);
+
+    out.kind = babet_process::StreamRedirectionKind::file;
+    out.file.path = std::move(path);
+    out.file.append = append;
+    out.file.permissions = permissions;
+    return true;
+}
+
+enum class StreamRole
+{
+    stdin_stream,
+    stdout_stream,
+    stderr_stream,
+};
+
+bool parse_stream_redirection(lua_State *L, int opts_idx,
+                              const char *field, StreamRole role,
+                              babet_process::StreamRedirection &out,
+                              std::string &err)
+{
+    out = babet_process::StreamRedirection{};
+    if (lua_is_none_or_nil(L, opts_idx))
+    {
+        return true;
+    }
+
+    raw_getfield(L, opts_idx, field);
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 1);
+        return true;
+    }
+
+    const std::string label = std::string("opts.") + field;
+    if (lua_is_strict_string(L, -1))
+    {
+        size_t len = 0;
+        const char *data = lua_tolstring(L, -1, &len);
+        const std::string mode(data, len);
+        lua_pop(L, 1);
+
+        if (mode == "pipe")
+        {
+            out.kind = babet_process::StreamRedirectionKind::pipe;
+            return true;
+        }
+        if (mode == "inherit")
+        {
+            out.kind = babet_process::StreamRedirectionKind::inherit;
+            return true;
+        }
+        if (mode == "null")
+        {
+            out.kind = babet_process::StreamRedirectionKind::null_device;
+            return true;
+        }
+        if (role == StreamRole::stderr_stream && mode == "stdout")
+        {
+            out.kind = babet_process::StreamRedirectionKind::stdout_stream;
+            return true;
+        }
+
+        err = label + " has an invalid redirection mode";
+        return false;
+    }
+
+    if (lua_type(L, -1) == LUA_TTABLE && role != StreamRole::stdin_stream)
+    {
+        const bool ok = parse_file_redirection(L, -1, label.c_str(),
+                                               out, err);
+        lua_pop(L, 1);
+        return ok;
+    }
+
+    lua_pop(L, 1);
+    if (role == StreamRole::stdin_stream)
+    {
+        err = label + " must be 'pipe', 'inherit', or 'null'";
+    }
+    else if (role == StreamRole::stderr_stream)
+    {
+        err = label +
+              " must be 'pipe', 'inherit', 'null', 'stdout', or a file table";
+    }
+    else
+    {
+        err = label +
+              " must be 'pipe', 'inherit', 'null', or a file table";
+    }
+    return false;
 }
 
 bool parse_timeout_value(lua_State *L, int idx, const char *label,
@@ -304,6 +501,7 @@ int wait_fd(lua_State *L, int fd, short events, double timeout)
 }
 
 int process_read_stream(lua_State *L, int Process::*fd_member,
+                        bool Process::*piped_member,
                         const char *method_name)
 {
     const int argc = lua_gettop(L);
@@ -344,6 +542,11 @@ int process_read_stream(lua_State *L, int Process::*fd_member,
         full += ": ";
         full += parse_error;
         return push_fail(L, full);
+    }
+
+    if (!(process->*piped_member))
+    {
+        return push_fail(L, "not_piped");
     }
 
     int &fd = process->*fd_member;
@@ -414,12 +617,14 @@ int process_read_stream(lua_State *L, int Process::*fd_member,
 int process_read_stdout(lua_State *L)
 {
     return process_read_stream(L, &Process::stdout_fd,
+                               &Process::stdout_piped,
                                "process.read_stdout");
 }
 
 int process_read_stderr(lua_State *L)
 {
     return process_read_stream(L, &Process::stderr_fd,
+                               &Process::stderr_piped,
                                "process.read_stderr");
 }
 
@@ -443,6 +648,10 @@ int process_write(lua_State *L)
         return push_fail(L, std::string("process.write: ") + parse_error);
     }
 
+    if (!process->stdin_piped)
+    {
+        return push_fail(L, "not_piped");
+    }
     if (process->stdin_fd < 0)
     {
         return push_fail(L, "closed");
@@ -517,6 +726,10 @@ int process_close_stdin(lua_State *L)
         return luaL_error(L, "process.close_stdin expects no argument");
     }
     Process *process = check_process(L, 1);
+    if (!process->stdin_piped)
+    {
+        return push_fail(L, "not_piped");
+    }
     babet_process::close_fd(process->stdin_fd);
     return push_ok(L);
 }
@@ -824,6 +1037,19 @@ int lua_spawn(lua_State *L)
         return push_fail(L, error);
     }
 
+    babet_process::StreamRedirection stdin_redirection;
+    babet_process::StreamRedirection stdout_redirection;
+    babet_process::StreamRedirection stderr_redirection;
+    if (!parse_stream_redirection(L, 3, "stdin", StreamRole::stdin_stream,
+                                  stdin_redirection, error) ||
+        !parse_stream_redirection(L, 3, "stdout", StreamRole::stdout_stream,
+                                  stdout_redirection, error) ||
+        !parse_stream_redirection(L, 3, "stderr", StreamRole::stderr_stream,
+                                  stderr_redirection, error))
+    {
+        return push_fail(L, error);
+    }
+
     babet_process::LaunchSpec spec;
     spec.command = command;
     spec.argv_strings = std::move(args);
@@ -832,6 +1058,9 @@ int lua_spawn(lua_State *L)
     spec.env_overrides = std::move(env);
     spec.has_deadline = has_launch_timeout;
     spec.deadline_ms = launch_deadline;
+    spec.stdin_redirection = std::move(stdin_redirection);
+    spec.stdout_redirection = std::move(stdout_redirection);
+    spec.stderr_redirection = std::move(stderr_redirection);
     spec.error_prefix = "spawn";
 
     // Alloue le userdata AVANT fork(). Une panne d'allocation Lua ne peut

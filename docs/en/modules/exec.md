@@ -687,11 +687,10 @@ print(result.stdout)
 ```
 
 <a id="spawn-overview"></a>
-## Streaming processes with `babet.spawn`
+## Controllable processes with `babet.spawn`
 
-`babet.spawn` uses the same secure launch engine as `babet.exec`, but it does
-not capture streams automatically and does not wait for completion. It returns
-a userdata representing the child process:
+`babet.spawn` uses the same shell-free launch engine as `babet.exec`, but does
+not wait for program completion. It returns a userdata representing the child:
 
 ```lua
 local process, err = babet.spawn("yt-dlp", {
@@ -701,10 +700,10 @@ local process, err = babet.spawn("yt-dlp", {
 assert(process, err)
 ```
 
-The process owns three non-blocking pipes for stdin, stdout, and stderr. The
-script decides when to read, write, wait, or terminate the process group. This
-API is intended for long-running programs, large outputs, and real-time
-progress display.
+By default, stdin, stdout, and stderr use three non-blocking pipes, preserving
+the historical behaviour exactly. Each stream may instead be inherited or
+connected to `/dev/null`; output streams may be redirected directly to files,
+and stderr may be merged into stdout.
 
 <a id="spawn-signature"></a>
 ### Signature and options
@@ -719,37 +718,157 @@ local process, err = babet.spawn(command, args?, opts?)
 | `args` | dense string array | no arguments | `argv[1]..argv[n]` |
 | `opts.cwd` | string | inherited directory | child working directory |
 | `opts.env` | string-to-string table | inherited environment | variables to add/replace |
-| `opts.launch_timeout` | finite number > 0 | unlimited wait | bounds `chdir` + `exec` launch |
+| `opts.launch_timeout` | finite number > 0 | unlimited wait | bounds the `chdir` + `exec` phase |
+| `opts.stdin` | `"pipe"`, `"inherit"`, or `"null"` | `"pipe"` | standard-input source |
+| `opts.stdout` | mode or file table | `"pipe"` | standard-output destination |
+| `opts.stderr` | mode, `"stdout"`, or file table | `"pipe"` | standard-error destination |
 
-Unlike `babet.exec`, unknown options are rejected. `spawn` does not accept
-`stdin`, `timeout`, or `max_output`: stdin is sent through `process:write()`,
-lifetime is controlled with `wait()`/`terminate()`, and outputs are read
-progressively.
+Unknown options are rejected. `spawn` does not accept the `timeout` and
+`max_output` options of `exec`: lifetime is controlled with
+`wait()`/`terminate()`, and piped outputs are read progressively.
 
-`launch_timeout` only covers the launch phase before the new executable is
-established. It is not a total process-lifetime limit.
+`launch_timeout` covers preparation and launch only, until the new executable
+is established. It is not a total process-lifetime limit. A redirection-file
+open failure happens before `fork()`, so no child is created in that case.
 
 `PATH` lookup, paths containing `/`, environment merging, and shell-free
 execution follow the same rules as `exec`.
+
+<a id="spawn-redirections"></a>
+### Redirection modes
+
+#### `"pipe"`
+
+The default mode creates a non-blocking pipe between parent and child:
+
+```lua
+local process = assert(babet.spawn("cat", {}, {
+    stdin = "pipe",
+    stdout = "pipe",
+    stderr = "pipe",
+}))
+
+assert(process:write("hello\n"))
+assert(process:close_stdin())
+print(assert(process:read_stdout(64 * 1024, 1)))
+```
+
+`write`, `close_stdin`, `read_stdout`, and `read_stderr` are available only for
+streams configured as `"pipe"`.
+
+#### `"inherit"`
+
+The child directly reuses Babet's corresponding standard descriptor:
+
+```lua
+local process = assert(babet.spawn("make", { "-j4" }, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+}))
+assert(process:wait())
+```
+
+Use this when a program should interact with the terminal or respect an
+external redirection applied to Babet itself.
+
+#### `"null"`
+
+The stream is connected to `/dev/null`:
+
+```lua
+local process = assert(babet.spawn("quiet-program", {}, {
+    stdin = "null",  -- immediate EOF in the child
+    stdout = "null",
+    stderr = "null",
+}))
+```
+
+#### File redirection
+
+stdout and stderr accept a strict table:
+
+```lua
+{
+    file = "/var/tmp/application.log", -- required, no NUL byte
+    append = true,                     -- false by default: truncate
+    permissions = tonumber("600", 8), -- 0600 by default, creation only
+}
+```
+
+- `append = false` truncates an existing regular file;
+- `append = true` writes with `O_APPEND`;
+- `permissions` must be an integer from `0000` to `0777` and applies only when
+  Babet creates the file;
+- the final destination must not be a symbolic link;
+- after opening, Babet uses `fstat()` to require a regular file; directories,
+  FIFOs, sockets, and devices are rejected;
+- the descriptor is prepared before `fork()` and retained only by the child.
+
+stdout-only example:
+
+```lua
+local process = assert(babet.spawn("generate-report", {}, {
+    stdout = {
+        file = "report.log",
+        permissions = tonumber("640", 8),
+    },
+}))
+```
+
+stderr-only append example:
+
+```lua
+local process = assert(babet.spawn("worker", {}, {
+    stderr = {
+        file = "errors.log",
+        append = true,
+    },
+}))
+```
+
+#### Merging stderr into stdout
+
+`stderr = "stdout"` duplicates descriptor 2 onto the already configured
+stdout. It works with a pipe, inheritance, `/dev/null`, or a file:
+
+```lua
+local process = assert(babet.spawn("driver", {}, {
+    stdout = {
+        file = "driver.log",
+        append = true,
+    },
+    stderr = "stdout",
+}))
+```
+
+For one combined log file, this form is preferable to two independent file
+tables because it uses one descriptor and one write offset.
 
 <a id="spawn-methods"></a>
 ### Process methods
 
 | Method | Return | Purpose |
 | --- | --- | --- |
-| `process:read_stdout([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read at most `max_bytes` from stdout |
-| `process:read_stderr([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read at most `max_bytes` from stderr |
-| `process:write(data [, timeout])` | `(bytes_written, nil)` or `(nil, reason)` | write part of `data` to stdin |
-| `process:close_stdin()` | `(true, nil)` | close stdin idempotently |
+| `process:read_stdout([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read stdout when it is a pipe |
+| `process:read_stderr([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read stderr when it is a pipe |
+| `process:write(data [, timeout])` | `(bytes_written, nil)` or `(nil, reason)` | write stdin when it is a pipe |
+| `process:close_stdin()` | `(true, nil)` or `(nil, reason)` | idempotently close piped stdin |
 | `process:is_running()` | `boolean` or `(nil, err)` | check state without blocking |
 | `process:pid()` | integer | return the assigned PID |
 | `process:wait([timeout])` | `(result, nil)` or `(nil, reason)` | wait without killing on timeout |
 | `process:terminate([grace_period])` | `(result, nil)` or `(nil, err)` | SIGTERM, then SIGKILL if needed |
 | `process:kill()` | `(result, nil)` or `(nil, err)` | SIGKILL the process group |
-| `process:close()` | `(true, nil)` | clean pipes and any active child |
+| `process:close()` | `(true, nil)` | clean descriptors and any active child |
 
-Short reasons `"timeout"`, `"closed"`, and `"interrupted"` are typed, like
-socket errors. Other diagnostics use a `process:` or `spawn:` prefix.
+Short reasons are:
+
+- `"timeout"`: no progress before the deadline;
+- `"closed"`: closed pipe or EOF;
+- `"interrupted"`: handled Babet interruption;
+- `"not_piped"`: the method targets a stream not configured as `"pipe"`.
+
+Other diagnostics use a `process:` or `spawn:` prefix.
 
 The table returned by `wait`, `terminate`, and `kill` contains:
 
@@ -762,13 +881,12 @@ The table returned by `wait`, `terminate`, and `kill` contains:
 }
 ```
 
-Calling `wait()` again after completion returns the same result because the
-status is cached after the first `waitpid`.
+A second `wait()` after completion returns the same cached status.
 
 <a id="spawn-reading"></a>
 ### Reading stdout and stderr
 
-Reads are binary-safe. By default they read at most 64 KiB and are
+Pipe reads are binary-safe. By default they read at most 64 KiB and are
 non-blocking (`timeout = 0`). The maximum size per call is 16 MiB.
 
 ```lua
@@ -780,23 +898,24 @@ elseif err == "timeout" then
     -- nothing became available for 250 ms
 elseif err == "closed" then
     -- final EOF on stdout
+elseif err == "not_piped" then
+    -- stdout is inherited, null, or redirected to a file
 else
     error(err)
 end
 ```
 
-`"closed"` is EOF for that stream, not necessarily process completion. A child
-may close stdout and keep working.
-
-Drain both stdout **and** stderr. Reading only one while the other fills can
-block the child when the kernel pipe becomes full.
+`"closed"` is EOF for that stream, not necessarily process completion. When
+stdout and stderr are both pipes, drain both: reading only one while the other
+fills can block the child. File, inherited, and null outputs do not fill a
+parent-side pipe.
 
 <a id="spawn-writing"></a>
 ### Writing stdin
 
-`write` accepts a binary Lua string, including NUL bytes. The pipe is
-non-blocking, so the call may write only part of the string even after it
-became writable. Use the returned byte count to resume at the next byte.
+With `stdin = "pipe"`, `write` accepts a binary Lua string including NUL bytes.
+The non-blocking pipe may accept only part of the string, so resume from the
+returned byte count.
 
 ```lua
 local function write_all(process, data)
@@ -813,52 +932,60 @@ assert(process:close_stdin())
 ```
 
 An empty string returns `(0, nil)`. After `close_stdin`, `write` returns
-`(nil, "closed")`. Closing stdin is often required for tools such as `cat`,
-`sort`, or `ffmpeg` to know the input is complete.
+`(nil, "closed")`. With `stdin = "inherit"` or `stdin = "null"`, `write` and
+`close_stdin` return `(nil, "not_piped")`.
 
 <a id="spawn-lifecycle"></a>
 ### Waiting, terminating, and closing
 
-`wait()` without an argument waits for process completion. `wait(timeout)`
-returns `(nil, "timeout")` when the budget expires without sending a signal or
-invalidating the object.
+`wait()` without an argument waits for completion. `wait(timeout)` returns
+`(nil, "timeout")` without sending a signal or invalidating the object.
 
-```lua
-local result, err = process:wait(0)
-if not result and err == "timeout" then
-    -- process is still running
-end
-```
+`terminate(grace_period)` sends SIGTERM to the whole group and then SIGKILL if
+needed. The default grace period is two seconds. `kill()` sends SIGKILL
+directly.
 
-`terminate(grace_period)` sends SIGTERM to the whole group. If the group does
-not exit before the grace period ends, Babet sends SIGKILL. The default grace
-period is two seconds. `kill()` sends SIGKILL directly.
-
-`close()` is idempotent. If the child is still running, it is terminated and
-reaped with bounded waits, then all three pipes are closed. The garbage
-collector and Lua `__close` metamethod perform the same cleanup:
-
-```lua
-local process <close> = assert(babet.spawn("long-job"))
--- automatic cleanup when leaving the scope
-```
-
-Explicit close is still recommended because garbage-collection timing is not
-deterministic.
+`close()` is idempotent. It terminates and reaps an active child with bounded
+waits, then closes every descriptor still owned by the parent. Lua `__close`
+and garbage collection perform the same cleanup.
 
 <a id="spawn-example"></a>
-### Streaming loop example
+### Combined example: launching a WebDriver or daemon
 
 ```lua
-local process, err = babet.spawn("yt-dlp", {
-    "--newline",
-    "-f", "bestvideo+bestaudio/best",
-    url,
+local process, err = babet.spawn("bin/geckodriver", {
+    "--port=4444",
+}, {
+    stdin = "null",
+    stdout = {
+        file = "logs/geckodriver.log",
+        append = true,
+        permissions = tonumber("600", 8),
+    },
+    stderr = "stdout",
 })
 assert(process, err)
 
-local stdout_open, stderr_open = true, true
+local result, wait_err = process:wait(0)
+if not result and wait_err == "timeout" then
+    print("geckodriver is running with PID", process:pid())
+end
+```
 
+No shell is involved, arguments remain separate, stdin cannot wait for input,
+and logs cannot fill a parent-side pipe.
+
+<a id="spawn-streaming-example"></a>
+### Combined example: streaming loop
+
+```lua
+local process = assert(babet.spawn("yt-dlp", {
+    "--newline",
+    "-f", "bestvideo+bestaudio/best",
+    url,
+}))
+
+local stdout_open, stderr_open = true, true
 while stdout_open or stderr_open do
     if stdout_open then
         local data, read_err = process:read_stdout(64 * 1024, 0.1)
@@ -888,27 +1015,24 @@ end
 local result, wait_err = process:wait(5)
 assert(result, wait_err)
 process:close()
-
-if result.code ~= 0 then
-    error("yt-dlp exited with code " .. result.code)
-end
 ```
 
 <a id="spawn-limits"></a>
 ### Limits and deadlock prevention
 
-- `wait()` does not drain output. Calling it immediately on a very verbose child
-  can block when its pipes fill. Drain both streams while it runs, or use
-  `babet.exec` for small automatically captured output.
-- Sending large input to a program that simultaneously emits large output
-  requires alternating writes and reads. A single `write_all` before any read
-  can fill pipes in both directions.
-- A `babet.spawn()` object cannot be connected after launch to another process
-  object. For a linear pipeline, use `babet.spawnPipeline()` directly.
-- stdout and stderr remain separate. Babet does not merge them.
-- `close()` and `terminate()` target the process group created at launch. A
-  descendant that deliberately changes process group or session may escape,
-  just as with `babet.exec`.
+- `wait()` does not drain outputs configured as `"pipe"`. For verbose children,
+  drain the pipes, redirect logs to a file, use `"inherit"`/`"null"`, or use
+  `babet.exec` for small bounded output.
+- Large simultaneous input and output require alternating writes and reads.
+- A `babet.spawn()` object cannot be connected after launch to another process;
+  use `babet.spawnPipeline()` for a linear pipeline.
+- File tables are not supported for stdin in this version.
+- Babet does not create parent directories for redirection files.
+- Redirection files are opened before `fork()`. If a later `fork()` or launch
+  error occurs, a file may already have been created or truncated even though
+  no usable process is returned.
+- `close()` and `terminate()` target the launch-time process group. A descendant
+  that deliberately changes group or session may escape that control.
 
 <a id="exec-errors"></a>
 ## Error contract

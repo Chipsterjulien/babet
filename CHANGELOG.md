@@ -6,6 +6,138 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.9.0] - 2026-07-17
+
+### Release summary
+
+Babet 2.9.0 strengthens process supervision, binary-data handling, atomic file
+publication, and concurrent worker orchestration. Existing `spawn()` and worker
+calls remain compatible by default, while the new opt-in APIs remove external
+Base64 commands, prevent undrained WebDriver log pipes, support bounded waits and cooperative worker
+shutdown, and allow direct MPMC communication without relaying messages through
+the parent Lua state.
+
+### Lot A — configurable `babet.spawn()` redirections
+
+- bumped the source version to 2.9.0;
+- strictly preserved three non-blocking pipes as the default, leaving all
+  historical calls unchanged;
+- added `"pipe"`, `"inherit"`, and `"null"` modes for stdin, stdout, and
+  stderr;
+- added `stderr = "stdout"`, applied after stdout configuration;
+- added direct stdout/stderr redirection to regular files with truncate or
+  append mode, creation permissions bounded to `0777`, `O_CLOEXEC`, final
+  symlink refusal, and `fstat()` verification;
+- opens every redirection destination before `fork()`, so an open failure
+  prevents child creation;
+- added the stable `"not_piped"` reason when streaming methods target an
+  inherited, null, merged, or file-redirected stream;
+- added validation, special-path, truncate, append, permission, merge,
+  `/dev/null`, inheritance, symlink-refusal, and compatibility tests;
+- synchronised rich French and English documentation with one example per mode
+  and a combined WebDriver/daemon example.
+
+### Lot B — native binary Base64 module
+
+- added `babet.base64.encode(data [, opts])` and
+  `babet.base64.decode(text [, opts])` to the main Lua state and every worker;
+- implemented the module internally with no external process and no additional
+  dependency, preserving NUL bytes and non-UTF-8 data in binary Lua strings;
+- added standard and URL-safe RFC 4648 alphabets through `url_safe`;
+- added encoding padding control and explicit unpadded decoding through
+  `padding` and `allow_unpadded`;
+- applies strict canonical decoding: exact alphabet, final padding only,
+  coherent length, at most two `=` characters, and rejection of truncated
+  groups or non-zero unused trailing bits;
+- added `ignore_whitespace` for the six ASCII whitespace bytes without making
+  any other input permissive;
+- added inclusive `max_output`, checked after full validation and before
+  allocating decoded output;
+- analyses text in two passes without an input-sized copy or position table,
+  retaining exact error offsets without multiplying memory use;
+- strictly validates arity, types, option keys, and unknown options, while
+  separating raised call errors from invalid-data `(nil, err)` results;
+- added RFC 4648 vectors, all 256 byte values, a large binary buffer,
+  alphabet, padding, whitespace, limit, canonical-error, and worker tests;
+- added rich French and English pages, separate examples for every option, a
+  combined unpadded URL-safe example, and PDF manual integration.
+
+
+### Lot C — generic atomic file writing
+
+- added `babet.writeFileAtomic(path, data [, opts])` to the main Lua state and every worker;
+- accepts binary Lua strings including NUL bytes and non-UTF-8 data, with no proportional intermediate copy in the binding;
+- added strict `overwrite` (`false`), `permissions` (`0644`), and `durable` (`true`) options;
+- creates a private mode-`0600` temporary file in the final directory, writes fully while handling `EINTR` and partial writes, applies `fchmod()` before synchronization, then publishes atomically;
+- rejects overwrite by default through no-replace `linkat()` publication, while explicit replacement of a regular file uses `renameat()`;
+- walks parents component by component with `openat()`/`O_NOFOLLOW`, rejecting `..`, symlink parents, a final symlink, and directory, FIFO, socket, or device destinations;
+- never creates parents implicitly and best-effort removes every temporary file after a pre-publication failure;
+- synchronizes the temporary file and parent directory by default, with an explicit diagnostic if publication already succeeded but rename persistence could not be confirmed;
+- added binary, empty-file, overwrite, permissions, non-durable, special-path, symlink, special-type, validation, cleanup, and worker tests;
+- added detailed French and English chapters, one example per option, a combined Base64/Selenium example, and PDF-manual integration.
+
+
+### Lot D — robust worker lifecycle
+
+- strictly rejects every unknown option and every non-string option key in `babet.workers.spawn()`, including names with a hidden NUL suffix;
+- added non-blocking, non-consuming `job:status()` with stable `"running"`, `"done"`, and `"error"` states;
+- extended `job:join(timeout?)` with monotonic second-based deadlines, non-blocking `0`, and `(nil, "timeout")` without closing queues, joining the pthread, or consuming the result;
+- added a pthread completion signal separate from message queues, protected against lost wakeups and used by all success, Lua-error, and C++-exception paths;
+- added idempotent cooperative `job:cancel()` and worker-side `worker.cancelled()`;
+- cancellation closes only the inbox, wakes `worker.recv()` with `"cancelled"`, rejects future `job:send()` calls with the same reason, and leaves the outbox drainable for a final message;
+- documented the distinction between `close()` — normal command completion with draining — and `cancel()` — cooperative abandonment of queued commands;
+- garbage collection now requests cancellation before closing both queues and joining the thread, without adding unsafe forced termination;
+- added non-consuming status, immediate and bounded join timeouts, messaging after a join timeout, final-error and validation coverage, idempotent cancellation, blocked-`worker.recv()` wakeup, queued-inbox abandonment, final-outbox-message, and direct cancellation-flag tests;
+- synchronized rich French and English documentation with separate and combined `status`/`join(timeout)`/`cancel` examples.
+
+
+### Lot E — direct shared worker channels
+
+- added `babet.workers.channel({ capacity = 64 })`, a thread-safe bounded FIFO
+  queue supporting 1 to 1,000,000 messages and multiple producers/consumers;
+- added explicit handle passing through
+  `workers.spawn(..., { channels = ... })` and an always-present
+  `worker.channels` table without changing the JSON contract of `worker.args`;
+- added `channel:send(value, timeout?)`, `channel:recv(timeout?)`,
+  `channel:close()`, and `channel:is_closed()` with stable `full`, `empty`,
+  `timeout`, and `closed` reasons;
+- made global close idempotent, wake blocked producers/consumers, reject new
+  sends, and drain already queued messages before `recv()` reports `closed`;
+- integrated cooperative cancellation: `job:cancel()` wakes the affected
+  worker's blocked `channel:send()` or `channel:recv()` with `cancelled`
+  without closing the shared channel for other participants;
+- shared the C++ resource through reference-counted handles, so collecting one
+  local handle does not close the channel for other Lua states while the last
+  reference safely closes and destroys the queue;
+- refactored worker serialization error contexts so channel diagnostics name
+  `workers.channel.send` or `workers.channel.recv` precisely;
+- added strict validation for options, capacities, channel names,
+  `opts.channels` values, arity, and transferred values; channels deliberately
+  remain non-serializable as messages;
+- added parent-to-worker, worker-to-parent, worker-to-worker, FIFO, `nil`,
+  close/drain, blocked-wakeup, handle-lifetime, two-producer/two-consumer, and
+  MPMC stress tests;
+- validated 100,000 messages, 2,000 cancellation races, and 1,000 close races
+  in native tests under normal compilation, ASan+UBSan, and ThreadSanitizer;
+- synchronized README, French/English documentation, detailed examples, and
+  both PDF manuals.
+
+### Release validation
+
+The final release candidate passed:
+
+- 3319 PASS / 0 FAIL in folder mode;
+- 3306 PASS / 0 FAIL in embedded mode;
+- 3306 PASS / 0 FAIL in embedded mode through `PATH`;
+- 9/9 runtime modes under ASan + UBSan;
+- 9/9 runtime modes again with the final normal build.
+
+The complete release gate, including local TLS and network smoke tests, remains:
+
+```sh
+./run_tests.sh --release
+```
+
 ## [2.8.0] - 2026-07-17
 
 ### Release summary

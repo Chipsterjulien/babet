@@ -16,9 +16,13 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.8.0**. See the
+Current stable and audited release: **2.9.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
+
+Babet 2.9.0 adds configurable `babet.spawn()` redirections, the native binary
+`babet.base64` module, secure `babet.writeFileAtomic()` publication, a hardened
+worker lifecycle, and direct bounded shared channels between workers.
 
 Can be used in three modes:
 
@@ -28,9 +32,10 @@ Can be used in three modes:
    self-contained executable with the script and its `require`d modules
    embedded as a ZIP appended to the binary.
 3. **As a library of bindings** : Lua scripts get
-   `babet.json`, `babet.http`, `babet.sqlite`,
+   `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`,
    `babet.socket`, `babet.inotify`, `babet.workers`,
-   `babet.user`, `babet.exec`, the streaming `babet.spawn`,
+   `babet.user`, `babet.exec`, `babet.writeFileAtomic`, the streaming
+   `babet.spawn`,
    `babet.pipeline` / `babet.spawnPipeline`, secure ZIP and TAR handling through
    `babet.archive`, standalone gzip/xz/bzip2/zstd streams through
    `babet.compression`, direct-to-file `babet.http.download`, and more.
@@ -70,6 +75,110 @@ The response is written to a same-directory temporary file and atomically
 committed only for a final 2xx status. Existing destinations are preserved on
 network, TLS, size, disk, and non-2xx failures.
 
+
+### Encode or decode binary data as Base64
+
+```lua
+local source = "\0\1\2screenshot\255"
+local encoded, err = babet.base64.encode(source, {
+    url_safe = true,
+    padding = false,
+})
+assert(encoded, err)
+
+local decoded
+decoded, err = babet.base64.decode(encoded, {
+    url_safe = true,
+    allow_unpadded = true,
+    max_output = 32 * 1024 * 1024,
+})
+assert(decoded, err)
+assert(decoded == source)
+```
+
+The module is binary-safe, imposes no UTF-8 requirement, and rejects mixed
+alphabets, whitespace, misplaced padding, and non-canonical trailing bits by
+default. It is also available inside workers.
+
+### Atomically publish a configuration file
+
+```lua
+local ok, err = babet.writeFileAtomic("runtime/state.json", json_data, {
+    overwrite = true,
+    permissions = tonumber("600", 8),
+})
+assert(ok, err)
+```
+
+Content is written to a private same-directory temporary file and then
+published atomically. Overwrite is disabled by default, symlink parents and a
+final symlink are rejected, and durability is enabled by default.
+
+### Wait for or cooperatively cancel a worker
+
+```lua
+local job = assert(babet.workers.spawn([[
+    while not worker.cancelled() do
+        local ok, command = worker.recv(0.1)
+        if ok then process(command) end
+    end
+    return "cancelled"
+]]))
+
+local ok, result = job:join(0.05)
+if ok == nil then
+    assert(result == "timeout")
+    assert(job:cancel())
+    ok, result = job:join(2)
+end
+assert(ok, result)
+```
+
+`status()` observes `running`, `done`, or `error` without consuming the result.
+A `join()` timeout leaves the job unchanged. `cancel()` deliberately remains
+cooperative: it wakes `worker.recv()`, sets the flag read by
+`worker.cancelled()`, also wakes the current channel wait without closing the
+shared channel, and leaves the outbox available for a final message.
+
+
+### Connect workers directly with shared channels
+
+```lua
+local tasks = assert(babet.workers.channel({ capacity = 16 }))
+local results = assert(babet.workers.channel({ capacity = 16 }))
+
+local producer = assert(babet.workers.spawn([[
+    for i = 1, 10 do
+        assert(worker.channels.tasks:send({ id = i, value = i * 10 }, 2))
+    end
+    return true
+]], nil, { channels = { tasks = tasks } }))
+
+local consumer = assert(babet.workers.spawn([[
+    for _ = 1, 10 do
+        local ok, task = worker.channels.tasks:recv(2)
+        assert(ok, task)
+        assert(worker.channels.results:send({
+            id = task.id,
+            result = task.value * 2,
+        }, 2))
+    end
+    return true
+]], nil, { channels = { tasks = tasks, results = results } }))
+
+for _ = 1, 10 do
+    local ok, result = results:recv(2)
+    assert(ok, result)
+    print(result.id, result.result)
+end
+
+assert(producer:join(2))
+assert(consumer:join(2))
+```
+
+Producer-to-consumer messages do not pass through the parent. Channels are
+FIFO, multi-producer, multi-consumer, and close with drainage of queued
+messages.
 
 ### Compress or decompress a standalone stream
 

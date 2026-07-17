@@ -9,7 +9,7 @@ is now part of the stable API.
 The FS module covers:
 
 - checking whether a path exists and what type it has;
-- creating and removing files and directories;
+- creating, atomically writing, and removing files and directories;
 - changing the current working directory;
 - lexical path manipulation;
 - listing, iterating, and recursively searching a tree;
@@ -38,6 +38,7 @@ The FS module covers:
   - [`joinPath`](#joinpath)
 - [Create, remove, rename, and link](#fs-actions)
   - [`touch`](#touch)
+  - [`writeFileAtomic`](write-file-atomic.md)
   - [`mkdir`](#mkdir)
   - [`remove`](#remove)
   - [`rmdir`](#rmdir)
@@ -160,6 +161,7 @@ their sections.
 | Function | Successful result |
 | --- | --- |
 | `babet.touch(path)` | `(true, nil)` |
+| `babet.writeFileAtomic(path, data, opts?)` | `(true, nil)` — atomic and durable binary publication; [detailed chapter](write-file-atomic.md) |
 | `babet.mkdir(path)` | `(true, nil)` — recursive and idempotent |
 | `babet.remove(path)` | `(true, nil)` — regular file or symlink |
 | `babet.rmdir(path)` | `(true, nil)` — real, empty directory |

@@ -1,0 +1,14 @@
+CHANGELOG.fr.md
+CHANGELOG.md
+README.fr.md
+README.md
+docs/en/README.md
+docs/en/modules/workers.md
+docs/fr/README.md
+docs/fr/modules/workers.md
+docs/manual-en.pdf
+docs/manual-fr.pdf
+examples/main.lua
+src/lua_bindings/workers.cpp
+src/lua_bindings/workers.hpp
+todo

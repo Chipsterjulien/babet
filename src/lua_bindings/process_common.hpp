@@ -7,10 +7,33 @@
 #include <utility>
 #include <vector>
 
+#include <sys/stat.h>
 #include <sys/types.h>
 
 namespace babet_process
 {
+
+enum class StreamRedirectionKind
+{
+    pipe,
+    inherit,
+    null_device,
+    file,
+    stdout_stream,
+};
+
+struct FileRedirection
+{
+    std::string path;
+    bool append = false;
+    mode_t permissions = 0600;
+};
+
+struct StreamRedirection
+{
+    StreamRedirectionKind kind = StreamRedirectionKind::pipe;
+    FileRedirection file;
+};
 
 struct LaunchSpec
 {
@@ -21,6 +44,9 @@ struct LaunchSpec
     std::vector<std::pair<std::string, std::string>> env_overrides;
     bool has_deadline = false;
     long long deadline_ms = 0;
+    StreamRedirection stdin_redirection;
+    StreamRedirection stdout_redirection;
+    StreamRedirection stderr_redirection;
     const char *error_prefix = "process";
 };
 
@@ -30,6 +56,9 @@ struct LaunchedProcess
     int stdin_fd = -1;
     int stdout_fd = -1;
     int stderr_fd = -1;
+    bool stdin_piped = false;
+    bool stdout_piped = false;
+    bool stderr_piped = false;
 };
 
 struct LaunchResult
@@ -113,9 +142,9 @@ bool set_nonblocking(int fd, const char *prefix, const char *label,
 void close_fd(int &fd);
 void close_process_fds(LaunchedProcess &process);
 
-// Crée les pipes, fork, configure le groupe de processus et attend le résultat
-// de chdir/exec via un pipe CLOEXEC. En succès, les trois fds parent sont
-// non-bloquants et appartiennent à l'appelant.
+// Prépare les redirections, fork, configure le groupe de processus et attend
+// le résultat de chdir/exec via un pipe CLOEXEC. En succès, seuls les flux
+// configurés avec `pipe` possèdent un fd parent non bloquant.
 LaunchResult launch(const LaunchSpec &spec);
 
 // Variante multi-processus : stdout d'une étape est relié directement au stdin

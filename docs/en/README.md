@@ -15,7 +15,7 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the stable and audited **Babet 2.8.0** release.
+Documentation for the stable and audited **Babet 2.9.0** release.
 
 ## Getting started
 
@@ -25,17 +25,19 @@ Documentation for the stable and audited **Babet 2.8.0** release.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.8.0 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.9.0 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 
 | I need to… | Chapter | What it contains |
 | --- | --- | --- |
 | create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find`, `copyTree`, permissions, and checksums |
+| atomically publish configuration or binary data | [`writeFileAtomic — atomic writing`](modules/write-file-atomic.md) | default no-overwrite, permissions, durability, path confinement, concurrency, and workers |
 | parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversion |
 | run an external program | [`Exec — processes`](modules/exec.md) | shell-free arguments, complete capture with `exec`, streaming with `spawn`, environment, cwd, and process control |
 | chain several commands | [`Process pipelines`](modules/pipeline.md) | complete capture or streaming, separate stderr streams, per-stage statuses, and process-group cleanup |
 | create or inspect/extract ZIP or TAR archives | [`Archive — secure multi-format archives`](modules/archive.md) | deterministic ZIP and plain/gzip/xz/bzip2/zstd TAR creation, listing, full testing, selective extraction, `dry_run` preview, anti-bomb limits, and atomic file publication |
+| encode or decode binary data as Base64 | [`Base64 — binary data`](modules/base64.md) | standard or URL-safe alphabets, optional padding, strict canonical decoding, controlled whitespace, and an output limit |
 | compress or decompress one file | [`Compression — standalone streams`](modules/compression.md) | gzip, xz, bzip2, and zstd streams, content detection, output limits, concatenated members, integrity checks, and atomic publication |
 | inspect the process, environment, machine, or Lua VM memory | [`SYS — process and machine`](modules/sys.md) | runtime version, PID, hostname, `uname`, `PATH`, `env`, `setenv`, and Lua-state memory |
 | send an HTTP request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic downloads, redirects, TLS, timeout, and size limits |
@@ -46,7 +48,7 @@ Documentation for the stable and audited **Babet 2.8.0** release.
 | read TOML configuration | [`TOML — configuration`](modules/toml.md) | decoding, TOML types, arrays, sections, dates, and parse errors |
 | watch a directory | [`Inotify — file events`](modules/inotify.md) | watches, events, timeout reads, moves, cookies, and closing |
 | handle Unix signals | [`SIGNAL — clean shutdown and reload`](modules/signal.md) | `TERM`/`INT`/`HUP`/`USR1`/`USR2`/`PIPE`, deferred callbacks, fixed order, coalescing, interruptible calls, and workers |
-| parallelise Lua work | [`WORKERS — OS threads and messages`](modules/workers.md) | isolated Lua states, `spawn`, `join`, `poll`, inbox/outbox, timeouts, closing, serialisation, and deadlocks |
+| parallelise Lua work | [`WORKERS — OS threads, messages, and channels`](modules/workers.md) | isolated Lua states, `spawn`, bounded lifecycle, inbox/outbox, and direct MPMC channels |
 | obtain or format time | [`Time — clocks and durations`](modules/time.md) | realtime and monotonic clocks, sleep, ISO-8601, parsing, and duration formatting |
 | look up a system account by name or UID | [`USER — system accounts`](modules/user.md) | NSS, `get`, `exists`, UID, primary GID, GECOS, home, shell, and resolution errors |
 | split or transform strings | [`Strings`](modules/strings.md) | `split`, separators, limits, character mode, and binary strings |
@@ -61,11 +63,13 @@ names below define each chapter's scope before you open it.
 | Module | Detailed scope |
 | --- | --- |
 | [`Archive — secure ZIP, TAR, gzip, xz, bzip2, and zstd operations`](modules/archive.md) | Create deterministic ZIP, TAR, gzip TAR, xz TAR, bzip2 TAR, or zstd TAR archives, then inspect, test, and selectively extract them with `dry_run` previews, bounded resources, confined paths, and atomic per-file publication. |
+| [`Base64 — binary encoding and decoding`](modules/base64.md) | Encode or decode binary Lua strings with standard or URL-safe alphabets, controlled padding, canonical validation, optional whitespace, and a `max_output` ceiling. |
 | [`Compression — standalone gzip, xz, bzip2, and zstd streams`](modules/compression.md) | Compress or decompress one regular file with automatic content detection, bounded expansion, integrity verification, symlink refusal, and atomic output publication. |
 | [`Argparse — command-line arguments`](modules/argparse.md) | Declare flags, options, and positional values; generate help; validate choices; convert values. |
 | [`Exec — external programs and processes`](modules/exec.md) | Run without a shell using `exec`, or progressively drive stdin/stdout/stderr using `spawn`. |
 | [`Process pipelines`](modules/pipeline.md) | Connect commands without a shell, using complete capture or streaming and per-stage statuses. |
 | [`FS — files, directories, paths, and attributes`](modules/fs.md) | Existence and types, creation/removal, paths, listings, search, iterators, tree copy/move, symlinks, Unix modes, and checksums. |
+| [`writeFileAtomic — atomic and durable file writing`](modules/write-file-atomic.md) | Publish a binary Lua string through a private temporary file and atomic rename, with explicit overwrite, exact permissions, `fsync`, path confinement, and worker support. |
 | [`HTTP — web requests`](modules/http.md) | URLs, methods, query, validated headers, binary bodies, responses, atomic file downloads, redirects, TLS verification, timeout, and limits. |
 | [`Inotify — filesystem monitoring`](modules/inotify.md) | Add/remove watches, read events, handle timeouts, moves, cookies, and closing. |
 | [`JSON — encoding and decoding`](modules/json.md) | Lua/JSON types, `null`, empty arrays, array marking, indentation, UTF-8, cycles, and limits. |
@@ -80,7 +84,7 @@ names below define each chapter's scope before you open it.
 | [`TLS — encrypted connections`](modules/tls.md) | Direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, deadlines, and fail-closed behaviour. |
 | [`TOML — configuration files`](modules/toml.md) | TOML decoding, scalars, arrays, tables, arrays of tables, dates/times, and diagnostics. |
 | [`USER — NSS system users`](modules/user.md) | Lookup by name or UID, existence, absence vs NSS errors, passwd fields, workers, and security limits. |
-| [`WORKERS — OS threads and message queues`](modules/workers.md) | Isolated Lua states, JSON transport, consumable results, `poll`/`join`, inbox/outbox, timeouts, closing, GC, and deadlock traps. |
+| [`WORKERS — OS threads, queues, and channels`](modules/workers.md) | Isolated Lua states, JSON transport, `status`, `join(timeout)`, cooperative cancellation, inbox/outbox, direct MPMC channels, closing, GC, and deadlock traps. |
 
 ## Structure of a module page
 

@@ -17,9 +17,14 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.8.0**. Voir le
+Version stable et auditée actuelle : **2.9.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
+
+Babet 2.9.0 ajoute les redirections configurables de `babet.spawn()`, le module
+Base64 natif binaire `babet.base64`, l’écriture sécurisée
+`babet.writeFileAtomic()`, un cycle de vie workers renforcé et des channels
+directs, bornés et partagés entre workers.
 
 Babet s’utilise de trois façons :
 
@@ -28,9 +33,9 @@ Babet s’utilise de trois façons :
 2. **Créateur d’exécutable** : `babet --create-exe ./monprojet application`
    produit un exécutable autonome contenant le script et ses modules `require`.
 3. **Bibliothèque de bindings** : les scripts disposent notamment de
-   `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`,
-   `babet.inotify`, `babet.workers`, `babet.user`, `babet.exec`, le streaming
-   `babet.spawn`, les pipelines `babet.pipeline` / `babet.spawnPipeline`, les
+   `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`,
+   `babet.inotify`, `babet.workers`, `babet.user`, `babet.exec`,
+   `babet.writeFileAtomic`, le streaming `babet.spawn`, les pipelines `babet.pipeline` / `babet.spawnPipeline`, les
    archives ZIP et TAR sécurisées `babet.archive`, les flux autonomes
    gzip/xz/bzip2/zstd via `babet.compression` et le téléchargement direct
    `babet.http.download`.
@@ -69,6 +74,115 @@ La réponse est écrite dans un temporaire du même dossier, puis validée
 atomiquement uniquement pour un statut final 2xx. Une destination existante est
 préservée après erreur réseau, TLS, taille, disque ou statut non-2xx.
 
+
+### Encoder ou décoder une donnée binaire en Base64
+
+```lua
+local source = "\0\1\2capture\255"
+local encoded, err = babet.base64.encode(source, {
+    url_safe = true,
+    padding = false,
+})
+assert(encoded, err)
+
+local decoded
+decoded, err = babet.base64.decode(encoded, {
+    url_safe = true,
+    allow_unpadded = true,
+    max_output = 32 * 1024 * 1024,
+})
+assert(decoded, err)
+assert(decoded == source)
+```
+
+Le module est binaire, n'exige pas d'UTF-8 et refuse par défaut les alphabets
+mélangés, les espaces, le padding mal placé et les bits finaux non canoniques.
+Il est également disponible dans les workers.
+
+### Publier atomiquement un fichier de configuration
+
+```lua
+local ok, err = babet.writeFileAtomic("runtime/state.json", json_data, {
+    overwrite = true,
+    permissions = tonumber("600", 8),
+})
+assert(ok, err)
+```
+
+Le contenu est écrit dans un temporaire privé du même dossier puis publié
+atomiquement. L’écrasement est refusé par défaut, les parents symboliques et la
+destination finale symbolique sont refusés, et la durabilité est activée par
+défaut.
+
+### Attendre ou annuler proprement un worker
+
+```lua
+local job = assert(babet.workers.spawn([[
+    while not worker.cancelled() do
+        local ok, command = worker.recv(0.1)
+        if ok then process(command) end
+    end
+    return "cancelled"
+]]))
+
+local ok, result = job:join(0.05)
+if ok == nil then
+    assert(result == "timeout")
+    assert(job:cancel())
+    ok, result = job:join(2)
+end
+assert(ok, result)
+```
+
+`status()` observe `running`, `done` ou `error` sans consommer le résultat.
+Un timeout de `join()` ne modifie pas le job. `cancel()` reste volontairement
+coopératif : il réveille `worker.recv()`, pose le drapeau lu par
+`worker.cancelled()`, réveille également l’attente de channel en cours sans
+fermer le channel partagé et laisse l’outbox disponible pour un dernier message.
+
+
+### Relier directement plusieurs workers par des channels
+
+```lua
+local tasks = assert(babet.workers.channel({ capacity = 16 }))
+local results = assert(babet.workers.channel({ capacity = 16 }))
+
+local producer = assert(babet.workers.spawn([[
+    for i = 1, 10 do
+        assert(worker.channels.tasks:send({ id = i, value = i * 10 }, 2))
+    end
+    return true
+]], nil, {
+    channels = { tasks = tasks },
+}))
+
+local consumer = assert(babet.workers.spawn([[
+    for _ = 1, 10 do
+        local ok, task = worker.channels.tasks:recv(2)
+        assert(ok, task)
+        assert(worker.channels.results:send({
+            id = task.id,
+            result = task.value * 2,
+        }, 2))
+    end
+    return true
+]], nil, {
+    channels = { tasks = tasks, results = results },
+}))
+
+for _ = 1, 10 do
+    local ok, result = results:recv(2)
+    assert(ok, result)
+    print(result.id, result.result)
+end
+
+assert(producer:join(2))
+assert(consumer:join(2))
+```
+
+Les messages producteur vers consommateur ne repassent pas par le parent. Un
+channel est FIFO, multi-producteurs, multi-consommateurs et fermé avec drainage
+des messages déjà présents.
 
 ### Compresser ou décompresser un flux autonome
 

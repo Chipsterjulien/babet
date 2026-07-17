@@ -643,6 +643,234 @@ end
 
 -- =====================================================================
 print("")
+print("=== base64 ===")
+
+do
+    local B = babet.base64
+
+    ok("babet.base64 is a table", type(B) == "table")
+    ok("babet.base64.encode is a function", type(B.encode) == "function")
+    ok("babet.base64.decode is a function", type(B.decode) == "function")
+
+    -- Vecteurs canoniques RFC 4648.
+    local vectors = {
+        { "", "" },
+        { "f", "Zg==" },
+        { "fo", "Zm8=" },
+        { "foo", "Zm9v" },
+        { "foob", "Zm9vYg==" },
+        { "fooba", "Zm9vYmE=" },
+        { "foobar", "Zm9vYmFy" },
+    }
+    for _, vector in ipairs(vectors) do
+        local encoded, encode_err = B.encode(vector[1])
+        ok("base64 RFC 4648 encode " .. string.format("%q", vector[1]),
+            encoded == vector[2] and encode_err == nil,
+            "encoded=" .. tostring(encoded) .. " err=" .. tostring(encode_err))
+
+        local decoded, decode_err = B.decode(vector[2])
+        ok("base64 RFC 4648 decode " .. string.format("%q", vector[2]),
+            decoded == vector[1] and decode_err == nil,
+            "decoded=" .. tostring(decoded) .. " err=" .. tostring(decode_err))
+    end
+
+    -- Chaînes Lua binaires : tous les octets, NUL inclus.
+    local bytes = {}
+    for value = 0, 255 do
+        bytes[#bytes + 1] = string.char(value)
+    end
+    local binary = table.concat(bytes)
+    local encoded, err = B.encode(binary)
+    local decoded, decode_err = B.decode(encoded)
+    ok("base64 round-trip preserves all 256 byte values",
+        err == nil and decode_err == nil and decoded == binary,
+        "encode_err=" .. tostring(err) .. " decode_err=" .. tostring(decode_err))
+
+    local large_binary = string.rep("\0\255abc", 200000)
+    encoded, err = B.encode(large_binary)
+    decoded, decode_err = B.decode(encoded, {
+        max_output = #large_binary,
+    })
+    ok("base64 round-trip preserves a large binary buffer",
+        err == nil and decode_err == nil and decoded == large_binary,
+        "size=" .. tostring(#large_binary)
+        .. " encode_err=" .. tostring(err)
+        .. " decode_err=" .. tostring(decode_err))
+
+    encoded, err = B.encode("\0\1\2abc\255")
+    decoded, decode_err = B.decode(encoded)
+    ok("base64 strings are binary-safe including embedded NUL",
+        err == nil and decode_err == nil and decoded == "\0\1\2abc\255")
+
+    -- Alphabet URL-safe et padding optionnel.
+    encoded, err = B.encode("\251\255", { url_safe = true })
+    ok("base64 URL-safe alphabet uses '-' and '_'",
+        encoded == "-_8=" and err == nil, tostring(encoded))
+
+    decoded, decode_err = B.decode("-_8=", { url_safe = true })
+    ok("base64 URL-safe decode", decoded == "\251\255" and decode_err == nil,
+        tostring(decode_err))
+
+    encoded, err = B.encode("hello", { padding = false })
+    ok("base64 encode without padding", encoded == "aGVsbG8" and err == nil,
+        tostring(encoded))
+
+    decoded, decode_err = B.decode("aGVsbG8")
+    ok_fail("base64 unpadded tail is rejected by default",
+        decoded, decode_err)
+
+    decoded, decode_err = B.decode("aGVsbG8", { allow_unpadded = true })
+    ok("base64 allow_unpadded accepts a canonical tail",
+        decoded == "hello" and decode_err == nil, tostring(decode_err))
+
+    encoded, err = B.encode("\251\255", {
+        url_safe = true,
+        padding = false,
+    })
+    decoded, decode_err = B.decode(encoded, {
+        url_safe = true,
+        allow_unpadded = true,
+    })
+    ok("base64 combined URL-safe and unpadded round-trip",
+        encoded == "-_8" and err == nil
+        and decoded == "\251\255" and decode_err == nil,
+        "encoded=" .. tostring(encoded) .. " err=" .. tostring(decode_err))
+
+    -- Espaces ASCII : stricts par défaut, option explicite pour les ignorer.
+    decoded, decode_err = B.decode("Zm9v\nYmFy")
+    ok_fail("base64 whitespace is rejected by default", decoded, decode_err)
+    ok("base64 invalid-character error reports the original byte",
+        type(decode_err) == "string"
+        and decode_err:find("byte 5", 1, true) ~= nil,
+        tostring(decode_err))
+
+    decoded, decode_err = B.decode(" Zm9v\tYmFy\r\n", {
+        ignore_whitespace = true,
+    })
+    ok("base64 ignore_whitespace accepts ASCII whitespace",
+        decoded == "foobar" and decode_err == nil, tostring(decode_err))
+
+    decoded, decode_err = B.decode(" Z g = = ", {
+        ignore_whitespace = true,
+    })
+    ok("base64 ignore_whitespace also works around padding",
+        decoded == "f" and decode_err == nil, tostring(decode_err))
+
+    -- Les alphabets standard et URL-safe restent distincts.
+    decoded, decode_err = B.decode("-_8=")
+    ok_fail("base64 standard mode rejects URL-safe characters",
+        decoded, decode_err)
+    decoded, decode_err = B.decode("+/8=", { url_safe = true })
+    ok_fail("base64 URL-safe mode rejects standard '+' and '/'",
+        decoded, decode_err)
+
+    -- Padding, troncature et bits inutilisés : décodage canonique strict.
+    for _, invalid in ipairs({
+        "=", "A===", "AA=A", "A=AA", "Zg=", "Zg===", "Z===",
+    }) do
+        decoded, decode_err = B.decode(invalid)
+        ok_fail("base64 rejects invalid padding " .. string.format("%q", invalid),
+            decoded, decode_err)
+    end
+
+    decoded, decode_err = B.decode("A", { allow_unpadded = true })
+    ok_fail("base64 rejects a one-symbol truncated quantum",
+        decoded, decode_err)
+
+    decoded, decode_err = B.decode("Zh==")
+    ok_fail("base64 rejects non-zero trailing bits with two '='",
+        decoded, decode_err)
+
+    decoded, decode_err = B.decode("Zm9=")
+    ok_fail("base64 rejects non-zero trailing bits with one '='",
+        decoded, decode_err)
+
+    decoded, decode_err = B.decode("Zh", { allow_unpadded = true })
+    ok_fail("base64 rejects non-zero trailing bits without padding",
+        decoded, decode_err)
+
+    decoded, decode_err = B.decode("%%%")
+    ok_fail("base64 rejects invalid characters", decoded, decode_err)
+    ok("base64 invalid-character error includes its byte offset",
+        type(decode_err) == "string"
+        and decode_err:find("byte 1", 1, true) ~= nil,
+        tostring(decode_err))
+
+    -- Limite de sortie calculée avant l'allocation du résultat décodé.
+    decoded, decode_err = B.decode("Zm9v", { max_output = 2 })
+    ok_fail("base64 max_output rejects output above the limit",
+        decoded, decode_err)
+    ok("base64 max_output has a stable reason",
+        decode_err == "base64: decoded output exceeds max_output",
+        tostring(decode_err))
+
+    decoded, decode_err = B.decode("Zm9v", { max_output = 3 })
+    ok("base64 max_output accepts output exactly at the limit",
+        decoded == "foo" and decode_err == nil, tostring(decode_err))
+
+    decoded, decode_err = B.decode("Zm9v", { max_output = 4 })
+    ok("base64 max_output accepts output just below the limit",
+        decoded == "foo" and decode_err == nil, tostring(decode_err))
+
+    decoded, decode_err = B.decode("Zm9v", {
+        max_output = math.maxinteger,
+    })
+    ok("base64 max_output accepts math.maxinteger without narrowing",
+        decoded == "foo" and decode_err == nil, tostring(decode_err))
+
+    decoded, decode_err = B.decode("", { max_output = 0 })
+    ok("base64 max_output=0 accepts empty output",
+        decoded == "" and decode_err == nil, tostring(decode_err))
+
+    -- Validation stricte : erreurs de programmation levées côté Lua.
+    ok_raises("base64 encode requires an argument",
+        function() B.encode() end)
+    ok_raises("base64 encode rejects extra arguments",
+        function() B.encode("x", nil, true) end)
+    ok_raises("base64 encode data must be a strict string",
+        function() B.encode(42) end)
+    ok_raises("base64 encode opts must be a table",
+        function() B.encode("x", true) end)
+    ok_raises("base64 encode url_safe must be a boolean",
+        function() B.encode("x", { url_safe = 1 }) end, "boolean")
+    ok_raises("base64 encode padding must be a boolean",
+        function() B.encode("x", { padding = "no" }) end, "boolean")
+    ok_raises("base64 encode rejects unknown options",
+        function() B.encode("x", { unknown = true }) end, "unknown")
+    ok_raises("base64 encode rejects non-string option keys",
+        function() B.encode("x", { [1] = true }) end, "keys")
+    ok("base64 encode accepts an explicit nil options argument",
+        B.encode("x", nil) == "eA==")
+
+    ok_raises("base64 decode requires an argument",
+        function() B.decode() end)
+    ok_raises("base64 decode rejects extra arguments",
+        function() B.decode("", nil, true) end)
+    ok_raises("base64 decode text must be a strict string",
+        function() B.decode(42) end)
+    ok_raises("base64 decode opts must be a table",
+        function() B.decode("", true) end)
+    ok_raises("base64 decode url_safe must be a boolean",
+        function() B.decode("", { url_safe = 1 }) end, "boolean")
+    ok_raises("base64 decode allow_unpadded must be a boolean",
+        function() B.decode("", { allow_unpadded = 1 }) end, "boolean")
+    ok_raises("base64 decode ignore_whitespace must be a boolean",
+        function() B.decode("", { ignore_whitespace = "yes" }) end,
+        "boolean")
+    ok_raises("base64 decode max_output must be an integer",
+        function() B.decode("", { max_output = 1.5 }) end, "integer")
+    ok_raises("base64 decode max_output must be non-negative",
+        function() B.decode("", { max_output = -1 }) end, "non-negative")
+    ok_raises("base64 decode rejects unknown options",
+        function() B.decode("", { unknown = true }) end, "unknown")
+    ok_raises("base64 decode rejects non-string option keys",
+        function() B.decode("", { [1] = true }) end, "keys")
+    ok("base64 decode accepts an explicit nil options argument",
+        B.decode("eA==", nil) == "x")
+end
+
+-- =====================================================================
+print("")
 print("=== actions: filesystem ===")
 
 do
@@ -1414,6 +1642,220 @@ do
             babet.rmdirAll(perm_continue)
         end
     end
+end
+
+
+-- =====================================================================
+print("")
+print("=== writeFileAtomic ===")
+
+do
+    local function read_binary(path)
+        local file = assert(io.open(path, "rb"))
+        local data = file:read("*a")
+        file:close()
+        return data
+    end
+
+    ok("writeFileAtomic is a function",
+        type(babet.writeFileAtomic) == "function")
+
+    local binary_path = sb("atomic-binary.dat")
+    local binary = "header\0payload\255tail"
+    ok_act("writeFileAtomic creates a binary file",
+        babet.writeFileAtomic(binary_path, binary))
+    ok("writeFileAtomic preserves embedded NUL and non-UTF-8 bytes",
+        read_binary(binary_path) == binary)
+
+    local preserved_ok, preserved_err = babet.writeFileAtomic(
+        binary_path, "must-not-replace")
+    ok_fail("writeFileAtomic refuses overwrite by default",
+        preserved_ok, preserved_err)
+    ok("writeFileAtomic keeps the previous destination on refusal",
+        read_binary(binary_path) == binary)
+    ok("writeFileAtomic default-overwrite error is explicit",
+        type(preserved_err) == "string"
+        and preserved_err:find("already exists", 1, true) ~= nil,
+        tostring(preserved_err))
+
+    ok_act("writeFileAtomic overwrite=true replaces atomically",
+        babet.writeFileAtomic(binary_path, "replacement", {
+            overwrite = true,
+        }))
+    ok("writeFileAtomic replacement content is complete",
+        read_binary(binary_path) == "replacement")
+
+    local mode_path = sb("atomic-mode.dat")
+    ok_act("writeFileAtomic applies explicit permissions",
+        babet.writeFileAtomic(mode_path, "secret", {
+            permissions = tonumber("600", 8),
+        }))
+    local mode, mode_err = babet.getMode(mode_path)
+    ok("writeFileAtomic permissions are exact despite umask",
+        mode == tonumber("600", 8) and mode_err == nil,
+        "mode=" .. tostring(mode) .. " err=" .. tostring(mode_err))
+
+    local empty_path = sb("atomic-empty.dat")
+    ok_act("writeFileAtomic accepts an empty binary string",
+        babet.writeFileAtomic(empty_path, ""))
+    ok("writeFileAtomic empty output has size zero",
+        babet.fileSize(empty_path) == 0)
+
+    local fast_path = sb("atomic-fast.dat")
+    ok_act("writeFileAtomic durable=false keeps atomic publication",
+        babet.writeFileAtomic(fast_path, "fast", {
+            durable = false,
+        }))
+    ok("writeFileAtomic durable=false wrote complete content",
+        read_binary(fast_path) == "fast")
+
+    local nil_opts_path = sb("atomic-nil-opts.dat")
+    ok_act("writeFileAtomic accepts explicit nil options",
+        babet.writeFileAtomic(nil_opts_path, "nil-options", nil))
+
+    local special_path = sb("atomic $;\"'*.dat")
+    ok_act("writeFileAtomic treats special path bytes literally",
+        babet.writeFileAtomic(special_path, "literal"))
+    ok("writeFileAtomic special path content is correct",
+        read_binary(special_path) == "literal")
+
+    local missing_ok, missing_err = babet.writeFileAtomic(
+        sb("missing-parent/file.dat"), "x")
+    ok_fail("writeFileAtomic does not create missing parents",
+        missing_ok, missing_err)
+    ok("writeFileAtomic missing-parent failure creates no directory",
+        babet.isDir(sb("missing-parent")) == false)
+
+    local dotdot_ok, dotdot_err = babet.writeFileAtomic(
+        SB .. "/sub/../atomic-dotdot.dat", "x")
+    ok_fail("writeFileAtomic rejects '..' path components",
+        dotdot_ok, dotdot_err)
+
+    local target_path = sb("atomic-target.dat")
+    ok_act("writeFileAtomic symlink target setup",
+        babet.writeFileAtomic(target_path, "target"))
+    local ln_result = babet.exec("ln", {
+        "-s", "atomic-target.dat", sb("atomic-link.dat"),
+    })
+    if type(ln_result) == "table" and ln_result.code == 0 then
+        local link_ok, link_err = babet.writeFileAtomic(
+            sb("atomic-link.dat"), "attack", { overwrite = true })
+        ok_fail("writeFileAtomic refuses a final symlink",
+            link_ok, link_err)
+        ok("writeFileAtomic never modifies a symlink target",
+            read_binary(target_path) == "target")
+    else
+        print("[INFO] writeFileAtomic final symlink: SKIP (ln unavailable)")
+    end
+
+    ok_act("writeFileAtomic parent-symlink setup directory",
+        babet.mkdir(sb("atomic-real-parent")))
+    ln_result = babet.exec("ln", {
+        "-s", "atomic-real-parent", sb("atomic-parent-link"),
+    })
+    if type(ln_result) == "table" and ln_result.code == 0 then
+        local parent_ok, parent_err = babet.writeFileAtomic(
+            sb("atomic-parent-link/escape.dat"), "attack")
+        ok_fail("writeFileAtomic refuses symlinked parent components",
+            parent_ok, parent_err)
+        ok("writeFileAtomic creates nothing through a parent symlink",
+            babet.fileExists(sb("atomic-real-parent/escape.dat")) == false)
+    else
+        print("[INFO] writeFileAtomic parent symlink: SKIP (ln unavailable)")
+    end
+
+    ok_act("writeFileAtomic directory-target setup",
+        babet.mkdir(sb("atomic-directory-target")))
+    local dir_ok, dir_err = babet.writeFileAtomic(
+        sb("atomic-directory-target"), "x", { overwrite = true })
+    ok_fail("writeFileAtomic refuses a directory destination",
+        dir_ok, dir_err)
+
+    local fifo_result = babet.exec("mkfifo", { sb("atomic-fifo") })
+    if type(fifo_result) == "table" and fifo_result.code == 0 then
+        local before = babet.time.monotonic()
+        local fifo_ok, fifo_err = babet.writeFileAtomic(
+            sb("atomic-fifo"), "x", { overwrite = true })
+        local elapsed = babet.time.monotonic() - before
+        ok_fail("writeFileAtomic refuses a FIFO destination",
+            fifo_ok, fifo_err)
+        ok("writeFileAtomic FIFO refusal never blocks",
+            elapsed < 1.0, "elapsed=" .. tostring(elapsed))
+        babet.exec("rm", { "-f", sb("atomic-fifo") })
+    else
+        print("[INFO] writeFileAtomic FIFO: SKIP (mkfifo unavailable)")
+    end
+
+    local leftovers = 0
+    for _, path in ipairs(assert(babet.listFiles(SB))) do
+        if path:find(".babet-write-", 1, true) then
+            leftovers = leftovers + 1
+        end
+    end
+    ok("writeFileAtomic leaves no temporary file after success/refusal",
+        leftovers == 0, "leftovers=" .. tostring(leftovers))
+
+    ok_raises("writeFileAtomic requires path and data",
+        function() return babet.writeFileAtomic("only-path") end,
+        "two or three arguments")
+    ok_raises("writeFileAtomic rejects excess arguments",
+        function()
+            return babet.writeFileAtomic("a", "b", nil, "extra")
+        end,
+        "two or three arguments")
+    ok_raises("writeFileAtomic path must be a strict string",
+        function() return babet.writeFileAtomic(42, "x") end,
+        "string")
+    ok_raises("writeFileAtomic data must be a strict string",
+        function() return babet.writeFileAtomic("x", 42) end,
+        "string")
+    ok_raises("writeFileAtomic rejects NUL in path",
+        function()
+            return babet.writeFileAtomic(sb("nul\0ignored"), "x")
+        end,
+        "NUL")
+    ok_raises("writeFileAtomic opts must be a table",
+        function() return babet.writeFileAtomic("x", "x", 42) end,
+        "table")
+    ok_raises("writeFileAtomic overwrite must be boolean",
+        function()
+            return babet.writeFileAtomic("x", "x", { overwrite = 1 })
+        end,
+        "opts.overwrite")
+    ok_raises("writeFileAtomic durable must be boolean",
+        function()
+            return babet.writeFileAtomic("x", "x", { durable = 1 })
+        end,
+        "opts.durable")
+    ok_raises("writeFileAtomic permissions must be integer",
+        function()
+            return babet.writeFileAtomic("x", "x", {
+                permissions = "600",
+            })
+        end,
+        "opts.permissions")
+    ok_raises("writeFileAtomic rejects negative permissions",
+        function()
+            return babet.writeFileAtomic("x", "x", { permissions = -1 })
+        end,
+        "between 0 and 0777")
+    ok_raises("writeFileAtomic rejects permissions above 0777",
+        function()
+            return babet.writeFileAtomic("x", "x", {
+                permissions = tonumber("1000", 8),
+            })
+        end,
+        "between 0 and 0777")
+    ok_raises("writeFileAtomic rejects unknown options",
+        function()
+            return babet.writeFileAtomic("x", "x", { parents = true })
+        end,
+        "unknown option")
+    ok_raises("writeFileAtomic rejects non-string option keys",
+        function()
+            return babet.writeFileAtomic("x", "x", { [1] = true })
+        end,
+        "keys must be strings")
 end
 
 -- =====================================================================
@@ -3475,6 +3917,43 @@ do
         return true
     end
 
+    local function read_stdout_all(process, timeout)
+        local chunks = {}
+        local deadline = babet.monotonic() + (timeout or 5)
+        while true do
+            local data, err = process:read_stdout(65536, 0.05)
+            if data then
+                chunks[#chunks + 1] = data
+            elseif err == "closed" then
+                return table.concat(chunks), nil
+            elseif err ~= "timeout" then
+                return nil, err
+            end
+            if babet.monotonic() >= deadline then
+                return nil, "test timeout"
+            end
+        end
+    end
+
+    local function write_test_file(path, data)
+        local file, err = io.open(path, "wb")
+        if not file then return nil, err end
+        local wrote, write_err = file:write(data)
+        local closed, close_err = file:close()
+        if not wrote then return nil, write_err end
+        if not closed then return nil, close_err end
+        return true
+    end
+
+    local function read_test_file(path)
+        local file, err = io.open(path, "rb")
+        if not file then return nil, err end
+        local data = file:read("a")
+        local closed, close_err = file:close()
+        if not closed then return nil, close_err end
+        return data
+    end
+
     ok("babet.spawn is a function", type(babet.spawn) == "function")
     ok("spawn() without command raises",
         pcall(function() babet.spawn() end) == false)
@@ -3495,8 +3974,240 @@ do
     ok_fail("spawn launch_timeout must be > 0", p, e)
     p, e = babet.spawn("echo", {}, { launch_timeout = "1" })
     ok_fail("spawn launch_timeout is a strict number", p, e)
+    p, e = babet.spawn("echo", {}, { stdin = "stdout" })
+    ok_fail("spawn stdin rejects unsupported modes", p, e)
+    p, e = babet.spawn("echo", {}, { stdin = {} })
+    ok_fail("spawn stdin rejects file tables", p, e)
+    p, e = babet.spawn("echo", {}, { stdout = "stdout" })
+    ok_fail("spawn stdout rejects stderr-only merge mode", p, e)
+    p, e = babet.spawn("echo", {}, { stdout = 42 })
+    ok_fail("spawn stdout mode is strict", p, e)
+    p, e = babet.spawn("echo", {}, { stdout = {} })
+    ok_fail("spawn file redirection requires file", p, e)
+    p, e = babet.spawn("echo", {}, {
+        stdout = { file = true },
+    })
+    ok_fail("spawn redirection file is a strict string", p, e)
+    p, e = babet.spawn("echo", {}, {
+        stdout = { file = sb("spawn.log"), append = "yes" },
+    })
+    ok_fail("spawn redirection append is a strict boolean", p, e)
+    p, e = babet.spawn("echo", {}, {
+        stdout = { file = sb("spawn.log"), permissions = 512.5 },
+    })
+    ok_fail("spawn redirection permissions are a strict integer", p, e)
+    p, e = babet.spawn("echo", {}, {
+        stdout = { file = sb("spawn.log"), permissions = 1024 },
+    })
+    ok_fail("spawn redirection permissions stay within 0777", p, e)
+    p, e = babet.spawn("echo", {}, {
+        stderr = { file = sb("spawn.log"), unknown = true },
+    })
+    ok_fail("spawn file redirection rejects unknown options", p, e)
+    p, e = babet.spawn("echo", {}, {
+        stdout = { file = sb("bad\0path") },
+    })
+    ok_fail("spawn redirection rejects NUL paths", p, e)
     p, e = babet.spawn("__babet_missing_command__")
     ok_fail("spawn missing command -> (nil, err)", p, e)
+
+    -- Redirections de fichiers : troncature, ajout, permissions et fusion.
+    local result, wait_err
+    local stdout_file = sb("spawn stdout $; '*.log")
+    assert(write_test_file(stdout_file, "OLD"))
+    local existing_mode_before = babet.getMode(stdout_file)
+    p, e = babet.spawn("sh", {
+        "-c", "printf 'OUT'; printf 'ERR' >&2",
+    }, {
+        stdin = "null",
+        stdout = {
+            file = stdout_file,
+            permissions = tonumber("640", 8),
+        },
+        stderr = "stdout",
+    })
+    ok("spawn accepts combined file redirection", p ~= nil and e == nil,
+        tostring(e))
+    local not_piped_data, not_piped_err = p:read_stdout(1, 0)
+    ok("read_stdout reports not_piped for file redirection",
+        not_piped_data == nil and not_piped_err == "not_piped")
+    not_piped_data, not_piped_err = p:read_stderr(1, 0)
+    ok("read_stderr reports not_piped when merged into stdout",
+        not_piped_data == nil and not_piped_err == "not_piped")
+    local not_piped_write, not_piped_write_err = p:write("x", 0)
+    ok("write reports not_piped for null stdin",
+        not_piped_write == nil and not_piped_write_err == "not_piped")
+    local not_piped_close, not_piped_close_err = p:close_stdin()
+    ok("close_stdin reports not_piped for null stdin",
+        not_piped_close == nil and not_piped_close_err == "not_piped")
+    result, wait_err = p:wait(2)
+    local redirected_data, redirected_read_err = read_test_file(stdout_file)
+    local existing_mode_after = babet.getMode(stdout_file)
+    ok("spawn truncates and merges stdout/stderr into one file",
+        result and result.code == 0 and redirected_data == "OUTERR",
+        tostring(redirected_read_err))
+    ok("spawn does not chmod an existing redirection file",
+        existing_mode_before == existing_mode_after,
+        "before=" .. tostring(existing_mode_before)
+        .. " after=" .. tostring(existing_mode_after))
+    p:close()
+
+    p, e = babet.spawn("sh", { "-c", "printf '+APPEND'" }, {
+        stdout = { file = stdout_file, append = true },
+        stderr = "null",
+    })
+    ok("spawn accepts append file redirection", p ~= nil and e == nil,
+        tostring(e))
+    result, wait_err = p:wait(2)
+    redirected_data, redirected_read_err = read_test_file(stdout_file)
+    ok("spawn appends without truncating existing data",
+        result and result.code == 0
+        and redirected_data == "OUTERR+APPEND",
+        tostring(redirected_read_err))
+    p:close()
+
+    local permissions_file = sb("spawn_permissions.log")
+    p, e = babet.spawn("printf", { "permissions" }, {
+        stdout = {
+            file = permissions_file,
+            permissions = tonumber("640", 8),
+        },
+        stderr = "null",
+    })
+    result, wait_err = p and p:wait(2)
+    local permissions_mode = babet.getMode(permissions_file)
+    ok("spawn applies permissions when creating a redirection file",
+        p ~= nil and result and result.code == 0
+        and (permissions_mode & tonumber("777", 8)) == tonumber("640", 8),
+        "spawn=" .. tostring(e) .. " mode=" .. tostring(permissions_mode))
+    if p then p:close() end
+
+    local stderr_file = sb("spawn_stderr.log")
+    p, e = babet.spawn("sh", {
+        "-c", "printf 'PIPE'; printf 'FILEERR' >&2",
+    }, {
+        stdout = "pipe",
+        stderr = { file = stderr_file },
+    })
+    ok("spawn redirects stderr independently", p ~= nil and e == nil,
+        tostring(e))
+    local stdout_only, stdout_only_err = read_stdout_all(p, 3)
+    result, wait_err = p:wait(2)
+    local stderr_data, stderr_read_err = read_test_file(stderr_file)
+    ok("spawn keeps stdout pipe while stderr uses a file",
+        stdout_only == "PIPE" and stdout_only_err == nil
+        and result and result.code == 0 and stderr_data == "FILEERR",
+        tostring(stderr_read_err))
+    p:close()
+
+    -- /dev/null fournit EOF sur stdin et supprime les sorties.
+    p, e = babet.spawn("sh", {
+        "-c", "if read value; then exit 9; else exit 0; fi",
+    }, {
+        stdin = "null",
+        stdout = "null",
+        stderr = "null",
+    })
+    ok("spawn supports null on all standard streams", p ~= nil and e == nil,
+        tostring(e))
+    result, wait_err = p:wait(2)
+    ok("null stdin reaches immediate EOF",
+        result and result.code == 0 and wait_err == nil)
+    not_piped_data, not_piped_err = p:read_stdout(1, 0)
+    ok("null stdout remains not_piped after process exit",
+        not_piped_data == nil and not_piped_err == "not_piped")
+    p:close()
+
+    -- inherit ne crée aucun pipe parent. `true` évite de polluer le terminal.
+    p, e = babet.spawn("true", {}, {
+        stdin = "inherit",
+        stdout = "inherit",
+        stderr = "inherit",
+    })
+    ok("spawn supports inherited standard streams", p ~= nil and e == nil,
+        tostring(e))
+    result, wait_err = p:wait(2)
+    not_piped_data, not_piped_err = p:read_stderr(1, 0)
+    ok("inherit exposes no readable parent pipe",
+        result and result.code == 0
+        and not_piped_data == nil and not_piped_err == "not_piped")
+    p:close()
+
+    p, e = babet.spawn("sh", { "-c", "sleep 10" }, {
+        stdin = "null",
+        stdout = "null",
+        stderr = "null",
+    })
+    ok("spawn terminate works without any parent pipe",
+        p ~= nil and e == nil, tostring(e))
+    result, wait_err = p:terminate(0.2)
+    ok("redirected process terminate returns a signaled result",
+        result and wait_err == nil and result.signaled == true
+        and (result.code == 143 or result.code == 137),
+        tostring(wait_err))
+    p:close()
+
+    -- Une erreur d'ouverture doit survenir avant fork/exec.
+    local side_effect = sb("spawn_should_not_run")
+    p, e = babet.spawn("sh", { "-c", "touch '" .. side_effect .. "'" }, {
+        stdout = { file = sb("missing_parent/out.log") },
+    })
+    local side_effect_exists = babet.fileExists(side_effect)
+    ok("spawn file-open failure prevents child launch",
+        p == nil and type(e) == "string" and side_effect_exists == false,
+        tostring(e))
+
+    p, e = babet.spawn("true", {}, {
+        stdout = { file = SB },
+    })
+    ok_fail("spawn refuses a directory as output destination", p, e)
+
+    local fifo_path = sb("spawn_output.fifo")
+    local fifo_result = babet.exec("mkfifo", { fifo_path })
+    if fifo_result and fifo_result.code == 0 then
+        local fifo_started = babet.monotonic()
+        p, e = babet.spawn("true", {}, {
+            stdout = { file = fifo_path },
+        })
+        local fifo_elapsed = babet.monotonic() - fifo_started
+        ok("spawn refuses a FIFO without blocking during open",
+            p == nil and type(e) == "string" and fifo_elapsed < 1,
+            "err=" .. tostring(e) .. " elapsed=" .. tostring(fifo_elapsed))
+        babet.remove(fifo_path)
+    else
+        ok("spawn FIFO fixture is available", false,
+            fifo_result and fifo_result.stderr or "mkfifo failed")
+    end
+
+    -- La destination finale ne peut pas être un lien symbolique.
+    local symlink_target = sb("spawn_symlink_target.log")
+    local symlink_output = sb("spawn_symlink_output.log")
+    assert(write_test_file(symlink_target, "TARGET"))
+    assert(babet.link("spawn_symlink_target.log", symlink_output))
+    p, e = babet.spawn("printf", { "ESCAPE" }, {
+        stdout = { file = symlink_output },
+    })
+    local symlink_target_data = read_test_file(symlink_target)
+    ok("spawn refuses a symlinked output destination",
+        p == nil and type(e) == "string"
+        and symlink_target_data == "TARGET", tostring(e))
+
+    -- La fusion fonctionne aussi lorsque stdout reste un pipe parent.
+    p, e = babet.spawn("sh", {
+        "-c", "printf 'OUT'; printf 'ERR' >&2",
+    }, {
+        stderr = "stdout",
+    })
+    ok("spawn merges stderr into a piped stdout", p ~= nil and e == nil,
+        tostring(e))
+    local merged_pipe, merged_pipe_err = read_stdout_all(p, 3)
+    local merged_stderr, merged_stderr_err = p:read_stderr(1, 0)
+    result, wait_err = p:wait(2)
+    ok("merged pipe preserves both sequential writes",
+        merged_pipe == "OUTERR" and merged_pipe_err == nil
+        and merged_stderr == nil and merged_stderr_err == "not_piped"
+        and result and result.code == 0, tostring(wait_err))
+    p:close()
 
     p, e = babet.spawn("sh", {
         "-c",
@@ -3516,7 +4227,7 @@ do
     ok("stream stderr is captured separately",
         errout == "ERR" and stream_err == nil, tostring(stream_err))
 
-    local result, wait_err = p:wait(2)
+    result, wait_err = p:wait(2)
     ok("process wait returns a result table",
         type(result) == "table" and wait_err == nil)
     ok("process normal exit code == 0",
@@ -10033,6 +10744,601 @@ do
 
     ok("babet.workers is a table", type(W) == "table")
     ok("workers.spawn is a function", type(W.spawn) == "function")
+    ok("workers.channel is a function", type(W.channel) == "function")
+
+    -- ----- channels directs entre parent et workers ---------------
+
+    do
+        local channel = assert(W.channel())
+        ok("channel userdata is created", type(channel) == "userdata")
+        ok("channel exposes send", type(channel.send) == "function")
+        ok("channel exposes recv", type(channel.recv) == "function")
+        ok("channel exposes close", type(channel.close) == "function")
+        ok("channel exposes is_closed",
+            type(channel.is_closed) == "function")
+        ok("new channel is open", channel:is_closed() == false)
+        ok("channel tostring reports open",
+            tostring(channel):find("open", 1, true) ~= nil)
+
+        local sent, send_err = channel:send({ id = 7, value = "hello" }, 0)
+        ok("channel parent send succeeds",
+            sent == true and send_err == nil)
+        local received, value = channel:recv(0)
+        ok("channel parent recv restores a table",
+            received == true and type(value) == "table"
+            and value.id == 7 and value.value == "hello")
+
+        local nil_sent, nil_send_err = channel:send(nil, 0)
+        local nil_received, nil_value = channel:recv(0)
+        ok("channel transports nil unambiguously",
+            nil_sent == true and nil_send_err == nil
+            and nil_received == true and nil_value == nil)
+    end
+
+    do
+        local channel = assert(W.channel())
+        local metatable = assert(getmetatable(channel))
+        local finalizer = assert(metatable.__gc)
+        finalizer(channel)
+        finalizer(channel)
+        ok("channel manual finalizer is idempotent",
+            getmetatable(channel) == nil)
+    end
+
+    do
+        local channel = assert(W.channel({ capacity = 1 }))
+        assert(channel:send("first", 0))
+        local full, full_reason = channel:send("second", 0)
+        ok("capacity-one channel reports full immediately",
+            full == false and full_reason == "full")
+
+        local first_ok, first = channel:recv(0)
+        ok("capacity-one channel preserves the queued value",
+            first_ok == true and first == "first")
+
+        local empty, empty_reason = channel:recv(0)
+        ok("empty channel reports empty immediately",
+            empty == false and empty_reason == "empty")
+
+        local timeout, timeout_reason = channel:recv(0.01)
+        ok("bounded channel recv reports timeout after waiting",
+            timeout == false and timeout_reason == "timeout")
+    end
+
+    do
+        local channel = assert(W.channel({ capacity = 2 }))
+        assert(channel:send("one"))
+        assert(channel:send("two"))
+        local close_ok, close_err = channel:close()
+        local close_again_ok, close_again_err = channel:close()
+        ok("channel close is idempotent",
+            close_ok == true and close_err == nil
+            and close_again_ok == true and close_again_err == nil)
+        ok("is_closed is true before draining",
+            channel:is_closed() == true)
+        ok("channel tostring reports closed",
+            tostring(channel):find("closed", 1, true) ~= nil)
+
+        local one_ok, one = channel:recv()
+        local two_ok, two = channel:recv()
+        local drained, drained_reason = channel:recv()
+        local after_close, after_close_reason = channel:send("three", 0)
+        ok("closed channel drains existing messages in FIFO order",
+            one_ok == true and one == "one"
+            and two_ok == true and two == "two")
+        ok("closed and drained channel reports closed",
+            drained == false and drained_reason == "closed")
+        ok("send after channel close reports closed",
+            after_close == false and after_close_reason == "closed")
+    end
+
+    ok_raises("workers.channel rejects excess arguments",
+        function() return W.channel(nil, "extra") end,
+        "expected")
+    ok_raises("workers.channel rejects non-table opts",
+        function() return W.channel(42) end,
+        "opts")
+    ok_raises("workers.channel rejects unknown options",
+        function() return W.channel({ capcity = 4 }) end,
+        "unknown option")
+    ok_raises("workers.channel rejects non-string option names",
+        function() return W.channel({ [1] = 4 }) end,
+        "must be strings")
+    ok_raises("workers.channel rejects option names containing NUL",
+        function()
+            return W.channel({ ["capacity\0ignored"] = 4 })
+        end, "NUL")
+    ok_raises("workers.channel rejects capacity zero",
+        function() return W.channel({ capacity = 0 }) end,
+        "between 1 and 1000000")
+    ok_raises("workers.channel rejects capacity above maximum",
+        function() return W.channel({ capacity = 1000001 }) end,
+        "between 1 and 1000000")
+    ok_raises("workers.channel rejects floating-point capacity",
+        function() return W.channel({ capacity = 4.0 }) end,
+        "integer")
+
+    do
+        local channel = assert(W.channel())
+        ok_raises("channel send requires a value",
+            function() return channel:send() end,
+            "expected")
+        ok_raises("channel recv rejects extra arguments",
+            function() return channel:recv(0, "extra") end,
+            "expected")
+        ok_raises("channel close rejects extra arguments",
+            function() return channel:close("extra") end,
+            "expected")
+        ok_raises("channel is_closed rejects extra arguments",
+            function() return channel:is_closed("extra") end,
+            "expected")
+        ok_raises("channel send rejects negative timeout",
+            function() return channel:send("x", -1) end,
+            ">= 0")
+        ok_raises("channel recv rejects non-numeric timeout",
+            function() return channel:recv("1") end,
+            "number")
+    end
+
+    do
+        local channel = assert(W.channel())
+        local value, err = channel:send(function() end, 0)
+        ok("channel send rejects functions as runtime data error",
+            value == nil and type(err) == "string"
+            and err:find("workers.channel.send", 1, true) ~= nil
+            and err:find("function", 1, true) ~= nil,
+            tostring(err))
+
+        local channel_value, channel_err = channel:send(channel, 0)
+        ok("a channel cannot be sent as a channel message",
+            channel_value == nil and type(channel_err) == "string"
+            and channel_err:find("userdata", 1, true) ~= nil,
+            tostring(channel_err))
+    end
+
+    do
+        local no_channels = assert(W.spawn([[
+            return type(worker.channels) == "table"
+                and next(worker.channels) == nil
+        ]]))
+        local joined, value = no_channels:join()
+        ok("worker.channels always exists as a table",
+            joined == true and value == true)
+    end
+
+    do
+        local channel = assert(W.channel())
+        ok_raises("workers.spawn rejects non-table opts.channels",
+            function()
+                return W.spawn("return true", nil, { channels = 42 })
+            end, "opts.channels")
+        ok_raises("workers.spawn rejects numeric channel names",
+            function()
+                return W.spawn("return true", nil, {
+                    channels = { [1] = channel },
+                })
+            end, "channel names")
+        ok_raises("workers.spawn rejects empty channel names",
+            function()
+                return W.spawn("return true", nil, {
+                    channels = { [""] = channel },
+                })
+            end, "non-empty")
+        ok_raises("workers.spawn rejects NUL channel names",
+            function()
+                return W.spawn("return true", nil, {
+                    channels = { ["tasks\0hidden"] = channel },
+                })
+            end, "without NUL")
+        ok_raises("workers.spawn rejects invalid UTF-8 channel names",
+            function()
+                return W.spawn("return true", nil, {
+                    channels = { [string.char(0xC0, 0x80)] = channel },
+                })
+            end, "UTF-8")
+        ok_raises("workers.spawn rejects non-channel values",
+            function()
+                return W.spawn("return true", nil, {
+                    channels = { tasks = {} },
+                })
+            end, "created by babet.workers.channel")
+    end
+
+    do
+        local tasks = assert(W.channel({ capacity = 4 }))
+        local worker_job = assert(W.spawn([[
+            local ok_recv, task = worker.channels.tasks:recv(2)
+            if not ok_recv then return task end
+            return task.value * 2
+        ]], nil, {
+            channels = { tasks = tasks },
+        }))
+        assert(tasks:send({ value = 21 }, 2))
+        local joined, value = worker_job:join(2)
+        ok("parent sends directly through a channel to a worker",
+            joined == true and value == 42,
+            "joined=" .. tostring(joined) .. " value=" .. tostring(value))
+    end
+
+    do
+        local results = assert(W.channel({ capacity = 4 }))
+        local worker_job = assert(W.spawn([[
+            local ok_send, send_err = worker.channels.results:send({
+                answer = 42,
+            }, 2)
+            return ok_send == true and send_err == nil
+        ]], nil, {
+            channels = { results = results },
+        }))
+        local received, value = results:recv(2)
+        local joined, worker_value = worker_job:join(2)
+        ok("worker sends directly through a channel to the parent",
+            received == true and value.answer == 42
+            and joined == true and worker_value == true)
+    end
+
+    do
+        local shared = assert(W.channel({ capacity = 2 }))
+        local worker_job = assert(W.spawn([[
+            assert(worker.channels.left:send("same-object", 1))
+            local ok_recv, value = worker.channels.right:recv(1)
+            return ok_recv and value == "same-object"
+        ]], nil, {
+            channels = {
+                left = shared,
+                right = shared,
+            },
+        }))
+        local joined, value = worker_job:join(2)
+        ok("two worker channel names may reference the same channel",
+            joined == true and value == true)
+    end
+
+    do
+        local tasks = assert(W.channel({ capacity = 16 }))
+        local results = assert(W.channel({ capacity = 16 }))
+
+        local producer = assert(W.spawn([[
+            for i = 1, 10 do
+                local ok_send, send_err = worker.channels.tasks:send({
+                    id = i,
+                    value = i * 10,
+                }, 2)
+                if not ok_send then return send_err end
+            end
+            return "producer done"
+        ]], nil, {
+            channels = { tasks = tasks },
+        }))
+
+        local consumer = assert(W.spawn([[
+            for _ = 1, 10 do
+                local ok_recv, task = worker.channels.tasks:recv(2)
+                if not ok_recv then return task end
+                local ok_send, send_err = worker.channels.results:send({
+                    id = task.id,
+                    result = task.value * 2,
+                }, 2)
+                if not ok_send then return send_err end
+            end
+            return "consumer done"
+        ]], nil, {
+            channels = {
+                tasks = tasks,
+                results = results,
+            },
+        }))
+
+        local direct_ok = true
+        for expected = 1, 10 do
+            local ok_recv, result = results:recv(2)
+            if not ok_recv
+                or result.id ~= expected
+                or result.result ~= expected * 20 then
+                direct_ok = false
+                break
+            end
+        end
+        local producer_ok, producer_result = producer:join(2)
+        local consumer_ok, consumer_result = consumer:join(2)
+        ok("worker A sends directly to worker B in FIFO order",
+            direct_ok
+            and producer_ok == true and producer_result == "producer done"
+            and consumer_ok == true and consumer_result == "consumer done")
+    end
+
+    do
+        local tasks = assert(W.channel({ capacity = 32 }))
+        local results = assert(W.channel({ capacity = 256 }))
+        local jobs = {}
+
+        for producer_id = 1, 2 do
+            jobs[#jobs + 1] = assert(W.spawn([[
+                for i = 1, 100 do
+                    local ok_send, send_err = worker.channels.tasks:send({
+                        producer = worker.args.producer,
+                        sequence = i,
+                    }, 5)
+                    if not ok_send then return send_err end
+                end
+                return true
+            ]], { producer = producer_id }, {
+                channels = { tasks = tasks },
+            }))
+        end
+
+        for _ = 1, 2 do
+            jobs[#jobs + 1] = assert(W.spawn([[
+                for _ = 1, 100 do
+                    local ok_recv, task = worker.channels.tasks:recv(5)
+                    if not ok_recv then return task end
+                    local ok_send, send_err = worker.channels.results:send(
+                        task, 5)
+                    if not ok_send then return send_err end
+                end
+                return true
+            ]], nil, {
+                channels = {
+                    tasks = tasks,
+                    results = results,
+                },
+            }))
+        end
+
+        local seen = { [1] = {}, [2] = {} }
+        local received_all = true
+        for _ = 1, 200 do
+            local ok_recv, item = results:recv(5)
+            if not ok_recv
+                or type(item) ~= "table"
+                or not seen[item.producer]
+                or seen[item.producer][item.sequence] then
+                received_all = false
+                break
+            end
+            seen[item.producer][item.sequence] = true
+        end
+
+        local all_jobs_ok = true
+        for _, job in ipairs(jobs) do
+            local joined, value = job:join(5)
+            if joined ~= true or value ~= true then
+                all_jobs_ok = false
+            end
+        end
+        for producer_id = 1, 2 do
+            for sequence = 1, 100 do
+                if not seen[producer_id][sequence] then
+                    received_all = false
+                end
+            end
+        end
+        ok("channel is safe with multiple producers and consumers",
+            received_all and all_jobs_ok)
+    end
+
+    do
+        local channel = assert(W.channel())
+        local blocked = assert(W.spawn([[
+            local ok_recv, reason = worker.channels.channel:recv()
+            return { ok = ok_recv, reason = reason }
+        ]], nil, {
+            channels = { channel = channel },
+        }))
+        babet.sleep(20, "ms")
+        assert(channel:close())
+        local joined, result = blocked:join(2)
+        ok("closing a channel wakes a blocked receiver",
+            joined == true and result.ok == false
+            and result.reason == "closed")
+    end
+
+    do
+        local channel = assert(W.channel({ capacity = 1 }))
+        assert(channel:send("already full"))
+        local blocked = assert(W.spawn([[
+            local ok_send, reason = worker.channels.channel:send(
+                "blocked", 10)
+            return { ok = ok_send, reason = reason }
+        ]], nil, {
+            channels = { channel = channel },
+        }))
+        babet.sleep(20, "ms")
+        assert(channel:close())
+        local joined, result = blocked:join(2)
+        local queued_ok, queued = channel:recv(0)
+        local drained, drained_reason = channel:recv(0)
+        ok("closing a channel wakes a blocked sender",
+            joined == true and result.ok == false
+            and result.reason == "closed")
+        ok("close during blocked send preserves the existing message",
+            queued_ok == true and queued == "already full"
+            and drained == false and drained_reason == "closed")
+    end
+
+    do
+        local channel = assert(W.channel())
+        local blocked = assert(W.spawn([[
+            local ok_recv, reason = worker.channels.channel:recv()
+            return { ok = ok_recv, reason = reason }
+        ]], nil, {
+            channels = { channel = channel },
+        }))
+        babet.sleep(20, "ms")
+        assert(blocked:cancel())
+        local joined, result = blocked:join(2)
+        local still_open = not channel:is_closed()
+        local parent_send = channel:send("parent still owns it", 0)
+        local parent_recv, parent_value = channel:recv(0)
+        ok("cancelling a worker wakes its blocked channel recv",
+            joined == true and result.ok == false
+            and result.reason == "cancelled")
+        ok("worker cancellation does not close the shared channel",
+            still_open and parent_send == true
+            and parent_recv == true
+            and parent_value == "parent still owns it")
+    end
+
+    do
+        local channel = assert(W.channel({ capacity = 1 }))
+        assert(channel:send("queued"))
+        local blocked = assert(W.spawn([[
+            local ok_send, reason = worker.channels.channel:send(
+                "blocked", 10)
+            return { ok = ok_send, reason = reason }
+        ]], nil, {
+            channels = { channel = channel },
+        }))
+        babet.sleep(20, "ms")
+        assert(blocked:cancel())
+        local joined, result = blocked:join(2)
+        local queued_ok, queued = channel:recv(0)
+        ok("cancelling a worker wakes its blocked channel send",
+            joined == true and result.ok == false
+            and result.reason == "cancelled")
+        ok("cancelled channel send preserves the queued message",
+            channel:is_closed() == false
+            and queued_ok == true and queued == "queued")
+    end
+
+    do
+        local channel = assert(W.channel())
+        local worker_job = assert(W.spawn([[
+            local ok_send, send_err = worker.channels.channel:send(
+                "still alive", 1)
+            return ok_send == true and send_err == nil
+        ]], nil, {
+            channels = { channel = channel },
+        }))
+        channel = nil
+        collectgarbage("collect")
+        local joined, value = worker_job:join(2)
+        ok("collecting the parent handle does not invalidate worker handle",
+            joined == true and value == true)
+    end
+
+    do
+        local channel = assert(W.channel())
+        local worker_job = assert(W.spawn([[
+            return worker.channels.channel:send("persist", 1)
+        ]], nil, {
+            channels = { channel = channel },
+        }))
+        local joined, sent = worker_job:join(2)
+        local received, value = channel:recv(0)
+        ok("worker destruction does not invalidate the parent handle",
+            joined == true and sent == true
+            and received == true and value == "persist")
+    end
+
+    -- Tous les sous-modules babet.* sont enregistrés dans chaque état Lua.
+    do
+        local w = W.spawn([[
+            local source = string.char(0, 1, 2, 251, 255)
+            local encoded, encode_err = babet.base64.encode(source, {
+                url_safe = true,
+                padding = false,
+            })
+            if not encoded then return false end
+            local decoded, decode_err = babet.base64.decode(encoded, {
+                url_safe = true,
+                allow_unpadded = true,
+            })
+            return encode_err == nil and decode_err == nil
+                and decoded == source
+        ]])
+        local joined, value = w:join()
+        ok("base64 is available and binary-safe inside a worker",
+            joined == true and value == true,
+            "joined=" .. tostring(joined) .. " value=" .. tostring(value))
+    end
+
+
+    do
+        local worker_path = sb("atomic-worker.dat")
+        local w = W.spawn([[
+            local ok_write, write_err = babet.writeFileAtomic(
+                worker.args.path,
+                "worker\0binary\255",
+                { permissions = tonumber("600", 8) }
+            )
+            if not ok_write then return write_err end
+            return true
+        ]], { path = worker_path })
+        local joined, value = w:join()
+        local file = io.open(worker_path, "rb")
+        local contents = file and file:read("*a") or nil
+        if file then file:close() end
+        ok("writeFileAtomic is available and binary-safe inside a worker",
+            joined == true and value == true
+            and contents == "worker\0binary\255",
+            "joined=" .. tostring(joined) .. " value=" .. tostring(value))
+    end
+
+
+    do
+        local race_path = sb("atomic-worker-race.dat")
+        local code = [[
+            local ok_write, write_err = babet.writeFileAtomic(
+                worker.args.path, worker.args.value)
+            return {
+                written = ok_write == true,
+                error = write_err,
+                value = worker.args.value,
+            }
+        ]]
+        local first = assert(W.spawn(code, {
+            path = race_path,
+            value = "first",
+        }))
+        local second = assert(W.spawn(code, {
+            path = race_path,
+            value = "second",
+        }))
+        local ok_first, result_first = first:join()
+        local ok_second, result_second = second:join()
+        local winners = 0
+        if ok_first and result_first.written then winners = winners + 1 end
+        if ok_second and result_second.written then winners = winners + 1 end
+        local file = io.open(race_path, "rb")
+        local final = file and file:read("*a") or nil
+        if file then file:close() end
+        ok("writeFileAtomic no-overwrite publication has one concurrent winner",
+            ok_first == true and ok_second == true and winners == 1,
+            "winners=" .. tostring(winners))
+        ok("writeFileAtomic concurrent winner published complete content",
+            final == "first" or final == "second",
+            "final=" .. tostring(final))
+    end
+
+    do
+        local race_path = sb("atomic-worker-overwrite-race.dat")
+        assert(babet.writeFileAtomic(race_path, "initial"))
+        local code = [[
+            local ok_write, write_err = babet.writeFileAtomic(
+                worker.args.path, worker.args.value, { overwrite = true })
+            return ok_write == true and write_err == nil
+        ]]
+        local first = assert(W.spawn(code, {
+            path = race_path,
+            value = "overwrite-first",
+        }))
+        local second = assert(W.spawn(code, {
+            path = race_path,
+            value = "overwrite-second",
+        }))
+        local ok_first, result_first = first:join()
+        local ok_second, result_second = second:join()
+        local file = io.open(race_path, "rb")
+        local final = file and file:read("*a") or nil
+        if file then file:close() end
+        ok("writeFileAtomic concurrent overwrite writers both complete",
+            ok_first == true and result_first == true
+            and ok_second == true and result_second == true)
+        ok("writeFileAtomic concurrent overwrite leaves one complete version",
+            final == "overwrite-first" or final == "overwrite-second",
+            "final=" .. tostring(final))
+    end
 
     -- ----- mauvais usage : luaL_error -----------------------------
 
@@ -10052,6 +11358,21 @@ do
         pcall(function()
             return W.spawn("return 1", nil, nil, "extra")
         end) == false)
+
+    ok_raises("workers.spawn rejects unknown options",
+        function()
+            return W.spawn("return 1", nil, { inbox_capcity = 8 })
+        end, "unknown option")
+    ok_raises("workers.spawn rejects non-string option names",
+        function()
+            return W.spawn("return 1", nil, { [1] = 8 })
+        end, "must be strings")
+    ok_raises("workers.spawn rejects option names containing NUL",
+        function()
+            return W.spawn("return 1", nil, {
+                ["inbox_capacity\0ignored"] = 8,
+            })
+        end, "NUL")
 
     -- ----- refus de sérialisation : function ----------------------
 
@@ -10206,17 +11527,18 @@ do
         ok("join: invalid Lua code -> (false, msg)",
             jok == false and type(val) == "string")
 
-        -- Régression lot 2 : une exception C++ produite pendant la
-        -- sérialisation du résultat ne doit jamais sortir de la pthread
-        -- et appeler std::terminate(). nlohmann/json refuse l'UTF-8
-        -- invalide lors de dump(), ce qui fournit un cas reproductible.
+        -- Une chaîne invalide pour le transport doit être refusée avant
+        -- json.dump(). Depuis la factorisation du sérialiseur des channels,
+        -- ce cas n'atteint donc plus le filet catch C++ : il produit une
+        -- erreur de transfert précise, sans quitter la pthread.
         w = W.spawn("return string.char(0xc0, 0x80)")
         jok, val = w:join()
-        ok("LOT 2 worker: exception C++ interne -> erreur explicite",
+        ok("worker return: invalid UTF-8 is rejected explicitly",
             jok == false and type(val) == "string"
-            and val:find("unhandled C++ exception", 1, true) ~= nil,
+            and val:find("not transferable", 1, true) ~= nil
+            and val:find("non-UTF-8", 1, true) ~= nil,
             "ok=" .. tostring(jok) .. " val=" .. tostring(val))
-        ok("  processus toujours vivant après l'exception worker",
+        ok("  process remains alive after rejected worker return",
             babet.pid() > 0)
     end
 
@@ -10241,6 +11563,201 @@ do
         jok, val = w:join()
         ok("arg == nil in worker (no inheritance from parent)",
             jok == true and val == true)
+    end
+
+    -- ----- status + join(timeout) + annulation coopérative -------
+
+    do
+        local w = assert(W.spawn([[
+            babet.sleep(400, "ms")
+            return "finished"
+        ]]))
+
+        ok("job.status is a function", type(w.status) == "function")
+        ok("job.cancel is a function", type(w.cancel) == "function")
+        ok("status() starts at running",
+            w:status() == "running")
+
+        local joined_now, reason_now = w:join(0)
+        ok("join(0) while running -> (nil, 'timeout')",
+            joined_now == nil and reason_now == "timeout",
+            "got=(" .. tostring(joined_now) .. ", "
+                .. tostring(reason_now) .. ")")
+        ok("join(0) timeout does not consume result",
+            w:status() == "running")
+
+        local joined_short, reason_short = w:join(0.02)
+        ok("join(timeout) expiry -> (nil, 'timeout')",
+            joined_short == nil and reason_short == "timeout",
+            "got=(" .. tostring(joined_short) .. ", "
+                .. tostring(reason_short) .. ")")
+
+        local joined_final, value_final = w:join(2)
+        ok("join after timeout can still consume the result",
+            joined_final == true and value_final == "finished",
+            "got=(" .. tostring(joined_final) .. ", "
+                .. tostring(value_final) .. ")")
+        ok("status() remains done after result consumption",
+            w:status() == "done")
+    end
+
+    do
+        local w = assert(W.spawn("return 99"))
+        local deadline = babet.monotonic() + 2
+        while w:status() == "running" and babet.monotonic() < deadline do
+            babet.sleep(1, "ms")
+        end
+        ok("status() reports done without consuming a successful result",
+            w:status() == "done")
+        local joined, value = w:join(0)
+        ok("join(0) consumes a successful result observed by status()",
+            joined == true and value == 99)
+    end
+
+    do
+        local w = assert(W.spawn([[
+            local ok_recv, value = worker.recv(2)
+            if not ok_recv then
+                return "recv failed: " .. tostring(value)
+            end
+            return value
+        ]]))
+        local joined, reason = w:join(0.01)
+        ok("join timeout leaves worker messaging usable",
+            joined == nil and reason == "timeout")
+        local sent, send_err = w:send("after-timeout", 1)
+        local joined_after, value_after = w:join(2)
+        ok("send and later join still work after join timeout",
+            sent == true and send_err == nil
+            and joined_after == true and value_after == "after-timeout",
+            "sent=" .. tostring(sent)
+                .. " joined=" .. tostring(joined_after)
+                .. " value=" .. tostring(value_after))
+    end
+
+    do
+        local w = assert(W.spawn("error('status boom')"))
+        local deadline = babet.monotonic() + 2
+        while w:status() == "running" and babet.monotonic() < deadline do
+            babet.sleep(1, "ms")
+        end
+        ok("status() reports error without consuming result",
+            w:status() == "error")
+        local joined, message = w:join(0)
+        ok("join(0) consumes an already failed worker",
+            joined == false and type(message) == "string"
+            and message:find("status boom", 1, true) ~= nil)
+        ok("status() still reports error after join",
+            w:status() == "error")
+    end
+
+    do
+        local w = assert(W.spawn([[
+            local ok_recv, reason = worker.recv()
+            if ok_recv then
+                return "unexpected message"
+            end
+            local was_cancelled = worker.cancelled()
+            local sent, send_err = worker.send({
+                reason = reason,
+                cancelled = was_cancelled,
+            })
+            if not sent then
+                return "final send failed: " .. tostring(send_err)
+            end
+            return reason
+        ]]))
+
+        babet.sleep(20, "ms")
+        local cancelled, cancel_err = w:cancel()
+        ok("cancel() -> (true, nil)",
+            cancelled == true and cancel_err == nil)
+        local cancelled_again, cancel_err_again = w:cancel()
+        ok("cancel() is idempotent",
+            cancelled_again == true and cancel_err_again == nil)
+
+        local send_ok, send_reason = w:send("late command", 0)
+        ok("send after cancel -> (false, 'cancelled')",
+            send_ok == false and send_reason == "cancelled",
+            "got=(" .. tostring(send_ok) .. ", "
+                .. tostring(send_reason) .. ")")
+
+        local recv_ok, final_message = w:recv(2)
+        ok("outbox remains drainable after cancel",
+            recv_ok == true and type(final_message) == "table"
+            and final_message.reason == "cancelled"
+            and final_message.cancelled == true,
+            "recv_ok=" .. tostring(recv_ok))
+
+        local joined, result = w:join(2)
+        ok("cancelled worker terminates cooperatively",
+            joined == true and result == "cancelled",
+            "got=(" .. tostring(joined) .. ", "
+                .. tostring(result) .. ")")
+        ok("cooperative cancellation keeps final state done",
+            w:status() == "done")
+    end
+
+    do
+        local w = assert(W.spawn([[
+            assert(worker.send("ready"))
+            babet.sleep(100, "ms")
+            local ok_recv, value = worker.recv()
+            return { ok = ok_recv, value = value }
+        ]]))
+        local ready_ok, ready = w:recv(2)
+        assert(ready_ok and ready == "ready")
+        assert(w:send("queued-before-cancel"))
+        assert(w:cancel())
+        local joined, result = w:join(2)
+        ok("cancel prevents queued inbox commands from being delivered",
+            joined == true and type(result) == "table"
+            and result.ok == false and result.value == "cancelled",
+            "joined=" .. tostring(joined)
+                .. " value=" .. tostring(result and result.value))
+    end
+
+    do
+        local w = assert(W.spawn([[
+            while not worker.cancelled() do
+                babet.sleep(1, "ms")
+            end
+            return "observed"
+        ]]))
+        assert(w:cancel())
+        local joined, result = w:join(2)
+        ok("worker.cancelled() observes parent cancellation",
+            joined == true and result == "observed")
+    end
+
+    do
+        local w = assert(W.spawn("return 1"))
+        ok("join rejects a negative timeout",
+            pcall(function() return w:join(-1) end) == false)
+        ok("join rejects a non-number timeout",
+            pcall(function() return w:join("0.1") end) == false)
+        ok("join rejects NaN",
+            pcall(function() return w:join(0 / 0) end) == false)
+        ok("join rejects infinity",
+            pcall(function() return w:join(math.huge) end) == false)
+        ok("join rejects excess arguments",
+            pcall(function() return w:join(0, "extra") end) == false)
+        ok("status rejects excess arguments",
+            pcall(function() return w:status("extra") end) == false)
+        ok("cancel rejects excess arguments",
+            pcall(function() return w:cancel("extra") end) == false)
+        local arity_worker = assert(W.spawn([[
+            local ok_call = pcall(function()
+                return worker.cancelled("extra")
+            end)
+            return ok_call
+        ]]))
+        local arity_ok, arity_result = arity_worker:join(2)
+        ok("worker.cancelled rejects arguments",
+            arity_ok == true and arity_result == false)
+        local joined, value = w:join()
+        ok("worker remains joinable after rejected lifecycle calls",
+            joined == true and value == 1)
     end
 
     -- ----- poll : running / done / error --------------------------

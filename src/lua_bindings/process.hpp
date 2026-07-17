@@ -10,12 +10,14 @@ struct lua_State;
  *
  *   process, err = babet.spawn(command [, args] [, opts])
  *
- * opts : cwd, env, launch_timeout.
+ * opts : cwd, env, launch_timeout, stdin, stdout, stderr.
  *
- * Le processus possède des pipes non bloquants et un groupe de processus
- * dédié. Les méthodes read_stdout/read_stderr/write permettent un pilotage
- * progressif sans accumulation automatique en mémoire. close()/__gc
- * terminent et réapent un processus encore actif de manière bornée.
+ * Par défaut, le processus possède trois pipes non bloquants. Chaque flux peut
+ * aussi être hérité ou raccordé à /dev/null ; stdout/stderr peuvent viser un
+ * fichier et stderr peut être fusionné dans stdout. Les méthodes de streaming
+ * restent disponibles uniquement pour les flux configurés comme pipes.
+ * close()/__gc terminent et réapent un processus encore actif de manière
+ * bornée.
  */
 void register_process(lua_State *L);
 

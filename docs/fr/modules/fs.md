@@ -9,7 +9,7 @@ historique et fait désormais partie de l’API stable.
 Le module FS couvre :
 
 - la vérification de l’existence et du type d’un chemin ;
-- la création et la suppression de fichiers et de dossiers ;
+- la création, l’écriture atomique et la suppression de fichiers et de dossiers ;
 - le changement de répertoire courant ;
 - la manipulation lexicale des chemins ;
 - le listing, l’itération et la recherche récursive ;
@@ -38,6 +38,7 @@ Le module FS couvre :
   - [`joinPath`](#joinpath)
 - [Créer, supprimer, renommer et lier](#fs-actions)
   - [`touch`](#touch)
+  - [`writeFileAtomic`](write-file-atomic.md)
   - [`mkdir`](#mkdir)
   - [`remove`](#remove)
   - [`rmdir`](#rmdir)
@@ -161,6 +162,7 @@ signalées dans leur section.
 | Fonction | Résultat en cas de succès |
 | --- | --- |
 | `babet.touch(path)` | `(true, nil)` |
+| `babet.writeFileAtomic(path, data, opts?)` | `(true, nil)` — publication binaire atomique et durable ; [chapitre détaillé](write-file-atomic.md) |
 | `babet.mkdir(path)` | `(true, nil)` — récursif et idempotent |
 | `babet.remove(path)` | `(true, nil)` — fichier régulier ou symlink |
 | `babet.rmdir(path)` | `(true, nil)` — dossier réel et vide |

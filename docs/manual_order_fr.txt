@@ -19,11 +19,13 @@ docs/fr/security.md
 # ensemble).
 
 docs/fr/modules/archive.md
+docs/fr/modules/base64.md
 docs/fr/modules/compression.md
 docs/fr/modules/argparse.md
 docs/fr/modules/exec.md
 docs/fr/modules/pipeline.md
 docs/fr/modules/fs.md
+docs/fr/modules/write-file-atomic.md
 docs/fr/modules/http.md
 docs/fr/modules/inotify.md
 docs/fr/modules/json.md

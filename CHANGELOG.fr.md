@@ -6,6 +6,154 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.9.0] - 2026-07-17
+
+### Résumé de la version
+
+Babet 2.9.0 renforce la supervision des processus, la manipulation des données
+binaires, la publication atomique de fichiers et l'orchestration concurrente
+des workers. Les appels historiques à `spawn()` et aux workers restent
+compatibles par défaut, tandis que les nouvelles API optionnelles suppriment le
+recours à une commande Base64 externe, évitent les pipes de journaux WebDriver
+non drainés, permettent des attentes bornées et un arrêt coopératif des workers, puis autorisent une
+communication MPMC directe sans relais par l'état Lua parent.
+
+### Lot A — redirections configurables de `babet.spawn()`
+
+- passage de la version source à 2.9.0 ;
+- conservation stricte des trois pipes non bloquants comme comportement par
+  défaut, sans modification des appels historiques ;
+- ajout des modes `"pipe"`, `"inherit"` et `"null"` pour stdin, stdout et
+  stderr ;
+- ajout de la fusion `stderr = "stdout"`, appliquée après la configuration de
+  stdout ;
+- ajout des redirections directes de stdout et stderr vers un fichier régulier,
+  avec troncature ou ajout, permissions de création bornées à `0777`,
+  `O_CLOEXEC`, refus de la destination finale symbolique et vérification
+  `fstat()` ;
+- ouverture de toutes les destinations avant `fork()`, afin qu'une erreur
+  d'ouverture empêche la création du processus enfant ;
+- ajout de la raison stable `"not_piped"` pour les méthodes de streaming visant
+  un flux hérité, nul, fusionné ou redirigé vers un fichier ;
+- ajout de tests pour toutes les validations, les chemins spéciaux, troncature,
+  ajout, permissions, fusion, `/dev/null`, héritage, refus des symlinks et
+  compatibilité du comportement historique ;
+- enrichissement synchronisé des documentations française et anglaise avec un
+  exemple distinct pour chaque mode et un exemple combiné WebDriver/daemon.
+
+### Lot B — module Base64 natif binaire
+
+- ajout de `babet.base64.encode(data [, opts])` et
+  `babet.base64.decode(text [, opts])`, disponibles dans l'état Lua principal
+  comme dans chaque worker ;
+- implémentation interne sans processus externe et sans dépendance
+  supplémentaire, avec chaînes Lua binaires préservant les octets NUL et les
+  données non UTF-8 ;
+- prise en charge des alphabets RFC 4648 standard et URL-safe via
+  `url_safe` ;
+- ajout du contrôle du padding à l'encodage et du décodage explicite des
+  formes non paddées via `padding` et `allow_unpadded` ;
+- décodage canonique strict : alphabet exact, padding final uniquement,
+  longueur cohérente, maximum de deux `=`, refus des groupes tronqués et des
+  bits finaux inutilisés non nuls ;
+- ajout de `ignore_whitespace` pour les six espaces ASCII, sans rendre le
+  décodeur permissif sur les autres octets ;
+- ajout de `max_output`, limite inclusive contrôlée après validation complète
+  et avant l'allocation de la sortie décodée ;
+- analyse du texte en deux passes sans copie ni table de positions
+  proportionnelle à l'entrée, afin de conserver les offsets d'erreur exacts
+  sans multiplier la mémoire ;
+- validation stricte de l'arité, des types, des clés et des options inconnues,
+  avec distinction entre erreurs d'appel levées et données invalides renvoyées
+  sous forme `nil, err` ;
+- ajout des vecteurs RFC 4648, des 256 octets, d'un gros buffer binaire, des
+  alphabets, du padding, des espaces, des limites, des erreurs canoniques et de
+  l'utilisation depuis un worker aux tests de non-régression ;
+- ajout de pages française et anglaise détaillées, d'exemples séparés pour
+  chaque option, d'un exemple combiné URL-safe sans padding et de l'intégration
+  aux manuels PDF.
+
+
+### Lot C — écriture atomique générique de fichiers
+
+- ajout de `babet.writeFileAtomic(path, data [, opts])` dans l’état Lua principal et dans chaque worker ;
+- prise en charge des chaînes Lua binaires, y compris les octets NUL et les données non UTF-8, sans copie intermédiaire proportionnelle dans le binding ;
+- ajout des options strictes `overwrite` (`false`), `permissions` (`0644`) et `durable` (`true`) ;
+- création d’un temporaire privé `0600` dans le dossier final, boucle d’écriture complète gérant `EINTR` et les écritures partielles, `fchmod()` avant synchronisation, puis publication atomique ;
+- refus de l’écrasement par défaut avec publication `linkat()` sans remplacement, et remplacement explicite d’un fichier régulier par `renameat()` ;
+- parcours du parent composant par composant avec `openat()`/`O_NOFOLLOW`, refus de `..`, des parents symboliques, de la destination finale symbolique et des dossiers, FIFO, sockets ou périphériques ;
+- absence de création implicite des parents et suppression au mieux de tout temporaire après une erreur antérieure à la publication ;
+- synchronisation par défaut du temporaire puis du dossier parent, avec diagnostic explicite si le fichier a déjà été publié mais que la persistance du renommage n’a pas pu être confirmée ;
+- ajout des tests de contenu binaire, fichier vide, écrasement, permissions, durabilité désactivée, chemins spéciaux, symlinks, types spéciaux, validations, nettoyage et utilisation depuis un worker ;
+- ajout d’un chapitre français et anglais détaillé, d’exemples séparés pour chaque option, d’un exemple combiné Base64/Selenium et de l’intégration aux manuels PDF.
+
+
+### Lot D — cycle de vie robuste des workers
+
+- refus strict de toute option inconnue ou de toute clé d’option non chaîne dans `babet.workers.spawn()`, y compris les noms contenant un suffixe NUL caché ;
+- ajout de `job:status()`, non bloquant et non consommant, avec les états stables `"running"`, `"done"` et `"error"` ;
+- extension de `job:join(timeout?)` avec timeout en secondes sur horloge monotone, `0` non bloquant et retour `(nil, "timeout")` sans fermeture, jointure ni consommation du résultat ;
+- ajout d’un signal de terminaison pthread distinct des queues, protégé contre les réveils perdus et partagé par tous les chemins de succès, d’erreur Lua ou d’exception C++ ;
+- ajout de l’annulation coopérative idempotente `job:cancel()` et de `worker.cancelled()` ;
+- l’annulation ferme uniquement l’inbox, réveille `worker.recv()` avec `"cancelled"`, refuse les futurs `job:send()` avec la même raison et laisse l’outbox drainable pour un dernier message ;
+- distinction documentée entre `close()` — fin normale des commandes avec drainage — et `cancel()` — abandon coopératif des commandes encore en attente ;
+- le garbage collector demande désormais l’annulation avant de fermer les deux queues et de joindre le thread, sans introduire de terminaison forcée dangereuse ;
+- ajout de tests de statut non consommant, timeouts immédiat et borné, messagerie toujours utilisable après timeout, erreurs finales, validations, annulation idempotente, réveil d’un `worker.recv()` bloqué, abandon des commandes encore en inbox, dernier message d’outbox et observation directe du drapeau ;
+- mise à jour synchronisée des documentations française et anglaise, avec exemples séparés et exemples combinés `status`/`join(timeout)`/`cancel`.
+
+
+### Lot E — channels directs partagés entre workers
+
+- ajout de `babet.workers.channel({ capacity = 64 })`, queue bornée de 1 à
+  1 000 000 messages, thread-safe, FIFO, multi-producteurs et
+  multi-consommateurs ;
+- transmission explicite des handles par `workers.spawn(..., { channels = ... })`
+  et exposition systématique de `worker.channels` dans chaque état Lua, sans
+  modifier le contrat JSON de `worker.args` ;
+- ajout de `channel:send(value, timeout?)`, `channel:recv(timeout?)`,
+  `channel:close()` et `channel:is_closed()` avec les raisons stables
+  `full`, `empty`, `timeout` et `closed` ;
+- fermeture globale idempotente, réveil des producteurs et consommateurs
+  bloqués, refus des nouveaux envois et drainage des messages déjà présents
+  avant que `recv()` ne signale `closed` ;
+- intégration à l'annulation coopérative : `job:cancel()` réveille le
+  `channel:send()` ou `channel:recv()` bloqué du worker concerné avec
+  `cancelled`, sans fermer le channel partagé pour les autres participants ;
+- partage de la ressource C++ par références comptées : le GC d'un handle local
+  ne ferme pas le channel pour les autres états, tandis que la dernière
+  référence ferme et détruit proprement la queue ;
+- extraction du contexte des erreurs de sérialisation workers afin que les
+  diagnostics de channels identifient précisément `workers.channel.send` ou
+  `workers.channel.recv` ;
+- validation stricte des options, capacités, noms de channels, valeurs de
+  `opts.channels`, arités et valeurs transférées, les channels restant
+  volontairement non sérialisables comme messages ;
+- ajout de tests parent vers worker, worker vers parent, worker vers worker,
+  FIFO, `nil`, fermeture avec drainage, réveils bloqués, durée de vie des
+  handles, deux producteurs/deux consommateurs et stress MPMC ;
+- validation native de 100 000 messages, 2 000 courses d'annulation et
+  1 000 courses de fermeture sous compilation normale, ASan+UBSan et
+  ThreadSanitizer ;
+- mise à jour synchronisée des README, documentations française et anglaise,
+  exemples détaillés et manuels PDF.
+
+### Validation de la version
+
+Le candidat final a réussi :
+
+- 3319 PASS / 0 FAIL en mode dossier ;
+- 3306 PASS / 0 FAIL en mode embarqué ;
+- 3306 PASS / 0 FAIL en mode embarqué via `PATH` ;
+- 9/9 modes d'exécution sous ASan + UBSan ;
+- 9/9 modes à nouveau avec le build normal final.
+
+La barrière de publication complète, incluant les tests TLS locaux et les smoke
+tests réseau, reste :
+
+```sh
+./run_tests.sh --release
+```
+
 ## [2.8.0] - 2026-07-17
 
 ### Résumé de la version

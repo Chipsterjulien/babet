@@ -17,11 +17,13 @@ docs/en/security.md
 # grouping (e.g. networking together, data formats together).
 
 docs/en/modules/archive.md
+docs/en/modules/base64.md
 docs/en/modules/compression.md
 docs/en/modules/argparse.md
 docs/en/modules/exec.md
 docs/en/modules/pipeline.md
 docs/en/modules/fs.md
+docs/en/modules/write-file-atomic.md
 docs/en/modules/http.md
 docs/en/modules/inotify.md
 docs/en/modules/json.md

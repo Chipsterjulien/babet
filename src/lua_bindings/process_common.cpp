@@ -17,6 +17,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -26,6 +27,8 @@ namespace babet_process
 {
 namespace
 {
+
+std::string prefixed(const char *prefix, const std::string &message);
 
 int move_fd_above_standard_streams(int &fd)
 {
@@ -110,6 +113,166 @@ void close_pair(int p[2])
         ::close(p[1]);
         p[1] = -1;
     }
+}
+
+bool clear_nonblocking(int fd, const char *prefix, const char *label,
+                       std::string &err)
+{
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 ||
+        ((flags & O_NONBLOCK) != 0 &&
+         ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0))
+    {
+        err = prefixed(prefix,
+                       std::string("cannot configure ") + label + ": " +
+                           std::strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+bool open_null_redirection(bool for_input, const char *prefix,
+                           const char *label, int &fd, std::string &err)
+{
+    const int flags = (for_input ? O_RDONLY : O_WRONLY) | O_CLOEXEC;
+    fd = ::open("/dev/null", flags);
+    if (fd < 0)
+    {
+        err = prefixed(prefix,
+                       std::string("cannot open /dev/null for ") + label +
+                           ": " + std::strerror(errno));
+        return false;
+    }
+    if (move_fd_above_standard_streams(fd) != 0)
+    {
+        const int saved = errno;
+        ::close(fd);
+        fd = -1;
+        errno = saved;
+        err = prefixed(prefix,
+                       std::string("cannot prepare /dev/null for ") + label +
+                           ": " + std::strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+bool open_output_redirection(const FileRedirection &file,
+                             const char *prefix, const char *label,
+                             int &fd, std::string &err)
+{
+    const int common_flags = O_WRONLY | O_CLOEXEC | O_NOFOLLOW |
+                             O_NONBLOCK |
+                             (file.append ? O_APPEND : 0);
+    bool created = false;
+
+    fd = ::open(file.path.c_str(), common_flags | O_CREAT | O_EXCL, 0600);
+    if (fd >= 0)
+    {
+        created = true;
+    }
+    else if (errno == EEXIST)
+    {
+        fd = ::open(file.path.c_str(), common_flags);
+    }
+
+    if (fd < 0)
+    {
+        err = prefixed(prefix,
+                       std::string("cannot open ") + label + " file '" +
+                           file.path + "': " + std::strerror(errno));
+        return false;
+    }
+
+    auto fail_open = [&](const std::string &message) {
+        const int saved = errno;
+        ::close(fd);
+        fd = -1;
+        errno = saved;
+        err = prefixed(prefix, message);
+        return false;
+    };
+
+    struct stat st{};
+    if (::fstat(fd, &st) != 0)
+    {
+        return fail_open(std::string("cannot inspect ") + label +
+                         " file '" + file.path + "': " +
+                         std::strerror(errno));
+    }
+    if (!S_ISREG(st.st_mode))
+    {
+        errno = EINVAL;
+        return fail_open(std::string(label) + " destination '" + file.path +
+                         "' is not a regular file");
+    }
+
+    if (created && ::fchmod(fd, file.permissions & 0777) != 0)
+    {
+        return fail_open(std::string("cannot set permissions on ") + label +
+                         " file '" + file.path + "': " +
+                         std::strerror(errno));
+    }
+    if (!file.append && ::ftruncate(fd, 0) != 0)
+    {
+        return fail_open(std::string("cannot truncate ") + label +
+                         " file '" + file.path + "': " +
+                         std::strerror(errno));
+    }
+    if (!clear_nonblocking(fd, prefix, label, err))
+    {
+        const int saved = errno;
+        ::close(fd);
+        fd = -1;
+        errno = saved;
+        return false;
+    }
+    if (move_fd_above_standard_streams(fd) != 0)
+    {
+        const int saved = errno;
+        ::close(fd);
+        fd = -1;
+        errno = saved;
+        err = prefixed(prefix,
+                       std::string("cannot prepare ") + label + " file '" +
+                           file.path + "': " + std::strerror(errno));
+        return false;
+    }
+    return true;
+}
+
+bool valid_launch_redirections(const LaunchSpec &spec, std::string &err)
+{
+    const auto stdin_kind = spec.stdin_redirection.kind;
+    if (stdin_kind != StreamRedirectionKind::pipe &&
+        stdin_kind != StreamRedirectionKind::inherit &&
+        stdin_kind != StreamRedirectionKind::null_device)
+    {
+        err = prefixed(spec.error_prefix, "invalid stdin redirection");
+        return false;
+    }
+
+    const auto stdout_kind = spec.stdout_redirection.kind;
+    if (stdout_kind != StreamRedirectionKind::pipe &&
+        stdout_kind != StreamRedirectionKind::inherit &&
+        stdout_kind != StreamRedirectionKind::null_device &&
+        stdout_kind != StreamRedirectionKind::file)
+    {
+        err = prefixed(spec.error_prefix, "invalid stdout redirection");
+        return false;
+    }
+
+    const auto stderr_kind = spec.stderr_redirection.kind;
+    if (stderr_kind != StreamRedirectionKind::pipe &&
+        stderr_kind != StreamRedirectionKind::inherit &&
+        stderr_kind != StreamRedirectionKind::null_device &&
+        stderr_kind != StreamRedirectionKind::file &&
+        stderr_kind != StreamRedirectionKind::stdout_stream)
+    {
+        err = prefixed(spec.error_prefix, "invalid stderr redirection");
+        return false;
+    }
+    return true;
 }
 
 std::string prefixed(const char *prefix, const std::string &message)
@@ -499,6 +662,10 @@ LaunchResult launch(const LaunchSpec &spec)
                                 "command and argv must not be empty");
         return result;
     }
+    if (!valid_launch_redirections(spec, result.error))
+    {
+        return result;
+    }
 
     std::vector<char *> argv;
     argv.reserve(spec.argv_strings.size() + 1);
@@ -516,42 +683,101 @@ LaunchResult launch(const LaunchSpec &spec)
     int pipe_out[2] = {-1, -1};
     int pipe_err[2] = {-1, -1};
     int pipe_exec[2] = {-1, -1};
+    int stdin_target = -1;
+    int stdout_target = -1;
+    int stderr_target = -1;
 
-    if (make_pipe(pipe_in) != 0)
-    {
-        result.error = std::string("pipe2() failed: ") + std::strerror(errno);
-        return result;
-    }
-    if (make_pipe(pipe_out) != 0)
-    {
-        result.error = std::string("pipe2() failed: ") + std::strerror(errno);
-        close_pair(pipe_in);
-        return result;
-    }
-    if (make_pipe(pipe_err) != 0)
-    {
-        result.error = std::string("pipe2() failed: ") + std::strerror(errno);
-        close_pair(pipe_in);
-        close_pair(pipe_out);
-        return result;
-    }
-    if (make_pipe(pipe_exec) != 0)
-    {
-        result.error = std::string("pipe2() failed: ") + std::strerror(errno);
+    auto close_prepared = [&]() {
         close_pair(pipe_in);
         close_pair(pipe_out);
         close_pair(pipe_err);
+        close_pair(pipe_exec);
+        close_fd(stdin_target);
+        close_fd(stdout_target);
+        close_fd(stderr_target);
+    };
+
+    auto make_stream_pipe = [&](int p[2], const char *label) {
+        if (make_pipe(p) == 0)
+        {
+            return true;
+        }
+        result.error = prefixed(
+            spec.error_prefix,
+            std::string("cannot create ") + label + " pipe: " +
+                std::strerror(errno));
+        return false;
+    };
+
+    if (spec.stdin_redirection.kind == StreamRedirectionKind::pipe &&
+        !make_stream_pipe(pipe_in, "stdin"))
+    {
+        close_prepared();
+        return result;
+    }
+    if (spec.stdout_redirection.kind == StreamRedirectionKind::pipe &&
+        !make_stream_pipe(pipe_out, "stdout"))
+    {
+        close_prepared();
+        return result;
+    }
+    if (spec.stderr_redirection.kind == StreamRedirectionKind::pipe &&
+        !make_stream_pipe(pipe_err, "stderr"))
+    {
+        close_prepared();
+        return result;
+    }
+
+    if (spec.stdin_redirection.kind == StreamRedirectionKind::null_device &&
+        !open_null_redirection(true, spec.error_prefix, "stdin",
+                               stdin_target, result.error))
+    {
+        close_prepared();
+        return result;
+    }
+    if (spec.stdout_redirection.kind == StreamRedirectionKind::null_device &&
+        !open_null_redirection(false, spec.error_prefix, "stdout",
+                               stdout_target, result.error))
+    {
+        close_prepared();
+        return result;
+    }
+    if (spec.stdout_redirection.kind == StreamRedirectionKind::file &&
+        !open_output_redirection(spec.stdout_redirection.file,
+                                 spec.error_prefix, "stdout",
+                                 stdout_target, result.error))
+    {
+        close_prepared();
+        return result;
+    }
+    if (spec.stderr_redirection.kind == StreamRedirectionKind::null_device &&
+        !open_null_redirection(false, spec.error_prefix, "stderr",
+                               stderr_target, result.error))
+    {
+        close_prepared();
+        return result;
+    }
+    if (spec.stderr_redirection.kind == StreamRedirectionKind::file &&
+        !open_output_redirection(spec.stderr_redirection.file,
+                                 spec.error_prefix, "stderr",
+                                 stderr_target, result.error))
+    {
+        close_prepared();
+        return result;
+    }
+    if (!make_stream_pipe(pipe_exec, "launch-status"))
+    {
+        close_prepared();
         return result;
     }
 
     const pid_t pid = ::fork();
     if (pid < 0)
     {
-        result.error = std::string("fork() failed: ") + std::strerror(errno);
-        close_pair(pipe_in);
-        close_pair(pipe_out);
-        close_pair(pipe_err);
-        close_pair(pipe_exec);
+        result.error = prefixed(spec.error_prefix,
+                                std::string("fork() failed: ") +
+                                    std::strerror(errno));
+        close_prepared();
         return result;
     }
 
@@ -559,9 +785,37 @@ LaunchResult launch(const LaunchSpec &spec)
     {
         ::setpgid(0, 0);
 
-        if (::dup2(pipe_in[0], STDIN_FILENO) < 0 ||
-            ::dup2(pipe_out[1], STDOUT_FILENO) < 0 ||
-            ::dup2(pipe_err[1], STDERR_FILENO) < 0)
+        auto duplicate_stream = [&](StreamRedirectionKind kind,
+                                    int pipe_child_fd, int target_fd,
+                                    int standard_fd) {
+            if (kind == StreamRedirectionKind::inherit)
+            {
+                return true;
+            }
+            const int source = kind == StreamRedirectionKind::pipe
+                                   ? pipe_child_fd
+                                   : target_fd;
+            return source >= 0 && ::dup2(source, standard_fd) >= 0;
+        };
+
+        if (!duplicate_stream(spec.stdin_redirection.kind, pipe_in[0],
+                              stdin_target, STDIN_FILENO) ||
+            !duplicate_stream(spec.stdout_redirection.kind, pipe_out[1],
+                              stdout_target, STDOUT_FILENO))
+        {
+            report_launch_failure_and_exit(pipe_exec[1], errno);
+        }
+
+        if (spec.stderr_redirection.kind ==
+            StreamRedirectionKind::stdout_stream)
+        {
+            if (::dup2(STDOUT_FILENO, STDERR_FILENO) < 0)
+            {
+                report_launch_failure_and_exit(pipe_exec[1], errno);
+            }
+        }
+        else if (!duplicate_stream(spec.stderr_redirection.kind, pipe_err[1],
+                                   stderr_target, STDERR_FILENO))
         {
             report_launch_failure_and_exit(pipe_exec[1], errno);
         }
@@ -569,6 +823,9 @@ LaunchResult launch(const LaunchSpec &spec)
         close_pair(pipe_in);
         close_pair(pipe_out);
         close_pair(pipe_err);
+        close_fd(stdin_target);
+        close_fd(stdout_target);
+        close_fd(stderr_target);
         ::close(pipe_exec[0]);
 
         if (spec.has_cwd && ::chdir(spec.cwd.c_str()) != 0)
@@ -588,20 +845,38 @@ LaunchResult launch(const LaunchSpec &spec)
 
     ::setpgid(pid, pid);
 
-    ::close(pipe_in[0]);
-    pipe_in[0] = -1;
-    ::close(pipe_out[1]);
-    pipe_out[1] = -1;
-    ::close(pipe_err[1]);
-    pipe_err[1] = -1;
+    if (pipe_in[0] >= 0)
+    {
+        ::close(pipe_in[0]);
+        pipe_in[0] = -1;
+    }
+    if (pipe_out[1] >= 0)
+    {
+        ::close(pipe_out[1]);
+        pipe_out[1] = -1;
+    }
+    if (pipe_err[1] >= 0)
+    {
+        ::close(pipe_err[1]);
+        pipe_err[1] = -1;
+    }
     ::close(pipe_exec[1]);
     pipe_exec[1] = -1;
+    close_fd(stdin_target);
+    close_fd(stdout_target);
+    close_fd(stderr_target);
 
     LaunchedProcess process;
     process.pid = pid;
     process.stdin_fd = pipe_in[1];
     process.stdout_fd = pipe_out[0];
     process.stderr_fd = pipe_err[0];
+    process.stdin_piped =
+        spec.stdin_redirection.kind == StreamRedirectionKind::pipe;
+    process.stdout_piped =
+        spec.stdout_redirection.kind == StreamRedirectionKind::pipe;
+    process.stderr_piped =
+        spec.stderr_redirection.kind == StreamRedirectionKind::pipe;
 
     std::string nonblock_error;
     if (!set_nonblocking(pipe_exec[0], spec.error_prefix, "launch pipe",
@@ -704,17 +979,22 @@ LaunchResult launch(const LaunchSpec &spec)
         {
             result.status_valid = true;
         }
-        result.error = std::string("cannot launch '") + spec.command +
-                       "': " + std::strerror(launch_errno);
+        result.error = prefixed(
+            spec.error_prefix,
+            std::string("cannot launch '") + spec.command + "': " +
+                std::strerror(launch_errno));
         return result;
     }
 
-    if (!set_nonblocking(process.stdin_fd, spec.error_prefix,
-                         "stdin pipe", nonblock_error) ||
-        !set_nonblocking(process.stdout_fd, spec.error_prefix,
-                         "stdout pipe", nonblock_error) ||
-        !set_nonblocking(process.stderr_fd, spec.error_prefix,
-                         "stderr pipe", nonblock_error))
+    if ((process.stdin_piped &&
+         !set_nonblocking(process.stdin_fd, spec.error_prefix,
+                          "stdin pipe", nonblock_error)) ||
+        (process.stdout_piped &&
+         !set_nonblocking(process.stdout_fd, spec.error_prefix,
+                          "stdout pipe", nonblock_error)) ||
+        (process.stderr_piped &&
+         !set_nonblocking(process.stderr_fd, spec.error_prefix,
+                          "stderr pipe", nonblock_error)))
     {
         result.error = std::move(nonblock_error);
         close_process_fds(process);
@@ -726,7 +1006,6 @@ LaunchResult launch(const LaunchSpec &spec)
     result.process = process;
     return result;
 }
-
 
 void close_pipeline_fds(LaunchedPipeline &pipeline)
 {

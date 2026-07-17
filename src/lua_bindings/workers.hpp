@@ -6,7 +6,7 @@
 #include <string>
 
 /**
- * @brief Workers à mémoire Lua isolée et communication par queues JSON.
+ * @brief Workers à mémoire Lua isolée, queues privées et channels partagés.
  *
  * API parent :
  *
@@ -15,11 +15,24 @@
  *   code : chaîne Lua stricte.
  *   args : table sérialisable ou nil, visible via worker.args.
  *   opts : inbox_capacity / outbox_capacity, entiers 1..1 000 000,
- *          défaut 64 messages par queue.
+ *          défaut 64 messages par queue ; channels = table nom->channel.
+ *          Toute option inconnue est refusée.
+ *
+ *   channel, err = babet.workers.channel({ capacity = 64 })
+ *
+ * Méthodes du channel :
+ *
+ *   channel:send(v, t?) -> (true, nil) | (false, reason) | (nil, err)
+ *   channel:recv(t?)    -> (true, value) | (false, reason) | (nil, err)
+ *   channel:close()     -> (true, nil)
+ *   channel:is_closed() -> bool
  *
  * Méthodes du job :
  *
- *   job:join()        -> (true, result) | (false, err)
+ *   job:join(t?)      -> (true, result) | (false, err) |
+ *                        (nil, "timeout")
+ *   job:status()      -> "running" | "done" | "error"
+ *   job:cancel()      -> (true, nil) ; annulation coopérative
  *   job:poll()        -> ("running", nil) |
  *                        ("done", result) | ("error", err)
  *   job:send(v, t?)   -> (true, nil) | (false, reason) | (nil, err)
@@ -29,15 +42,29 @@
  * API dans l'état enfant :
  *
  *   worker.args
+ *   worker.channels.<name>
  *   worker.send(v, t?) -> (true, nil) | (false, reason_or_error)
  *   worker.recv(t?)    -> (true, value) | (false, reason)
+ *   worker.cancelled() -> bool
  *
- * join() bloque sans timeout et consomme le résultat. poll() est non bloquant
- * mais consomme également le résultat dès qu'il renvoie done/error ; il ne
- * faut donc pas faire poll terminé puis join. close() ferme seulement la queue
- * parent->worker afin que l'outbox reste drainable. Le __gc ferme les deux
- * queues puis joint la pthread, et peut donc bloquer si le worker ne termine
- * pas.
+ * join(timeout?) attend sur une condition monotone. Un timeout renvoie
+ * (nil, "timeout") sans joindre la pthread ni consommer le résultat. status()
+ * ne consomme jamais. poll() reste compatible et consomme done/error ; il ne
+ * faut donc pas faire poll terminé puis join. cancel() pose un drapeau, ferme
+ * seulement l'inbox et réveille worker.recv(), qui renvoie "cancelled" ;
+ * l'outbox reste drainable. Un send/recv de channel bloqué dans ce worker est
+ * également réveillé avec "cancelled", sans fermer le channel global.
+ * L'annulation est coopérative et ne peut pas interrompre un appel système
+ * arbitraire. Le __gc demande l'annulation, ferme les deux queues puis joint
+ * la pthread, et peut donc encore bloquer si
+ * le worker ne termine pas.
+ *
+ * Les channels sont des queues bornées FIFO, thread-safe, multi-producteurs et
+ * multi-consommateurs. close() interdit tout nouvel envoi, réveille les appels
+ * bloqués et laisse recv() drainer les messages présents avant "closed". Les
+ * handles Lua partagent un même objet C++ via shared_ptr ; le GC d'un handle ne
+ * ferme pas le channel global. Un channel n'est jamais sérialisé dans args ou
+ * comme message : il doit être transmis explicitement par opts.channels.
  *
  * Transport : nil, booléens, nombres finis, chaînes sans NUL acceptées par le
  * validateur UTF-8, listes denses non vides et objets à clés string. Tables
@@ -47,7 +74,7 @@
  *
  * Timeout des queues : nil/absent = infini, 0 = immédiat, valeur positive
  * <= 86400 s = attente bornée arrondie au milliseconde supérieur. Les raisons
- * normales sont full, empty, timeout et closed.
+ * normales sont full, empty, timeout, closed et cancelled.
  */
 void register_workers(lua_State *L);
 

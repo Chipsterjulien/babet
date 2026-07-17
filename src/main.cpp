@@ -1,4 +1,5 @@
 #include "lua_bindings/archive.hpp"
+#include "lua_bindings/base64.hpp"
 #include "lua_bindings/attributes.hpp"
 #include "lua_bindings/blake2b.hpp"
 #include "lua_bindings/blake2s.hpp"
@@ -55,6 +56,7 @@
 #include "lua_bindings/touch.hpp"
 #include "lua_bindings/user.hpp"
 #include "lua_bindings/workers.hpp"
+#include "lua_bindings/writeFileAtomic.hpp"
 #include "lua_bindings/fileIterator.hpp"
 
 #include "project_core/archive_backend.hpp"
@@ -253,8 +255,14 @@ void register_babet(lua_State *L)
     lua_pushcfunction(L, lua_touch);
     lua_setfield(L, -2, "touch");
 
+    lua_pushcfunction(L, lua_writeFileAtomic);
+    lua_setfield(L, -2, "writeFileAtomic");
+
     lua_pushcfunction(L, lua_createFileIterator);
     lua_setfield(L, -2, "createFileIterator");
+
+    // Sous-table babet.base64 (RFC 4648, chaînes binaires).
+    register_base64(L);
 
     // Sous-table babet.compression (flux gzip/xz/bzip2/zstd autonomes).
     register_compression(L);

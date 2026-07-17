@@ -48,6 +48,7 @@ FILE_TO_ANCHOR = {
     "cookbook":        "ch-cookbook",
     "argparse":        "ch-argparse",
     "archive":         "ch-archive",
+    "base64":          "ch-base64",
     "compression":     "ch-compression",
     "exec":            "ch-exec",
     "fs":              "ch-fs",
@@ -67,6 +68,7 @@ FILE_TO_ANCHOR = {
     "toml":            "ch-toml",
     "user":            "ch-user",
     "workers":         "ch-workers",
+    "write-file-atomic": "ch-write-file-atomic",
 }
 
 

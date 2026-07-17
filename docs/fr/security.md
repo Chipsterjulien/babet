@@ -51,6 +51,7 @@ Le travail de durcissement dans Babet protège les usages
   le descripteur source, borne la sortie décompressée, vérifie l’intégrité du
   codec, refuse les octets finaux parasites, prépare la sortie à côté de la
   destination et la publie atomiquement.
+- **Écriture atomique générale** : `writeFileAtomic()` ouvre chaque parent sans suivre de symlink, refuse `..`, une destination finale symbolique ou non régulière et l’écrasement implicite. Les données sont écrites dans un temporaire privé du même dossier, les permissions sont appliquées, puis le fichier et le dossier sont synchronisés avant et après publication atomique.
 - **Cleanup borné des groupes de processus** dans `babet.exec` couvre aussi
   la phase `chdir`/`exec`, les erreurs internes de polling et le cas où un
   enfant ferme ses pipes tout en continuant à tourner. Au timeout, TERM puis
