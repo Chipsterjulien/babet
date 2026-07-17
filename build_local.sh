@@ -403,8 +403,8 @@ RE2_CMAKE_DIR="${RE2_INSTALL_DIR}/lib/cmake/re2"
 RE2_PROFILE_FILE="${RE2_CMAKE_BUILD_DIR}/.babet-build-profile"
 RE2_BUILD_PROFILE="re2=${RE2_VERSION};abseil=${ABSL_VERSION};icu=OFF;shared=OFF;tests=OFF"
 #
-# libarchive : backend multi-format introduit en 2.6.0 et réutilisé en
-# 2.7.0. Il est compilé avec les
+# libarchive : backend multi-format introduit en 2.6.0 et
+# réutilisé dans les versions 2.7.0 et 2.8.0. Il est compilé avec les
 # filtres gzip, xz, bzip2 et zstd internes, adossés respectivement aux
 # versions statiques de zlib, liblzma, libbz2 et libzstd ci-dessus.
 LIBARCHIVE_VERSION="3.8.8"

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(babet VERSION 2.7.0 LANGUAGES CXX C)
+project(babet VERSION 2.8.0 LANGUAGES CXX C)
 
 # Génère src/generated/version.hpp depuis src/version.hpp.in,
 # en injectant les composants de version définis dans project().
@@ -37,7 +37,7 @@ if(NOT MINIZ_SRC OR NOT MINIZ_INCLUDE)
 endif()
 
 # libarchive : bibliothèque C statique compilée localement et épinglée par
-# build_local.sh. La 2.7.0 l'utilise pour créer, inspecter et extraire les TAR
+# build_local.sh. La 2.8.0 l'utilise pour créer, inspecter et extraire les TAR
 # non compressés, gzip, xz, bzip2 et zstd. Toutes les bibliothèques de
 # compression sont compilées localement et liées statiquement.
 if(NOT LIBARCHIVE_LIB OR NOT LIBARCHIVE_INCLUDE)

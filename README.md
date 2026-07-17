@@ -16,7 +16,7 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.7.0**. See the
+Current stable and audited release: **2.8.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
@@ -92,7 +92,7 @@ Sources and destinations must be regular files reached without symlink parent
 components; output is staged in the destination directory and published
 atomically. The default decompression ceiling is 1 GiB.
 
-### Create, inspect, and extract ZIP or TAR securely
+### Create, inspect, verify, and extract ZIP or TAR securely
 
 ```lua
 local created, err = babet.archive.create("project", "project.zip", {
@@ -120,8 +120,19 @@ assert(selected, err)
 local info, err = babet.archive.list("upload.zip", {
     max_entries = 2000,
     max_total_size = 512 * 1024 * 1024,
+    max_path_length = 8192,
+    max_total_name_bytes = 2 * 1024 * 1024,
 })
 assert(info, err)
+assert(info.duplicates == 0 and info.conflicts == 0)
+
+local verified
+verified, err = babet.archive.test("upload.zip", {
+    max_entries = 2000,
+    max_total_size = 512 * 1024 * 1024,
+})
+assert(verified, err)
+assert(verified.files + verified.directories == verified.entries)
 
 local tar_info
 tar_info, err = babet.archive.list("source.tar.xz")
@@ -129,8 +140,22 @@ assert(tar_info, err)
 assert(tar_info.format == "tar")
 assert(tar_info.compression == "xz")
 
+local plan
+plan, err = babet.archive.extract("source.tar", "restore", {
+    dry_run = true,
+    include = { "src/**", "README.md" },
+    exclude = { "src/generated/**", "**/*.tmp" },
+    overwrite = true,
+})
+assert(plan, err)
+assert(plan.would_create + plan.would_overwrite + plan.would_skip
+    == plan.entries)
+assert(not babet.fileExists("restore"))
+
 local result
 result, err = babet.archive.extract("source.tar", "restore", {
+    include = { "src/**", "README.md" },
+    exclude = { "src/generated/**", "**/*.tmp" },
     overwrite = false,
 })
 assert(result, err)
@@ -141,7 +166,7 @@ one, err = babet.archive.extractFile(
 assert(one, err)
 ```
 
-ZIP creation, listing, and extraction continue to use miniz. Plain, gzip-,
+ZIP creation, listing, verification, and extraction continue to use miniz. Plain, gzip-,
 xz-, bzip2-, and zstd-compressed TAR operations use the statically linked
 libarchive, zlib, XZ Utils/liblzma, libbz2, and libzstd backends. Readers detect
 format and compression from the contents; `archive.create()` infers TAR from
@@ -156,10 +181,22 @@ accepts bounded, case-sensitive `include` and `exclude` safe-glob arrays matched
 against final archive paths; exclusions win and excluded directories are
 pruned. Creation rejects selected source symlinks, unsupported filesystem
 objects, unsafe entry names, and an output inside any source tree.
-Extraction rejects absolute paths, `..` components, archive links and special
-types, sparse TAR files, and symlinked destination parents. Archives are
-published atomically as a whole; extracted files are staged before publication
-and published atomically per file.
+`archive.test()` fully reads verifiable data and rejects technically corrupt,
+ambiguous, or unsafe archives without creating any file. `archive.extract()`
+now reuses the exact same bounded `include` and `exclude` safe globs as
+creation, matched against normalised internal paths; exclusions win, excluded
+subtrees are pruned, and only required parents are created. Unselected entries
+do not participate in output collisions, while global limits still apply to
+the whole archive. Extraction still rejects selected absolute paths, `..`
+components, archive links and special types, sparse TAR files, and symlinked
+destination parents. Created archives are published atomically as a whole; retained extraction
+files are staged before publication and published atomically per file. With
+`dry_run = true`, the same plan, filters, limits, and destination checks run
+without creation, writes, chmod, renames, or removals; the result reports
+`would_create`, `would_overwrite`, `would_skip`, and whether the destination
+root would be created. This preview is a snapshot and does not replace the
+checks repeated by real extraction. Run `archive.test()` first when skipped ZIP
+payload integrity must also be verified.
 
 ## Pre-release validation
 

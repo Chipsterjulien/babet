@@ -259,7 +259,7 @@ void register_babet(lua_State *L)
     // Sous-table babet.compression (flux gzip/xz/bzip2/zstd autonomes).
     register_compression(L);
 
-    // Sous-table babet.archive (ZIP miniz + TAR/libarchive, gzip compris).
+    // Sous-table babet.archive (ZIP miniz + TAR brut/gzip/xz/bzip2/zstd).
     // Même précondition de pile que les autres sous-modules.
     register_archive(L);
 
@@ -460,7 +460,7 @@ static int run_tool_script(const fs::path &anchorDir,
 int main(int argc, char *argv[])
 {
     // === ÉTAPE -1 : vérifier les backends d'archive liés ============
-    // La 2.7.0 utilise libarchive, zlib, liblzma, libbz2 et libzstd
+    // La 2.8.0 utilise libarchive, zlib, liblzma, libbz2 et libzstd
     // statiquement pour TAR/gzip/xz/bzip2/zstd, tout en conservant miniz pour
     // ZIP. Ces contrôles détectent
     // immédiatement un mélange header/bibliothèque dans les builds personnalisés.

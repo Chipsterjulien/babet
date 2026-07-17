@@ -34,6 +34,7 @@ struct ScanLimits
     std::uint64_t max_entries;
     std::uint64_t max_entry_size;
     std::uint64_t max_total_size;
+    std::uint64_t max_path_length;
     std::uint64_t max_total_name_bytes;
     double max_compression_ratio;
 };
@@ -45,6 +46,13 @@ struct Entry
     std::uint64_t size = 0;
     std::uint32_t unix_mode = 0;
     bool has_unix_mode = false;
+    std::int64_t mtime = 0;
+    long mtime_nsec = 0;
+    bool has_mtime = false;
+    std::int64_t uid = 0;
+    std::int64_t gid = 0;
+    bool has_uid = false;
+    bool has_gid = false;
     bool sparse = false;
     bool has_link_target = false;
     std::string link_target;
@@ -55,6 +63,7 @@ struct ScanResult
     std::vector<Entry> entries;
     Compression compression = Compression::none;
     std::uint64_t total_size = 0;
+    std::uint64_t total_name_bytes = 0;
     std::uint64_t archive_size = 0;
 };
 

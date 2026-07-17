@@ -9,6 +9,7 @@ commande externe :
 ```lua
 babet.archive.create(source_ou_sources, archive [, opts])
 babet.archive.list(archive [, opts])
+babet.archive.test(archive [, opts])
 babet.archive.extract(archive, destination [, opts])
 babet.archive.extractFile(archive, entry, destination [, opts])
 ```
@@ -23,7 +24,7 @@ du contenu. Pour `create()`, `.tar` sélectionne un TAR brut, `.tar.gz` et
 `opts.format` peut remplacer l’extension. Les flux compressés autonomes sont
 traités séparément par [`babet.compression`](compression.md).
 
-Les quatre fonctions suivent le contrat habituel :
+Les cinq fonctions suivent le contrat habituel :
 
 ```lua
 local result, err = babet.archive.list("backup.zip")
@@ -43,6 +44,7 @@ Lua. Une liste de sources ou une table d’options invalide renvoie
 - [`babet.archive.create`](#babetarchivecreate)
 - [Options d’inspection/extraction et limites anti-bombe](#options-dinspectionextraction-et-limites-anti-bombe)
 - [`babet.archive.list`](#babetarchivelist)
+- [`babet.archive.test`](#babetarchivetest)
 - [`babet.archive.extract`](#babetarchiveextract)
 - [`babet.archive.extractFile`](#babetarchiveextractfile)
 - [Règles de chemins](#règles-de-chemins)
@@ -346,66 +348,135 @@ assert(named, err)
 
 ## Options d’inspection/extraction et limites anti-bombe
 
-Les options communes à `list()`, `extract()` et `extractFile()` sont :
+Les options suivantes sont communes à `list()`, `test()`, `extract()` et
+`extractFile()`. Elles sont appliquées à **l’archive entière**, même lorsque
+`extractFile()` ne demande qu’une seule entrée : sélectionner un petit fichier
+ne permet donc jamais de contourner les limites globales.
 
 | Option | Défaut | Maximum accepté | Effet |
 | --- | ---: | ---: | --- |
-| `max_entries` | `10000` | `100000` | nombre maximal d’entrées dans l’archive |
+| `max_entries` | `10000` | `100000` | nombre maximal d’entrées exposées par l’archive |
 | `max_entry_size` | `256 * 1024 * 1024` | `8 * 1024^3` | taille décompressée maximale d’une entrée non répertoire |
 | `max_total_size` | `1024 * 1024 * 1024` | `64 * 1024^3` | somme maximale des tailles décompressées des entrées non répertoire |
+| `max_path_length` | `64 * 1024` | `1024 * 1024` | longueur maximale, en octets, d’un nom brut d’entrée inspecté |
+| `max_total_name_bytes` | `64 * 1024 * 1024` | `64 * 1024 * 1024` | somme maximale, en octets, de tous les noms d’entrées ; cette option sert à resserrer la limite fixe |
 | `max_compression_ratio` | `1000` | `1000000000` | rapport par entrée pour ZIP ; rapport global octets fichiers décompressés / taille archive pour TAR gzip, xz, bzip2 ou zstd ; sans effet pour TAR brut |
 
-Les trois limites entières doivent être des **entiers Lua strictement positifs**.
-`max_compression_ratio` doit être un nombre fini supérieur ou égal à `1`.
-`NaN`, l’infini, les booléens et les chaînes numériques sont refusés.
+Les cinq limites entières doivent être de **vrais entiers Lua strictement
+positifs**. Les flottants, même écrits `10.0`, les booléens, les chaînes
+numériques, zéro et les valeurs supérieures au plafond sont refusés.
+`max_compression_ratio` doit être un nombre fini supérieur ou égal à `1` ;
+`NaN` et l’infini sont refusés. Une clé inconnue est toujours une erreur.
 
-Indépendamment des options, la somme des longueurs des noms d’entrées est
-bornée en interne à 64 Mio. Cette limite fixe borne la mémoire consacrée aux
-métadonnées, y compris lorsque `max_entries` est relevé explicitement.
-Les allocations réalisées par le lecteur ZIP miniz sont en outre plafonnées à
-128 Mio par archive. Le répertoire central et ses commentaires ne peuvent donc
-pas provoquer une allocation mémoire arbitraire avant l’application des
-limites entrée par entrée. L’inspection TAR fonctionne en flux : Babet lit les
-données de chaque entrée sans les conserver en mémoire, à la fois pour atteindre
-l’en-tête suivant et pour détecter les données tronquées. Pour TAR gzip, Babet
-effectue en plus une validation progressive et bornée avec zlib, car libarchive
-ne vérifie pas lui-même le CRC/ISIZE de la bande-annonce gzip ; les bandes-
-annonces corrompues et les données finales non gzip sont donc refusées. Le
-bourrage nul standard après un membre gzip reste accepté. Pour TAR zstd, Babet
-effectue une validation progressive et bornée indépendante avec libzstd : les
-frames complètes et les frames concaténées valides sont acceptées, tandis que
-corruption, troncature ou données finales étrangères sont refusées avant
-publication.
+`max_path_length` borne la quantité de métadonnées que Babet accepte de lire ;
+elle ne rend pas un long chemin extractible. La politique de sécurité de
+l’extraction reste plus stricte : un nom de plus de **4096 octets** est signalé
+par `list()` avec `safe_path = false`, même lorsque sa longueur reste sous
+`max_path_length`. Avec la valeur par défaut, il est donc possible d’inspecter
+et de diagnostiquer un nom de 4097 octets sans jamais autoriser son extraction.
+L’appelant peut réduire `max_path_length` afin de refuser l’archive avant même
+la construction de la table Lua.
 
-Pour une extraction complète, l’arbre de sortie est aussi borné en interne à
-100000 répertoires uniques, parents implicites compris, et à 64 Mio de chemins
-de répertoires normalisés cumulés. Une poignée d’entrées extrêmement profondes
-ne peut donc pas provoquer une explosion non bornée du nombre de `mkdir` ou de
-la mémoire consacrée aux préfixes.
+`max_total_name_bytes` vaut déjà son plafond fixe par défaut. Elle permet de
+resserrer le budget de noms pour une archive non fiable, mais pas de l’élargir.
+Le résultat de `list()` expose la consommation réelle dans
+`total_name_bytes`. Les allocations internes du lecteur ZIP miniz sont en
+outre plafonnées à 128 Mio par archive, de sorte qu’un répertoire central ou
+des commentaires ZIP excessifs ne puissent pas provoquer une allocation
+arbitraire avant les contrôles entrée par entrée.
 
-Ces limites sont appliquées pendant l’inspection de **toute l’archive**, y
-compris avec `list()` et `extractFile()`. Ainsi, `extractFile()` ne contourne
-pas la politique globale en sélectionnant une petite entrée au milieu d’une
-archive dont les métadonnées annoncent une expansion excessive.
+L’inspection TAR fonctionne en flux : Babet lit les données de chaque entrée
+sans les conserver en mémoire, afin d’atteindre l’en-tête suivant et de
+détecter les contenus tronqués. Pour TAR gzip, une validation progressive et
+bornée avec zlib contrôle aussi CRC et ISIZE de chaque membre ; le bourrage nul
+standard reste accepté, mais une bande-annonce corrompue ou des octets finaux
+étrangers sont refusés. Pour TAR zstd, une validation progressive indépendante
+avec libzstd exige des frames complètes, accepte les frames concaténées valides
+et refuse corruption, troncature ou données finales étrangères. Les filtres xz
+et bzip2 restent entièrement consommés par libarchive.
 
-Une entrée non vide qui annonce une taille compressée nulle est toujours
-refusée. Les répertoires ne comptent pas dans `max_entry_size`,
-`max_total_size` ni le rapport de compression, mais ils comptent dans
-`max_entries`.
+Pour une extraction complète, l’arbre de sortie est également borné en interne
+à 100000 répertoires uniques, parents implicites compris, et à 64 Mio de chemins
+de répertoires normalisés cumulés. Ces plafonds fixes ne sont pas réglables.
 
-Exemple :
+Une entrée non vide qui annonce une taille compressée nulle est refusée. Les
+répertoires ne comptent ni dans `max_entry_size`, ni dans `max_total_size`, ni
+dans le rapport de compression, mais ils comptent dans `max_entries` et dans
+les budgets de noms.
+
+### Un exemple par limite
+
+Limiter seulement le nombre d’entrées :
 
 ```lua
-local info, err = babet.archive.list("upload.zip", {
+local result, err = babet.archive.test("upload.zip", {
+    max_entries = 2000,
+})
+assert(result, err)
+```
+
+Limiter seulement la taille d’une entrée :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_entry_size = 64 * 1024 * 1024,
+})
+assert(result, err)
+```
+
+Limiter seulement la taille totale annoncée :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_total_size = 512 * 1024 * 1024,
+})
+assert(result, err)
+```
+
+Limiter seulement la longueur d’un nom brut :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_path_length = 8192,
+})
+assert(result, err)
+```
+
+Limiter seulement le budget cumulé des noms :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_total_name_bytes = 2 * 1024 * 1024,
+})
+assert(result, err)
+```
+
+Limiter seulement le rapport de compression :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_compression_ratio = 200,
+})
+assert(result, err)
+```
+
+Combiner toutes les protections pour une archive reçue d’un tiers :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
     max_entries = 2000,
     max_entry_size = 64 * 1024 * 1024,
     max_total_size = 512 * 1024 * 1024,
+    max_path_length = 8192,
+    max_total_name_bytes = 2 * 1024 * 1024,
     max_compression_ratio = 200,
 })
+assert(result, err)
 ```
 
-Les clés inconnues sont refusées. Les options propres à la création et à
-l’extraction ne sont pas acceptées par `list()`.
+Les options propres à la création ou à l’écriture, telles que `overwrite`,
+`preserve_permissions`, `format`, `dry_run`, `include` ou `exclude`, ne sont
+pas acceptées par `list()` ou `test()`.
 
 <a id="babetarchivelist"></a>
 
@@ -416,86 +487,555 @@ local info, err = babet.archive.list(archive [, opts])
 ```
 
 `archive` est le chemin d’un fichier ZIP, TAR brut, TAR gzip, TAR xz, TAR
-bzip2 ou TAR zstd.
-L’extension ne sert pas à la détection. Le chemin peut être un symlink vers un fichier
-régulier : Babet ouvre une seule fois sa cible et conserve ce même descripteur
-pendant toute l’analyse. Les répertoires, FIFO, sockets et périphériques sont
-refusés avant l’analyse du format ; l’ouverture non bloquante évite notamment
-qu’un FIFO sans écrivain suspende `list()`.
+bzip2 ou TAR zstd. Le format et la compression sont détectés par le **contenu**,
+jamais par l’extension : un TAR zstd nommé `sauvegarde.bin` est reconnu, tandis
+qu’un fichier nommé `sauvegarde.tar.zst` mais contenant autre chose est refusé.
+Les suffixes usuels `.tar`, `.tar.gz`, `.tgz`, `.tar.xz`, `.txz`, `.tar.bz2`,
+`.tbz`, `.tbz2`, `.tar.zst`, `.tar.zstd` et `.tzst` ne sont donc que des
+conventions de nommage.
 
-Pour un ZIP, Babet essaie d’abord le lecteur miniz existant. Si le même fichier
-épinglé n’est pas un ZIP, Babet rembobine ce descripteur et n’active que le
-lecteur TAR de libarchive avec les filtres intégrés `none`, `gzip`, `xz`,
-`bzip2` et `zstd`.
-Aucun décompresseur externe ne peut être lancé par ce chemin. Les archives TAR
-concaténées sont parcourues intégralement ; les données finales qui ne forment
-pas un TAR, les contenus tronqués et les données attachées à une entrée non
-régulière sont refusés. La fonction applique ensuite les limites précédentes et
-renvoie :
+Le chemin source peut être un symlink vers un fichier régulier. Babet ouvre sa
+cible une seule fois et conserve ce même descripteur pendant toute l’analyse.
+Les répertoires, FIFO, sockets et périphériques sont refusés avant l’analyse du
+format ; l’ouverture non bloquante empêche notamment qu’un FIFO sans écrivain
+suspende l’appel.
+
+Babet essaie d’abord le lecteur ZIP miniz. Si le fichier épinglé n’est pas un
+ZIP, le même descripteur est rembobiné puis confié au lecteur TAR libarchive,
+avec uniquement les filtres intégrés `none`, `gzip`, `xz`, `bzip2` et `zstd`.
+Aucun décompresseur externe n’est lancé. Les archives ZIP fractionnées et les
+archives multivolumes ne sont pas prises en charge. Une archive standard vide
+est valide et renvoie `count = 0`.
+
+`list()` ne crée **aucun fichier, aucun dossier et aucun fichier temporaire**.
+Elle conserve l’ordre physique/logique des entrées tel qu’il apparaît dans
+l’archive : aucun tri, aucune déduplication et aucune réorganisation ne sont
+effectués. `entries[1]` représente toujours la première entrée rencontrée,
+`entries[2]` la deuxième, etc. Cette stabilité permet aux champs `index`,
+`duplicate_of` et `conflict_with` de référencer directement la table retournée.
+
+La fonction renvoie exactement deux valeurs : `(info, nil)` en cas de succès
+et `(nil, message)` en cas d’échec.
+
+### Structure retournée
 
 ```lua
 {
     format = "zip",           -- "zip" ou "tar"
-    compression = "none",    -- "none", "gzip", "xz", "bzip2" ou "zstd" pour TAR
+    compression = "none",    -- "none", "gzip", "xz", "bzip2" ou "zstd"
     entries = {
         {
-            name = "docs/readme.txt", -- nom brut de l’entrée
-            path = "docs/readme.txt", -- chemin normalisé pour l’extraction
-            type = "file",            -- voir les types d’entrées pris en charge ci-dessous
+            index = 1,
+            name = "docs/readme.txt", -- nom brut, chaîne Lua binaire
+            path = "docs/readme.txt", -- chemin normalisé si safe_path == true
+            valid_utf8 = true,
+            type = "file",
             size = 1234,
-            compressed_size = 530,
-            crc32 = 305419896,         -- entier non signé sur 32 bits
-            compression_method = 8,
+
+            compressed_size = 530,     -- ZIP uniquement, sinon nil
+            crc32 = 305419896,          -- ZIP uniquement, sinon nil
+            compression_method = 8,    -- ZIP uniquement, sinon nil
             encrypted = false,
             supported = true,
+
             safe_path = true,
             extractable = true,
             reason = nil,
-            unix_mode = 420,           -- 0644, ou nil sans mode Unix
+
+            unix_mode = 420,            -- 0644, ou nil
+            mtime = 1750000000,         -- secondes Unix, ou nil
+            mtime_nsec = nil,           -- TAR uniquement, ou nil
+            uid = nil,                  -- TAR uniquement, ou nil
+            gid = nil,                  -- TAR uniquement, ou nil
             sparse = false,
-            link_target = nil,         -- cible d’un symlink/hard link TAR
+            link_target = nil,
+
+            duplicate = false,
+            duplicate_of = nil,
+            conflict = false,
+            conflict_with = nil,
+            conflict_reason = nil,
         },
     },
     count = 1,
     total_size = 1234,
     archive_size = 666,
+    total_name_bytes = 19,
+    duplicates = 0,
+    conflicts = 0,
     zip64 = false,             -- nil pour TAR
 }
 ```
 
-`path` retire le `/` terminal d’une entrée répertoire. Il n’est renseigné de
-façon utile que si `safe_path == true`.
+`format` décrit le conteneur. Pour ZIP, `compression` vaut toujours `"none"`,
+car la compression est choisie entrée par entrée et apparaît dans
+`compression_method`. Pour TAR, `compression` vaut `"none"`, `"gzip"`,
+`"xz"`, `"bzip2"` ou `"zstd"` selon le filtre détecté.
 
-Pour un ZIP, `extractable` indique que l’entrée possède un chemin acceptable,
-un type pris en charge, une méthode de compression comprise par miniz et
-qu’elle n’est pas chiffrée. Pour un TAR, les fichiers réguliers et répertoires
-sûrs sont extractibles. Les fichiers sparse, symlinks, hard links, FIFO,
-périphériques et autres types spéciaux TAR sont inspectés mais refusés avec une
-raison explicite. `extractable` ne prédit jamais les conflits avec la
-destination ni les doublons entre entrées.
+`count` est le nombre d’éléments de `entries`. `total_size` est la somme des
+tailles déclarées des entrées non répertoire. `archive_size` est la taille du
+fichier d’archive épinglé. `total_name_bytes` est la somme exacte des longueurs
+en octets des champs `name`. `zip64` est un booléen pour ZIP et vaut `nil` pour
+TAR.
 
-Les champs propres au ZIP conservent leurs valeurs exactes antérieures. Pour un
-TAR, `compressed_size`, `crc32` et `compression_method` valent `nil`, car TAR ne
-porte ni compression ni CRC par entrée. `encrypted` vaut `false`, `supported`
-indique que libarchive a pu analyser l’entrée, et `sparse` signale les
-métadonnées de fichier creux. `link_target` contient la cible brute annoncée
-pour un symlink ou hard link TAR lorsque libarchive l’expose, et vaut `nil`
-sinon. Les types TAR retournés
-par ce lot sont `file`, `directory`, `symlink`, `hardlink`, `fifo`,
-`character_device`, `block_device`, `socket` et `unsupported`.
+### Champs communs à chaque entrée
 
-`unix_mode` contient uniquement les bits `0000` à `7777` annoncés par une
-archive créée sur un système Unix. Il vaut `nil` lorsque cette information
-n’existe pas. La présence d’un mode ne signifie pas qu’il sera conservé : voir
-[`preserve_permissions`](#permissions).
+- `index` est l’indice Lua 1-based de l’entrée dans l’ordre de l’archive ;
+- `name` conserve le nom brut sous forme de chaîne Lua binaire ;
+- `path` est la forme normalisée prévue pour l’extraction. Un `/` terminal de
+  répertoire est retiré. Ce champ n’est utilisable comme chemin que lorsque
+  `safe_path == true` ; il peut être vide pour une entrée dangereuse ;
+- `valid_utf8` indique si `name` est un encodage UTF-8 strictement valide.
+  Babet ne convertit, ne remplace et ne normalise jamais les octets ;
+- `type` vaut `file`, `directory`, `symlink`, `hardlink`, `fifo`,
+  `character_device`, `block_device`, `socket` ou `unsupported` ;
+- `size` est la taille décompressée déclarée. Pour un répertoire ou un objet
+  spécial elle vaut normalement `0`, selon les métadonnées réellement lues ;
+- `safe_path` ne juge que le nom : chemin relatif, séparateur `/`, composants
+  non vides, absence de `.` et `..`, absence de préfixe de lecteur Windows,
+  absence d’octet NUL, type cohérent avec un `/` terminal et longueur maximale
+  extractible de 4096 octets ;
+- `extractable` juge l’entrée isolément : chemin sûr, type autorisé, absence de
+  chiffrement et méthode prise en charge. Il ne tient volontairement pas compte
+  d’un doublon ou d’une collision avec une autre entrée ; consulter aussi
+  `duplicate` et `conflict` ;
+- `reason` vaut `nil` lorsque l’entrée est isolément extractible, sinon une
+  raison stable telle que `symlink entries are refused` ou
+  `entry path contains '.' or '..'` ;
+- `unix_mode` contient les bits `0000` à `7777` lorsqu’ils sont disponibles,
+  sinon `nil`. La valeur décimale `420` correspond à `0644` ;
+- `mtime` est l’heure de modification en secondes depuis l’époque Unix lorsque
+  le backend peut la fournir, sinon `nil` ;
+- `mtime_nsec` est la partie nanoseconde d’un timestamp TAR lorsque celui-ci
+  est présent. Elle vaut `nil` pour ZIP ;
+- `uid` et `gid` sont les identifiants numériques TAR lorsqu’ils sont
+  explicitement présents, sinon `nil`. Ils valent toujours `nil` pour ZIP ;
+- `sparse` signale un fichier TAR creux ;
+- `link_target` contient la cible brute d’un symlink ou d’un hard link TAR
+  lorsque libarchive l’expose, sinon `nil`.
 
-Les noms ZIP lus dans une archive existante sont des chaînes d’octets. Les
-chemins TAR sont les chaînes natives renvoyées par libarchive après traitement
-des en-têtes TAR, y compris les préfixes ustar, noms longs GNU et champs `path`
-pax. Les comparaisons sont exactes et sensibles à la casse, et Babet
-n’effectue aucune normalisation Unicode supplémentaire. Cette tolérance
-d’inspection n’affaiblit pas `create()`, qui n’émet que des
-noms UTF-8 valides en ZIP comme en TAR.
+Pour ZIP, `mtime` provient du timestamp DOS de l’entrée converti par miniz en
+`time_t`. Le format ZIP ne stocke ni fuseau horaire ni nanosecondes : la valeur
+est donc une information de calendrier locale à interpréter avec prudence.
+Pour TAR, `mtime` peut être négatif ou supérieur à la plage DOS et
+`mtime_nsec` conserve la précision disponible. L’absence d’une métadonnée est
+toujours représentée par `nil`, jamais par une valeur inventée.
+
+### Champs propres au ZIP
+
+`compressed_size`, `crc32` et `compression_method` reprennent les métadonnées
+du répertoire central ZIP. `encrypted` signale le drapeau de chiffrement et
+`supported` indique si miniz reconnaît la méthode de compression. Ces champs
+permettent l’inspection, mais `crc32` n’est pas une preuve d’intégrité :
+`list()` ne décompresse pas tous les payloads ZIP. Une archive peut donc avoir
+un répertoire central lisible tout en contenant une donnée compressée dont le
+CRC ne sera détecté qu’à la lecture/extraction. Pour une validation complète des en-têtes locaux, des données et des CRC,
+utiliser [`archive.test()`](#babetarchivetest).
+
+Pour TAR, `compressed_size`, `crc32` et `compression_method` valent `nil`,
+`encrypted` vaut `false`, et `supported` indique que l’en-tête a pu être
+interprété. La compression éventuelle concerne le flux TAR entier et apparaît
+dans le champ global `compression`.
+
+### Noms binaires, chemins dangereux et normalisation
+
+Les noms ZIP sont des chaînes d’octets issues du répertoire central. Les noms
+TAR sont les chaînes natives fournies par libarchive après traitement des
+préfixes ustar, noms longs GNU et champs pax `path`. Les comparaisons sont
+exactes, orientées octets et sensibles à la casse. Aucune normalisation Unicode
+n’est appliquée : deux représentations Unicode visuellement identiques restent
+deux noms distincts. Un nom UTF-8 invalide est conservé et signalé par
+`valid_utf8 = false` ; il n’est pas automatiquement déclaré dangereux si les
+autres règles de chemin sont respectées.
+
+Les chemins absolus, les composants `.` ou `..`, les doubles `/`, les
+backslashes, les préfixes `C:`, les noms vides, les octets NUL et les noms de
+plus de 4096 octets sont signalés par `safe_path = false` et une `reason`
+explicite. `list()` continue à inspecter les autres entrées tant que les limites
+de métadonnées restent respectées. Elle ne tente jamais de corriger silencieusement
+un chemin dangereux.
+
+### Doublons et collisions
+
+Les diagnostics sont attachés à la **deuxième occurrence et aux suivantes** :
+
+- `duplicate = true` signifie que le même champ `name`, octet pour octet, a déjà
+  été rencontré. `duplicate_of` contient l’indice de la première occurrence ;
+- `conflict = true` signifie que le chemin de sortie sûr et normalisé de cette
+  entrée ne peut pas coexister avec une entrée antérieure. `conflict_with`
+  contient l’indice antérieur retenu et `conflict_reason` vaut actuellement
+  `duplicate output path` ou `file/directory path conflict` ;
+- `duplicates` compte les occurrences exactes supplémentaires ;
+- `conflicts` compte les occurrences supplémentaires qui rendraient le plan
+  d’extraction ambigu ou impossible.
+
+Un doublon exact dont le chemin est sûr est donc à la fois un `duplicate` et un
+`conflict`. Deux noms bruts différents, par exemple `docs/` et `docs`, ne sont
+pas des doublons, mais ils entrent en collision après normalisation et le second
+porte `conflict = true`. Une entrée dangereuse peut être signalée comme doublon
+brut, mais elle n’entre pas dans le calcul des collisions de sortie puisqu’elle
+n’a pas de chemin d’extraction sûr.
+
+`list()` ne transforme pas ces diagnostics en erreur : son rôle est précisément
+de permettre l’examen d’une archive suspecte. `extract()` continue en revanche
+à refuser les doublons et collisions avant toute écriture.
+
+Exemple de diagnostic :
+
+```lua
+local info, err = babet.archive.list("upload.zip")
+assert(info, err)
+
+for _, entry in ipairs(info.entries) do
+    if not entry.safe_path then
+        print(entry.index, entry.name, entry.reason)
+    elseif entry.duplicate then
+        print(entry.index, "duplique l’entrée", entry.duplicate_of)
+    elseif entry.conflict then
+        print(entry.index, entry.conflict_reason,
+            "avec l’entrée", entry.conflict_with)
+    end
+end
+```
+
+### Exemples d’utilisation
+
+Afficher simplement le contenu dans l’ordre de l’archive :
+
+```lua
+local info, err = babet.archive.list("backup.tar.zst")
+assert(info, err)
+
+print(info.format, info.compression, info.count)
+for _, entry in ipairs(info.entries) do
+    print(entry.index, entry.type, entry.path, entry.size)
+end
+```
+
+Exploiter les métadonnées disponibles sans supposer qu’elles existent :
+
+```lua
+local info, err = babet.archive.list("package.zip")
+assert(info, err)
+
+for _, entry in ipairs(info.entries) do
+    if entry.mtime ~= nil then
+        print(entry.name, os.date("%Y-%m-%d %H:%M:%S", entry.mtime))
+    end
+    if entry.unix_mode ~= nil then
+        print(string.format("mode=%04o", entry.unix_mode))
+    end
+    if entry.uid ~= nil then
+        print("uid/gid", entry.uid, entry.gid)
+    end
+end
+```
+
+Refuser soi-même toute archive ambiguë avant de poursuivre un traitement :
+
+```lua
+local info, err = babet.archive.list("upload.zip")
+assert(info, err)
+
+if info.duplicates ~= 0 or info.conflicts ~= 0 then
+    error("archive ambiguë")
+end
+
+for _, entry in ipairs(info.entries) do
+    if not entry.safe_path or not entry.extractable then
+        error((entry.reason or "entrée refusée") .. ": " .. entry.name)
+    end
+end
+```
+
+Traiter correctement un nom non UTF-8 :
+
+```lua
+local info, err = babet.archive.list("legacy.zip")
+assert(info, err)
+
+for _, entry in ipairs(info.entries) do
+    if not entry.valid_utf8 then
+        -- La chaîne reste binaire : afficher les octets plutôt que la passer
+        -- à une interface qui exige du texte UTF-8.
+        local bytes = {}
+        for i = 1, #entry.name do
+            bytes[#bytes + 1] = string.format("%02x", entry.name:byte(i))
+        end
+        print(entry.index, table.concat(bytes))
+    end
+end
+```
+
+Utiliser `list()` dans un worker :
+
+```lua
+local worker, err = babet.workers.spawn([[
+local info, list_err = babet.archive.list(worker.args.archive, {
+    max_entries = 5000,
+})
+if not info then error(list_err) end
+return {
+    format = info.format,
+    compression = info.compression,
+    count = info.count,
+    duplicates = info.duplicates,
+    conflicts = info.conflicts,
+}
+]], { archive = "backup.tar.zst" })
+assert(worker, err)
+
+local joined, result = worker:join()
+assert(joined, result)
+print(result.format, result.count)
+```
+
+La fonction et tous ses champs ont le même comportement dans l’état Lua
+principal, en mode dossier, en mode embarqué et dans les workers.
+
+### Ce que `list()` valide — et ce qu’elle ne garantit pas
+
+Pour ZIP, Babet valide la structure nécessaire à l’ouverture et à la lecture du
+répertoire central, les nombres et tailles annoncés, les chemins et les limites.
+Les données compressées des fichiers ne sont pas toutes lues : un CRC de
+payload invalide peut donc rester invisible à ce stade.
+
+Pour TAR et TAR compressé, atteindre l’en-tête suivant impose de consommer les
+données de chaque entrée ; Babet détecte ainsi de nombreuses troncatures,
+en-têtes invalides et erreurs du flux externe. Cette lecture complète ne change
+pas le rôle de l’API : `list()` retourne un inventaire, tandis que [`archive.test()`](#babetarchivetest) transforme la lecture
+complète et les règles de sécurité agrégées en un verdict strict.
+
+Une archive techniquement lisible mais contenant des chemins dangereux, liens
+ou objets spéciaux est volontairement retournée avec ses diagnostics. Une
+archive dont le format est inconnu, dont la structure ne peut pas être lue, qui
+dépasse une limite ou dont le flux TAR est tronqué renvoie `(nil, message)`.
+
+
+
+<a id="babetarchivetest"></a>
+
+## `babet.archive.test`
+
+```lua
+local result, err = babet.archive.test(archive [, opts])
+```
+
+`test()` vérifie intégralement une archive **sans rien extraire et sans rien
+écrire**. Elle accepte les mêmes formats détectés par contenu que `list()` :
+ZIP, TAR brut, TAR gzip, TAR xz, TAR bzip2 et TAR zstd. Elle accepte exactement
+les mêmes six limites anti-bombe documentées plus haut et refuse toute autre
+option.
+
+Le contrat est volontairement strict : un succès signifie que l’archive est à
+la fois **techniquement valide** et **entièrement sûre selon les règles
+d’extraction de Babet**. Une archive lisible mais contenant un chemin dangereux,
+un doublon, une collision, un symlink, un hard link, un fichier sparse, un
+objet spécial, une entrée chiffrée ou une méthode ZIP non prise en charge
+renvoie donc `(nil, message)`. `test()` ne renvoie pas une table `warnings` ni
+un champ `safe = false` : pour obtenir un inventaire détaillé d’une archive
+suspecte sans la valider, utiliser `list()`.
+
+Le chemin source suit le même contrat que `list()` : un symlink vers un fichier
+régulier est accepté, tandis qu’un répertoire, FIFO, socket ou périphérique est
+refusé sans blocage. Le fichier ouvert est épinglé par descripteur pendant toute
+la vérification. L’extension ne participe jamais au choix du backend.
+
+### Vérifications techniques
+
+Pour un ZIP, Babet contrôle notamment :
+
+- les métadonnées EOCD et ZIP64, avec refus des archives fractionnées ou
+  multivolumes ;
+- le répertoire central et les limites annoncées ;
+- l’en-tête local de **chaque** entrée, y compris les fichiers vides et les
+  répertoires ;
+- l’identité du nom local et du nom central, les drapeaux, la méthode, les
+  tailles, le CRC, les champs ZIP64 locaux et les data descriptors, avec
+  ou sans signature ;
+- les bornes de chaque zone locale, l’absence de chevauchement entre entrées et
+  l’absence de recouvrement avec le répertoire central ;
+- la décompression complète de chaque entrée non répertoire, la taille réellement
+  produite et son CRC.
+
+Pour TAR, le lecteur consomme l’intégralité des données et vérifie les en-têtes,
+checksums TAR disponibles, tailles, troncatures, padding et données finales.
+Pour TAR gzip, xz, bzip2 ou zstd, le flux de compression est lui aussi consommé
+jusqu’à sa fin ; les erreurs d’intégrité, frames ou membres tronqués et octets
+finaux étrangers sont refusés selon les garanties du codec et du backend.
+
+Une archive vide correctement formée est valide. Une erreur de lecture, un
+format inconnu, une structure ambiguë, une limite dépassée ou une incohérence
+entre métadonnées et données provoque `(nil, message)`.
+
+### Vérifications de sécurité
+
+Après la validation technique, Babet applique aux entrées, dans leur ordre
+d’archive, les mêmes règles que l’extraction réelle :
+
+- chemin relatif non vide utilisant uniquement `/`, sans `.` ni `..`, sans
+  double séparateur, backslash, préfixe de lecteur ou octet NUL ;
+- longueur extractible maximale de 4096 octets ;
+- uniquement des fichiers réguliers et répertoires ordinaires ;
+- aucun symlink, hard link, FIFO, socket, périphérique, objet non pris en charge
+  ou fichier sparse ;
+- aucun doublon exact, doublon de chemin de sortie ou conflit fichier/dossier ;
+- aucune entrée ZIP chiffrée ou utilisant une méthode non prise en charge.
+
+Le premier diagnostic est déterministe : Babet conserve l’ordre de lecture de
+l’archive et arrête la vérification au premier échec selon les phases ci-dessus.
+Un succès garantit donc que `files + directories == entries`.
+
+### Structure retournée
+
+```lua
+{
+    format = "tar",
+    compression = "zstd",
+    entries = 42,
+    files = 35,
+    directories = 7,
+    total_size = 12345678,
+    archive_size = 3456789,
+    total_name_bytes = 812,
+    zip64 = nil,
+}
+```
+
+- `format` vaut `"zip"` ou `"tar"` ;
+- `compression` vaut `"none"`, `"gzip"`, `"xz"`, `"bzip2"` ou `"zstd"` ;
+- `entries`, `files` et `directories` comptent les entrées validées ;
+- `total_size` est la somme des tailles décompressées des fichiers réguliers ;
+- `archive_size` est la taille en octets du fichier archive épinglé ;
+- `total_name_bytes` est la somme des longueurs brutes des noms ;
+- `zip64` est un booléen pour ZIP et `nil` pour TAR.
+
+La fonction renvoie exactement `(result, nil)` en cas de succès et
+`(nil, message)` en cas d’échec.
+
+### Exemples d’utilisation
+
+Vérifier simplement une archive avant de la conserver :
+
+```lua
+local result, err = babet.archive.test("upload.zip")
+if not result then
+    io.stderr:write("archive refusée : ", err, "\n")
+    return 1
+end
+
+print(result.format, result.entries, result.total_size)
+```
+
+Vérifier un TAR compressé, même lorsque son extension est trompeuse :
+
+```lua
+local result, err = babet.archive.test("sauvegarde.bin")
+assert(result, err)
+assert(result.format == "tar")
+assert(result.compression == "zstd")
+```
+
+Resserrer uniquement le nombre d’entrées :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_entries = 500,
+})
+assert(result, err)
+```
+
+Resserrer uniquement la taille d’un fichier :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_entry_size = 16 * 1024 * 1024,
+})
+assert(result, err)
+```
+
+Resserrer uniquement la taille totale :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_total_size = 128 * 1024 * 1024,
+})
+assert(result, err)
+```
+
+Resserrer uniquement la longueur des noms :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_path_length = 4096,
+})
+assert(result, err)
+```
+
+Resserrer uniquement le budget cumulé des noms :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_total_name_bytes = 1024 * 1024,
+})
+assert(result, err)
+```
+
+Resserrer uniquement le rapport de compression :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_compression_ratio = 100,
+})
+assert(result, err)
+```
+
+Combiner toutes les limites pour une archive non fiable :
+
+```lua
+local result, err = babet.archive.test("upload.zip", {
+    max_entries = 500,
+    max_entry_size = 16 * 1024 * 1024,
+    max_total_size = 128 * 1024 * 1024,
+    max_path_length = 4096,
+    max_total_name_bytes = 1024 * 1024,
+    max_compression_ratio = 100,
+})
+assert(result, err)
+```
+
+Distinguer une inspection diagnostique d’un verdict strict :
+
+```lua
+local info, list_err = babet.archive.list("upload.zip")
+assert(info, list_err)
+
+local verified, test_err = babet.archive.test("upload.zip")
+if not verified then
+    print("contenu visible mais archive refusée :", test_err)
+end
+```
+
+Utiliser `test()` dans un worker :
+
+```lua
+local worker, err = babet.workers.spawn([[
+local result, test_err = babet.archive.test(worker.args.archive, {
+    max_entries = 2000,
+    max_total_size = 512 * 1024 * 1024,
+})
+if not result then error(test_err) end
+return result
+]], { archive = "backup.tar.zst" })
+assert(worker, err)
+
+local joined, result = worker:join()
+assert(joined, result)
+print(result.format, result.compression, result.entries)
+```
+
+Le comportement et le contrat de retour sont identiques en mode dossier, en
+mode embarqué, en mode embarqué via `PATH` et dans les workers.
 
 <a id="babetarchiveextract"></a>
 
@@ -509,64 +1049,364 @@ local result, err = babet.archive.extract(
 )
 ```
 
-Options supplémentaires :
+`archive` peut être un ZIP, un TAR brut, un TAR gzip, un TAR xz, un TAR bzip2
+ou un TAR zstd. Le format et la compression sont détectés par le contenu, pas
+par l'extension.
+
+Options acceptées :
 
 | Option | Défaut | Comportement |
-| --- | --- | --- |
-| `overwrite` | `false` | autorise le remplacement atomique d’un fichier régulier existant |
-| `preserve_permissions` | `false` | conserve les bits Unix ordinaires `rwx` lorsqu’ils sont disponibles |
+| --- | ---: | --- |
+| `overwrite` | `false` | autorise le remplacement atomique d'un fichier régulier existant |
+| `dry_run` | `false` | prévisualise l'extraction et vérifie les données sélectionnées sans modifier le système de fichiers |
+| `preserve_permissions` | `false` | conserve les bits Unix ordinaires `rwx` lorsqu'ils sont disponibles |
+| `include` | aucune | tableau dense de globs sûrs sélectionnant les chemins internes normalisés |
+| `exclude` | aucune | tableau dense de globs sûrs retirés après inclusion ; l'exclusion gagne toujours |
+| `max_entries` | `10000` | nombre maximal d'entrées analysées ; plafond fixe `100000` |
+| `max_entry_size` | `256 * 1024 * 1024` | taille décompressée maximale d'une entrée ; plafond fixe 8 Gio |
+| `max_total_size` | `1024 * 1024 * 1024` | somme maximale des tailles déclarées ; plafond fixe 64 Gio |
+| `max_path_length` | `64 * 1024` | longueur maximale d'un nom brut ; plafond fixe 1 Mio |
+| `max_total_name_bytes` | `64 * 1024 * 1024` | somme maximale des longueurs de noms ; plafond fixe 64 Mio |
+| `max_compression_ratio` | `1000` | rapport décompressé/compressé maximal, entre `1` et `1000000000` |
 
-Ces deux valeurs doivent être de vrais booléens Lua.
+Les booléens doivent être de vrais booléens Lua, les limites entières de vrais
+entiers Lua strictement positifs et `max_compression_ratio` un nombre fini. Les
+clés inconnues, les arguments supplémentaires et les options propres à
+`create()` sont refusés. `dry_run`, `include` et `exclude` ne sont acceptées que
+par `extract()`, pas par `list()`, `test()` ni `extractFile()`.
 
-`archive` peut être un ZIP, un TAR brut, un TAR gzip, un TAR xz, un TAR bzip2
-ou un TAR zstd ;
-format et compression sont détectés par le contenu, pas par l’extension. Avant toute écriture de fichier, Babet :
+### Sélection par globs sûrs
 
-1. inspecte intégralement l’archive et applique les limites ;
-2. refuse toute entrée non extractible ;
-3. refuse les chemins de sortie dupliqués ;
-4. refuse les conflits où un même chemin devrait être à la fois fichier et
-   répertoire ;
-5. vérifie les éléments déjà présents dans la destination.
+`include` et `exclude` réutilisent exactement le même moteur borné que
+[`archive.create()`](#babetarchivecreate). Il n'existe pas de second moteur ni
+de variante propre à l'extraction.
 
-Pour un TAR, Babet relit ensuite le **même fichier épinglé** depuis le début,
-compare chaque en-tête avec le plan issu de l’inspection, puis transmet les
-blocs des fichiers réguliers à la couche de destination sécurisée. Une entrée
-ajoutée, supprimée ou dont les métadonnées diffèrent entre les deux passes fait
-échouer l’opération. Cette vérification ne constitue pas un instantané : une
-modification concurrente de données de même taille peut encore être détectée
-par une erreur de lecture, mais n’est pas garantie d’être distinguée si les
-en-têtes restent identiques.
+Une liste `include` absente ou vide conserve le comportement historique et
+sélectionne initialement toutes les entrées. Avec une liste `include` non vide,
+une entrée est retenue si au moins un motif correspond. `exclude` est appliqué
+ensuite et gagne toujours, même lorsqu'un chemin correspond aussi à
+`include`.
 
-Le résultat est :
+Les motifs sont ancrés sur le **chemin interne normalisé complet** de l'entrée,
+avec `/` comme séparateur. Les comparaisons sont orientées octets et sensibles
+à la casse :
+
+- `*` correspond à zéro ou plusieurs octets sauf `/` ;
+- `**` correspond à zéro ou plusieurs octets, y compris `/` ;
+- `?` correspond à exactement un octet sauf `/` ;
+- `\x` protège l'octet suivant `x`.
+
+Un répertoire est testé sous les formes `chemin` et `chemin/`. Exclure
+`src/generated` ou `src/generated/**` exclut donc le répertoire et coupe tout
+son sous-arbre, même si l'archive ne contient pas d'entrée de répertoire
+explicite. Les seuls parents nécessaires aux fichiers retenus sont créés ; un
+répertoire explicite non sélectionné n'est pas créé. Un répertoire vide n'est
+restauré que si son entrée explicite est sélectionnée.
+
+Les mêmes limites que pour la création sont appliquées : chaque motif est
+limité à 4096 octets ; `include` et `exclude` sont limités ensemble à 256
+motifs et 256 Kio de texte, un million d'évaluations et un budget fixe de
+100 000 000 cellules de correspondance par appel. Le graphe normalisé utilisé
+pour propager l'exclusion des répertoires est en outre plafonné à 100000 chemins
+de répertoire uniques et à 64 Mio de texte cumulé. Dépasser une limite fait
+échouer l'opération avant toute publication. L'ordre des motifs ne modifie pas
+la sélection.
+
+### Simulation sans écriture avec `dry_run`
+
+Avec `dry_run = true`, Babet construit exactement le même plan qu'une extraction
+réelle, mais n'appelle aucune opération de création, d'écriture, de chmod, de
+renommage, de suppression ni de publication. L'archive est épinglée et analysée,
+les mêmes limites et filtres sont appliqués, les entrées sélectionnées sont
+validées, puis la destination est parcourue uniquement en lecture avec
+`openat`/`fstatat` et `O_NOFOLLOW`. Aucun dossier racine, parent implicite,
+fichier temporaire ou entrée finale n'est créé.
+
+Le contrôle de destination conserve la politique réelle :
+
+- une racine absente est acceptée et signalée par
+  `would_create_destination = true` ;
+- une racine ou un parent existant qui est un symlink ou un objet non dossier
+  est refusé ;
+- une entrée sélectionnée absente compte dans `would_create` ;
+- un fichier régulier existant compte dans `would_overwrite` uniquement avec
+  `overwrite = true` ; avec `overwrite = false`, l'appel échoue comme
+  l'extraction réelle ;
+- un répertoire explicite sélectionné et déjà présent compte dans
+  `would_skip`, car l'extraction réelle le conserve et ne modifie pas son mode ;
+- un conflit fichier/répertoire ou une cible finale symlinkée reste une erreur.
+
+`would_create`, `would_overwrite` et `would_skip` comptent seulement les
+**entrées explicites sélectionnées dans l'archive**. Leur somme vaut donc
+`entries`. La racine de destination et les parents implicites nécessaires ne
+sont pas inclus dans ces compteurs ; la racine dispose de son booléen séparé.
+Lorsque des filtres actifs ne sélectionnent rien, le comportement reste celui de
+l'extraction réelle : la destination n'est pas inspectée et
+`would_create_destination` vaut `false`. À l'inverse, une archive vide sans
+filtre prévisualise bien la création éventuelle de sa racine.
+
+La simulation vérifie réellement les données qui seraient extraites. Pour ZIP,
+chaque fichier régulier sélectionné est décompressé vers un consommateur nul et
+son CRC est contrôlé ; les payloads ZIP non sélectionnés restent ignorés, comme
+pour l'extraction sélective réelle. Pour TAR, la seconde passe consomme le flux
+complet brut ou compressé et compare de nouveau les en-têtes au plan initial,
+sans transmettre les données au système de fichiers. `archive.test()` reste
+l'API à utiliser lorsqu'il faut vérifier tous les payloads ZIP, y compris ceux
+qui seraient ignorés.
+
+Le résultat décrit un **instantané**. Un autre processus peut modifier la
+destination après le retour de `dry_run`; la simulation n'est donc jamais une
+garantie qu'une extraction ultérieure réussira ni qu'elle produira les mêmes
+compteurs. L'extraction réelle recommence tous les contrôles et épingle les
+descripteurs nécessaires avant toute publication.
+
+### Validation, entrées ignorées et intégrité
+
+Babet épingle d'abord le fichier d'archive et inspecte **toutes les entrées et les métadonnées nécessaires au plan** afin
+d'appliquer les limites globales avant d'ouvrir la destination. La sélection
+est ensuite calculée sur les noms normalisés. Seules les entrées retenues
+participent au plan de sortie :
+
+- un doublon, une collision fichier/répertoire, un lien ou un objet spécial
+  présent uniquement hors sélection n'empêche pas l'extraction ;
+- une entrée dangereuse sélectionnée reste refusée avant toute écriture ;
+- avec une liste `include` non vide, un chemin dangereux sans forme normalisée
+  ne peut correspondre à aucun motif et reste hors sélection ;
+- avec seulement `exclude`, le comportement historique « tout sélectionner »
+  reste actif : un chemin dangereux ne peut pas être rendu sûr par un motif
+  d'exclusion et fait donc échouer l'appel ;
+- les collisions déjà présentes sur le disque mais situées hors sélection ne
+  sont ni remplacées ni modifiées.
+
+Cette politique permet d'extraire une partie sûre d'une archive mixte sans
+présenter `exclude` comme un mécanisme de réparation de chemins invalides.
+Toutes les limites d'entrées, de tailles, de noms et de rapport de compression
+continuent à porter sur l'archive inspectée entière, pas seulement sur les
+fichiers retenus.
+
+Pour ZIP, les payloads ignorés ne sont pas décompressés et leur CRC n'est donc
+pas vérifié par l'extraction sélective. Pour TAR, le lecteur doit avancer dans
+le flux jusqu'aux en-têtes suivants, y compris dans un flux compressé, mais
+`extract()` n'est pas l'API de vérification complète. Appeler
+[`archive.test()`](#babetarchivetest) avant l'extraction lorsqu'il faut garantir
+l'intégrité de **toutes** les entrées, y compris celles qui seront ignorées.
+
+Avant toute publication, Babet refuse les entrées retenues non extractibles,
+les sorties retenues dupliquées, les conflits fichier/répertoire retenus et les
+objets existants incompatibles dans la destination. Les fichiers sélectionnés
+sont préparés dans la destination sécurisée puis publiés atomiquement. Pour
+TAR, le même fichier épinglé est relu depuis le début et chaque en-tête est
+comparé au plan issu de la première passe.
+
+Lorsque des filtres actifs ne sélectionnent rien, l'appel réussit sans créer la
+destination. Sans filtre, une archive vide conserve le comportement historique
+et crée le répertoire racine de destination.
+
+### Valeur de retour
+
+La fonction renvoie exactement `(result, nil)` ou `(nil, message)` :
 
 ```lua
 {
-    files = 12,
-    directories = 3, -- entrées répertoire explicites dans l’archive
-    bytes = 987654,  -- octets décompressés des fichiers
+    entries = 28,     -- entrées réellement sélectionnées
+    files = 24,       -- fichiers réguliers sélectionnés
+    directories = 4, -- répertoires explicites sélectionnés
+    skipped = 15,     -- entrées de l'archive non sélectionnées
+    bytes = 987654,   -- octets décompressés des fichiers sélectionnés
     path = "restauration",
 }
 ```
 
-`directories` ne compte pas les parents implicites créés pour atteindre un
-fichier.
-
-Exemple :
+Avec `dry_run = true`, la même table reçoit en plus :
 
 ```lua
-local result, err = babet.archive.extract("backup.tar", "restore", {
+{
+    dry_run = true,
+    would_create = 20,
+    would_overwrite = 3,
+    would_skip = 5,
+    would_create_destination = false,
+}
+```
+
+Ces champs supplémentaires sont absents d'une extraction réelle afin de ne pas
+modifier son contrat historique. `directories` ne compte pas les parents
+implicites créés pour atteindre un fichier. `entries == files + directories`
+pour une extraction réussie, puisque les liens et objets spéciaux sélectionnés
+sont refusés. En simulation réussie, `would_create + would_overwrite +
+would_skip == entries`. `skipped` vaut `0` lorsqu'aucun filtre n'est actif.
+
+### Exemples
+
+Prévisualiser une extraction vers une destination absente :
+
+```lua
+local plan, err = babet.archive.extract("backup.zip", "restore", {
+    dry_run = true,
+})
+assert(plan, err)
+assert(plan.dry_run == true)
+assert(plan.would_create_destination == true)
+assert(not babet.fileExists("restore"))
+```
+
+Prévisualiser les remplacements autorisés dans une destination existante :
+
+```lua
+local plan, err = babet.archive.extract("backup.tar.zst", "restore", {
+    dry_run = true,
+    overwrite = true,
+    preserve_permissions = true,
+})
+assert(plan, err)
+print(plan.would_create, plan.would_overwrite, plan.would_skip)
+```
+
+Sans `overwrite = true`, un fichier final déjà présent reste une erreur :
+
+```lua
+local plan, err = babet.archive.extract("backup.zip", "restore", {
+    dry_run = true,
+})
+assert(plan == nil and type(err) == "string")
+```
+
+Combiner simulation, sélection et limites :
+
+```lua
+local plan, err = babet.archive.extract("project.tar.xz", "output", {
+    dry_run = true,
+    include = { "src/**", "docs/**", "README.md" },
+    exclude = { "src/generated/**", "**/*.tmp" },
+    overwrite = true,
+    preserve_permissions = true,
+    max_entries = 20000,
+    max_total_size = 2 * 1024 * 1024 * 1024,
+})
+assert(plan, err)
+assert(plan.would_create + plan.would_overwrite + plan.would_skip
+    == plan.entries)
+assert(not babet.fileExists("output"))
+```
+
+Extraire seulement deux zones précises :
+
+```lua
+local result, err = babet.archive.extract("project.tar.zst", "output", {
+    include = {
+        "src/**",
+        "README.md",
+    },
+})
+assert(result, err)
+print(result.entries, result.skipped)
+```
+
+Exclure les fichiers temporaires tout en conservant le reste :
+
+```lua
+local result, err = babet.archive.extract("backup.zip", "restore", {
+    exclude = {
+        "**/*.tmp",
+        "cache/**",
+    },
+})
+assert(result, err)
+```
+
+Combiner inclusion et exclusion, avec priorité aux exclusions :
+
+```lua
+local result, err = babet.archive.extract("project.tar.xz", "output", {
+    include = {
+        "src/**",
+        "docs/**",
+        "README.md",
+    },
+    exclude = {
+        "src/generated/**",
+        "**/*.tmp",
+    },
     overwrite = false,
     preserve_permissions = true,
     max_total_size = 2 * 1024 * 1024 * 1024,
 })
-
-if not result then
-    error(err)
-end
-
-print(result.files, result.bytes)
+assert(result, err)
 ```
+
+Utiliser `?` et protéger un caractère `*` littéral :
+
+```lua
+local result, err = babet.archive.extract("assets.zip", "assets", {
+    include = {
+        "icons/icon-?.png", -- icon-a.png, mais pas icon-large.png
+        "docs/file\\*.txt", -- nom contenant réellement un astérisque
+    },
+})
+assert(result, err)
+```
+
+Gérer une sélection vide sans créer de dossier :
+
+```lua
+local result, err = babet.archive.extract("package.zip", "unused", {
+    include = { "does-not-exist/**" },
+})
+assert(result, err)
+assert(result.entries == 0 and result.skipped > 0)
+assert(not babet.fileExists("unused"))
+```
+
+Utiliser les filtres dans un worker :
+
+```lua
+local worker, err = babet.workers.spawn([[
+local result, extract_err = babet.archive.extract(
+    worker.args.archive,
+    worker.args.destination,
+    {
+        include = { "docs/**", "README.md" },
+        exclude = { "docs/drafts/**" },
+    }
+)
+if not result then error(extract_err) end
+return result
+]], {
+    archive = "package.tar.gz",
+    destination = "documentation",
+})
+assert(worker, err)
+
+local joined, result = worker:join()
+assert(joined, result)
+print(result.files, result.skipped)
+```
+
+Prévisualiser dans un worker sans créer la destination :
+
+```lua
+local worker, err = babet.workers.spawn([[
+local plan, extract_err = babet.archive.extract(
+    worker.args.archive, worker.args.destination, {
+        dry_run = true,
+        include = { "manifest.json", "docs/**" },
+    })
+if not plan then error(extract_err) end
+return plan
+]], {
+    archive = "package.tar.gz",
+    destination = "preview-only",
+})
+assert(worker, err)
+
+local joined, plan = worker:join()
+assert(joined, plan)
+assert(plan.dry_run == true)
+assert(not babet.fileExists("preview-only"))
+```
+
+Le contrat, les limites et la sélection sont identiques en mode dossier, en
+mode embarqué, en mode embarqué via `PATH` et dans les workers.
 
 <a id="babetarchiveextractfile"></a>
 

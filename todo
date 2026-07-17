@@ -1,20 +1,23 @@
-Babet 2.7.0 roadmap
+Babet 2.8.0 roadmap
 ====================
 
-[x] Define the standalone compressed-stream API outside babet.archive.
-[x] Add secure gzip/xz/bzip2/zstd compression and automatic decompression.
-[x] Add pinned sources, bounded output, concatenated-member support, atomic
-    publication, strict Lua validation, worker registration, tests, and FR/EN
-    documentation for the first compression lot.
-[x] Add strictly validated format-specific compression levels.
-[x] Extend archive creation to accept an explicit source list.
-[x] Define deterministic archive entry names, duplicate/collision handling,
-    absolute-path policy, and symlink rules for explicit source lists.
-[x] Add include/exclude rules backed by the bounded safe glob engine.
-[x] Audit code, tests, FR/EN documentation, examples and PDF manuals before
-    release, using the same standard as 2.6.0.
+[x] Lot 1: enrich babet.archive.list() without breaking its historical wrapper.
+[x] Preserve archive order and expose bounded ZIP/TAR metadata.
+[x] Report exact duplicates and normalized output-path conflicts.
+[x] Add configurable raw-name and cumulative-name limits shared by inspection
+    and extraction.
+[x] Add exhaustive ZIP/TAR/worker tests and rich synchronized FR/EN examples.
+[x] Lot 2: add babet.archive.test() for complete integrity and safety checks.
+[x] Lot 3: add include/exclude safe-glob selection to archive.extract().
+[x] Lot 4: add dry_run extraction simulation with no filesystem mutation.
+[x] Study the optional bounded babet.archive.read() API: deliberately deferred
+    because extractFile() covers targeted extraction and an in-memory API would
+    add another allocation/size contract without being required for 2.8.0.
+[x] Perform the final code/tests/docs/PDF/build/release audit.
 
 Deferred ideas retained in notes.md:
+- bounded in-memory archive.read() for a future version if a concrete use case
+  justifies the additional API and memory contract;
 - parent-side PATH resolution followed by execve;
 - worker-to-worker channels;
 - cooperative cancellation design;

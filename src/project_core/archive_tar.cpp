@@ -552,6 +552,22 @@ bool decode_entry(archive_entry *raw_entry, std::size_t index,
     entry.unix_mode =
         static_cast<std::uint32_t>(archive_entry_mode(raw_entry) & 07777U);
     entry.has_unix_mode = archive_entry_perm_is_set(raw_entry) != 0;
+    entry.has_mtime = archive_entry_mtime_is_set(raw_entry) != 0;
+    if (entry.has_mtime)
+    {
+        entry.mtime = static_cast<std::int64_t>(archive_entry_mtime(raw_entry));
+        entry.mtime_nsec = archive_entry_mtime_nsec(raw_entry);
+    }
+    entry.has_uid = archive_entry_uid_is_set(raw_entry) != 0;
+    if (entry.has_uid)
+    {
+        entry.uid = static_cast<std::int64_t>(archive_entry_uid(raw_entry));
+    }
+    entry.has_gid = archive_entry_gid_is_set(raw_entry) != 0;
+    if (entry.has_gid)
+    {
+        entry.gid = static_cast<std::int64_t>(archive_entry_gid(raw_entry));
+    }
     entry.sparse = archive_entry_sparse_count(raw_entry) > 0;
 
     const char *target = entry.type == EntryType::hardlink
@@ -598,10 +614,20 @@ bool account_entry(const Entry &entry, std::size_t index,
         return false;
     }
 
+    if (entry.name.size() > limits.max_path_length)
+    {
+        err = "archive: entry name at index " +
+              std::to_string(index + 1) +
+              " exceeds max_path_length (" +
+              std::to_string(entry.name.size()) + " > " +
+              std::to_string(limits.max_path_length) + ")";
+        return false;
+    }
+
     if (total_name_bytes > limits.max_total_name_bytes ||
         entry.name.size() > limits.max_total_name_bytes - total_name_bytes)
     {
-        err = "archive: cumulative entry-name size exceeds the internal 64 MiB metadata limit";
+        err = "archive: cumulative entry-name size exceeds max_total_name_bytes";
         return false;
     }
     total_name_bytes += entry.name.size();
@@ -633,6 +659,12 @@ bool entries_equal(const Entry &actual, const Entry &expected) noexcept
            actual.size == expected.size &&
            actual.unix_mode == expected.unix_mode &&
            actual.has_unix_mode == expected.has_unix_mode &&
+           actual.mtime == expected.mtime &&
+           actual.mtime_nsec == expected.mtime_nsec &&
+           actual.has_mtime == expected.has_mtime &&
+           actual.uid == expected.uid && actual.gid == expected.gid &&
+           actual.has_uid == expected.has_uid &&
+           actual.has_gid == expected.has_gid &&
            actual.sparse == expected.sparse &&
            actual.has_link_target == expected.has_link_target &&
            actual.link_target == expected.link_target;
@@ -784,6 +816,7 @@ bool scan_fd(int fd, std::uint64_t archive_size,
                 return false;
             }
             result.total_size = total_size;
+            result.total_name_bytes = total_name_bytes;
             return true;
         }
         if (status != ARCHIVE_OK || raw_entry == nullptr)

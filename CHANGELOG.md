@@ -6,6 +6,150 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.8.0] - 2026-07-17
+
+### Release summary
+
+Babet 2.8.0 completes the archive lifecycle with bounded inspection, full
+integrity and safety testing, selective extraction, and read-only extraction
+previews. ZIP and plain/gzip/xz/bzip2/zstd TAR readers share strict limits,
+deterministic diagnostics, worker support, and the existing confined
+destination policy.
+
+The optional in-memory `archive.read()` proposal was reviewed and deliberately
+deferred: `extractFile()` already covers targeted extraction, while a new Lua
+string-returning API would add another allocation and size contract without
+being required by the 2.8.0 theme.
+
+### Lot 1 — advanced archive inspection
+
+- bumped the source version to 2.8.0;
+- preserved the bounded historical `babet.archive.list(archive [, opts])` API
+  and its `format`/`compression`/`entries` wrapper instead of adding a
+  redundant iterator;
+- strictly preserves internal entry order without sorting or deduplication;
+- added per-entry `index` and `valid_utf8`, preserving names exactly as binary
+  Lua strings without Unicode normalisation;
+- added `mtime`, `mtime_nsec`, `uid`, and `gid` when genuinely supplied by the
+  backend, with explicit `nil` when unavailable;
+- added deterministic `duplicate`/`duplicate_of` diagnostics for repeated raw
+  names and `conflict`/`conflict_with`/`conflict_reason` for normalised output
+  path or file/directory collisions;
+- added global `total_name_bytes`, `duplicates`, and `conflicts` aggregates;
+- added strict `max_path_length` (64 KiB default, 1 MiB hard cap) and
+  `max_total_name_bytes` (64 MiB default and hard cap), shared with `extract()`
+  and `extractFile()`;
+- kept the independent 4096-byte extractable-path rule: longer names may be
+  inspected within the metadata budget but remain `safe_path = false`;
+- bounded the prefix graph used for collision diagnostics to 100000 directories
+  and 64 MiB of cumulative paths;
+- clarified integrity scope: `list()` inventories and diagnoses ZIP metadata
+  without inflating every payload, while TAR must be consumed to its end to
+  reach every header;
+- added ZIP/TAR tests for metadata, order, invalid UTF-8, duplicates, normalised
+  collisions, split/truncated archives, exact and tightened limits, workers,
+  and no writes before extraction;
+- systematically expanded French and English documentation with one example
+  per option, combined examples, security diagnostics, ZIP/TAR differences,
+  and worker usage.
+
+### Lot 2 — complete integrity and safety verification
+
+- added `babet.archive.test(archive [, opts])` to the main Lua state and
+  workers, with the strict `(result, nil)` or `(nil, message)` contract;
+- detects ZIP, TAR, gzip TAR, xz TAR, bzip2 TAR, and zstd TAR from content
+  without writing or creating any temporary directory;
+- strictly reuses the existing shared `max_entries`, `max_entry_size`,
+  `max_total_size`, `max_path_length`, `max_total_name_bytes`, and
+  `max_compression_ratio` limits;
+- fully validates ZIP EOCD/ZIP64 metadata, local headers, names, flags, methods,
+  sizes, CRCs, ZIP64 fields, data descriptors, bounds, and overlap, then fully
+  decompresses every non-directory entry;
+- fully consumes plain and compressed TAR streams, checking headers, available
+  checksums, truncation, padding, corruption, and trailing data according to
+  libarchive, zlib, liblzma, libbz2, and libzstd guarantees;
+- applies a strict safety verdict, rejecting unsafe paths, duplicates,
+  file/directory collisions, links, sparse files, special objects, encrypted
+  entries, and unsupported ZIP methods;
+- returns a deterministic `format`, `compression`, `entries`, `files`,
+  `directories`, `total_size`, `archive_size`, `total_name_bytes`, and `zip64`
+  summary;
+- added ZIP/TAR, empty archive, damaged local header, data descriptor, CRC,
+  per-compression corruption, limit, worker, and zero-side-effect tests;
+- synchronised rich French and English documentation with one example per
+  limit, combined examples, the `list()`/`test()` distinction, and worker use.
+
+### Lot 3 — selective extraction through safe globs
+
+- added strict `include` and `exclude` options to
+  `babet.archive.extract()` without changing `extractFile()` or historical
+  unfiltered calls;
+- shared parsing, compilation, limits, and work accounting with the existing
+  `safe_glob` engine already used by `archive.create()`;
+- anchored, byte-oriented, case-sensitive matching on normalised internal
+  paths with identical `*`, `**`, `?`, and `\` rules;
+- made `exclude` always win, including pruning an entire directory subtree even
+  when parent directories are implicit;
+- limited type, duplicate, and output-collision validation to selected entries
+  while retaining whole-archive header scanning and global limits;
+- creates no destination when active filters select nothing and creates only
+  the parents required by retained files;
+- added `entries` and `skipped` result fields while preserving `files`,
+  `directories`, `bytes`, and `path`;
+- applies identically to ZIP, plain TAR, gzip TAR, xz TAR, bzip2 TAR, zstd TAR,
+  and worker Lua states;
+- added extensive ZIP/TAR tests for include-only, exclude-only, precedence,
+  subtree pruning, escaping, limits, empty selection, unselected duplicates and
+  collisions, skipped unsafe or special entries, compressed formats, and
+  workers;
+- synchronised rich French and English documentation with separate and combined
+  examples, side effects, limits, and the selective-extraction versus
+  `archive.test()` integrity distinction.
+
+### Lot 4 — extraction preview without filesystem mutation
+
+- added strict boolean `dry_run` to `babet.archive.extract()` without exposing
+  it to `list()`, `test()`, or `extractFile()`;
+- reused the exact same archive scan, anti-bomb limits, `include`/`exclude`
+  filters, normalisation, and destination plan as real extraction;
+- traversed the destination read-only through directory descriptors,
+  `openat`/`fstatat`, and `O_NOFOLLOW`, with no mkdir, temporary file, write,
+  chmod, rename, unlink, or publication operation;
+- added `would_create`, `would_overwrite`, `would_skip`, and
+  `would_create_destination`, counting explicit selected entries only and
+  remaining absent from the historical real-extraction result;
+- preserved strict overwrite policy: an existing file remains an error without
+  permission, while an explicitly selected existing directory is reported as
+  retained;
+- genuinely verified selected ZIP payloads through a null consumer, including
+  decompression and CRC, and performed the complete second TAR pass without
+  forwarding data to the filesystem;
+- kept an empty active selection inert without inspecting or creating the
+  destination, while an unfiltered empty archive previews possible root
+  creation;
+- added ZIP, TAR, and compressed-TAR tests for missing and existing destinations,
+  overwrite on and off, filters, limits, duplicates, corruption, symlinks,
+  file/directory conflicts, workers, and complete absence of mutation;
+- documented that the preview is a snapshot rather than a guarantee against
+  concurrent destination changes before a later extraction.
+
+### Final release audit
+
+- audited the C++ implementation, Lua registration, strict option validation,
+  worker registration, test coverage, README files, online help, build/test/
+  release scripts, licences, and French/English documentation against the
+  actual code and tests;
+- confirmed that `archive.list()`, `archive.test()`, `archive.extract()`, and
+  `archive.extractFile()` expose only their documented options and return
+  fields, with `dry_run`, `include`, and `exclude` limited to full extraction;
+- added the dedicated `GITHUB_RELEASE_2.8.0.md` publication notes and finalised
+  the release checklist;
+- regenerated both PDF manuals from the final Markdown sources and performed a
+  rendered visual review;
+- retained the last validated runtime results: 3067 PASS / 0 FAIL in folder
+  mode, 3054 PASS / 0 FAIL in embedded mode, 3054 PASS / 0 FAIL through
+  `PATH`, and 9/9 modes under both ASan/UBSan and the normal build.
+
 ## [2.7.0] - 2026-07-16
 
 ### Release summary

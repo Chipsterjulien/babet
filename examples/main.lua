@@ -11595,6 +11595,8 @@ do
             local name = assert(entry.name)
             local data = entry.data or ""
             local payload = entry.payload or data
+            local entry_dos_time = entry.dos_time or dos_time
+            local entry_dos_date = entry.dos_date or dos_date
             local method = entry.method
             if method == nil then method = entry.payload and 8 or 0 end
             local flags = entry.flags or 0
@@ -11612,18 +11614,38 @@ do
                 end
             end
 
+            local local_name = entry.local_name or name
+            local local_extra = entry.local_extra or ""
+            local local_flags = entry.local_flags
+            if local_flags == nil then local_flags = flags end
+            local local_method = entry.local_method
+            if local_method == nil then local_method = method end
+            local local_crc = entry.local_crc32
+            if local_crc == nil then local_crc = crc end
+            local local_compressed_size = entry.local_compressed_size
+            if local_compressed_size == nil then
+                local_compressed_size = compressed_size
+            end
+            local local_expanded_size = entry.local_size
+            if local_expanded_size == nil then local_expanded_size = expanded_size end
             local local_header = string.pack(
                 "<I4I2I2I2I2I2I4I4I4I2I2",
-                0x04034b50, 20, flags, method, dos_time, dos_date,
-                crc, compressed_size, expanded_size, #name, 0)
-            local local_record = local_header .. name .. payload
+                entry.local_signature or 0x04034b50, 20,
+                local_flags, local_method,
+                entry_dos_time, entry_dos_date,
+                local_crc, local_compressed_size, local_expanded_size,
+                #local_name, #local_extra)
+            local local_record = local_header .. local_name .. local_extra
+                .. payload .. (entry.descriptor or "")
             local_parts[#local_parts + 1] = local_record
 
             local central_header = string.pack(
                 "<I4I2I2I2I2I2I2I4I4I4I2I2I2I2I2I4I4",
                 0x02014b50, version_made_by, 20, flags, method,
-                dos_time, dos_date, crc, compressed_size, expanded_size,
-                #name, 0, 0, 0, 0, external, local_offset)
+                entry_dos_time, entry_dos_date,
+                crc, compressed_size, expanded_size,
+                #name, 0, 0, entry.disk_start or 0, 0,
+                external, local_offset)
             central_parts[#central_parts + 1] = central_header .. name
             local_offset = local_offset + #local_record
         end
@@ -11637,12 +11659,19 @@ do
         return write_bytes(path, local_blob .. central_blob .. eocd)
     end
 
-    local function make_empty_zip64(path)
+    local function make_empty_zip64(path, opts)
+        opts = opts or {}
         local zip64_eocd = string.pack(
             "<I4I8I2I2I4I4I8I8I8I8",
-            0x06064b50, 44, 45, 45, 0, 0, 0, 0, 0, 0)
+            0x06064b50, 44, 45, 45,
+            opts.disk_number or 0,
+            opts.central_directory_disk or 0,
+            opts.entries_on_disk or 0,
+            opts.total_entries or 0,
+            0, 0)
         local locator = string.pack(
-            "<I4I4I8I4", 0x07064b50, 0, 0, 1)
+            "<I4I4I8I4", 0x07064b50,
+            opts.locator_disk or 0, 0, opts.total_disks or 1)
         local eocd = string.pack(
             "<I4I2I2I2I2I4I4I2",
             0x06054b50, 0, 0, 0xffff, 0xffff,
@@ -11831,6 +11860,7 @@ do
         type(babet.archive) == "table"
         and type(babet.archive.create) == "function"
         and type(babet.archive.list) == "function"
+        and type(babet.archive.test) == "function"
         and type(babet.archive.extract) == "function"
         and type(babet.archive.extractFile) == "function")
 
@@ -11838,6 +11868,7 @@ do
         return type(babet.archive) == "table"
             and type(babet.archive.create) == "function"
             and type(babet.archive.list) == "function"
+            and type(babet.archive.test) == "function"
             and type(babet.archive.extract) == "function"
             and type(babet.archive.extractFile) == "function"
     ]])
@@ -11864,7 +11895,14 @@ do
     local valid_tar = root .. "/valid-tar.data"
     assert(make_tar(valid_tar, {
         { name = "dir/", typeflag = "5", mode = tonumber("711", 8) },
-        { name = "dir/hello.txt", data = "bonjour\n", mode = tonumber("640", 8) },
+        {
+            name = "dir/hello.txt",
+            data = "bonjour\n",
+            mode = tonumber("640", 8),
+            uid = 123,
+            gid = 456,
+            mtime = 1750000000,
+        },
         { name = "binary.bin", data = "\0A\0B", mode = tonumber("601", 8) },
         { name = "hello-link", typeflag = "2", linkname = "dir/hello.txt",
           mode = tonumber("777", 8) },
@@ -11889,6 +11927,9 @@ do
                 and value.compression == "none"
                 and value.count == 11
                 and value.total_size == 23
+                and value.total_name_bytes == 845
+                and value.duplicates == 0
+                and value.conflicts == 0
                 and value.archive_size == babet.fileSize(valid_tar)
                 and value.zip64 == nil
         end)
@@ -11907,6 +11948,17 @@ do
         and tar_list.entries[2].type == "file"
         and tar_list.entries[2].size == 8
         and tar_list.entries[2].unix_mode == tonumber("640", 8)
+        and tar_list.entries[2].index == 2
+        and tar_list.entries[2].valid_utf8 == true
+        and tar_list.entries[2].mtime == 1750000000
+        and tar_list.entries[2].mtime_nsec == 0
+        and tar_list.entries[2].uid == 123
+        and tar_list.entries[2].gid == 456
+        and tar_list.entries[2].duplicate == false
+        and tar_list.entries[2].duplicate_of == nil
+        and tar_list.entries[2].conflict == false
+        and tar_list.entries[2].conflict_with == nil
+        and tar_list.entries[2].conflict_reason == nil
         and tar_list.entries[2].safe_path == true
         and tar_list.entries[2].extractable == true
         and tar_list.entries[2].reason == nil)
@@ -11939,6 +11991,15 @@ do
         tar_list and tar_list.entries[11].name == pax_long_name
         and tar_list.entries[11].size == 3)
 
+    local mixed_tar_test, mixed_tar_test_err = babet.archive.test(valid_tar)
+    ok_fail("archive.test rejects a technically valid TAR containing links and special entries",
+        mixed_tar_test, mixed_tar_test_err)
+    ok("archive.test TAR safety rejection is explicit",
+        type(mixed_tar_test_err) == "string"
+        and (mixed_tar_test_err:find("symlink", 1, true) ~= nil
+            or mixed_tar_test_err:find("link", 1, true) ~= nil),
+        "err=" .. tostring(mixed_tar_test_err))
+
     local safe_tar = root .. "/safe.tar"
     assert(make_tar(safe_tar, {
         { name = "dir/", typeflag = "5", mode = tonumber("2711", 8) },
@@ -11959,12 +12020,49 @@ do
                 and value.entries[2].reason == nil
         end)
 
+    local safe_tar_test, safe_tar_test_err = babet.archive.test(safe_tar)
+    ok_val("archive.test fully validates a safe uncompressed TAR",
+        safe_tar_test, safe_tar_test_err, function(value)
+            return value.format == "tar"
+                and value.compression == "none"
+                and value.entries == 5
+                and value.files == 4
+                and value.directories == 1
+                and value.total_size == 16
+                and value.archive_size == babet.fileSize(safe_tar)
+                and value.total_name_bytes == safe_tar_list.total_name_bytes
+                and value.zip64 == nil
+        end)
+    ok("archive.test TAR creates no staging files",
+        no_archive_temporaries(root))
+
+    do
+        local dry_out = root .. "/tar-dry-run-out"
+        local preview, preview_err = babet.archive.extract(
+            safe_tar, dry_out, { dry_run = true })
+        ok_val("archive.extract TAR dry_run validates without writing",
+            preview, preview_err, function(value)
+                return value.entries == 5 and value.files == 4
+                    and value.directories == 1 and value.skipped == 0
+                    and value.bytes == 16 and value.path == dry_out
+                    and value.dry_run == true
+                    and value.would_create == 5
+                    and value.would_overwrite == 0
+                    and value.would_skip == 0
+                    and value.would_create_destination == true
+            end)
+        ok("archive.extract TAR dry_run creates no destination or staging files",
+            babet.fileExists(dry_out) == false
+            and no_archive_temporaries(root))
+    end
+
     local tar_default_out = root .. "/tar-default"
     local tar_default, tar_default_err = babet.archive.extract(
         safe_tar, tar_default_out)
     ok_val("archive.extract extracts an uncompressed TAR",
         tar_default, tar_default_err, function(value)
-            return value.files == 4 and value.directories == 1
+            return value.entries == 5 and value.files == 4
+                and value.directories == 1 and value.skipped == 0
                 and value.bytes == 16 and value.path == tar_default_out
         end)
     ok("archive.extract TAR preserves text, binary and empty contents",
@@ -11981,6 +12079,151 @@ do
             == tonumber("644", 8))
     ok("archive.extract TAR leaves no staging files",
         no_archive_temporaries(tar_default_out))
+
+    do
+        local filter_tar = root .. "/filter-selective.tar"
+        assert(make_tar(filter_tar, {
+            { name = "src/", typeflag = "5" },
+            { name = "src/main.lua", data = "print('ok')\n" },
+            { name = "src/generated/", typeflag = "5" },
+            { name = "src/generated/cache.tmp", data = "cache" },
+            { name = "README.md", data = "readme" },
+            { name = "notes.tmp", data = "notes" },
+        }))
+        local dry_filter_out = root .. "/filter-selective-tar-dry-out"
+        local dry_filtered, dry_filtered_err = babet.archive.extract(
+            filter_tar, dry_filter_out, {
+                dry_run = true,
+                include = { "src/**", "README.md" },
+                exclude = { "src/generated", "*.tmp", "**/*.tmp" },
+            })
+        ok_val("archive.extract TAR dry_run applies include/exclude identically",
+            dry_filtered, dry_filtered_err, function(value)
+                return value.entries == 3 and value.files == 2
+                    and value.directories == 1 and value.skipped == 3
+                    and value.bytes == 18 and value.dry_run == true
+                    and value.would_create == 3
+                    and value.would_create_destination == true
+            end)
+        ok("archive.extract TAR filtered dry_run creates nothing",
+            babet.fileExists(dry_filter_out) == false)
+
+        local filter_out = root .. "/filter-selective-tar-out"
+        local filtered, filtered_err = babet.archive.extract(
+            filter_tar, filter_out, {
+                include = { "src/**", "README.md" },
+                exclude = { "src/generated", "*.tmp", "**/*.tmp" },
+            })
+        ok_val("archive.extract TAR applies include/exclude safe globs",
+            filtered, filtered_err, function(value)
+                return value.entries == 3 and value.files == 2
+                    and value.directories == 1 and value.skipped == 3
+                    and value.bytes == 18 and value.path == filter_out
+            end)
+        ok("archive.extract TAR exclude overrides include and prunes subtrees",
+            read_bytes(filter_out .. "/src/main.lua") == "print('ok')\n"
+            and read_bytes(filter_out .. "/README.md") == "readme"
+            and babet.fileExists(filter_out .. "/src/generated") == false
+            and babet.fileExists(filter_out .. "/notes.tmp") == false)
+
+        local exclude_only_out = root .. "/filter-exclude-only-tar-out"
+        local exclude_only, exclude_only_err = babet.archive.extract(
+            filter_tar, exclude_only_out, {
+                exclude = { "src/generated", "*.tmp" },
+            })
+        ok_val("archive.extract TAR supports exclude-only selection",
+            exclude_only, exclude_only_err, function(value)
+                return value.entries == 3 and value.files == 2
+                    and value.directories == 1 and value.skipped == 3
+                    and value.bytes == 18
+            end)
+        ok("archive.extract TAR exclude-only keeps unrelated entries",
+            read_bytes(exclude_only_out .. "/src/main.lua") == "print('ok')\n"
+            and read_bytes(exclude_only_out .. "/README.md") == "readme"
+            and babet.fileExists(exclude_only_out .. "/src/generated") == false
+            and babet.fileExists(exclude_only_out .. "/notes.tmp") == false)
+
+        local root_star_out = root .. "/filter-root-star-tar-out"
+        local root_star, root_star_err = babet.archive.extract(
+            filter_tar, root_star_out, { include = { "*.md" } })
+        ok_val("archive.extract TAR keeps '*' component-local",
+            root_star, root_star_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.directories == 0 and value.skipped == 5
+            end)
+        ok("archive.extract TAR component-local star selects only root README",
+            read_bytes(root_star_out .. "/README.md") == "readme"
+            and babet.fileExists(root_star_out .. "/src") == false)
+
+        local no_match_out = root .. "/filter-no-match-tar-out"
+        local no_match, no_match_err = babet.archive.extract(
+            filter_tar, no_match_out, { include = { "missing/**" } })
+        ok_val("archive.extract TAR accepts an empty selection",
+            no_match, no_match_err, function(value)
+                return value.entries == 0 and value.files == 0
+                    and value.directories == 0 and value.skipped == 6
+                    and value.bytes == 0
+            end)
+        ok("archive.extract TAR empty selection creates no destination",
+            babet.fileExists(no_match_out) == false)
+
+        local special_tar = root .. "/filter-special.tar"
+        assert(make_tar(special_tar, {
+            { name = "blocked/", typeflag = "5" },
+            { name = "blocked/link", typeflag = "2", linkname = "../outside" },
+            { name = "safe.txt", data = "safe" },
+        }))
+        local special_out = root .. "/filter-special-tar-out"
+        local special, special_err = babet.archive.extract(
+            special_tar, special_out, {
+                include = { "**" }, exclude = { "blocked" },
+            })
+        ok_val("archive.extract TAR ignores excluded special entries",
+            special, special_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.directories == 0 and value.skipped == 2
+            end)
+        ok("archive.extract TAR excluded directory creates no descendants",
+            read_bytes(special_out .. "/safe.txt") == "safe"
+            and babet.fileExists(special_out .. "/blocked") == false)
+
+        local escaped_tar = root .. "/filter-escaped.tar"
+        assert(make_tar(escaped_tar, {
+            { name = "literal*.txt", data = "star" },
+            { name = "literalX.txt", data = "x" },
+        }))
+        local escaped_out = root .. "/filter-escaped-tar-out"
+        local escaped, escaped_err = babet.archive.extract(
+            escaped_tar, escaped_out, { include = { "literal\\*.txt" } })
+        ok_val("archive.extract TAR glob backslash escapes a wildcard",
+            escaped, escaped_err, function(value)
+                return value.entries == 1 and value.skipped == 1
+            end)
+        ok("archive.extract TAR escaped star is literal",
+            read_bytes(escaped_out .. "/literal*.txt") == "star"
+            and babet.fileExists(escaped_out .. "/literalX.txt") == false)
+
+        local worker_out = root .. "/filter-worker-tar-out"
+        local worker, worker_err = babet.workers.spawn([[
+local result, err = babet.archive.extract(
+    worker.args.archive, worker.args.destination,
+    { include = { "README.md" } })
+if not result then error(err) end
+return result
+]], { archive = filter_tar, destination = worker_out })
+        ok("archive.extract TAR filters start in a worker",
+            worker ~= nil and worker_err == nil, tostring(worker_err))
+        if worker then
+            local joined, value = worker:join()
+            ok("archive.extract TAR filters succeed in a worker",
+                joined == true and type(value) == "table"
+                and value.entries == 1 and value.files == 1
+                and value.skipped == 5,
+                inspect(value))
+            ok("archive.extract TAR filtered worker publishes selected data",
+                read_bytes(worker_out .. "/README.md") == "readme")
+        end
+    end
 
     local tar_again, tar_again_err = babet.archive.extract(
         safe_tar, tar_default_out)
@@ -12020,7 +12263,17 @@ do
     local tar_worker, tar_worker_err = babet.workers.spawn([[
 local info, err = babet.archive.list(worker.args.path)
 if not info then error(err) end
-return { format = info.format, count = info.count, total_size = info.total_size }
+return {
+    format = info.format,
+    count = info.count,
+    total_size = info.total_size,
+    total_name_bytes = info.total_name_bytes,
+    duplicates = info.duplicates,
+    conflicts = info.conflicts,
+    mtime = info.entries[2].mtime,
+    uid = info.entries[2].uid,
+    gid = info.entries[2].gid,
+}
 ]], { path = valid_tar })
     ok("archive.list TAR starts in a worker",
         tar_worker ~= nil and tar_worker_err == nil, tostring(tar_worker_err))
@@ -12029,7 +12282,12 @@ return { format = info.format, count = info.count, total_size = info.total_size 
         ok("archive.list TAR succeeds in a worker",
             joined == true and type(value) == "table"
             and value.format == "tar" and value.count == 11
-            and value.total_size == 23,
+            and value.total_size == 23
+            and value.total_name_bytes == 845
+            and value.duplicates == 0
+            and value.conflicts == 0
+            and value.mtime == 1750000000
+            and value.uid == 123 and value.gid == 456,
             inspect(value))
     end
 
@@ -12117,6 +12375,8 @@ return result
         compressed_tar_list, compressed_tar_err, function(value)
             return value.format == "tar" and value.compression == "gzip"
                 and value.count == 0 and value.total_size == 0
+                and value.total_name_bytes == 0
+                and value.duplicates == 0 and value.conflicts == 0
         end)
 
     local empty_tar = root .. "/empty.tar"
@@ -12125,7 +12385,17 @@ return result
     ok_val("archive.list accepts a standard empty TAR",
         empty_tar_list, empty_tar_err, function(value)
             return value.format == "tar" and value.count == 0
-                and value.total_size == 0 and #value.entries == 0
+                and value.total_size == 0 and value.total_name_bytes == 0
+                and value.duplicates == 0 and value.conflicts == 0
+                and #value.entries == 0
+        end)
+    local empty_tar_test, empty_tar_test_err = babet.archive.test(empty_tar)
+    ok_val("archive.test accepts an empty TAR",
+        empty_tar_test, empty_tar_test_err, function(value)
+            return value.format == "tar" and value.compression == "none"
+                and value.entries == 0 and value.files == 0
+                and value.directories == 0 and value.total_size == 0
+                and value.total_name_bytes == 0 and value.zip64 == nil
         end)
     local empty_tar_out = root .. "/empty-tar-out"
     local empty_tar_extract, empty_tar_extract_err = babet.archive.extract(
@@ -12159,6 +12429,13 @@ return result
         and unsafe_tar_list.entries[4].safe_path == false
         and unsafe_tar_list.entries[5].safe_path == false
         and unsafe_tar_list.entries[6].safe_path == false)
+    local unsafe_tar_test, unsafe_tar_test_err = babet.archive.test(unsafe_tar)
+    ok_fail("archive.test rejects unsafe TAR paths",
+        unsafe_tar_test, unsafe_tar_test_err)
+    ok("archive.test unsafe TAR diagnostic is explicit",
+        type(unsafe_tar_test_err) == "string"
+        and unsafe_tar_test_err:find("cannot be extracted", 1, true) ~= nil,
+        "err=" .. tostring(unsafe_tar_test_err))
     local unsafe_tar_out = root .. "/unsafe-tar-out"
     local unsafe_tar_extract, unsafe_tar_extract_err = babet.archive.extract(
         unsafe_tar, unsafe_tar_out)
@@ -12179,15 +12456,29 @@ return result
         valid_tar, { max_total_size = 22 })
     ok_fail("archive.list TAR enforces max_total_size",
         tar_limited, tar_limited_err)
+    tar_limited, tar_limited_err = babet.archive.list(
+        valid_tar, { max_path_length = #pax_long_name - 1 })
+    ok_fail("archive.list TAR enforces max_path_length",
+        tar_limited, tar_limited_err)
+    tar_limited, tar_limited_err = babet.archive.list(
+        valid_tar, { max_total_name_bytes = 844 })
+    ok_fail("archive.list TAR enforces max_total_name_bytes",
+        tar_limited, tar_limited_err)
     local tar_exact, tar_exact_err = babet.archive.list(valid_tar, {
         max_entries = 11,
         max_entry_size = 8,
         max_total_size = 23,
+        max_path_length = #pax_long_name,
+        max_total_name_bytes = 845,
         max_compression_ratio = 1,
     })
     ok_val("archive.list TAR accepts exact limits",
         tar_exact, tar_exact_err,
-        function(value) return value.count == 11 and value.total_size == 23 end)
+        function(value)
+            return value.count == 11
+                and value.total_size == 23
+                and value.total_name_bytes == 845
+        end)
     local tar_limited_out = root .. "/tar-limited-out"
     local tar_extract_limited, tar_extract_limited_err = babet.archive.extract(
         safe_tar, tar_limited_out, { max_total_size = 15 })
@@ -12223,6 +12514,30 @@ return result
         { name = "same.txt", data = "first" },
         { name = "same.txt", data = "second" },
     }))
+    local duplicate_tar_list, duplicate_tar_list_err =
+        babet.archive.list(duplicate_tar)
+    ok_val("archive.list reports exact TAR duplicates and output conflicts",
+        duplicate_tar_list, duplicate_tar_list_err, function(value)
+            return value.duplicates == 1
+                and value.conflicts == 1
+                and value.entries[1].duplicate == false
+                and value.entries[1].conflict == false
+                and value.entries[2].duplicate == true
+                and value.entries[2].duplicate_of == 1
+                and value.entries[2].conflict == true
+                and value.entries[2].conflict_with == 1
+                and value.entries[2].conflict_reason
+                    == "duplicate output path"
+        end)
+    local duplicate_tar_test, duplicate_tar_test_err =
+        babet.archive.test(duplicate_tar)
+    ok_fail("archive.test rejects duplicate TAR paths",
+        duplicate_tar_test, duplicate_tar_test_err)
+    ok("archive.test duplicate TAR diagnostic is explicit",
+        type(duplicate_tar_test_err) == "string"
+        and duplicate_tar_test_err:find("duplicate output path", 1, true)
+            ~= nil,
+        "err=" .. tostring(duplicate_tar_test_err))
     local duplicate_tar_out = root .. "/duplicate-tar-out"
     local duplicate_tar_extract, duplicate_tar_extract_err =
         babet.archive.extract(duplicate_tar, duplicate_tar_out)
@@ -12231,11 +12546,43 @@ return result
     ok("duplicate TAR refusal creates no destination",
         babet.fileExists(duplicate_tar_out) == false)
 
+    do
+        local filtered_duplicate_tar = root .. "/filtered-duplicate.tar"
+        assert(make_tar(filtered_duplicate_tar, {
+            { name = "same.txt", data = "first" },
+            { name = "same.txt", data = "second" },
+            { name = "safe.txt", data = "safe" },
+        }))
+        local filtered_out = root .. "/filtered-duplicate-tar-out"
+        local filtered, filtered_err = babet.archive.extract(
+            filtered_duplicate_tar, filtered_out,
+            { include = { "safe.txt" } })
+        ok_val("archive.extract TAR ignores unselected duplicate paths",
+            filtered, filtered_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.skipped == 2 and value.bytes == 4
+            end)
+        ok("archive.extract TAR unselected duplicates publish only safe data",
+            read_bytes(filtered_out .. "/safe.txt") == "safe"
+            and babet.fileExists(filtered_out .. "/same.txt") == false)
+    end
+
     local conflict_tar = root .. "/conflict.tar"
     assert(make_tar(conflict_tar, {
         { name = "node", data = "file" },
         { name = "node/child.txt", data = "child" },
     }))
+    local conflict_tar_list, conflict_tar_list_err =
+        babet.archive.list(conflict_tar)
+    ok_val("archive.list reports TAR file/directory conflicts",
+        conflict_tar_list, conflict_tar_list_err, function(value)
+            return value.duplicates == 0
+                and value.conflicts == 1
+                and value.entries[2].conflict == true
+                and value.entries[2].conflict_with == 1
+                and value.entries[2].conflict_reason
+                    == "file/directory path conflict"
+        end)
     local conflict_tar_out = root .. "/conflict-tar-out"
     local conflict_tar_extract, conflict_tar_extract_err =
         babet.archive.extract(conflict_tar, conflict_tar_out)
@@ -12255,8 +12602,15 @@ return result
         safe_tar, tar_parent_link .. "/out")
     ok_fail("archive.extract TAR refuses a symlinked destination parent",
         tar_parent_attack, tar_parent_attack_err)
+    do
+        local tar_parent_dry, tar_parent_dry_err = babet.archive.extract(
+            safe_tar, tar_parent_link .. "/dry-out", { dry_run = true })
+        ok_fail("archive.extract TAR dry_run refuses a symlinked destination parent",
+            tar_parent_dry, tar_parent_dry_err)
+    end
     ok("TAR destination-parent refusal writes nothing through the symlink",
-        babet.fileExists(tar_parent_target .. "/out") == false)
+        babet.fileExists(tar_parent_target .. "/out") == false
+        and babet.fileExists(tar_parent_target .. "/dry-out") == false)
 
     local nonregular_payload_tar = root .. "/nonregular-payload.tar"
     assert(make_tar(nonregular_payload_tar, {
@@ -12273,12 +12627,18 @@ return result
     local damaged_tar_list, damaged_tar_err = babet.archive.list(damaged_tar)
     ok_fail("archive.list rejects a TAR with an invalid header checksum",
         damaged_tar_list, damaged_tar_err)
+    local damaged_tar_test, damaged_tar_test_err = babet.archive.test(damaged_tar)
+    ok_fail("archive.test rejects a TAR with an invalid header checksum",
+        damaged_tar_test, damaged_tar_test_err)
 
     local trailing_tar = root .. "/trailing-garbage.tar"
     assert(write_bytes(trailing_tar, valid_tar_bytes .. "NOT-A-TAR"))
     local trailing_tar_list, trailing_tar_err = babet.archive.list(trailing_tar)
     ok_fail("archive.list rejects non-TAR trailing data",
         trailing_tar_list, trailing_tar_err)
+    local trailing_tar_test, trailing_tar_test_err = babet.archive.test(trailing_tar)
+    ok_fail("archive.test rejects non-TAR trailing data",
+        trailing_tar_test, trailing_tar_test_err)
 
     local truncated_tar = root .. "/truncated.tar"
     assert(make_tar(truncated_tar, {
@@ -12287,6 +12647,10 @@ return result
     local truncated_tar_list, truncated_tar_err = babet.archive.list(truncated_tar)
     ok_fail("archive.list detects truncated TAR entry data",
         truncated_tar_list, truncated_tar_err)
+    local truncated_tar_test, truncated_tar_test_err =
+        babet.archive.test(truncated_tar)
+    ok_fail("archive.test detects truncated TAR entry data",
+        truncated_tar_test, truncated_tar_test_err)
 
     local tar_extract_out = root .. "/tar-special-out"
     local tar_extract, tar_extract_err = babet.archive.extract(
@@ -12441,6 +12805,28 @@ return result
         read_bytes(mixed_safe_path) == "safe"
         and babet.fileExists(root .. "/unsafe.txt") == false)
 
+    local mixed_selective_out = root .. "/tar-selective-safe-out"
+    local mixed_selective, mixed_selective_err = babet.archive.extract(
+        mixed_path_tar, mixed_selective_out, { include = { "safe.txt" } })
+    ok_val("archive.extract TAR may select a safe normalized path from a mixed archive",
+        mixed_selective, mixed_selective_err, function(value)
+            return value.entries == 1 and value.files == 1
+                and value.skipped == 1 and value.bytes == 4
+        end)
+    ok("archive.extract TAR selective mixed-archive extraction stays contained",
+        read_bytes(mixed_selective_out .. "/safe.txt") == "safe"
+        and babet.fileExists(root .. "/unsafe.txt") == false)
+
+    do
+        local mixed_exclude_out = root .. "/tar-exclude-unsafe-out"
+        local mixed_exclude, mixed_exclude_err = babet.archive.extract(
+            mixed_path_tar, mixed_exclude_out, { exclude = { "../unsafe.txt" } })
+        ok_fail("archive.extract TAR exclude-only cannot sanitize an unsafe path",
+            mixed_exclude, mixed_exclude_err)
+        ok("archive.extract TAR unsafe exclude-only failure creates no destination",
+            babet.fileExists(mixed_exclude_out) == false)
+    end
+
     local tar_limited_single_path = root .. "/tar-single-limited.txt"
     local tar_limited_single, tar_limited_single_err = babet.archive.extractFile(
         safe_tar, "empty.txt", tar_limited_single_path, {
@@ -12545,8 +12931,53 @@ return result
         function(value)
             return value.format == "zip" and value.compression == "none"
                 and value.count == 0 and value.total_size == 0
+                and value.total_name_bytes == 0
+                and value.duplicates == 0 and value.conflicts == 0
                 and #value.entries == 0 and value.zip64 == false
         end)
+    do
+        local empty_test, empty_test_err = babet.archive.test(empty_zip)
+        ok_val("archive.test(empty ZIP)", empty_test, empty_test_err,
+            function(value)
+                return value.format == "zip" and value.compression == "none"
+                    and value.entries == 0 and value.files == 0
+                    and value.directories == 0 and value.total_size == 0
+                    and value.total_name_bytes == 0 and value.zip64 == false
+            end)
+    end
+    do
+        local dry_out = root .. "/empty-dry-run-out"
+        local preview, preview_err = babet.archive.extract(
+            empty_zip, dry_out, { dry_run = true })
+        ok_val("archive.extract dry_run previews an empty ZIP",
+            preview, preview_err, function(value)
+                return value.entries == 0 and value.files == 0
+                    and value.directories == 0 and value.skipped == 0
+                    and value.bytes == 0 and value.path == dry_out
+                    and value.dry_run == true
+                    and value.would_create == 0
+                    and value.would_overwrite == 0
+                    and value.would_skip == 0
+                    and value.would_create_destination == true
+            end)
+        ok("archive.extract empty ZIP dry_run creates no destination",
+            babet.fileExists(dry_out) == false)
+
+        local filtered_out = root .. "/empty-filtered-dry-run-out"
+        local filtered, filtered_err = babet.archive.extract(
+            empty_zip, filtered_out, {
+                dry_run = true,
+                include = { "missing/**" },
+            })
+        ok_val("archive.extract dry_run keeps empty filtered selection inert",
+            filtered, filtered_err, function(value)
+                return value.entries == 0 and value.skipped == 0
+                    and value.dry_run == true
+                    and value.would_create_destination == false
+            end)
+        ok("archive.extract empty filtered dry_run never inspects or creates the destination",
+            babet.fileExists(filtered_out) == false)
+    end
     local empty_out = root .. "/empty-out"
     local empty_extract, empty_extract_err = babet.archive.extract(
         empty_zip, empty_out)
@@ -12564,8 +12995,92 @@ return result
     ok_val("archive.list(empty ZIP64)", zip64_list, zip64_list_err,
         function(value)
             return value.count == 0 and value.total_size == 0
+                and value.total_name_bytes == 0
+                and value.duplicates == 0 and value.conflicts == 0
                 and value.zip64 == true
         end)
+    do
+        local zip64_test, zip64_test_err = babet.archive.test(empty_zip64)
+        ok_val("archive.test(empty ZIP64)", zip64_test, zip64_test_err,
+            function(value)
+                return value.entries == 0 and value.files == 0
+                    and value.directories == 0 and value.total_size == 0
+                    and value.zip64 == true
+            end)
+    end
+
+    do
+        local split_zip = root .. "/split-volume.zip"
+        assert(write_bytes(split_zip, string.pack(
+            "<I4I2I2I2I2I4I4I2",
+            0x06054b50, 1, 1, 0, 0, 0, 0, 0)))
+        local split_list, split_list_err = babet.archive.list(split_zip)
+        ok_fail("archive.list rejects split or multi-volume ZIP metadata",
+            split_list, split_list_err)
+        ok("split ZIP rejection has an explicit diagnostic",
+            type(split_list_err) == "string"
+            and split_list_err:find("multi-volume", 1, true) ~= nil,
+            "err=" .. tostring(split_list_err))
+    end
+
+    do
+        local split_count_zip = root .. "/split-count.zip"
+        assert(write_bytes(split_count_zip, string.pack(
+            "<I4I2I2I2I2I4I4I2",
+            0x06054b50, 0, 0, 0, 1, 0, 0, 0)))
+        local split_count_list, split_count_err =
+            babet.archive.list(split_count_zip)
+        ok_fail("archive.list rejects ZIP entries split across disks",
+            split_count_list, split_count_err)
+        ok("split-entry-count rejection uses the multi-volume diagnostic",
+            type(split_count_err) == "string"
+            and split_count_err:find("multi-volume", 1, true) ~= nil,
+            "err=" .. tostring(split_count_err))
+    end
+
+    do
+        local split_entry_zip = root .. "/split-entry.zip"
+        assert(make_zip(split_entry_zip, {
+            { name = "part.txt", data = "x", disk_start = 1 },
+        }))
+        local split_entry_list, split_entry_err =
+            babet.archive.list(split_entry_zip)
+        ok_fail("archive.list rejects a ZIP entry stored on another disk",
+            split_entry_list, split_entry_err)
+        ok("split-entry rejection uses the multi-volume diagnostic",
+            type(split_entry_err) == "string"
+            and split_entry_err:find("multi-volume", 1, true) ~= nil,
+            "err=" .. tostring(split_entry_err))
+    end
+
+    do
+        local split_zip64_locator = root .. "/split-zip64-locator.zip"
+        assert(make_empty_zip64(split_zip64_locator, { locator_disk = 1 }))
+        local split_zip64_locator_list, split_zip64_locator_err =
+            babet.archive.list(split_zip64_locator)
+        ok_fail("archive.list rejects multi-volume ZIP64 locator metadata",
+            split_zip64_locator_list, split_zip64_locator_err)
+        ok("ZIP64 locator rejection uses the multi-volume diagnostic",
+            type(split_zip64_locator_err) == "string"
+            and split_zip64_locator_err:find("multi-volume", 1, true) ~= nil,
+            "err=" .. tostring(split_zip64_locator_err))
+    end
+
+    do
+        local split_zip64_eocd = root .. "/split-zip64-eocd.zip"
+        assert(make_empty_zip64(split_zip64_eocd, {
+            disk_number = 1,
+            central_directory_disk = 1,
+        }))
+        local split_zip64_eocd_list, split_zip64_eocd_err =
+            babet.archive.list(split_zip64_eocd)
+        ok_fail("archive.list rejects multi-volume ZIP64 EOCD metadata",
+            split_zip64_eocd_list, split_zip64_eocd_err)
+        ok("ZIP64 EOCD rejection uses the multi-volume diagnostic",
+            type(split_zip64_eocd_err) == "string"
+            and split_zip64_eocd_err:find("multi-volume", 1, true) ~= nil,
+            "err=" .. tostring(split_zip64_eocd_err))
+    end
 
     local valid_zip = root .. "/valid.zip"
     local valid_entries = {
@@ -12584,6 +13099,14 @@ return result
     local made, make_err = make_zip(valid_zip, valid_entries)
     ok("archive fixture created", made == true, make_err)
 
+    local truncated_zip = root .. "/truncated-valid.zip"
+    local valid_zip_bytes = assert(read_bytes(valid_zip))
+    assert(write_bytes(truncated_zip, valid_zip_bytes:sub(1, -11)))
+    local truncated_zip_list, truncated_zip_list_err =
+        babet.archive.list(truncated_zip)
+    ok_fail("archive.list rejects a truncated ZIP central directory",
+        truncated_zip_list, truncated_zip_list_err)
+
     local listed, list_err = babet.archive.list(valid_zip)
     ok_val("archive.list(valid)", listed, list_err, function(value)
         return type(value) == "table"
@@ -12592,6 +13115,9 @@ return result
             and value.compression == "none"
             and value.count == 5
             and value.total_size == 4108
+            and value.total_name_bytes == 50
+            and value.duplicates == 0
+            and value.conflicts == 0
             and value.archive_size == babet.fileSize(valid_zip)
             and value.zip64 == false
     end)
@@ -12613,6 +13139,17 @@ return result
         and listed.entries[2].compressed_size == 8
         and listed.entries[2].crc32 == crc32_number("bonjour\n")
         and listed.entries[2].compression_method == 0
+        and listed.entries[2].index == 2
+        and listed.entries[2].valid_utf8 == true
+        and math.type(listed.entries[2].mtime) == "integer"
+        and listed.entries[2].mtime_nsec == nil
+        and listed.entries[2].uid == nil
+        and listed.entries[2].gid == nil
+        and listed.entries[2].duplicate == false
+        and listed.entries[2].duplicate_of == nil
+        and listed.entries[2].conflict == false
+        and listed.entries[2].conflict_with == nil
+        and listed.entries[2].conflict_reason == nil
         and listed.entries[2].encrypted == false
         and listed.entries[2].supported == true
         and listed.entries[2].unix_mode == tonumber("640", 8))
@@ -12622,6 +13159,184 @@ return result
         and listed.entries[5].compressed_size == #deflated_4096_a
         and listed.entries[5].compression_method == 8
         and listed.entries[5].extractable == true)
+
+    do
+        local tested, test_err = babet.archive.test(valid_zip)
+        ok_val("archive.test fully reads and validates every ZIP payload",
+            tested, test_err, function(value)
+                return value.format == "zip"
+                    and value.compression == "none"
+                    and value.entries == 5
+                    and value.files == 4
+                    and value.directories == 1
+                    and value.total_size == 4108
+                    and value.archive_size == babet.fileSize(valid_zip)
+                    and value.total_name_bytes == 50
+                    and value.zip64 == false
+            end)
+    end
+    ok("archive.test ZIP creates no staging files",
+        no_archive_temporaries(root))
+
+    do
+        local dry_out = root .. "/zip-dry-run-out"
+        local preview, preview_err = babet.archive.extract(
+            valid_zip, dry_out, { dry_run = true })
+        ok_val("archive.extract ZIP dry_run validates selected payloads without writing",
+            preview, preview_err, function(value)
+                return value.entries == 5 and value.files == 4
+                    and value.directories == 1 and value.skipped == 0
+                    and value.bytes == 4108 and value.path == dry_out
+                    and value.dry_run == true
+                    and value.would_create == 5
+                    and value.would_overwrite == 0
+                    and value.would_skip == 0
+                    and value.would_create_destination == true
+            end)
+        ok("archive.extract ZIP dry_run leaves no filesystem trace",
+            babet.fileExists(dry_out) == false
+            and no_archive_temporaries(root))
+
+        local worker_out = root .. "/zip-dry-run-worker-out"
+        local worker, worker_err = babet.workers.spawn([[
+local result, err = babet.archive.extract(
+    worker.args.archive, worker.args.destination,
+    { dry_run = true, include = { "dir/**" } })
+if not result then error(err) end
+return result
+]], { archive = valid_zip, destination = worker_out })
+        ok("archive.extract dry_run starts in a worker",
+            worker ~= nil and worker_err == nil, tostring(worker_err))
+        if worker then
+            local joined, value = worker:join()
+            ok("archive.extract dry_run succeeds in a worker",
+                joined == true and type(value) == "table"
+                and value.dry_run == true and value.entries == 2
+                and value.files == 1 and value.directories == 1
+                and value.skipped == 3 and value.would_create == 2
+                and value.would_create_destination == true,
+                inspect(value))
+            ok("archive.extract worker dry_run creates no destination",
+                babet.fileExists(worker_out) == false)
+        end
+    end
+
+    do
+        local descriptor_data = "descriptor-data"
+        local descriptor_crc = crc32_number(descriptor_data)
+        local descriptor_zip = root .. "/descriptor.zip"
+        assert(make_zip(descriptor_zip, {
+            {
+                name = "descriptor.txt",
+                data = descriptor_data,
+                flags = 0x0008,
+                local_crc32 = 0,
+                local_compressed_size = 0,
+                local_size = 0,
+                descriptor = string.pack("<I4I4I4I4", 0x08074b50,
+                    descriptor_crc, #descriptor_data, #descriptor_data),
+            },
+        }))
+        local descriptor_test, descriptor_test_err =
+            babet.archive.test(descriptor_zip)
+        ok_val("archive.test validates signed ZIP data descriptors",
+            descriptor_test, descriptor_test_err,
+            function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.total_size == #descriptor_data
+            end)
+
+        local unsigned_descriptor_zip = root .. "/unsigned-descriptor.zip"
+        assert(make_zip(unsigned_descriptor_zip, {
+            {
+                name = "unsigned.txt",
+                data = descriptor_data,
+                flags = 0x0008,
+                local_crc32 = 0,
+                local_compressed_size = 0,
+                local_size = 0,
+                descriptor = string.pack("<I4I4I4", descriptor_crc,
+                    #descriptor_data, #descriptor_data),
+            },
+        }))
+        local unsigned_test, unsigned_test_err =
+            babet.archive.test(unsigned_descriptor_zip)
+        ok_val("archive.test validates unsigned ZIP data descriptors",
+            unsigned_test, unsigned_test_err,
+            function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.total_size == #descriptor_data
+            end)
+    end
+
+    do
+        local bad_local_signature = root .. "/bad-local-signature.zip"
+        assert(make_zip(bad_local_signature, {
+            { name = "empty.txt", data = "", local_signature = 0x04034b51 },
+        }))
+        local listed, listed_err = babet.archive.list(bad_local_signature)
+        ok_val("archive.list remains a metadata-only scan for local ZIP damage",
+            listed, listed_err)
+        local tested, tested_err = babet.archive.test(bad_local_signature)
+        ok_fail("archive.test rejects a damaged ZIP local-header signature",
+            tested, tested_err)
+        ok("damaged local-header diagnostic is explicit",
+            type(tested_err) == "string"
+            and tested_err:find("local-header", 1, true) ~= nil,
+            "err=" .. tostring(tested_err))
+    end
+
+    do
+        local bad_local_name = root .. "/bad-local-name.zip"
+        assert(make_zip(bad_local_name, {
+            { name = "safe.txt", local_name = "evil.txt", data = "safe" },
+        }))
+        local tested, tested_err = babet.archive.test(bad_local_name)
+        ok_fail("archive.test rejects differing local and central ZIP names",
+            tested, tested_err)
+        ok("local-name mismatch diagnostic is explicit",
+            type(tested_err) == "string"
+            and tested_err:find("local filename", 1, true) ~= nil,
+            "err=" .. tostring(tested_err))
+    end
+
+    do
+        local bad_empty_metadata = root .. "/bad-empty-metadata.zip"
+        assert(make_zip(bad_empty_metadata, {
+            { name = "empty.txt", data = "", local_crc32 = 1 },
+        }))
+        local tested, tested_err = babet.archive.test(bad_empty_metadata)
+        ok_fail("archive.test validates local metadata for empty ZIP files",
+            tested, tested_err)
+    end
+
+    do
+        local directory_data_zip = root .. "/directory-data.zip"
+        assert(make_zip(directory_data_zip, {
+            { name = "folder/", data = "unexpected" },
+        }))
+        local tested, tested_err = babet.archive.test(directory_data_zip)
+        ok_fail("archive.test rejects ZIP directory entries containing data",
+            tested, tested_err)
+    end
+    do
+        local test_worker, test_worker_err = babet.workers.spawn([[
+local result, err = babet.archive.test(worker.args.archive)
+if not result then error(err) end
+return result
+]], { archive = valid_zip })
+        ok("archive.test starts in a worker",
+            test_worker ~= nil and test_worker_err == nil,
+            tostring(test_worker_err))
+        if test_worker then
+            local joined, value = test_worker:join()
+            ok("archive.test succeeds in a worker",
+                joined == true and type(value) == "table"
+                and value.format == "zip" and value.entries == 5
+                and value.files == 4 and value.total_size == 4108,
+                inspect(value))
+        end
+    end
 
     -- Les noms temporaires internes ne doivent jamais entrer en conflit avec
     -- un nom de sortie contrôlé par l'archive. Le compteur vaut encore zéro :
@@ -12657,8 +13372,10 @@ return result
     local extract_dir = root .. "/extract-default"
     local extracted, extract_err = babet.archive.extract(valid_zip, extract_dir)
     ok_val("archive.extract(valid)", extracted, extract_err, function(value)
-        return value.files == 4 and value.directories == 1
+        return value.entries == 5 and value.files == 4
+            and value.directories == 1 and value.skipped == 0
             and value.bytes == 4108 and value.path == extract_dir
+            and value.dry_run == nil
     end)
     ok("archive.extract text content",
         read_bytes(extract_dir .. "/dir/hello.txt") == "bonjour\n")
@@ -12676,6 +13393,241 @@ return result
         default_dir_mode == tonumber("755", 8), tostring(default_dir_mode))
     ok("archive.extract leaves no staging files",
         no_archive_temporaries(extract_dir))
+
+    do
+        local mixed_destination = root .. "/dry-run-mixed-destination"
+        assert(babet.mkdir(mixed_destination .. "/dir"))
+        assert(write_bytes(mixed_destination .. "/dir/hello.txt", "old\n"))
+        local mixed, mixed_err = babet.archive.extract(
+            valid_zip, mixed_destination, {
+                dry_run = true,
+                overwrite = true,
+            })
+        ok_val("archive.extract dry_run classifies create overwrite and skip",
+            mixed, mixed_err, function(value)
+                return value.entries == 5 and value.files == 4
+                    and value.directories == 1
+                    and value.would_create == 3
+                    and value.would_overwrite == 1
+                    and value.would_skip == 1
+                    and value.would_create_destination == false
+                    and value.would_create + value.would_overwrite
+                        + value.would_skip == value.entries
+            end)
+        ok("archive.extract mixed dry_run performs no planned action",
+            read_bytes(mixed_destination .. "/dir/hello.txt") == "old\n"
+            and babet.fileExists(mixed_destination .. "/binary.bin") == false
+            and babet.fileExists(mixed_destination .. "/empty.txt") == false
+            and babet.fileExists(mixed_destination .. "/compressed.txt") == false
+            and no_archive_temporaries(mixed_destination))
+    end
+
+    do
+        local before_hello = read_bytes(extract_dir .. "/dir/hello.txt")
+        local before_binary = read_bytes(extract_dir .. "/binary.bin")
+        local before_file_mode = babet.getMode(extract_dir .. "/binary.bin")
+        local before_dir_mode = babet.getMode(extract_dir .. "/dir")
+        local preview, preview_err = babet.archive.extract(
+            valid_zip, extract_dir, {
+                dry_run = true,
+                overwrite = true,
+                preserve_permissions = true,
+            })
+        ok_val("archive.extract dry_run reports existing destination actions",
+            preview, preview_err, function(value)
+                return value.entries == 5 and value.files == 4
+                    and value.directories == 1 and value.skipped == 0
+                    and value.dry_run == true
+                    and value.would_create == 0
+                    and value.would_overwrite == 4
+                    and value.would_skip == 1
+                    and value.would_create_destination == false
+                    and value.would_create + value.would_overwrite
+                        + value.would_skip == value.entries
+            end)
+        ok("archive.extract dry_run never changes existing bytes or modes",
+            read_bytes(extract_dir .. "/dir/hello.txt") == before_hello
+            and read_bytes(extract_dir .. "/binary.bin") == before_binary
+            and babet.getMode(extract_dir .. "/binary.bin") == before_file_mode
+            and babet.getMode(extract_dir .. "/dir") == before_dir_mode
+            and no_archive_temporaries(extract_dir))
+
+        local refused, refused_err = babet.archive.extract(
+            valid_zip, extract_dir, { dry_run = true })
+        ok_fail("archive.extract dry_run preserves overwrite=false refusal",
+            refused, refused_err)
+        ok("archive.extract refused dry_run leaves existing files intact",
+            read_bytes(extract_dir .. "/dir/hello.txt") == before_hello
+            and read_bytes(extract_dir .. "/binary.bin") == before_binary)
+    end
+
+    do
+        local filter_zip = root .. "/filter-selective.zip"
+        assert(make_zip(filter_zip, {
+            { name = "src/" },
+            { name = "src/main.lua", data = "print('ok')\n" },
+            { name = "src/generated/" },
+            { name = "src/generated/cache.tmp", data = "cache" },
+            { name = "README.md", data = "readme" },
+            { name = "notes.tmp", data = "notes" },
+        }))
+        local dry_filter_out = root .. "/filter-selective-zip-dry-out"
+        local dry_filtered, dry_filtered_err = babet.archive.extract(
+            filter_zip, dry_filter_out, {
+                dry_run = true,
+                include = { "src/**", "README.md" },
+                exclude = { "src/generated", "*.tmp", "**/*.tmp" },
+            })
+        ok_val("archive.extract ZIP dry_run applies include/exclude identically",
+            dry_filtered, dry_filtered_err, function(value)
+                return value.entries == 3 and value.files == 2
+                    and value.directories == 1 and value.skipped == 3
+                    and value.bytes == 18 and value.dry_run == true
+                    and value.would_create == 3
+                    and value.would_overwrite == 0
+                    and value.would_skip == 0
+                    and value.would_create_destination == true
+            end)
+        ok("archive.extract ZIP filtered dry_run creates nothing",
+            babet.fileExists(dry_filter_out) == false)
+
+        local filter_out = root .. "/filter-selective-zip-out"
+        local filtered, filtered_err = babet.archive.extract(
+            filter_zip, filter_out, {
+                include = { "src/**", "README.md" },
+                exclude = { "src/generated", "*.tmp", "**/*.tmp" },
+            })
+        ok_val("archive.extract ZIP applies include/exclude safe globs",
+            filtered, filtered_err, function(value)
+                return value.entries == 3 and value.files == 2
+                    and value.directories == 1 and value.skipped == 3
+                    and value.bytes == 18 and value.path == filter_out
+            end)
+        ok("archive.extract ZIP exclude overrides include and prunes subtrees",
+            read_bytes(filter_out .. "/src/main.lua") == "print('ok')\n"
+            and read_bytes(filter_out .. "/README.md") == "readme"
+            and babet.fileExists(filter_out .. "/src/generated") == false
+            and babet.fileExists(filter_out .. "/notes.tmp") == false)
+
+        local exclude_only_out = root .. "/filter-exclude-only-zip-out"
+        local exclude_only, exclude_only_err = babet.archive.extract(
+            filter_zip, exclude_only_out, {
+                exclude = { "src/generated", "*.tmp" },
+            })
+        ok_val("archive.extract ZIP supports exclude-only selection",
+            exclude_only, exclude_only_err, function(value)
+                return value.entries == 3 and value.files == 2
+                    and value.directories == 1 and value.skipped == 3
+                    and value.bytes == 18
+            end)
+        ok("archive.extract ZIP exclude-only keeps unrelated entries",
+            read_bytes(exclude_only_out .. "/src/main.lua") == "print('ok')\n"
+            and read_bytes(exclude_only_out .. "/README.md") == "readme"
+            and babet.fileExists(exclude_only_out .. "/src/generated") == false
+            and babet.fileExists(exclude_only_out .. "/notes.tmp") == false)
+
+        local question_out = root .. "/filter-question-zip-out"
+        local question, question_err = babet.archive.extract(
+            filter_zip, question_out, { include = { "src/main.lu?" } })
+        ok_val("archive.extract ZIP '?' matches exactly one non-slash byte",
+            question, question_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.skipped == 5
+            end)
+        ok("archive.extract ZIP '?' selected the expected file",
+            read_bytes(question_out .. "/src/main.lua") == "print('ok')\n")
+
+        local case_out = root .. "/filter-case-zip-out"
+        local case_result, case_err = babet.archive.extract(
+            filter_zip, case_out, { include = { "readme.md" } })
+        ok_val("archive.extract ZIP safe globs are case-sensitive",
+            case_result, case_err, function(value)
+                return value.entries == 0 and value.skipped == 6
+            end)
+        ok("archive.extract ZIP case mismatch creates no destination",
+            babet.fileExists(case_out) == false)
+
+        local empty_filters_out = root .. "/filter-empty-arrays-zip-out"
+        local empty_filters, empty_filters_err = babet.archive.extract(
+            filter_zip, empty_filters_out, { include = {}, exclude = {} })
+        ok_val("archive.extract ZIP empty filter arrays are historical no-ops",
+            empty_filters, empty_filters_err, function(value)
+                return value.entries == 6 and value.files == 4
+                    and value.directories == 2 and value.skipped == 0
+            end)
+        ok("archive.extract ZIP empty filter arrays extract every entry",
+            read_bytes(empty_filters_out .. "/README.md") == "readme"
+            and read_bytes(empty_filters_out .. "/src/generated/cache.tmp") == "cache"
+            and read_bytes(empty_filters_out .. "/notes.tmp") == "notes")
+
+        local existing_out = root .. "/filter-existing-zip-out"
+        assert(babet.mkdir(existing_out .. "/src/generated"))
+        assert(write_bytes(existing_out .. "/src/generated/cache.tmp", "keep"))
+        local existing, existing_err = babet.archive.extract(
+            filter_zip, existing_out, { include = { "README.md" } })
+        ok_val("archive.extract ZIP ignores destination collisions outside selection",
+            existing, existing_err, function(value)
+                return value.entries == 1 and value.skipped == 5
+            end)
+        ok("archive.extract ZIP leaves unselected existing paths untouched",
+            read_bytes(existing_out .. "/README.md") == "readme"
+            and read_bytes(existing_out .. "/src/generated/cache.tmp") == "keep")
+
+        local no_match_out = root .. "/filter-no-match-zip-out"
+        local no_match, no_match_err = babet.archive.extract(
+            filter_zip, no_match_out, { include = { "missing/**" } })
+        ok_val("archive.extract ZIP accepts an empty selection",
+            no_match, no_match_err, function(value)
+                return value.entries == 0 and value.files == 0
+                    and value.directories == 0 and value.skipped == 6
+                    and value.bytes == 0
+            end)
+        ok("archive.extract ZIP empty selection creates no destination",
+            babet.fileExists(no_match_out) == false)
+
+        local symlink_external = zip_mode(0xA000, tonumber("777", 8))
+        local special_zip = root .. "/filter-special.zip"
+        assert(make_zip(special_zip, {
+            { name = "blocked/" },
+            { name = "blocked/link", data = "../outside",
+              external_attributes = symlink_external },
+            { name = "safe.txt", data = "safe" },
+        }))
+        local special_out = root .. "/filter-special-zip-out"
+        local special, special_err = babet.archive.extract(
+            special_zip, special_out, {
+                include = { "**" }, exclude = { "blocked" },
+            })
+        ok_val("archive.extract ZIP ignores excluded special entries",
+            special, special_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.directories == 0 and value.skipped == 2
+            end)
+        ok("archive.extract ZIP excluded directory creates no descendants",
+            read_bytes(special_out .. "/safe.txt") == "safe"
+            and babet.fileExists(special_out .. "/blocked") == false)
+
+        local worker_out = root .. "/filter-worker-zip-out"
+        local worker, worker_err = babet.workers.spawn([[
+local result, err = babet.archive.extract(
+    worker.args.archive, worker.args.destination,
+    { include = { "README.md" } })
+if not result then error(err) end
+return result
+]], { archive = filter_zip, destination = worker_out })
+        ok("archive.extract ZIP filters start in a worker",
+            worker ~= nil and worker_err == nil, tostring(worker_err))
+        if worker then
+            local joined, value = worker:join()
+            ok("archive.extract ZIP filters succeed in a worker",
+                joined == true and type(value) == "table"
+                and value.entries == 1 and value.files == 1
+                and value.skipped == 5,
+                inspect(value))
+            ok("archive.extract ZIP filtered worker publishes selected data",
+                read_bytes(worker_out .. "/README.md") == "readme")
+        end
+    end
 
     local refused, refused_err = babet.archive.extract(valid_zip, extract_dir)
     ok_fail("archive.extract refuses overwrite by default", refused, refused_err)
@@ -12781,25 +13733,132 @@ return result
     }))
     local duplicate_list, duplicate_list_err = babet.archive.list(duplicate_zip)
     ok_val("archive.list reports duplicate names", duplicate_list, duplicate_list_err,
-        function(value) return value.count == 2 end)
+        function(value)
+            return value.count == 2
+                and value.duplicates == 1
+                and value.conflicts == 1
+                and value.entries[1].duplicate == false
+                and value.entries[1].conflict == false
+                and value.entries[2].duplicate == true
+                and value.entries[2].duplicate_of == 1
+                and value.entries[2].conflict == true
+                and value.entries[2].conflict_with == 1
+                and value.entries[2].conflict_reason
+                    == "duplicate output path"
+        end)
+    do
+        local duplicate_test, duplicate_test_err =
+            babet.archive.test(duplicate_zip)
+        ok_fail("archive.test rejects duplicate ZIP paths",
+            duplicate_test, duplicate_test_err)
+        ok("archive.test duplicate ZIP diagnostic is explicit",
+            type(duplicate_test_err) == "string"
+            and duplicate_test_err:find("duplicate output path", 1, true)
+                ~= nil,
+            "err=" .. tostring(duplicate_test_err))
+    end
     local duplicate_extract, duplicate_extract_err = babet.archive.extract(
         duplicate_zip, root .. "/duplicate-out")
     ok_fail("archive.extract refuses duplicate output paths",
         duplicate_extract, duplicate_extract_err)
+    do
+        local duplicate_dry_out = root .. "/duplicate-dry-run-out"
+        local duplicate_dry, duplicate_dry_err = babet.archive.extract(
+            duplicate_zip, duplicate_dry_out, { dry_run = true })
+        ok_fail("archive.extract dry_run rejects selected duplicate paths",
+            duplicate_dry, duplicate_dry_err)
+        ok("archive.extract duplicate dry_run creates no destination",
+            babet.fileExists(duplicate_dry_out) == false)
+    end
     local duplicate_one, duplicate_one_err = babet.archive.extractFile(
         duplicate_zip, "same.txt", root .. "/ambiguous.txt")
     ok_fail("archive.extractFile refuses an ambiguous duplicate name",
         duplicate_one, duplicate_one_err)
+
+    do
+        local filtered_duplicate_zip = root .. "/filtered-duplicate.zip"
+        assert(make_zip(filtered_duplicate_zip, {
+            { name = "same.txt", data = "first" },
+            { name = "same.txt", data = "second" },
+            { name = "safe.txt", data = "safe" },
+        }))
+        local filtered_out = root .. "/filtered-duplicate-zip-out"
+        local filtered, filtered_err = babet.archive.extract(
+            filtered_duplicate_zip, filtered_out,
+            { include = { "safe.txt" } })
+        ok_val("archive.extract ZIP ignores unselected duplicate paths",
+            filtered, filtered_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.skipped == 2 and value.bytes == 4
+            end)
+        ok("archive.extract ZIP unselected duplicates publish only safe data",
+            read_bytes(filtered_out .. "/safe.txt") == "safe"
+            and babet.fileExists(filtered_out .. "/same.txt") == false)
+    end
 
     local conflict_zip = root .. "/conflict.zip"
     assert(make_zip(conflict_zip, {
         { name = "node", data = "file" },
         { name = "node/child.txt", data = "child" },
     }))
+    local conflict_list, conflict_list_err = babet.archive.list(conflict_zip)
+    ok_val("archive.list reports ZIP file/directory conflicts",
+        conflict_list, conflict_list_err, function(value)
+            return value.duplicates == 0
+                and value.conflicts == 1
+                and value.entries[2].conflict == true
+                and value.entries[2].conflict_with == 1
+                and value.entries[2].conflict_reason
+                    == "file/directory path conflict"
+        end)
+    do
+        local conflict_test, conflict_test_err = babet.archive.test(conflict_zip)
+        ok_fail("archive.test rejects ZIP file/directory path conflicts",
+            conflict_test, conflict_test_err)
+    end
     local conflict, conflict_err = babet.archive.extract(
         conflict_zip, root .. "/conflict-out")
     ok_fail("archive.extract refuses file/directory path conflicts",
         conflict, conflict_err)
+
+    local normalized_conflict_zip = root .. "/normalized-conflict.zip"
+    assert(make_zip(normalized_conflict_zip, {
+        { name = "same/", data = "" },
+        { name = "same", data = "file" },
+    }))
+    local normalized_conflict_list, normalized_conflict_list_err =
+        babet.archive.list(normalized_conflict_zip)
+    ok_val("archive.list distinguishes raw duplicates from normalized collisions",
+        normalized_conflict_list, normalized_conflict_list_err,
+        function(value)
+            return value.duplicates == 0
+                and value.conflicts == 1
+                and value.entries[1].path == "same"
+                and value.entries[2].path == "same"
+                and value.entries[2].duplicate == false
+                and value.entries[2].conflict == true
+                and value.entries[2].conflict_with == 1
+                and value.entries[2].conflict_reason
+                    == "file/directory path conflict"
+        end)
+
+    ;(function()
+    local unsafe_duplicate_zip = root .. "/unsafe-duplicate.zip"
+    assert(make_zip(unsafe_duplicate_zip, {
+        { name = "../same.txt", data = "first" },
+        { name = "../same.txt", data = "second" },
+    }))
+    local unsafe_duplicate_list, unsafe_duplicate_list_err =
+        babet.archive.list(unsafe_duplicate_zip)
+    ok_val("archive.list reports raw duplicates even for unsafe paths",
+        unsafe_duplicate_list, unsafe_duplicate_list_err, function(value)
+            return value.duplicates == 1 and value.conflicts == 0
+                and value.entries[2].safe_path == false
+                and value.entries[2].duplicate == true
+                and value.entries[2].duplicate_of == 1
+                and value.entries[2].conflict == false
+        end)
+    end)()
 
     local unsafe_zip = root .. "/unsafe.zip"
     local long_name = string.rep("a", 4097)
@@ -12836,13 +13895,34 @@ return result
         and unsafe_list.entries[8].safe_path == false)
     ok("archive.list marks oversized names unsafe",
         unsafe_list and unsafe_list.entries[9].safe_path == false)
+    do
+        local unsafe_test, unsafe_test_err = babet.archive.test(unsafe_zip)
+        ok_fail("archive.test rejects unsafe ZIP paths",
+            unsafe_test, unsafe_test_err)
+        ok("archive.test unsafe ZIP diagnostic is explicit",
+            type(unsafe_test_err) == "string"
+            and unsafe_test_err:find("cannot be extracted", 1, true) ~= nil,
+            "err=" .. tostring(unsafe_test_err))
+    end
+    local strict_path_list, strict_path_list_err = babet.archive.list(
+        unsafe_zip, { max_path_length = 4096 })
+    ok_fail("archive.list may tighten metadata path length below its default",
+        strict_path_list, strict_path_list_err)
     local unsafe_out = root .. "/unsafe-out"
     local unsafe_extract, unsafe_extract_err = babet.archive.extract(
         unsafe_zip, unsafe_out)
     ok_fail("archive.extract refuses unsafe archive paths",
         unsafe_extract, unsafe_extract_err)
-    ok("archive path validation happens before destination creation",
-        babet.fileExists(unsafe_out) == false)
+    do
+        local unsafe_dry_out = root .. "/unsafe-dry-run-out"
+        local unsafe_dry, unsafe_dry_err = babet.archive.extract(
+            unsafe_zip, unsafe_dry_out, { dry_run = true })
+        ok_fail("archive.extract dry_run refuses selected unsafe archive paths",
+            unsafe_dry, unsafe_dry_err)
+        ok("archive path validation happens before destination creation",
+            babet.fileExists(unsafe_out) == false
+            and babet.fileExists(unsafe_dry_out) == false)
+    end
     local selected_unsafe, selected_unsafe_err = babet.archive.extractFile(
         unsafe_zip, "../escape.txt", root .. "/selected-unsafe.txt")
     ok_fail("archive.extractFile refuses a selected unsafe entry",
@@ -12852,6 +13932,62 @@ return result
     ok_val("archive.extractFile may select a safe entry from a mixed archive",
         selected_safe, selected_safe_err)
     ok("selected safe entry content", read_bytes(root .. "/selected-safe.txt") == "safe")
+
+    local selective_safe_out = root .. "/selective-safe-out"
+    local selective_safe, selective_safe_err = babet.archive.extract(
+        unsafe_zip, selective_safe_out, { include = { "safe.txt" } })
+    ok_val("archive.extract ZIP may select a safe normalized path from a mixed archive",
+        selective_safe, selective_safe_err, function(value)
+            return value.entries == 1 and value.files == 1
+                and value.skipped == 9 and value.bytes == 4
+        end)
+    ok("archive.extract ZIP selective mixed-archive extraction stays contained",
+        read_bytes(selective_safe_out .. "/safe.txt") == "safe"
+        and babet.fileExists(root .. "/escape.txt") == false)
+    do
+        local dry_out = root .. "/selective-safe-dry-out"
+        local dry, dry_err = babet.archive.extract(
+            unsafe_zip, dry_out, {
+                dry_run = true,
+                include = { "safe.txt" },
+            })
+        ok_val("archive.extract dry_run may preview a safe subset of a mixed ZIP",
+            dry, dry_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.skipped == 9 and value.bytes == 4
+                    and value.dry_run == true
+                    and value.would_create == 1
+                    and value.would_create_destination == true
+            end)
+        ok("archive.extract mixed ZIP dry_run creates nothing",
+            babet.fileExists(dry_out) == false)
+    end
+
+    do
+        local unsafe_exclude_out = root .. "/zip-exclude-unsafe-out"
+        local unsafe_exclude, unsafe_exclude_err = babet.archive.extract(
+            unsafe_zip, unsafe_exclude_out, { exclude = { "../escape.txt" } })
+        ok_fail("archive.extract ZIP exclude-only cannot sanitize an unsafe path",
+            unsafe_exclude, unsafe_exclude_err)
+        ok("archive.extract ZIP unsafe exclude-only failure creates no destination",
+            babet.fileExists(unsafe_exclude_out) == false)
+    end
+
+    local binary_name_zip = root .. "/binary-name.zip"
+    local binary_name = "\255.bin"
+    assert(make_zip(binary_name_zip, {
+        { name = binary_name, data = "binary-name" },
+    }))
+    local binary_name_list, binary_name_list_err =
+        babet.archive.list(binary_name_zip)
+    ok_val("archive.list preserves non-UTF-8 ZIP names as Lua byte strings",
+        binary_name_list, binary_name_list_err, function(value)
+            return value.total_name_bytes == #binary_name
+                and value.entries[1].name == binary_name
+                and value.entries[1].path == binary_name
+                and value.entries[1].valid_utf8 == false
+                and value.entries[1].safe_path == true
+        end)
 
     local nul_name_zip = root .. "/nul-name.zip"
     assert(make_zip(nul_name_zip, {
@@ -12878,10 +14014,24 @@ return result
     ok("ZIP symlink is never extractable",
         symlink_list and symlink_list.entries[1].type == "symlink"
         and symlink_list.entries[1].extractable == false)
+    do
+        local symlink_test, symlink_test_err = babet.archive.test(symlink_zip)
+        ok_fail("archive.test rejects ZIP symlink entries",
+            symlink_test, symlink_test_err)
+    end
     local symlink_entry, symlink_entry_err = babet.archive.extract(
         symlink_zip, root .. "/symlink-entry-out")
     ok_fail("archive.extract refuses ZIP symlink entries",
         symlink_entry, symlink_entry_err)
+    do
+        local symlink_dry_out = root .. "/symlink-entry-dry-out"
+        local symlink_dry, symlink_dry_err = babet.archive.extract(
+            symlink_zip, symlink_dry_out, { dry_run = true })
+        ok_fail("archive.extract dry_run refuses selected ZIP symlink entries",
+            symlink_dry, symlink_dry_err)
+        ok("archive.extract ZIP symlink dry_run creates no destination",
+            babet.fileExists(symlink_dry_out) == false)
+    end
 
     local symlink_file, symlink_file_err = babet.archive.extractFile(
         symlink_zip, "link", root .. "/symlink-as-file")
@@ -12920,6 +14070,12 @@ return result
     ok("unsupported filesystem type is not extractable",
         special_type_list and special_type_list.entries[1].type == "unsupported"
         and special_type_list.entries[1].extractable == false)
+    do
+        local special_test, special_test_err =
+            babet.archive.test(special_type_zip)
+        ok_fail("archive.test rejects special ZIP filesystem types",
+            special_test, special_test_err)
+    end
     local special_type, special_type_err = babet.archive.extract(
         special_type_zip, root .. "/special-type-out")
     ok_fail("archive.extract refuses unsupported filesystem types",
@@ -12934,6 +14090,16 @@ return result
     ok("encrypted entry is not extractable",
         encrypted_list and encrypted_list.entries[1].encrypted == true
         and encrypted_list.entries[1].extractable == false)
+    do
+        local encrypted_test, encrypted_test_err =
+            babet.archive.test(encrypted_zip)
+        ok_fail("archive.test refuses unverifiable encrypted ZIP entries",
+            encrypted_test, encrypted_test_err)
+        ok("archive.test encrypted ZIP diagnostic is explicit",
+            type(encrypted_test_err) == "string"
+            and encrypted_test_err:find("encrypted", 1, true) ~= nil,
+            "err=" .. tostring(encrypted_test_err))
+    end
     local encrypted, encrypted_err = babet.archive.extract(
         encrypted_zip, root .. "/encrypted-out")
     ok_fail("archive.extract refuses encrypted entries", encrypted, encrypted_err)
@@ -12948,6 +14114,12 @@ return result
     ok("unsupported compression is not extractable",
         unsupported_list and unsupported_list.entries[1].supported == false
         and unsupported_list.entries[1].extractable == false)
+    do
+        local unsupported_test, unsupported_test_err =
+            babet.archive.test(unsupported_zip)
+        ok_fail("archive.test refuses unsupported ZIP compression methods",
+            unsupported_test, unsupported_test_err)
+    end
     local unsupported, unsupported_err = babet.archive.extract(
         unsupported_zip, root .. "/unsupported-out")
     ok_fail("archive.extract refuses unsupported compression",
@@ -12974,14 +14146,65 @@ return result
     ok_fail("archive max_entry_size enforced", limited, limited_err)
     limited, limited_err = babet.archive.list(valid_zip, { max_total_size = 4107 })
     ok_fail("archive max_total_size enforced", limited, limited_err)
+    limited, limited_err = babet.archive.list(
+        valid_zip, { max_path_length = 13 })
+    ok_fail("archive max_path_length enforced", limited, limited_err)
+    limited, limited_err = babet.archive.list(
+        valid_zip, { max_total_name_bytes = 49 })
+    ok_fail("archive max_total_name_bytes enforced", limited, limited_err)
     local exact_limits, exact_limits_err = babet.archive.list(valid_zip, {
         max_entries = 5,
         max_entry_size = 4096,
         max_total_size = 4108,
+        max_path_length = 14,
+        max_total_name_bytes = 50,
     })
     ok_val("archive anti-bomb integer limits are inclusive at the boundary",
         exact_limits, exact_limits_err,
-        function(value) return value.count == 5 and value.total_size == 4108 end)
+        function(value)
+            return value.count == 5
+                and value.total_size == 4108
+                and value.total_name_bytes == 50
+        end)
+
+    do
+        local tested, tested_err = babet.archive.test(valid_zip, {
+            max_entries = 5,
+            max_entry_size = 4096,
+            max_total_size = 4108,
+            max_path_length = 14,
+            max_total_name_bytes = 50,
+            max_compression_ratio = 1000,
+        })
+        ok_val("archive.test accepts all six limits at valid boundaries",
+            tested, tested_err, function(value)
+                return value.entries == 5 and value.total_size == 4108
+                    and value.total_name_bytes == 50
+            end)
+
+        tested, tested_err = babet.archive.test(valid_zip, {
+            max_entry_size = 4095,
+        })
+        ok_fail("archive.test enforces max_entry_size", tested, tested_err)
+        tested, tested_err = babet.archive.test(valid_zip, {
+            max_total_size = 4107,
+        })
+        ok_fail("archive.test enforces max_total_size", tested, tested_err)
+        tested, tested_err = babet.archive.test(valid_zip, {
+            max_path_length = 13,
+        })
+        ok_fail("archive.test enforces max_path_length", tested, tested_err)
+        tested, tested_err = babet.archive.test(valid_zip, {
+            max_total_name_bytes = 49,
+        })
+        ok_fail("archive.test enforces max_total_name_bytes",
+            tested, tested_err)
+        tested, tested_err = babet.archive.test(ratio_zip, {
+            max_compression_ratio = 100,
+        })
+        ok_fail("archive.test enforces max_compression_ratio",
+            tested, tested_err)
+    end
 
     local limited_out = root .. "/limited-out"
     limited, limited_err = babet.archive.extract(
@@ -12990,10 +14213,33 @@ return result
         limited, limited_err)
     ok("archive.extract limit failure creates no destination",
         babet.fileExists(limited_out) == false)
+    do
+        local dry_limited_out = root .. "/dry-run-limited-out"
+        local dry_limited, dry_limited_err = babet.archive.extract(
+            valid_zip, dry_limited_out, {
+                dry_run = true,
+                max_entries = 4,
+            })
+        ok_fail("archive.extract dry_run applies anti-bomb limits",
+            dry_limited, dry_limited_err)
+        ok("archive.extract dry_run limit failure creates no destination",
+            babet.fileExists(dry_limited_out) == false)
+    end
     limited, limited_err = babet.archive.extractFile(
         valid_zip, "binary.bin", root .. "/limited-single.bin",
         { max_total_size = 4 })
     ok_fail("archive.extractFile applies limits to the whole archive",
+        limited, limited_err)
+    limited, limited_err = babet.archive.extract(
+        valid_zip, root .. "/limited-name-out", { max_path_length = 13 })
+    ok_fail("archive.extract applies max_path_length before writing",
+        limited, limited_err)
+    ok("archive.extract path-length failure creates no destination",
+        babet.fileExists(root .. "/limited-name-out") == false)
+    limited, limited_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", root .. "/limited-name-bytes.bin",
+        { max_total_name_bytes = 49 })
+    ok_fail("archive.extractFile applies max_total_name_bytes to the archive",
         limited, limited_err)
 
     local corrupt_zip = root .. "/corrupt.zip"
@@ -13007,6 +14253,49 @@ return result
             crc32 = (crc32_number(bad_data) + 1) & 0xffffffff,
         },
     }))
+    local corrupt_list, corrupt_list_err = babet.archive.list(corrupt_zip)
+    ok_val("archive.list reports ZIP CRC metadata without reading every payload",
+        corrupt_list, corrupt_list_err, function(value)
+            return value.count == 3
+                and value.entries[3].crc32
+                    == ((crc32_number(bad_data) + 1) & 0xffffffff)
+        end)
+    do
+        local corrupt_test, corrupt_test_err = babet.archive.test(corrupt_zip)
+        ok_fail("archive.test detects corrupt ZIP data or CRC",
+            corrupt_test, corrupt_test_err)
+        ok("archive.test corrupt ZIP diagnostic identifies the failing entry",
+            type(corrupt_test_err) == "string"
+            and corrupt_test_err:find("folder/bad.txt", 1, true) ~= nil,
+            "err=" .. tostring(corrupt_test_err))
+    end
+    do
+        local dry_out = root .. "/corrupt-dry-run-out"
+        local dry, dry_err = babet.archive.extract(
+            corrupt_zip, dry_out, { dry_run = true })
+        ok_fail("archive.extract dry_run detects corrupt selected ZIP data",
+            dry, dry_err)
+        ok("archive.extract corrupt dry_run creates no destination",
+            babet.fileExists(dry_out) == false)
+
+        local good_out = root .. "/corrupt-good-dry-run-out"
+        local good, good_err = babet.archive.extract(
+            corrupt_zip, good_out, {
+                dry_run = true,
+                include = { "folder/good.txt" },
+            })
+        ok_val("archive.extract dry_run skips unselected corrupt ZIP payloads",
+            good, good_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.directories == 0 and value.skipped == 2
+                    and value.bytes == 4 and value.dry_run == true
+                    and value.would_create == 1
+                    and value.would_create_destination == true
+            end)
+        ok("archive.extract selective corrupt dry_run creates nothing",
+            babet.fileExists(good_out) == false)
+    end
+
     local corrupt_out = root .. "/corrupt-out"
     local corrupt, corrupt_err = babet.archive.extract(corrupt_zip, corrupt_out)
     ok_fail("archive extraction detects corrupt data/CRC", corrupt, corrupt_err)
@@ -13019,15 +14308,39 @@ return result
     ok("corrupt extraction removes newly created empty subdirectories",
         babet.fileExists(corrupt_out .. "/folder") == false)
 
+    do
+        local corrupt_selected_out = root .. "/corrupt-selected-out"
+        local corrupt_selected, corrupt_selected_err = babet.archive.extract(
+            corrupt_zip, corrupt_selected_out, {
+                include = { "folder/good.txt" },
+            })
+        ok_val("archive.extract ZIP does not inflate an unselected corrupt payload",
+            corrupt_selected, corrupt_selected_err, function(value)
+                return value.entries == 1 and value.files == 1
+                    and value.directories == 0 and value.skipped == 2
+                    and value.bytes == 4
+            end)
+        ok("archive.extract ZIP selected good payload is published independently",
+            read_bytes(corrupt_selected_out .. "/folder/good.txt") == "good"
+            and babet.fileExists(corrupt_selected_out .. "/folder/bad.txt") == false)
+    end
+
     local not_zip = root .. "/not-a-zip.bin"
     assert(write_bytes(not_zip, "not a ZIP archive"))
     local invalid, invalid_err = babet.archive.list(not_zip)
     ok_fail("archive.list rejects malformed ZIP", invalid, invalid_err)
+    invalid, invalid_err = babet.archive.test(not_zip)
+    ok_fail("archive.test rejects malformed input", invalid, invalid_err)
     invalid, invalid_err = babet.archive.list(root .. "/missing.zip")
     ok_fail("archive.list rejects missing archive", invalid, invalid_err)
+    invalid, invalid_err = babet.archive.test(root .. "/missing.zip")
+    ok_fail("archive.test rejects a missing archive", invalid, invalid_err)
 
     invalid, invalid_err = babet.archive.list(root)
     ok_fail("archive.list rejects a directory as archive source",
+        invalid, invalid_err)
+    invalid, invalid_err = babet.archive.test(root)
+    ok_fail("archive.test rejects a directory as archive source",
         invalid, invalid_err)
 
     local archive_fifo = root .. "/archive-input-fifo"
@@ -13041,6 +14354,15 @@ return result
         invalid, invalid_err)
     ok("archive.list rejects a FIFO without blocking",
         fifo_elapsed < 2, tostring(fifo_elapsed))
+    do
+        local test_fifo_started = babet.time.monotonic()
+        invalid, invalid_err = babet.archive.test(archive_fifo)
+        local test_fifo_elapsed = babet.time.monotonic() - test_fifo_started
+        ok_fail("archive.test rejects a FIFO as archive source",
+            invalid, invalid_err)
+        ok("archive.test rejects a FIFO without blocking",
+            test_fifo_elapsed < 2, tostring(test_fifo_elapsed))
+    end
     babet.exec("rm", { "-f", archive_fifo })
 
     local archive_input_link = root .. "/archive-input-link.zip"
@@ -13053,6 +14375,13 @@ return result
     ok_val("archive.list follows a read-only symlink to a regular ZIP",
         linked_archive, linked_archive_err,
         function(value) return value.count == 5 end)
+    do
+        local linked_test, linked_test_err =
+            babet.archive.test(archive_input_link)
+        ok_val("archive.test follows a symlink to a regular ZIP",
+            linked_test, linked_test_err,
+            function(value) return value.entries == 5 end)
+    end
 
     local outside = root .. "/outside"
     local symlink_dest = root .. "/symlink-dest"
@@ -13069,6 +14398,12 @@ return result
         valid_zip, symlink_dest, { overwrite = true })
     ok_fail("archive.extract refuses a symlinked destination parent",
         parent_attack, parent_attack_err)
+    do
+        local dry_parent_attack, dry_parent_attack_err = babet.archive.extract(
+            valid_zip, symlink_dest, { dry_run = true, overwrite = true })
+        ok_fail("archive.extract dry_run refuses a symlinked destination parent",
+            dry_parent_attack, dry_parent_attack_err)
+    end
     ok("symlinked parent cannot redirect extraction outside",
         read_bytes(outside .. "/sentinel.txt") == "unchanged"
         and babet.fileExists(outside .. "/hello.txt") == false)
@@ -13081,6 +14416,12 @@ return result
         valid_zip, root_link, { overwrite = true })
     ok_fail("archive.extract refuses a symlink in destination root",
         root_attack, root_attack_err)
+    do
+        local dry_root_attack, dry_root_attack_err = babet.archive.extract(
+            valid_zip, root_link, { dry_run = true, overwrite = true })
+        ok_fail("archive.extract dry_run refuses a symlink in destination root",
+            dry_root_attack, dry_root_attack_err)
+    end
 
     local leaf_dest = root .. "/leaf-dest"
     assert(babet.mkdir(leaf_dest))
@@ -13097,6 +14438,34 @@ return result
         leaf_attack, leaf_attack_err)
     ok("symlink destination target remains unchanged",
         read_bytes(outside .. "/leaf.txt") == "outside")
+    do
+        local dry_leaf_attack, dry_leaf_attack_err = babet.archive.extract(
+            valid_zip, leaf_dest, {
+                dry_run = true,
+                overwrite = true,
+                include = { "binary.bin" },
+            })
+        ok_fail("archive.extract dry_run refuses a symlink destination entry",
+            dry_leaf_attack, dry_leaf_attack_err)
+        ok("archive.extract dry_run leaves the symlink target unchanged",
+            read_bytes(outside .. "/leaf.txt") == "outside")
+    end
+
+    do
+        local conflict_destination = root .. "/dry-run-destination-conflict"
+        assert(babet.mkdir(conflict_destination))
+        assert(write_bytes(conflict_destination .. "/dir", "file"))
+        local conflict, conflict_err = babet.archive.extract(
+            valid_zip, conflict_destination, {
+                dry_run = true,
+                overwrite = true,
+            })
+        ok_fail("archive.extract dry_run refuses destination file/directory conflicts",
+            conflict, conflict_err)
+        ok("archive.extract dry_run destination conflict remains unchanged",
+            read_bytes(conflict_destination .. "/dir") == "file"
+            and no_archive_temporaries(conflict_destination))
+    end
 
     local empty_destination, empty_destination_err =
         babet.archive.extract(valid_zip, "")
@@ -13105,8 +14474,12 @@ return result
 
     local bad, bad_err = babet.archive.list(valid_zip, "bad")
     ok_fail("archive.list opts must be a table", bad, bad_err)
+    bad, bad_err = babet.archive.test(valid_zip, "bad")
+    ok_fail("archive.test opts must be a table", bad, bad_err)
     bad, bad_err = babet.archive.list(valid_zip, { overwrite = true })
     ok_fail("archive.list rejects extraction-only options", bad, bad_err)
+    bad, bad_err = babet.archive.test(valid_zip, { overwrite = true })
+    ok_fail("archive.test rejects extraction-only options", bad, bad_err)
     bad, bad_err = babet.archive.list(valid_zip, { unknown = true })
     ok_fail("archive.list rejects unknown options", bad, bad_err)
     bad, bad_err = babet.archive.list(valid_zip, { [1] = true })
@@ -13116,6 +14489,95 @@ return result
     })
     ok_fail("archive overwrite option is strictly boolean", bad, bad_err)
     bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        dry_run = 1,
+    })
+    ok_fail("archive dry_run option is strictly boolean", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { dry_run = true })
+    ok_fail("archive.list rejects dry_run", bad, bad_err)
+    bad, bad_err = babet.archive.test(valid_zip, { dry_run = true })
+    ok_fail("archive.test rejects dry_run", bad, bad_err)
+    bad, bad_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", root .. "/bad-dry-run-file", {
+            dry_run = true,
+        })
+    ok_fail("archive.extractFile rejects dry_run", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        include = "*.txt",
+    })
+    ok_fail("archive.extract include must be a dense array", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        exclude = { [1] = "*.txt", [3] = "*.tmp" },
+    })
+    ok_fail("archive.extract filter arrays must not contain holes", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        include = { 42 },
+    })
+    ok_fail("archive.extract filters require strict string values", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        include = { "" },
+    })
+    ok_fail("archive.extract rejects empty glob patterns", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        include = { "bad\0pattern" },
+    })
+    ok_fail("archive.extract rejects NUL bytes in glob patterns", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        include = { "trailing\\" },
+    })
+    ok_fail("archive.extract rejects a trailing glob escape", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        include = { string.rep("a", 4097) },
+    })
+    ok_fail("archive.extract enforces the 4096-byte per-pattern limit", bad, bad_err)
+    bad = (function()
+        local patterns = {}
+        for i = 1, 257 do
+            patterns[i] = "pattern-" .. tostring(i)
+        end
+        return patterns
+    end)()
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        include = bad,
+    })
+    ok_fail("archive.extract enforces the combined 256-pattern limit", bad, bad_err);
+
+    -- Keep the separator: the next parenthesized function is a new
+    -- statement, not a call on the nil result returned by ok_fail().
+    (function()
+        local exact_filter_bytes = (function()
+            local patterns = {}
+            for i = 1, 64 do
+                patterns[i] = string.rep("a", 4096)
+            end
+            return patterns
+        end)()
+        local exact_filter_out = root .. "/exact-filter-bytes-out"
+        local exact_filter, exact_filter_err = babet.archive.extract(
+            empty_zip, exact_filter_out, { include = exact_filter_bytes })
+        ok_val("archive.extract accepts the exact 256 KiB filter-byte boundary",
+            exact_filter, exact_filter_err, function(value)
+                return value.entries == 0 and value.skipped == 0
+            end)
+        ok("archive.extract exact filter-byte empty selection creates no destination",
+            babet.fileExists(exact_filter_out) == false)
+        exact_filter_bytes[#exact_filter_bytes + 1] = "x"
+        bad, bad_err = babet.archive.extract(
+            empty_zip, root .. "/bad-filter-bytes", {
+                include = exact_filter_bytes,
+            })
+        ok_fail("archive.extract enforces the combined 256 KiB filter-byte limit",
+            bad, bad_err)
+    end)()
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
+        unknown = true,
+    })
+    ok_fail("archive.extract rejects unknown options", bad, bad_err)
+    bad, bad_err = babet.archive.extractFile(
+        valid_zip, "binary.bin", root .. "/bad-filter-file", {
+            include = { "binary.bin" },
+        })
+    ok_fail("archive.extractFile rejects selective-extraction options", bad, bad_err)
+    bad, bad_err = babet.archive.extract(valid_zip, root .. "/bad-options", {
         preserve_permissions = "yes",
     })
     ok_fail("archive preserve_permissions option is strictly boolean", bad, bad_err)
@@ -13123,8 +14585,30 @@ return result
     ok_fail("archive integer limits reject floating-point numbers", bad, bad_err)
     bad, bad_err = babet.archive.list(valid_zip, { max_entries = 0 })
     ok_fail("archive integer limits reject zero", bad, bad_err)
+    bad, bad_err = babet.archive.test(valid_zip, { max_entries = 4 })
+    ok_fail("archive.test applies anti-bomb limits", bad, bad_err)
     bad, bad_err = babet.archive.list(valid_zip, { max_entries = 100001 })
     ok_fail("archive max_entries hard ceiling enforced", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { max_path_length = 1.0 })
+    ok_fail("archive max_path_length requires an integer", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, { max_path_length = 0 })
+    ok_fail("archive max_path_length rejects zero", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, {
+        max_path_length = 1024 * 1024 + 1,
+    })
+    ok_fail("archive max_path_length hard ceiling enforced", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, {
+        max_total_name_bytes = 1.0,
+    })
+    ok_fail("archive max_total_name_bytes requires an integer", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, {
+        max_total_name_bytes = 0,
+    })
+    ok_fail("archive max_total_name_bytes rejects zero", bad, bad_err)
+    bad, bad_err = babet.archive.list(valid_zip, {
+        max_total_name_bytes = 64 * 1024 * 1024 + 1,
+    })
+    ok_fail("archive max_total_name_bytes hard ceiling enforced", bad, bad_err)
     bad, bad_err = babet.archive.list(valid_zip, {
         max_compression_ratio = 0.5,
     })
@@ -13144,6 +14628,29 @@ return result
     ok_raises("archive.list rejects excess arguments",
         function() return babet.archive.list(valid_zip, nil, true) end,
         "expects 1 or 2 arguments")
+    ok_raises("archive.test enforces arity",
+        function() return babet.archive.test() end,
+        "expects 1 or 2 arguments")
+    ok_raises("archive.test rejects excess arguments",
+        function() return babet.archive.test(valid_zip, nil, true) end,
+        "expects 1 or 2 arguments")
+    ;(function()
+        local long_name_zip = root .. "/filter-work-limit.zip"
+        local long_name = string.rep("a", 4096)
+        assert(make_zip(long_name_zip, {
+            { name = long_name, data = "x" },
+        }))
+        local expensive = {}
+        for i = 1, 7 do expensive[i] = string.rep("?", 4096) end
+        local work_out = root .. "/filter-work-limit-out"
+        local work_result, work_err = babet.archive.extract(
+            long_name_zip, work_out, { include = expensive })
+        ok_fail("archive.extract bounds cumulative glob matching work",
+            work_result, work_err)
+        ok("archive.extract glob work-limit failure creates no destination",
+            babet.fileExists(work_out) == false)
+    end)()
+
     ok_raises("archive.extract enforces arity",
         function() return babet.archive.extract(valid_zip) end,
         "expects 2 or 3 arguments")
@@ -13165,6 +14672,11 @@ return result
         function() return babet.archive.list({}) end)
     ok_raises("archive.list rejects NUL in archive path",
         function() return babet.archive.list(valid_zip .. "\0ignored") end,
+        "NUL")
+    ok_raises("archive.test rejects non-string path",
+        function() return babet.archive.test({}) end)
+    ok_raises("archive.test rejects NUL in archive path",
+        function() return babet.archive.test(valid_zip .. "\0ignored") end,
         "NUL")
     ok_raises("archive.extract rejects NUL in destination",
         function()
@@ -13493,6 +15005,18 @@ return result.files
                 and gzip_list.entries[1].compressed_size == nil
                 and gzip_list.entries[1].crc32 == nil
                 and gzip_list.entries[1].compression_method == nil)
+            do
+                local gzip_test, gzip_test_err = babet.archive.test(gzip_tar)
+                ok_val("archive.test validates a gzip-compressed TAR",
+                    gzip_test, gzip_test_err, function(value)
+                        return value.format == "tar"
+                            and value.compression == "gzip"
+                            and value.entries == gzip_list.count
+                            and value.files == 3
+                            and value.directories == 2
+                            and value.total_size == gzip_list.total_size
+                    end)
+            end
 
             local disguised_gzip = root .. "/gzip-content.data"
             assert(write_bytes(disguised_gzip, assert(gzip_raw)))
@@ -13594,6 +15118,25 @@ return result.files
             ok("archive.create gzip level zero remains readable",
                 babet.archive.list(gzip_stored) ~= nil)
 
+            do
+                local gzip_dry_run_out = root .. "/gzip-dry-run-out"
+                local preview, preview_err = babet.archive.extract(
+                    gzip_tar, gzip_dry_run_out, {
+                        dry_run = true,
+                        include = { "nested/binary.bin" },
+                    })
+                ok_val("archive.extract gzip TAR dry_run validates without writing",
+                    preview, preview_err, function(value)
+                        return value.entries == 1 and value.files == 1
+                            and value.directories == 0 and value.skipped == 4
+                            and value.bytes == 5 and value.dry_run == true
+                            and value.would_create == 1
+                            and value.would_create_destination == true
+                    end)
+                ok("archive.extract gzip TAR dry_run creates no destination",
+                    babet.fileExists(gzip_dry_run_out) == false)
+            end
+
             local gzip_roundtrip = root .. "/gzip-roundtrip"
             local gzip_extract, gzip_extract_err = babet.archive.extract(
                 gzip_tar, gzip_roundtrip)
@@ -13607,6 +15150,23 @@ return result.files
                     == "A\0B\255C")
             ok("archive.extract gzip TAR preserves empty directories",
                 babet.isDir(gzip_roundtrip .. "/nested/empty") == true)
+
+            do
+                local selective_out = root .. "/gzip-selective-out"
+                local selective, selective_err = babet.archive.extract(
+                    gzip_tar, selective_out, { include = { "nested/binary.bin" } })
+                ok_val("archive.extract gzip TAR applies selective filters",
+                    selective, selective_err, function(value)
+                        return value.entries == 1 and value.files == 1
+                            and value.directories == 0 and value.skipped == 4
+                            and value.bytes == 5
+                    end)
+                ok("archive.extract gzip TAR creates only required parents",
+                    read_bytes(selective_out .. "/nested/binary.bin")
+                        == "A\0B\255C"
+                    and babet.fileExists(selective_out .. "/alpha.txt") == false
+                    and babet.fileExists(selective_out .. "/nested/repeated.txt") == false)
+            end
 
             local gzip_single = root .. "/gzip-single.bin"
             local gzip_single_result, gzip_single_err =
@@ -13679,6 +15239,12 @@ return result.files
                 babet.archive.list(corrupt_gzip)
             ok_fail("archive.list rejects a gzip TAR with a corrupt trailer",
                 corrupt_gzip_list, corrupt_gzip_list_err)
+            do
+                local corrupt_gzip_test, corrupt_gzip_test_err =
+                    babet.archive.test(corrupt_gzip)
+                ok_fail("archive.test rejects a gzip TAR with a corrupt trailer",
+                    corrupt_gzip_test, corrupt_gzip_test_err)
+            end
             local corrupt_gzip_out = root .. "/corrupt-gzip-out"
             local corrupt_gzip_extract, corrupt_gzip_extract_err =
                 babet.archive.extract(corrupt_gzip, corrupt_gzip_out)
@@ -13755,6 +15321,18 @@ return result.files
                     and xz_list.entries[1].compressed_size == nil
                     and xz_list.entries[1].crc32 == nil
                     and xz_list.entries[1].compression_method == nil)
+                do
+                    local xz_test, xz_test_err = babet.archive.test(xz_tar)
+                    ok_val("archive.test validates an xz-compressed TAR",
+                        xz_test, xz_test_err, function(value)
+                            return value.format == "tar"
+                                and value.compression == "xz"
+                                and value.entries == xz_list.count
+                                and value.files == 3
+                                and value.directories == 2
+                                and value.total_size == xz_list.total_size
+                        end)
+                end
 
                 local disguised_xz = root .. "/xz-content.data"
                 assert(write_bytes(disguised_xz, assert(xz_raw)))
@@ -13838,6 +15416,25 @@ return result.files
                 ok("archive.create xz level zero remains readable",
                     babet.archive.list(xz_level_zero) ~= nil)
 
+                do
+                    local xz_dry_run_out = root .. "/xz-dry-run-out"
+                    local preview, preview_err = babet.archive.extract(
+                        xz_tar, xz_dry_run_out, {
+                            dry_run = true,
+                            include = { "nested/binary.bin" },
+                        })
+                    ok_val("archive.extract xz TAR dry_run validates without writing",
+                        preview, preview_err, function(value)
+                            return value.entries == 1 and value.files == 1
+                                and value.directories == 0 and value.skipped == 4
+                                and value.bytes == 5 and value.dry_run == true
+                                and value.would_create == 1
+                                and value.would_create_destination == true
+                        end)
+                    ok("archive.extract xz TAR dry_run creates no destination",
+                        babet.fileExists(xz_dry_run_out) == false)
+                end
+
                 local xz_roundtrip = root .. "/xz-roundtrip"
                 local xz_extract, xz_extract_err = babet.archive.extract(
                     xz_tar, xz_roundtrip)
@@ -13851,6 +15448,23 @@ return result.files
                         == "A\0B\255C")
                 ok("archive.extract xz TAR preserves empty directories",
                     babet.isDir(xz_roundtrip .. "/nested/empty") == true)
+
+                do
+                    local selective_out = root .. "/xz-selective-out"
+                    local selective, selective_err = babet.archive.extract(
+                        xz_tar, selective_out, { include = { "nested/binary.bin" } })
+                    ok_val("archive.extract xz TAR applies selective filters",
+                        selective, selective_err, function(value)
+                            return value.entries == 1 and value.files == 1
+                                and value.directories == 0 and value.skipped == 4
+                                and value.bytes == 5
+                        end)
+                    ok("archive.extract xz TAR creates only required parents",
+                        read_bytes(selective_out .. "/nested/binary.bin")
+                            == "A\0B\255C"
+                        and babet.fileExists(selective_out .. "/alpha.txt") == false
+                        and babet.fileExists(selective_out .. "/nested/repeated.txt") == false)
+                end
 
                 local xz_single = root .. "/xz-single.bin"
                 local xz_single_result, xz_single_err =
@@ -13908,6 +15522,12 @@ return result.files
                     babet.archive.list(corrupt_xz)
                 ok_fail("archive.list rejects a corrupt xz TAR",
                     corrupt_xz_list, corrupt_xz_list_err)
+                do
+                    local corrupt_xz_test, corrupt_xz_test_err =
+                        babet.archive.test(corrupt_xz)
+                    ok_fail("archive.test rejects a corrupt xz TAR",
+                        corrupt_xz_test, corrupt_xz_test_err)
+                end
                 local corrupt_xz_out = root .. "/corrupt-xz-out"
                 local corrupt_xz_extract, corrupt_xz_extract_err =
                     babet.archive.extract(corrupt_xz, corrupt_xz_out)
@@ -13984,6 +15604,19 @@ return result.files
                     and bzip2_list.entries[1].compressed_size == nil
                     and bzip2_list.entries[1].crc32 == nil
                     and bzip2_list.entries[1].compression_method == nil)
+                do
+                    local bzip2_test, bzip2_test_err =
+                        babet.archive.test(bzip2_tar)
+                    ok_val("archive.test validates a bzip2-compressed TAR",
+                        bzip2_test, bzip2_test_err, function(value)
+                            return value.format == "tar"
+                                and value.compression == "bzip2"
+                                and value.entries == bzip2_list.count
+                                and value.files == 3
+                                and value.directories == 2
+                                and value.total_size == bzip2_list.total_size
+                        end)
+                end
 
                 local disguised_bzip2 = root .. "/bzip2-content.data"
                 assert(write_bytes(disguised_bzip2, assert(bzip2_raw)))
@@ -14088,6 +15721,25 @@ return result.files
                 ok_fail("archive.create bzip2 rejects compression_level=0",
                     bzip2_zero, bzip2_zero_err)
 
+                do
+                    local bzip2_dry_run_out = root .. "/bzip2-dry-run-out"
+                    local preview, preview_err = babet.archive.extract(
+                        bzip2_tar, bzip2_dry_run_out, {
+                            dry_run = true,
+                            include = { "nested/binary.bin" },
+                        })
+                    ok_val("archive.extract bzip2 TAR dry_run validates without writing",
+                        preview, preview_err, function(value)
+                            return value.entries == 1 and value.files == 1
+                                and value.directories == 0 and value.skipped == 4
+                                and value.bytes == 5 and value.dry_run == true
+                                and value.would_create == 1
+                                and value.would_create_destination == true
+                        end)
+                    ok("archive.extract bzip2 TAR dry_run creates no destination",
+                        babet.fileExists(bzip2_dry_run_out) == false)
+                end
+
                 local bzip2_out = root .. "/bzip2-out"
                 local bzip2_extract, bzip2_extract_err =
                     babet.archive.extract(bzip2_tar, bzip2_out)
@@ -14099,6 +15751,23 @@ return result.files
                         == "A\0B\255C")
                 ok("archive.extract bzip2 TAR preserves empty directories",
                     babet.isDir(bzip2_out .. "/nested/empty") == true)
+
+                do
+                    local selective_out = root .. "/bzip2-selective-out"
+                    local selective, selective_err = babet.archive.extract(
+                        bzip2_tar, selective_out, { include = { "nested/binary.bin" } })
+                    ok_val("archive.extract bzip2 TAR applies selective filters",
+                        selective, selective_err, function(value)
+                            return value.entries == 1 and value.files == 1
+                                and value.directories == 0 and value.skipped == 4
+                                and value.bytes == 5
+                        end)
+                    ok("archive.extract bzip2 TAR creates only required parents",
+                        read_bytes(selective_out .. "/nested/binary.bin")
+                            == "A\0B\255C"
+                        and babet.fileExists(selective_out .. "/alpha.txt") == false
+                        and babet.fileExists(selective_out .. "/nested/repeated.txt") == false)
+                end
 
                 local bzip2_single = root .. "/bzip2-single.bin"
                 local bzip2_file, bzip2_file_err = babet.archive.extractFile(
@@ -14159,6 +15828,12 @@ return result.files
                     babet.archive.list(corrupt_bzip2)
                 ok_fail("archive.list rejects a corrupt bzip2 TAR",
                     corrupt_bzip2_list, corrupt_bzip2_list_err)
+                do
+                    local corrupt_bzip2_test, corrupt_bzip2_test_err =
+                        babet.archive.test(corrupt_bzip2)
+                    ok_fail("archive.test rejects a corrupt bzip2 TAR",
+                        corrupt_bzip2_test, corrupt_bzip2_test_err)
+                end
                 local corrupt_bzip2_out = root .. "/corrupt-bzip2-out"
                 local corrupt_bzip2_extract, corrupt_bzip2_extract_err =
                     babet.archive.extract(corrupt_bzip2, corrupt_bzip2_out)
@@ -14240,6 +15915,19 @@ return result.files
                     and zstd_list.entries[1].compressed_size == nil
                     and zstd_list.entries[1].crc32 == nil
                     and zstd_list.entries[1].compression_method == nil)
+                do
+                    local zstd_test, zstd_test_err =
+                        babet.archive.test(zstd_tar)
+                    ok_val("archive.test validates a zstd-compressed TAR",
+                        zstd_test, zstd_test_err, function(value)
+                            return value.format == "tar"
+                                and value.compression == "zstd"
+                                and value.entries == zstd_list.count
+                                and value.files == 3
+                                and value.directories == 2
+                                and value.total_size == zstd_list.total_size
+                        end)
+                end
 
                 local disguised_zstd = root .. "/zstd-content.data"
                 assert(write_bytes(disguised_zstd, assert(zstd_raw)))
@@ -14352,6 +16040,25 @@ return result.files
                 ok_fail("archive.create zstd rejects compression_level=20",
                     zstd_twenty, zstd_twenty_err)
 
+                do
+                    local zstd_dry_run_out = root .. "/zstd-dry-run-out"
+                    local preview, preview_err = babet.archive.extract(
+                        zstd_tar, zstd_dry_run_out, {
+                            dry_run = true,
+                            include = { "nested/binary.bin" },
+                        })
+                    ok_val("archive.extract zstd TAR dry_run validates without writing",
+                        preview, preview_err, function(value)
+                            return value.entries == 1 and value.files == 1
+                                and value.directories == 0 and value.skipped == 4
+                                and value.bytes == 5 and value.dry_run == true
+                                and value.would_create == 1
+                                and value.would_create_destination == true
+                        end)
+                    ok("archive.extract zstd TAR dry_run creates no destination",
+                        babet.fileExists(zstd_dry_run_out) == false)
+                end
+
                 local zstd_out = root .. "/zstd-out"
                 local zstd_extract, zstd_extract_err =
                     babet.archive.extract(zstd_tar, zstd_out)
@@ -14363,6 +16070,23 @@ return result.files
                         == "A\0B\255C")
                 ok("archive.extract zstd TAR preserves empty directories",
                     babet.isDir(zstd_out .. "/nested/empty") == true)
+
+                do
+                    local selective_out = root .. "/zstd-selective-out"
+                    local selective, selective_err = babet.archive.extract(
+                        zstd_tar, selective_out, { include = { "nested/binary.bin" } })
+                    ok_val("archive.extract zstd TAR applies selective filters",
+                        selective, selective_err, function(value)
+                            return value.entries == 1 and value.files == 1
+                                and value.directories == 0 and value.skipped == 4
+                                and value.bytes == 5
+                        end)
+                    ok("archive.extract zstd TAR creates only required parents",
+                        read_bytes(selective_out .. "/nested/binary.bin")
+                            == "A\0B\255C"
+                        and babet.fileExists(selective_out .. "/alpha.txt") == false
+                        and babet.fileExists(selective_out .. "/nested/repeated.txt") == false)
+                end
 
                 local zstd_single = root .. "/zstd-single.bin"
                 local zstd_file, zstd_file_err = babet.archive.extractFile(
@@ -14454,6 +16178,12 @@ return result.files
                     babet.archive.list(corrupt_zstd)
                 ok_fail("archive.list rejects a corrupt zstd TAR",
                     corrupt_zstd_list, corrupt_zstd_list_err)
+                do
+                    local corrupt_zstd_test, corrupt_zstd_test_err =
+                        babet.archive.test(corrupt_zstd)
+                    ok_fail("archive.test rejects a corrupt zstd TAR",
+                        corrupt_zstd_test, corrupt_zstd_test_err)
+                end
                 local corrupt_zstd_out = root .. "/corrupt-zstd-out"
                 local corrupt_zstd_extract, corrupt_zstd_extract_err =
                     babet.archive.extract(corrupt_zstd, corrupt_zstd_out)
@@ -15505,6 +17235,10 @@ return { result.files, result.directories, result.include_patterns,
     ok("archive.list accepts explicit nil options and returns exactly two values",
         list_return_contract.n == 2 and type(list_return_contract[1]) == "table"
         and list_return_contract[2] == nil)
+    local test_return_contract = table.pack(babet.archive.test(nil_options_zip, nil))
+    ok("archive.test accepts explicit nil options and returns exactly two values",
+        test_return_contract.n == 2 and type(test_return_contract[1]) == "table"
+        and test_return_contract[2] == nil)
 
     local create_bad, create_bad_err = babet.archive.create(
         create_source, root .. "/bad-create.zip", "bad")

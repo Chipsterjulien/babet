@@ -17,7 +17,7 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.7.0**. Voir le
+Version stable et auditée actuelle : **2.8.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
@@ -92,7 +92,7 @@ sans composant parent symlinké ; la sortie est préparée dans le dossier
 destination puis publiée atomiquement. Le plafond de décompression par défaut
 est de 1 Gio.
 
-### Créer, inspecter et extraire ZIP ou TAR en sécurité
+### Créer, inspecter, vérifier et extraire ZIP ou TAR en sécurité
 
 ```lua
 local created, err = babet.archive.create("projet", "projet.zip", {
@@ -120,8 +120,19 @@ assert(selection, err)
 local info, err = babet.archive.list("upload.zip", {
     max_entries = 2000,
     max_total_size = 512 * 1024 * 1024,
+    max_path_length = 8192,
+    max_total_name_bytes = 2 * 1024 * 1024,
 })
 assert(info, err)
+assert(info.duplicates == 0 and info.conflicts == 0)
+
+local verified
+verified, err = babet.archive.test("upload.zip", {
+    max_entries = 2000,
+    max_total_size = 512 * 1024 * 1024,
+})
+assert(verified, err)
+assert(verified.files + verified.directories == verified.entries)
 
 local tar_info
 tar_info, err = babet.archive.list("source.tar.xz")
@@ -129,8 +140,22 @@ assert(tar_info, err)
 assert(tar_info.format == "tar")
 assert(tar_info.compression == "xz")
 
+local plan
+plan, err = babet.archive.extract("source.tar", "restore", {
+    dry_run = true,
+    include = { "src/**", "README.md" },
+    exclude = { "src/generated/**", "**/*.tmp" },
+    overwrite = true,
+})
+assert(plan, err)
+assert(plan.would_create + plan.would_overwrite + plan.would_skip
+    == plan.entries)
+assert(not babet.fileExists("restore"))
+
 local result
 result, err = babet.archive.extract("source.tar", "restore", {
+    include = { "src/**", "README.md" },
+    exclude = { "src/generated/**", "**/*.tmp" },
     overwrite = false,
 })
 assert(result, err)
@@ -141,7 +166,7 @@ one, err = babet.archive.extractFile(
 assert(one, err)
 ```
 
-La création, le listing et l’extraction ZIP continuent d’utiliser miniz. Les
+La création, le listing, la vérification et l’extraction ZIP continuent d’utiliser miniz. Les
 opérations TAR brutes, gzip, xz, bzip2 ou zstd utilisent les backends
 libarchive, zlib, XZ Utils/liblzma, libbz2 et libzstd liés statiquement. Les
 lecteurs détectent le format et la compression à partir du contenu ;
@@ -157,10 +182,23 @@ sortie déterministe. La création accepte aussi des tableaux bornés de globs s
 l’archive ; les exclusions gagnent et les dossiers exclus sont élagués. La
 création refuse les symlinks sélectionnés, objets non pris en charge, noms
 d’entrée dangereux et toute sortie située dans un arbre source.
-L’extraction
-refuse les chemins absolus, composants `..`, liens et types spéciaux de
-l’archive, fichiers TAR sparse et parents symlinkés. Les fichiers extraits sont
-tous préparés avant publication, puis publiés atomiquement un par un.
+`archive.test()` lit entièrement les données vérifiables et refuse aussi les
+archives techniquement corrompues, ambiguës ou dangereuses, sans créer de
+fichier. `archive.extract()` réutilise désormais exactement les mêmes globs
+sûrs bornés `include` et `exclude` que la création, sur les chemins internes
+normalisés ; les exclusions gagnent, les sous-arbres exclus sont élagués et
+seuls les parents nécessaires sont créés. Les entrées hors sélection ne
+participent pas aux collisions de sortie, mais les limites globales restent
+appliquées à l’archive entière. L’extraction refuse toujours les chemins
+sélectionnés absolus, composants `..`, liens, types spéciaux, fichiers TAR
+sparse et parents symlinkés. Les fichiers retenus sont tous préparés avant
+publication, puis publiés atomiquement un par un. Avec `dry_run = true`, le
+même plan, les mêmes filtres, limites et contrôles de destination sont exécutés
+sans création, écriture, chmod, renommage ni suppression ; le résultat indique
+`would_create`, `would_overwrite`, `would_skip` et l’éventuelle création de la
+racine. Cette prévisualisation décrit un instantané et ne remplace pas les
+contrôles refaits par l’extraction réelle. Utiliser `archive.test()` en amont
+lorsqu’il faut vérifier aussi l’intégrité des payloads ZIP ignorés.
 
 ## Validation avant une release
 
