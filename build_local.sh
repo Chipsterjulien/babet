@@ -6,6 +6,10 @@
 # office de filet de sécurité pour celles qu'on aurait oubliées.
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tools/build_dependency_utils.sh
+. "${SCRIPT_DIR}/tools/build_dependency_utils.sh"
+
 # Parsing des arguments
 RUN_AFTER_BUILD=0
 ENABLE_SANITIZERS=0
@@ -225,7 +229,6 @@ download_with_fallback() {
 }
 
 # Variables
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 DOWNLOAD_DIR="${SCRIPT_DIR}/downloads"
 #
@@ -722,7 +725,10 @@ else
 fi
 
 # Installer et compiler Zstandard / libzstd si nécessaire.
-if [ ! -f "${ZSTD_LIB}" ] || [ ! -f "${ZSTD_INCLUDE}/zstd.h" ]; then
+# Les trois fichiers sont nécessaires : CMake vérifie zstd.h et
+# zstd_errors.h, et libarchive lie la bibliothèque statique. Une ancienne
+# installation partielle ne doit donc jamais être considérée comme valide.
+if ! babet_zstd_install_complete "${ZSTD_LIB}" "${ZSTD_INCLUDE}"; then
     echo "Installation de Zstandard ${ZSTD_VERSION}..."
     mkdir -p "${ZSTD_ROOT}" "${DOWNLOAD_DIR}"
 
@@ -740,9 +746,21 @@ if [ ! -f "${ZSTD_LIB}" ] || [ ! -f "${ZSTD_INCLUDE}/zstd.h" ]; then
     verify_sha256 "${DOWNLOAD_DIR}/${ZSTD_TAR}" \
         "${ZSTD_SHA256}" "Zstandard"
 
-    if [ ! -d "${ZSTD_SOURCE_DIR}" ]; then
-        echo "Décompression de Zstandard ${ZSTD_VERSION}..."
-        tar -xzf "${DOWNLOAD_DIR}/${ZSTD_TAR}" -C "${ZSTD_ROOT}"
+    # Une extraction interrompue peut laisser le dossier racine présent mais
+    # inutilisable. La préparation se fait dans un dossier temporaire puis le
+    # source complet remplace l'ancien arbre, ce qui évite de publier une
+    # extraction partielle comme cache valide.
+    if ! babet_zstd_source_complete "${ZSTD_SOURCE_DIR}"; then
+        if [ -e "${ZSTD_SOURCE_DIR}" ]; then
+            echo "Source Zstandard incomplète : réextraction propre..."
+        else
+            echo "Décompression de Zstandard ${ZSTD_VERSION}..."
+        fi
+
+        if ! babet_prepare_zstd_source                 "${ZSTD_SOURCE_DIR}" "${ZSTD_ROOT}"                 "${DOWNLOAD_DIR}/${ZSTD_TAR}" "${ZSTD_DIR}"; then
+            echo "Échec : source Zstandard extraite incomplète."
+            exit 1
+        fi
     fi
 
     rm -rf "${ZSTD_CMAKE_BUILD_DIR}" "${ZSTD_INSTALL_DIR}"

@@ -5599,6 +5599,63 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = True
 
+    def _write_fragmented(self, data):
+        if not data:
+            return
+        split = max(1, len(data) // 2)
+        self.wfile.write(data[:split])
+        self.wfile.flush()
+        self.wfile.write(data[split:])
+        self.wfile.flush()
+
+    def _send_chunked(self, status, body=b"", headers=(),
+                      chunk_sizes=(4096,), extensions=False,
+                      trailers=(), fragmented=False, terminate=True):
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Transfer-Encoding", "chunked")
+        if trailers:
+            self.send_header("Trailer", ", ".join(name for name, _ in trailers))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            offset = 0
+            index = 0
+            while offset < len(body):
+                requested = chunk_sizes[index % len(chunk_sizes)]
+                chunk = body[offset:offset + requested]
+                suffix = ";babet=%d" % index if extensions else ""
+                header = ("%X%s\r\n" % (len(chunk), suffix)).encode("ascii")
+                if fragmented:
+                    self._write_fragmented(header)
+                    self._write_fragmented(chunk)
+                    self._write_fragmented(b"\r\n")
+                else:
+                    self.wfile.write(header)
+                    self.wfile.write(chunk)
+                    self.wfile.write(b"\r\n")
+                offset += len(chunk)
+                index += 1
+            if terminate:
+                self.wfile.write(b"0\r\n")
+                for name, value in trailers:
+                    self.wfile.write((name + ": " + value + "\r\n").encode("ascii"))
+                self.wfile.write(b"\r\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _send_close_delimited(self, status, body=b"", headers=()):
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD" and body:
+            self.wfile.write(body)
+        self.wfile.flush()
+        self.close_connection = True
+
     def _echo(self):
         body = self._read_body()
         self._send(200, body, [
@@ -5622,6 +5679,26 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/large":
             self._send(200, b"x" * 4096,
                        [("Content-Type", "application/octet-stream")])
+        elif path == "/chunked":
+            self._send_chunked(200, b"chunked-" * 16384,
+                               [("Content-Type", "application/octet-stream")])
+        elif path == "/chunked-fragmented":
+            self._send_chunked(
+                200, b"fragmented-" * 1000 + b"END",
+                [("Content-Type", "application/octet-stream")],
+                chunk_sizes=(1, 2, 3, 7, 31, 257, 4097),
+                extensions=True,
+                trailers=(("X-Chunked-Trailer", "complete"),),
+                fragmented=True)
+        elif path == "/chunked-truncated":
+            self._send_chunked(
+                200, b"incomplete",
+                [("Content-Type", "application/octet-stream")],
+                chunk_sizes=(32,), terminate=False)
+        elif path == "/close-delimited":
+            self._send_close_delimited(
+                200, b"close---" * 16384,
+                [("Content-Type", "application/octet-stream")])
         elif path == "/empty":
             self._send(204, b"",
                        [("Content-Type", "application/octet-stream")])
@@ -5783,6 +5860,75 @@ server.serve_forever()
                     == "table")
             ok("HTTP download writes binary-safe content",
                 read_binary(download_path) == "AB\0CD")
+
+            local chunked_download_path = download_dir .. "/chunked.bin"
+            local chunked_download, chunked_download_err = H.download(
+                base .. "/chunked", chunked_download_path, {
+                    timeout = 5,
+                    max_file_size = 131072,
+                })
+            ok("HTTP download accepts a chunked response at exact limit",
+                type(chunked_download) == "table"
+                and chunked_download_err == nil
+                and chunked_download.status == 200
+                and chunked_download.saved == true
+                and chunked_download.bytes == 131072,
+                "err=" .. tostring(chunked_download_err))
+            ok("HTTP chunked download writes the complete body",
+                read_binary(chunked_download_path)
+                    == string.rep("chunked-", 16384))
+
+            local chunked_limited_path = download_dir
+                .. "/chunked-limited.bin"
+            write_binary(chunked_limited_path, "CHUNKED-ORIGINAL")
+            local chunked_limited, chunked_limited_err = H.download(
+                base .. "/chunked", chunked_limited_path, {
+                    timeout = 5,
+                    max_file_size = 131071,
+                })
+            ok_fail("HTTP chunked download enforces max_file_size boundary",
+                chunked_limited, chunked_limited_err)
+            ok("HTTP chunked download limit error is explicit",
+                chunked_limited == nil
+                and tostring(chunked_limited_err):find(
+                    "max_file_size", 1, true) ~= nil,
+                "err=" .. tostring(chunked_limited_err))
+            ok("HTTP chunked download limit preserves destination",
+                read_binary(chunked_limited_path) == "CHUNKED-ORIGINAL")
+            ok("HTTP chunked download limit removes temporary file",
+                count_download_temps(download_dir) == 0)
+
+            local close_download_path = download_dir .. "/close-delimited.bin"
+            local close_download, close_download_err = H.download(
+                base .. "/close-delimited", close_download_path, {
+                    timeout = 5,
+                    max_file_size = 131072,
+                })
+            ok("HTTP download accepts a close-delimited response",
+                type(close_download) == "table"
+                and close_download_err == nil
+                and close_download.status == 200
+                and close_download.saved == true
+                and close_download.bytes == 131072,
+                "err=" .. tostring(close_download_err))
+            ok("HTTP close-delimited download writes the complete body",
+                read_binary(close_download_path)
+                    == string.rep("close---", 16384))
+
+            local truncated_download_path = download_dir
+                .. "/chunked-truncated.bin"
+            write_binary(truncated_download_path, "TRUNCATED-ORIGINAL")
+            local truncated_download, truncated_download_err = H.download(
+                base .. "/chunked-truncated", truncated_download_path, {
+                    timeout = 5,
+                    max_file_size = 1024,
+                })
+            ok_fail("HTTP download rejects a truncated chunked response",
+                truncated_download, truncated_download_err)
+            ok("HTTP truncated chunked download preserves destination",
+                read_binary(truncated_download_path) == "TRUNCATED-ORIGINAL")
+            ok("HTTP truncated chunked download removes temporary file",
+                count_download_temps(download_dir) == 0)
 
             write_binary(download_path, "OLD")
             local replaced, replace_err = H.download(
@@ -5992,6 +6138,84 @@ server.serve_forever()
                 and type(large_ok.body) == "string"
                 and #large_ok.body == 4096,
                 "err=" .. tostring(large_err))
+
+            local chunked, chunked_err = babet.http.get(base .. "/chunked", {
+                timeout = 5,
+                max_body_size = 131072,
+            })
+            ok("HTTP chunked response is read completely at exact limit",
+                type(chunked) == "table" and chunked_err == nil
+                and chunked.status == 200
+                and chunked.body == string.rep("chunked-", 16384),
+                "len=" .. tostring(chunked and #chunked.body)
+                    .. " err=" .. tostring(chunked_err))
+
+            local chunked_too_big, chunked_too_big_err = babet.http.get(
+                base .. "/chunked", {
+                    timeout = 5,
+                    max_body_size = 131071,
+                })
+            ok_fail("HTTP chunked response enforces max_body_size boundary",
+                chunked_too_big, chunked_too_big_err)
+            ok("  chunked limit exposes no partial body and stays explicit",
+                chunked_too_big == nil
+                and tostring(chunked_too_big_err):find(
+                    "max_body_size", 1, true) ~= nil,
+                "err=" .. tostring(chunked_too_big_err))
+
+            local fragmented, fragmented_err = babet.http.get(
+                base .. "/chunked-fragmented", {
+                    timeout = 5,
+                    max_body_size = 11003,
+                })
+            -- cpp-httplib consumes the trailing section but stores its fields
+            -- separately from the initial response headers. Babet does not
+            -- currently expose that separate trailer collection; successful
+            -- completion plus the declared Trailer header verifies the framing.
+            ok("HTTP fragmented chunked response supports extensions and trailers",
+                type(fragmented) == "table" and fragmented_err == nil
+                and fragmented.body == string.rep("fragmented-", 1000) .. "END"
+                and type(fragmented.headers) == "table"
+                and fragmented.headers["trailer"] == "X-Chunked-Trailer",
+                "err=" .. tostring(fragmented_err))
+
+            local close_delimited, close_delimited_err = babet.http.get(
+                base .. "/close-delimited", {
+                    timeout = 5,
+                    max_body_size = 131072,
+                })
+            ok("HTTP close-delimited response is read completely",
+                type(close_delimited) == "table"
+                and close_delimited_err == nil
+                and close_delimited.status == 200
+                and close_delimited.body == string.rep("close---", 16384),
+                "err=" .. tostring(close_delimited_err))
+
+            local close_too_big, close_too_big_err = babet.http.get(
+                base .. "/close-delimited", {
+                    timeout = 5,
+                    max_body_size = 131071,
+                })
+            ok_fail("HTTP close-delimited response enforces max_body_size",
+                close_too_big, close_too_big_err)
+            ok("  close-delimited limit exposes no partial body",
+                close_too_big == nil
+                and tostring(close_too_big_err):find(
+                    "max_body_size", 1, true) ~= nil,
+                "err=" .. tostring(close_too_big_err))
+
+            local truncated_chunked, truncated_chunked_err = babet.http.get(
+                base .. "/chunked-truncated", {
+                    timeout = 5,
+                    max_body_size = 1024,
+                })
+            ok_fail("HTTP truncated chunked response is rejected",
+                truncated_chunked, truncated_chunked_err)
+            ok("  truncated chunked response exposes no partial body",
+                truncated_chunked == nil
+                and type(truncated_chunked_err) == "string"
+                and truncated_chunked_err:find("http: ", 1, true) == 1,
+                "err=" .. tostring(truncated_chunked_err))
 
             local r404, e404 = babet.http.get(
                 base .. "/nexiste_pas", { timeout = 5 })

@@ -624,6 +624,12 @@ Aucun corps partiel n'est exposé. Le header `Content-Length` n'est pas la seule
 protection : la limite s'applique aux chunks réellement reçus, y compris avec
 un transfert chunked ou une longueur absente/trompeuse.
 
+Babet prend en charge les trois cadrages de corps HTTP/1.1 utilisés ici :
+`Content-Length`, `Transfer-Encoding: chunked` et corps terminé par la fermeture
+de connexion. Babet 2.9.1 corrige spécifiquement les deux derniers avec
+cpp-httplib 0.45.0 ; les limites portent toujours sur les octets réellement
+livrés au receiver de Babet.
+
 Pour un gros payload GET, utilise
 [`babet.http.download`](#http-download) au lieu d'augmenter cette limite en
 mémoire.

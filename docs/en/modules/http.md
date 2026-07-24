@@ -492,6 +492,12 @@ nil, "http: response body exceeds max_body_size"
 No partial body is exposed. The guard applies to actual received bytes, not
 only Content-Length, including chunked or misleading responses.
 
+Babet supports the three HTTP/1.1 response-body framings relevant here:
+`Content-Length`, `Transfer-Encoding: chunked`, and a body terminated by
+connection close. Babet 2.9.1 specifically fixes the latter two with
+cpp-httplib 0.45.0; limits still apply to bytes actually delivered to Babet's
+receiver.
+
 For large GET payloads, use [`babet.http.download`](#http-download) instead of
 raising this in-memory limit.
 

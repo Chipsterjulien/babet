@@ -17,7 +17,7 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version stable et auditée **Babet 2.9.0**.
+Documentation de la version stable et auditée **Babet 2.9.1**.
 
 ## Pour démarrer
 
@@ -27,7 +27,7 @@ Documentation de la version stable et auditée **Babet 2.9.0**.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.9.0 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.9.1 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 

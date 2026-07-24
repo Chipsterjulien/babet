@@ -2,6 +2,7 @@
 # validate_release.sh — validation complète avant publication.
 #
 # Enchaîne automatiquement :
+#   - un préflight léger du bootstrap Zstandard ;
 #   1. build + tests ASan/UBSan ;
 #   2. restauration du build normal + tests complets ;
 #   3. smoke tests réseau avec le binaire normal final.
@@ -25,6 +26,13 @@ print_stage() {
     echo "$1"
     echo "============================================================"
 }
+
+print_stage "Préflight — bootstrap Zstandard"
+if ! bash "${SCRIPT_DIR}/tools/test_zstd_bootstrap.sh"; then
+    echo
+    echo "Validation pré-release : ÉCHEC"
+    exit 1
+fi
 
 print_stage "Étape 1/3 — ASan + UBSan"
 bash "${SCRIPT_DIR}/run_tests.sh" --sanitizers

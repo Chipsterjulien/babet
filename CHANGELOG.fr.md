@@ -6,6 +6,40 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.9.1] - 2026-07-24
+
+### Correctif HTTP pour les réponses chunked et sans `Content-Length`
+
+- correction d'une régression introduite par Babet 2.9.0 lors de la
+  neutralisation de la limite interne de cpp-httplib 0.45.0 : la valeur `0`
+  était interprétée comme une limite nulle sur les chemins de lecture
+  `Transfer-Encoding: chunked` et sans `Content-Length`, provoquant
+  `http: Failed to read connection` dès le premier octet reçu ;
+- remplacement de cette valeur par la plus grande valeur `std::size_t`
+  représentable, de sorte que les receivers de Babet restent l'unique autorité
+  pour `max_body_size` et `max_file_size` ;
+- conservation des garanties existantes : aucune réponse mémoire partielle,
+  destination existante préservée après erreur, temporaire de téléchargement
+  supprimé et diagnostic explicite en cas de dépassement ;
+- ajout de tests locaux déterministes pour les réponses chunked de 128 Kio, les
+  limites exactes et juste inférieures, les téléchargements, les chunks
+  fragmentés avec extensions et trailers, les réponses délimitées par fermeture
+  de connexion et les flux chunked tronqués ;
+- ajout de gardes indépendantes dans `smoke_test_network.sh`, exécutées par
+  `run_tests.sh --release`, qui vérifient les receivers mémoire et fichier en
+  HTTPS local pour le cadrage chunked, puis en HTTP local pour le cadrage par
+  fermeture de connexion ;
+- correction validée pour le cas réel de l'API AUR utilisé par yaourt, sans
+  dépendre de ce service externe dans les tests bloquants ;
+- durcissement du bootstrap de Zstandard : une installation n'est désormais
+  considérée complète que si `libzstd.a`, `zstd.h` et `zstd_errors.h` sont
+  tous présents ; une extraction source interrompue ou incomplète est
+  automatiquement remplacée par une réextraction propre dans un dossier
+  temporaire ;
+- ajout d'un préflight local sans réseau à `run_tests.sh --release`, couvrant
+  l'installation partielle, la source partielle, la réutilisation d'une source
+  complète et le refus d'une archive source mal formée.
+
 ## [2.9.0] - 2026-07-17
 
 ### Résumé de la version

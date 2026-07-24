@@ -19,12 +19,12 @@ if [ ! -x "$BIN" ]; then
 fi
 
 TMPDIR=$(mktemp -d -t babet-smoke-XXXXXX)
-HTTPS_PID=""
+FIXTURE_PID=""
 
 cleanup() {
-    if [ -n "$HTTPS_PID" ] && kill -0 "$HTTPS_PID" 2>/dev/null; then
-        kill "$HTTPS_PID" 2>/dev/null || true
-        wait "$HTTPS_PID" 2>/dev/null || true
+    if [ -n "$FIXTURE_PID" ] && kill -0 "$FIXTURE_PID" 2>/dev/null; then
+        kill "$FIXTURE_PID" 2>/dev/null || true
+        wait "$FIXTURE_PID" 2>/dev/null || true
     fi
     rm -rf "$TMPDIR"
 }
@@ -88,7 +88,7 @@ require_tool() {
     fi
 }
 
-start_local_https_fixture() {
+start_local_http_fixtures() {
     require_tool openssl
     require_tool python3
 
@@ -99,7 +99,8 @@ start_local_https_fixture() {
     local server_cert="$TMPDIR/server.crt"
     local server_ext="$TMPDIR/server.ext"
     local port_file="$TMPDIR/https.port"
-    local server_log="$TMPDIR/https-server.log"
+    local http_port_file="$TMPDIR/http.port"
+    local server_log="$TMPDIR/local-network-server.log"
 
     cat > "$server_ext" <<'EXT'
 subjectAltName=IP:127.0.0.1,DNS:localhost
@@ -142,23 +143,50 @@ import http.server
 import os
 import ssl
 import sys
+import threading
 
-cert_file, key_file, port_file = sys.argv[1:4]
+cert_file, key_file, port_file, http_port_file = sys.argv[1:5]
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
-        body = b"babet local TLS smoke test\n"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(body)
+        if self.path == "/chunked":
+            body = b"chunked-" * 16384
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for start in range(0, len(body), 4096):
+                chunk = body[start:start + 4096]
+                self.wfile.write(("%X\r\n" % len(chunk)).encode("ascii"))
+                self.wfile.write(chunk)
+                self.wfile.write(b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        elif self.path == "/close-delimited":
+            body = b"close---" * 16384
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            body = b"babet local TLS smoke test\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+        self.wfile.flush()
+        self.close_connection = True
 
     def log_message(self, _format, *_args):
         pass
+
+http_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+http_server.daemon_threads = True
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
 server.daemon_threads = True
@@ -172,28 +200,38 @@ with open(temporary, "w", encoding="ascii") as handle:
     handle.flush()
     os.fsync(handle.fileno())
 os.replace(temporary, port_file)
+
+temporary = http_port_file + ".tmp"
+with open(temporary, "w", encoding="ascii") as handle:
+    handle.write(str(http_server.server_address[1]))
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, http_port_file)
+
+threading.Thread(target=http_server.serve_forever, daemon=True).start()
 server.serve_forever()
 PY
 
     python3 "$TMPDIR/https_server.py" \
-        "$server_cert" "$server_key" "$port_file" \
+        "$server_cert" "$server_key" "$port_file" "$http_port_file" \
         >"$server_log" 2>&1 &
-    HTTPS_PID=$!
+    FIXTURE_PID=$!
 
     local i
     for ((i = 0; i < 50; i++)); do
-        if [ -s "$port_file" ]; then
+        if [ -s "$port_file" ] && [ -s "$http_port_file" ]; then
             TLS_PORT=$(cat "$port_file")
+            HTTP_PORT=$(cat "$http_port_file")
             TLS_CA_CERT="$ca_cert"
             return 0
         fi
-        if ! kill -0 "$HTTPS_PID" 2>/dev/null; then
+        if ! kill -0 "$FIXTURE_PID" 2>/dev/null; then
             break
         fi
         sleep 0.1
     done
 
-    echo "[FAIL] démarrage du serveur HTTPS local"
+    echo "[FAIL] démarrage des serveurs HTTP/HTTPS locaux"
     cat "$server_log" 2>/dev/null || true
     exit 1
 }
@@ -208,8 +246,9 @@ else
 fi
 echo
 
-start_local_https_fixture
+start_local_http_fixtures
 TLS_URL="https://127.0.0.1:${TLS_PORT}/"
+HTTP_URL="http://127.0.0.1:${HTTP_PORT}/"
 
 # 1. Timeout TCP borné vers TEST-NET-1.
 run_case "socket.connect vers 192.0.2.1 reste borné" \
@@ -268,7 +307,77 @@ else
 end" \
 '^DOWNLOADED=27 STATUS=200$' required 1
 
-# 5. Le bypass explicite verify=false doit également permettre la connexion.
+# 5. Garde indépendante contre la régression AUR de Babet 2.9.0 : une réponse
+# chunked réelle en HTTPS doit fonctionner avec le receiver mémoire comme avec
+# le receiver fichier. Ce smoke local aurait échoué avec
+# set_payload_max_length(0), même si le grand corpus principal était modifié.
+run_case "HTTPS local accepte une réponse chunked" \
+"local opts = {
+    ca_cert = \"$TLS_CA_CERT\", timeout = 5, max_body_size = 131072
+}
+local chunked, chunked_err = babet.http.get(\"${TLS_URL}chunked\", opts)
+local chunk_path = \"$TMPDIR/tls-chunked.bin\"
+local dchunk, dchunk_err = babet.http.download(
+    \"${TLS_URL}chunked\", chunk_path, {
+        ca_cert = \"$TLS_CA_CERT\", timeout = 5, max_file_size = 131072
+    })
+if not chunked or not dchunk then
+    print(\"ERR=\" .. table.concat({
+        tostring(chunked_err), tostring(dchunk_err)
+    }, \" | \"))
+else
+    local function read_all(path)
+        local file = io.open(path, \"rb\")
+        if not file then return nil end
+        local body = file:read(\"*a\")
+        file:close()
+        return body
+    end
+    local expected_chunked = string.rep(\"chunked-\", 16384)
+    local file_chunked = read_all(chunk_path)
+    if chunked.body == expected_chunked
+        and file_chunked == expected_chunked
+        and dchunk.bytes == #expected_chunked then
+        print(\"CHUNKED_OK=131072\")
+    else
+        print(\"BAD_CHUNKED_CONTENT\")
+    end
+end" \
+'^CHUNKED_OK=131072$' required 1
+
+# 6. La même valeur erronée affectait aussi le chemin sans Content-Length.
+# Ce framing est testé sur HTTP local : une fermeture TCP est alors le
+# délimiteur normal du corps, sans introduire les exigences de fermeture TLS
+# (`close_notify`) propres à OpenSSL et indépendantes du protocole HTTP.
+run_case "HTTP local accepte une réponse terminée par fermeture" \
+"local opts = { timeout = 5, max_body_size = 131072 }
+local closed, closed_err = babet.http.get(
+    \"${HTTP_URL}close-delimited\", opts)
+local close_path = \"$TMPDIR/http-close.bin\"
+local dclose, dclose_err = babet.http.download(
+    \"${HTTP_URL}close-delimited\", close_path, {
+        timeout = 5, max_file_size = 131072
+    })
+if not closed or not dclose then
+    print(\"ERR=\" .. table.concat({
+        tostring(closed_err), tostring(dclose_err)
+    }, \" | \"))
+else
+    local file = io.open(close_path, \"rb\")
+    local file_closed = file and file:read(\"*a\") or nil
+    if file then file:close() end
+    local expected_closed = string.rep(\"close---\", 16384)
+    if closed.body == expected_closed
+        and file_closed == expected_closed
+        and dclose.bytes == #expected_closed then
+        print(\"CLOSE_OK=131072\")
+    else
+        print(\"BAD_CLOSE_CONTENT\")
+    end
+end" \
+'^CLOSE_OK=131072$' required 1
+
+# 7. Le bypass explicite verify=false doit également permettre la connexion.
 run_case "HTTPS certificat local accepté avec verify=false" \
 "local r, e = babet.http.request{
     url = \"$TLS_URL\", verify = false, timeout = 5
@@ -276,7 +385,7 @@ run_case "HTTPS certificat local accepté avec verify=false" \
 if r then print(\"STATUS=\" .. r.status) else print(\"ERR=\" .. tostring(e)) end" \
 '^STATUS=200$' required 1
 
-# 6. Sondes publiques utiles, mais dépendantes du réseau, du proxy et des
+# 8. Sondes publiques utiles, mais dépendantes du réseau, du proxy et des
 # services tiers. Elles sont relancées une fois et restent informatives par
 # défaut. BABET_SMOKE_STRICT_EXTERNAL=1 les rend bloquantes.
 run_case "HTTPS certificat public valide sans ca_cert" \

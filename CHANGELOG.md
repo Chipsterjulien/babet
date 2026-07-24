@@ -6,6 +6,37 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.9.1] - 2026-07-24
+
+### HTTP fix for chunked and no-`Content-Length` responses
+
+- fixed a regression introduced in Babet 2.9.0 while disabling
+  cpp-httplib 0.45.0's internal payload cap: `0` was interpreted as a zero-byte
+  limit on `Transfer-Encoding: chunked` and no-`Content-Length` read paths,
+  producing `http: Failed to read connection` on the first received byte;
+- replaced that value with the largest representable `std::size_t`, leaving
+  Babet's own receivers as the sole authority for `max_body_size` and
+  `max_file_size`;
+- preserved the existing guarantees: no partial in-memory response, existing
+  destination preserved on failure, download staging file removed, and an
+  explicit diagnostic when the configured limit is exceeded;
+- added deterministic local tests for 128 KiB chunked responses, exact and
+  one-byte-below limits, downloads, fragmented chunks with extensions and
+  trailers, connection-close-delimited responses, and truncated chunked
+  streams;
+- added independent required guards to `smoke_test_network.sh`, run by
+  `run_tests.sh --release`, covering both memory and file receivers over local
+  HTTPS for chunked framing and local HTTP for connection-close framing;
+- validated the fix against the real AUR API use case from yaourt without
+  making that external service a blocking test dependency;
+- hardened the Zstandard bootstrap: an installation is now complete only when
+  `libzstd.a`, `zstd.h`, and `zstd_errors.h` are all present, while an
+  interrupted or incomplete source extraction is replaced automatically by a
+  clean extraction through a temporary directory;
+- added a network-free preflight to `run_tests.sh --release`, covering partial
+  installations, partial source trees, reuse of complete sources, and rejection
+  of malformed source archives.
+
 ## [2.9.0] - 2026-07-17
 
 ### Release summary

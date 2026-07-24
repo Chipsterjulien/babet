@@ -1,4 +1,4 @@
-Babet 2.9.0 roadmap
+Babet 2.9.x roadmap
 ====================
 
 [x] Lot A: add configurable babet.spawn() redirections.
@@ -12,6 +12,16 @@ Babet 2.9.0 roadmap
 [x] Lot E: add bounded direct worker-to-worker channels after lifecycle rules
     and shared transport primitives are stable.
 [x] Perform the final code/tests/docs/PDF/build/release audit.
+
+Babet 2.9.1 corrective release
+------------------------------
+
+[x] Fix chunked and connection-close HTTP response framing with cpp-httplib
+    0.45.0 while preserving Babet-owned body/file limits.
+[x] Add exact-boundary, fragmented, truncated, download-cleanup and
+    close-delimited regression tests.
+[x] Add independent blocking local smoke tests for both response receivers:
+    HTTPS for chunked framing and HTTP for connection-close framing.
 
 Deferred ideas retained in notes.md:
 - bounded in-memory archive.read() if a concrete use case justifies it;
