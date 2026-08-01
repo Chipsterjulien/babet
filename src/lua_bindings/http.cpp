@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <ctime>
 #include <exception>
+#include <limits>
+#include <new>
 #include <string>
 #include <utility>
 #include <vector>
@@ -29,6 +31,8 @@ namespace
         2ll * 1024ll * 1024ll * 1024ll;
     constexpr std::uint64_t DEFAULT_MAX_FILE_SIZE =
         8ull * 1024ull * 1024ull * 1024ull;
+    constexpr std::size_t HTTPLIB_MAX_PAYLOAD_LENGTH =
+        (std::numeric_limits<std::size_t>::max)();
 
     bool is_ascii_alpha(unsigned char c)
     {
@@ -735,14 +739,19 @@ namespace
             cli.enable_server_certificate_verification(verify);
 
             // La limite du corps est appliquée par Babet via un
-            // ContentReceiver ci-dessous. On désactive donc la limite
-            // interne de cpp-httplib : selon le chemin de lecture, la
-            // v0.45.0 peut traduire son dépassement en Error::Read au
-            // lieu de Error::ExceedMaxPayloadSize, ce qui ferait perdre
-            // le diagnostic précis attendu par l'API Lua. Notre
-            // receiver garde en plus le contrôle exact du corps partiel
-            // et fonctionne au-delà du défaut interne de 100 Mio.
-            cli.set_payload_max_length(0);
+            // ContentReceiver ci-dessous. cpp-httplib 0.45.0 ne traite
+            // PAS 0 comme « illimité » ici : sur une réponse HTTP
+            // chunked non vide, set_payload_max_length(0) fait échouer
+            // la lecture avec Error::Read (« Failed to read connection »).
+            // Le même piège touche les réponses sans Content-Length,
+            // dont le corps est délimité par la fermeture de connexion.
+            //
+            // On neutralise donc sa borne interne de 100 Mio avec la
+            // plus grande valeur représentable. Le receiver de Babet
+            // reste l'unique autorité pour max_body_size/max_file_size :
+            // il conserve le diagnostic précis, ne publie jamais de
+            // corps partiel et permet les limites documentées > 100 Mio.
+            cli.set_payload_max_length(HTTPLIB_MAX_PAYLOAD_LENGTH);
             if (has_ca)
             {
                 cli.set_ca_cert_path(ca_cert);
@@ -913,9 +922,13 @@ namespace
             res->body = std::move(response_body);
             return push_response(L, res);
         }
-        catch (const std::exception &e)
+        catch (const std::bad_alloc &)
         {
-            return push_fail(L, std::string("http: ") + e.what());
+            return push_fail(L, "http: out of memory");
+        }
+        catch (const std::exception &)
+        {
+            return push_fail(L, "http: internal failure");
         }
         catch (...)
         {

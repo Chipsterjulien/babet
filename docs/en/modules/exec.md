@@ -1069,6 +1069,15 @@ The following validations return `(nil, err)` rather than raising:
 - invalid `cwd`;
 - `pipe`, `fork`, `poll`, `waitpid`, or another internal system failure.
 
+After a successful `fork()`, Babet retains ownership of descriptors and of the
+process group until ownership is transferred to a `spawn()` object or final
+reaping completes for `exec()`. If an internal C++ exception occurs in that
+window—for example while allocating an output buffer—the emergency path closes
+descriptors, immediately sends `SIGKILL` to the group, and attempts to reap the
+child within a short bounded window before returning `nil, err`. Exception
+cleanup does not use `terminate()`'s grace period, which is reserved for
+explicitly requested shutdown.
+
 ```lua
 local result, err = babet.exec("echo", "hello")
 assert(result == nil)

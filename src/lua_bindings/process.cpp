@@ -11,6 +11,7 @@
 #include <cstring>
 #include <ctime>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -994,6 +995,9 @@ int process_tostring(lua_State *L)
 
 int lua_spawn(lua_State *L)
 {
+    bool empty_userdata_pushed = false;
+    try
+    {
     if (!lua_arity_between(L, 1, 3))
     {
         return luaL_error(L, "spawn expects command, optional args and opts");
@@ -1067,11 +1071,13 @@ int lua_spawn(lua_State *L)
     // ainsi pas abandonner un processus enfant déjà lancé. Le userdata est
     // initialisé fermé jusqu'au succès complet de launch().
     Process *process = push_empty_process(L);
+    empty_userdata_pushed = true;
 
     babet_process::LaunchResult launched = babet_process::launch(spec);
     if (!launched.success)
     {
         lua_pop(L, 1); // userdata vide, aucune ressource à nettoyer
+        empty_userdata_pushed = false;
         if (launched.timed_out)
         {
             return push_fail(L, "spawn: launch timed out");
@@ -1080,8 +1086,26 @@ int lua_spawn(lua_State *L)
     }
 
     initialize_process(process, launched.process);
+    empty_userdata_pushed = false; // le userdata possède désormais les ressources
     lua_pushnil(L);
     return 2;
+    }
+    catch (const std::bad_alloc &)
+    {
+        if (empty_userdata_pushed)
+        {
+            lua_pop(L, 1);
+        }
+        return push_fail(L, "spawn: out of memory during launch");
+    }
+    catch (...)
+    {
+        if (empty_userdata_pushed)
+        {
+            lua_pop(L, 1);
+        }
+        return push_fail(L, "spawn: internal launch failure");
+    }
 }
 
 void register_process_metatable(lua_State *L)

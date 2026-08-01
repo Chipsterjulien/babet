@@ -1112,6 +1112,15 @@ Les validations suivantes ne lèvent pas ; elles renvoient `(nil, err)` :
 - `cwd` invalide ;
 - échec de `pipe`, `fork`, `poll`, `waitpid` ou autre erreur interne système.
 
+Après un `fork()` réussi, Babet conserve la propriété des descripteurs et du
+groupe de processus jusqu’au transfert vers un objet `spawn()` ou jusqu’à la
+récupération finale par `exec()`. Si une exception C++ interne survient pendant
+cette période — par exemple lors d’une allocation de tampon — le chemin
+d’urgence ferme les descripteurs, envoie immédiatement `SIGKILL` au groupe et
+tente de récupérer l’enfant pendant une fenêtre courte avant de renvoyer
+`nil, err`. Ce nettoyage d’exception n’utilise pas la période de grâce de
+`terminate()`, réservée aux arrêts explicitement demandés.
+
 ```lua
 local result, err = babet.exec("echo", "hello")
 assert(result == nil)

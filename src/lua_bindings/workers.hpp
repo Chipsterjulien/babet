@@ -69,8 +69,10 @@
  * Transport : nil, booléens, nombres finis, chaînes sans NUL acceptées par le
  * validateur UTF-8, listes denses non vides et objets à clés string. Tables
  * vides -> objets JSON. Fonctions, userdata, coroutines, cycles, tables
- * creuses/mixtes et profondeur > 32 sont refusés. Seule la première valeur de
- * retour traverse ; aucun traceback n'est ajouté automatiquement.
+ * creuses/mixtes et profondeur > 32 sont refusés. Chaque transfert est aussi
+ * limité à 1 000 000 de valeurs JSON développées et à un budget conservateur
+ * estimé de 64 Mio. Seule la première valeur de retour traverse ; aucun
+ * traceback n'est ajouté automatiquement.
  *
  * Timeout des queues : nil/absent = infini, 0 = immédiat, valeur positive
  * <= 86400 s = attente bornée arrondie au milliseconde supérieur. Les raisons

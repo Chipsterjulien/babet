@@ -590,12 +590,21 @@ La table de réponse décrit alors la réponse finale. Babet n'expose pas
 l'historique des hops ni une option `max_redirects`; la limite interne de
 cpp-httplib s'applique.
 
-Avant d'activer le suivi sur une URL non fiable, considère :
+Lorsqu'une redirection change de schéma, d'hôte ou de port, cpp-httplib 0.45
+retire automatiquement les headers `Host`, `Authorization` et
+`Proxy-Authorization` avant la requête suivante. Une redirection de même origine
+conserve `Authorization`. Les autres headers ajoutés par le script, notamment
+`Cookie` ou un secret personnalisé, ne bénéficient pas d'une suppression
+générale : évite donc de suivre une destination non fiable avec de tels headers.
 
-- redirection vers un autre domaine ;
-- passage HTTPS vers HTTP ;
-- accès à une adresse interne ou metadata cloud ;
-- transmission de headers sensibles selon la politique de la bibliothèque.
+Avant d'activer le suivi sur une URL non fiable, considère aussi :
+
+- le passage HTTPS vers HTTP ;
+- l'accès à une adresse interne ou à un service de métadonnées cloud ;
+- la destination finale réellement autorisée par ton application.
+
+La suite de tests locale vérifie qu'un header `Authorization` n'est pas transmis
+lors d'une redirection vers une autre origine.
 
 <a id="http-max-body"></a>
 ## `max_body_size`
@@ -623,6 +632,12 @@ nil, "http: response body exceeds max_body_size"
 Aucun corps partiel n'est exposé. Le header `Content-Length` n'est pas la seule
 protection : la limite s'applique aux chunks réellement reçus, y compris avec
 un transfert chunked ou une longueur absente/trompeuse.
+
+Babet prend en charge les trois cadrages de corps HTTP/1.1 utilisés ici :
+`Content-Length`, `Transfer-Encoding: chunked` et corps terminé par la fermeture
+de connexion. Babet 2.9.1 corrige spécifiquement les deux derniers avec
+cpp-httplib 0.45.0 ; les limites portent toujours sur les octets réellement
+livrés au receiver de Babet.
 
 Pour un gros payload GET, utilise
 [`babet.http.download`](#http-download) au lieu d'augmenter cette limite en
@@ -866,7 +881,8 @@ babet.http.download(url, "fichier", "pas une table")
 - DNS, connexion, TLS, envoi, lecture ou timeout ;
 - corps de réponse dépassant `max_body_size` ou `max_file_size` ;
 - chemin de destination ou erreur du système de fichiers ;
-- exception interne convertie en message `http: …`.
+- échec d'allocation interne converti en `(nil, "http: out of memory")` ;
+- autre exception interne convertie en `(nil, "http: internal failure")`.
 
 ### Pas une erreur Babet
 

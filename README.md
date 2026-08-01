@@ -16,13 +16,17 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.9.0**. See the
+Current stable and audited release: **2.9.2**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.9.0 adds configurable `babet.spawn()` redirections, the native binary
-`babet.base64` module, secure `babet.writeFileAtomic()` publication, a hardened
-worker lifecycle, and direct bounded shared channels between workers.
+Babet 2.9.2 hardens worker serialization, process and pipeline cleanup, SQLite
+transaction recovery, and the HTTP/socket exception boundaries without changing
+the Lua API. It also expands deterministic preflights for Zstandard, inotify,
+and worker serialization budgets. The 2.9 feature line still includes
+configurable `babet.spawn()` redirections, the native `babet.base64` module,
+secure `babet.writeFileAtomic()` publication, a hardened worker lifecycle, and
+direct bounded shared channels between workers.
 
 Can be used in three modes:
 
@@ -315,10 +319,10 @@ Before tagging a release, run the complete validation with one command:
 ./run_tests.sh --release
 ```
 
-Babet's blocking TLS checks use a local HTTPS fixture generated at runtime.
-Public HTTPS probes are advisory by default, so a third-party outage, proxy,
-DNS filter, or TLS interception does not invalidate a release. To make those
-probes blocking too:
+Babet's blocking HTTP-framing and TLS checks use local HTTP/HTTPS fixtures
+generated at runtime. Public HTTPS probes are advisory by default, so a
+third-party outage, proxy, DNS filter, or TLS interception does not invalidate
+a release. To make those probes blocking too:
 
 ```sh
 BABET_SMOKE_STRICT_EXTERNAL=1 ./run_tests.sh --release
@@ -328,9 +332,10 @@ It automatically runs the ASan/UBSan suite, restores and revalidates the
 normal build, then runs the network smoke tests against that final binary.
 The normal build step is still attempted when the sanitizer stage fails, so
 `test/babet` is not deliberately left instrumented. Internet access is
-optional: without it, only the advisory public probes warn. The blocking TLS
-checks use a local fixture; the bounded TCP check uses a reserved TEST-NET
-address. The network stage requires the `python3` and `openssl` commands.
+optional: without it, only the advisory public probes warn. The blocking HTTP
+and TLS checks use local fixtures; the bounded TCP check uses a reserved
+TEST-NET address. The network stage requires the `python3` and `openssl`
+commands.
 
 The individual commands remain available for diagnosis:
 

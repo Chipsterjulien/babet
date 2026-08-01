@@ -477,6 +477,11 @@ DNS/TCP errors, and the stable typed states `"timeout"`, `"closed"`, and
 Only compare complete strings for stable typed errors. System messages may vary
 across libc and kernel versions.
 
+Internal C++ exceptions never cross into Lua. Allocation failure is converted
+to `(nil, "socket: out of memory")`; other internal exceptions receive a fixed
+literal diagnostic. This boundary covers every public `babet.socket` function
+and method.
+
 <a id="socket-design"></a>
 ## Security and limitations
 
@@ -488,3 +493,10 @@ across libc and kernel versions.
 - No half-close, configurable keepalive, UDP, Unix sockets, or Lua event loop.
 - One userdata should not be used concurrently; socket userdata cannot cross a
   WORKERS message boundary.
+- `connect`, `listen`, `accept`, and `connect_tls` create the Lua userdata owner
+  before acquiring an FD or OpenSSL object, so a Lua memory-error longjmp cannot
+  abandon an unowned resource. `starttls` uses a separate guard and closes the
+  stream if an exception occurs after the handshake has started.
+- OOM exception safety is established by structural review, strict compilation,
+  and static analysis rather than deterministic `bad_alloc` injection; the
+  integration suite covers observable lifecycle and failure paths.

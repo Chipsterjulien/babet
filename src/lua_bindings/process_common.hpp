@@ -3,6 +3,7 @@
 
 #include <lua.hpp>
 
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +13,8 @@
 
 namespace babet_process
 {
+
+inline constexpr std::size_t MAX_PIPELINE_STAGES = 32;
 
 enum class StreamRedirectionKind
 {
@@ -139,8 +142,15 @@ bool terminate_and_reap(pid_t pid, int &status);
 bool set_nonblocking(int fd, const char *prefix, const char *label,
                      std::string &err);
 
-void close_fd(int &fd);
-void close_process_fds(LaunchedProcess &process);
+void close_fd(int &fd) noexcept;
+void close_process_fds(LaunchedProcess &process) noexcept;
+
+// Nettoyage d'urgence sans allocation C++ : ferme les flux, envoie SIGKILL
+// au groupe puis tente de récolter l'enfant pendant une fenêtre courte.
+// Destiné aux destructeurs RAII et aux catch(...) pendant un déroulement de
+// pile ; aucun arrêt gracieux ne doit être tenté dans ce contexte.
+bool emergency_kill_and_reap(LaunchedProcess &process,
+                             long long reap_timeout_ms = 500) noexcept;
 
 // Prépare les redirections, fork, configure le groupe de processus et attend
 // le résultat de chdir/exec via un pipe CLOEXEC. En succès, seuls les flux
@@ -152,7 +162,13 @@ LaunchResult launch(const LaunchSpec &spec);
 // stdout de la dernière et un stderr par étape. En cas d'échec partiel, tous
 // les groupes déjà lancés sont terminés et les enfants directs sont réapés.
 PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec);
-void close_pipeline_fds(LaunchedPipeline &pipeline);
+void close_pipeline_fds(LaunchedPipeline &pipeline) noexcept;
+
+// Variante pipeline du nettoyage d'urgence. Le vecteur d'enfants est déjà
+// alloué par le lanceur ; la fonction n'alloue rien et marque les PID récoltés
+// à -1 afin de ne jamais signaler ultérieurement un identifiant recyclé.
+bool emergency_kill_and_reap(LaunchedPipeline &pipeline,
+                             long long reap_timeout_ms = 500) noexcept;
 
 int exit_code_from_status(int status, bool status_valid);
 

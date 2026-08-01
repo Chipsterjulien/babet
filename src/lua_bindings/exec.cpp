@@ -17,6 +17,7 @@
 #include "process_common.hpp"
 
 #include <string>
+#include <new>
 #include <unordered_set>
 #include <vector>
 #include <utility>
@@ -467,6 +468,56 @@ namespace
                ChildWaitResult::reaped;
     }
 
+    class EmergencyExecGuard
+    {
+    public:
+        EmergencyExecGuard(pid_t &pid, int &stdin_fd, int &stdout_fd,
+                           int &stderr_fd) noexcept
+            : pid_(pid), stdin_fd_(stdin_fd), stdout_fd_(stdout_fd),
+              stderr_fd_(stderr_fd)
+        {
+        }
+
+        EmergencyExecGuard(const EmergencyExecGuard &) = delete;
+        EmergencyExecGuard &operator=(const EmergencyExecGuard &) = delete;
+
+        ~EmergencyExecGuard() noexcept
+        {
+            cleanup_now();
+        }
+
+        void cleanup_now() noexcept
+        {
+            if (!armed_)
+            {
+                return;
+            }
+            babet_process::LaunchedProcess process;
+            process.pid = pid_;
+            process.stdin_fd = stdin_fd_;
+            process.stdout_fd = stdout_fd_;
+            process.stderr_fd = stderr_fd_;
+            babet_process::emergency_kill_and_reap(process);
+            pid_ = process.pid;
+            stdin_fd_ = process.stdin_fd;
+            stdout_fd_ = process.stdout_fd;
+            stderr_fd_ = process.stderr_fd;
+            armed_ = false;
+        }
+
+        void release() noexcept
+        {
+            armed_ = false;
+        }
+
+    private:
+        pid_t &pid_;
+        int &stdin_fd_;
+        int &stdout_fd_;
+        int &stderr_fd_;
+        bool armed_ = true;
+    };
+
     int push_exec_result(lua_State *L, const std::string &out_buf,
                          const std::string &err_buf, int status,
                          bool status_valid, bool timed_out,
@@ -506,6 +557,8 @@ namespace
 
 int lua_exec(lua_State *L)
 {
+    try
+    {
     // --- validation des arguments Lua -------------------------------
     if (!lua_arity_between(L, 1, 3) ||
         !lua_is_strict_string(L, 1))
@@ -574,10 +627,20 @@ int lua_exec(lua_State *L)
         return push_fail(L, launch_result.error);
     }
 
-    const pid_t pid = launch_result.process.pid;
+    pid_t pid = launch_result.process.pid;
     int pipe_in[2] = {-1, launch_result.process.stdin_fd};
     int pipe_out[2] = {launch_result.process.stdout_fd, -1};
     int pipe_err[2] = {launch_result.process.stderr_fd, -1};
+    launch_result.process.pid = -1;
+    launch_result.process.stdin_fd = -1;
+    launch_result.process.stdout_fd = -1;
+    launch_result.process.stderr_fd = -1;
+
+    EmergencyExecGuard emergency_guard(
+        pid, pipe_in[1], pipe_out[0], pipe_err[0]);
+
+    // IMPORTANT : aucun appel lua_* n'est autorisé tant que cette garde est
+    // armée. Une erreur Lua utilise longjmp et contournerait son destructeur.
 
     // --- I/O concurrente, avec deadline éventuelle ------------------
     std::string out_buf, err_buf;
@@ -587,7 +650,7 @@ int lua_exec(lua_State *L)
     bool in_open = has_stdin;
     if (!has_stdin)
     {
-        close(pipe_in[1]);
+        babet_process::close_fd(pipe_in[1]);
     }
 
     bool out_open = true, err_open = true;
@@ -735,7 +798,7 @@ int lua_exec(lua_State *L)
             size_t remaining = stdin_data.size() - stdin_off;
             if (remaining == 0)
             {
-                close(pipe_in[1]);
+                babet_process::close_fd(pipe_in[1]);
                 in_open = false;
             }
             else
@@ -747,7 +810,7 @@ int lua_exec(lua_State *L)
                     stdin_off += static_cast<size_t>(wn);
                     if (stdin_off == stdin_data.size())
                     {
-                        close(pipe_in[1]);
+                        babet_process::close_fd(pipe_in[1]);
                         in_open = false;
                     }
                 }
@@ -760,7 +823,7 @@ int lua_exec(lua_State *L)
                     }
                     else
                     {
-                        close(pipe_in[1]);
+                        babet_process::close_fd(pipe_in[1]);
                         in_open = false;
                     }
                 }
@@ -768,23 +831,28 @@ int lua_exec(lua_State *L)
         }
     }
 
-    close(pipe_out[0]);
-    close(pipe_err[0]);
+    babet_process::close_fd(pipe_out[0]);
+    babet_process::close_fd(pipe_err[0]);
     if (in_open)
     {
-        close(pipe_in[1]);
+        babet_process::close_fd(pipe_in[1]);
         in_open = false;
     }
 
     if (!io_internal_error.empty())
     {
         int status = 0;
-        bool reaped = terminate_and_reap(pid, status);
-        if (!reaped)
+        const bool reaped = terminate_and_reap(pid, status);
+        if (reaped)
+        {
+            pid = -1;
+        }
+        else
         {
             io_internal_error +=
                 " (child could not be reaped within cleanup deadline)";
         }
+        emergency_guard.cleanup_now();
         return push_fail(L, io_internal_error);
     }
 
@@ -801,11 +869,12 @@ int lua_exec(lua_State *L)
         if (wait_result == ChildWaitResult::reaped)
         {
             status_valid = true;
+            pid = -1;
         }
         else if (wait_result == ChildWaitResult::error)
         {
-            return push_fail(L, std::string("exec: waitpid failed: ") +
-                                    std::strerror(errno));
+            emergency_guard.cleanup_now();
+            return push_fail(L, "exec: waitpid failed");
         }
         else
         {
@@ -819,6 +888,10 @@ int lua_exec(lua_State *L)
                                                now_ms() + grace_ms);
             }
             status_valid = (wait_result == ChildWaitResult::reaped);
+            if (status_valid)
+            {
+                pid = -1;
+            }
         }
     }
     else if (timed_out)
@@ -834,6 +907,10 @@ int lua_exec(lua_State *L)
             wait_result = wait_child_until(pid, status, now_ms() + 500);
         }
         status_valid = (wait_result == ChildWaitResult::reaped);
+        if (status_valid)
+        {
+            pid = -1;
+        }
     }
     else
     {
@@ -845,11 +922,29 @@ int lua_exec(lua_State *L)
         status_valid = (waited == pid);
         if (!status_valid)
         {
-            return push_fail(L, std::string("exec: waitpid failed: ") +
-                                    std::strerror(errno));
+            emergency_guard.cleanup_now();
+            return push_fail(L, "exec: waitpid failed");
         }
+        pid = -1;
     }
 
+    if (pid > 0)
+    {
+        emergency_guard.cleanup_now();
+    }
+    else
+    {
+        emergency_guard.release();
+    }
     return push_exec_result(L, out_buf, err_buf, status, status_valid,
                             timed_out, out_truncated, err_truncated);
+    }
+    catch (const std::bad_alloc &)
+    {
+        return push_fail(L, "exec: out of memory during execution");
+    }
+    catch (...)
+    {
+        return push_fail(L, "exec: internal execution failure");
+    }
 }

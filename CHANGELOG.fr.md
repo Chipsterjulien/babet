@@ -6,6 +6,182 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.9.2] - 2026-08-01
+
+### Résumé de la version
+
+Babet 2.9.2 est une version de durcissement et de couverture de non-régression
+pour Babet 2.9.1. Elle ne modifie pas l'API Lua. Elle renforce la sérialisation
+des workers, le nettoyage des processus et pipelines, la récupération des
+transactions SQLite, les frontières d'exception HTTP/sockets, le décodage
+inotify et la validation de release.
+
+### Durcissement du build et des tests de non-régression
+
+- extension du préflight Zstandard local sans réseau aux tests ordinaires et
+  aux deux builds de validation de release ;
+- correction d'un diagnostic vide lorsqu'un TAR gzip était suivi d'un seul
+  octet non nul, avec vérification des cas à un et deux octets résiduels ;
+- durcissement du décodage des buffers inotify : copie alignée de l'en-tête,
+  contrôle des en-têtes et noms tronqués, progression bornée et test
+  d'intégration vérifiant plusieurs événements dans une même lecture ;
+- durcissement du helper de tests `ok_fail()`, qui refuse désormais les chaînes
+  d'erreur vides ;
+- audit des 132 assertions `ok_raises()` : les 36 appels qui vérifiaient
+  seulement qu'une erreur Lua quelconque était levée exigent désormais un
+  fragment de diagnostic stable, et le helper refuse tout nouvel appel sans
+  motif non vide ;
+- ajout d'un préflight hermétique de huit cas pour le décodeur inotify et d'un
+  smoke test TLS vérifiant un certificat avec SAN IP via l'OpenSSL statique
+  réellement lié à Babet ;
+- réalignement des documentations workers française et anglaise sur la séquence
+  réelle de `__gc`, avec l'étape initiale de demande d'annulation et une
+  précision indiquant que le timeout de `join()` ne borne pas un futur
+  `pthread_join()` déclenché par le ramasse-miettes.
+
+### Durcissement de la sérialisation workers
+
+- interception sans allocation C++ supplémentaire des exceptions produites
+  pendant la construction ou l'encodage JSON des arguments de `spawn`, de
+  `job:send` et de `worker.send`, afin qu'aucune exception ne traverse une
+  `lua_CFunction` ;
+- ajout d'un budget symétrique par opération, limité à 1 000 000 de valeurs
+  développées et 64 Mio estimés, appliqué avant la copie des chaînes et avant
+  la publication dans les queues ;
+- protection contre l'amplification exponentielle provoquée par des sous-tables
+  ou chaînes partagées, avec garantie qu'un message refusé n'est pas publié ;
+- correction de l'ordre de traitement des entiers JSON non signés et signés ;
+- ajout de tests d'intégration pour la fidélité exacte des entiers 64 bits, le
+  refus de `NaN` et des infinis sur les cinq chemins de transfert, le budget
+  d'octets et l'atomicité des envois refusés ;
+- ajout d'un préflight hermétique pour les frontières des budgets de nœuds et
+  d'octets, complété par un unique test du chemin Lua public au-delà du million
+  de nœuds, activé seulement dans le mode dossier du build normal ;
+- clarification du contrat de période de grâce des pipelines : tous les membres
+  reçoivent `SIGTERM` immédiatement, tandis que les leaders zombies préservent
+  le PGID jusqu'au signal final éventuel.
+
+### Sûreté aux exceptions des processus et pipelines
+
+- protection des frontières Lua de `spawn`, `exec`, `pipeline` et
+  `spawnPipeline` contre toute exception C++ issue du lancement ou de la phase
+  synchrone, avec diagnostics littéraux n'exigeant aucune allocation C++ ;
+- ajout d'un nettoyage d'urgence sans allocation après `fork()` : fermeture des
+  descripteurs, `SIGKILL` immédiat du groupe et tentative de récupération
+  bornée, sans appliquer la période de grâce réservée à `terminate()` ;
+- ajout de gardes RAII autour des allocations nominales de `exec()` et
+  `pipeline()` - croissance des sorties, vecteurs de `poll()` et tableaux de
+  statuts - afin qu'un échec d'allocation ne puisse abandonner des enfants ou
+  des pipes ;
+- exclusion systématique des PID déjà récupérés lors des signaux de nettoyage,
+  pour ne jamais viser un identifiant recyclé ;
+- déplacement de la limite de 32 étapes vers le lanceur commun et validation
+  locale avant toute création de pipe ou tout `fork()` ;
+- documentation explicite de l'invariant interdisant les appels Lua dans les
+  régions protégées par RAII, car une erreur Lua utilise `longjmp` et
+  contournerait les destructeurs C++ ;
+- documentation explicite du fait que la sûreté OOM après `fork()` repose sur
+  la revue structurelle, la compilation stricte et un nettoyage sans allocation,
+  et non sur une injection déterministe d'échec d'allocation.
+
+### Durcissement de l'état transactionnel SQLite
+
+- ajout d'une possession RAII explicite après tout `BEGIN` réussi, avec
+  tentative immédiate de rollback après exception C++ et remise à zéro garantie
+  du marqueur de callback transactionnel actif ;
+- réservation des deux cases de pile nécessaires au callback avant `BEGIN`,
+  puis de la case du booléen de succès avant `COMMIT`, afin d'éviter tout
+  `longjmp` Lua non protégé pendant que la garde transactionnelle est armée ;
+- report du formatage de l'erreur du callback après la tentative de rollback,
+  pour qu'un objet d'erreur Lua inhabituel ne puisse laisser une transaction
+  ouverte ;
+- conservation conjointe des diagnostics de `COMMIT` et de `ROLLBACK`, ajout
+  d'une dernière tentative de rollback sans allocation C++ et signalement
+  explicite si la connexion reste malgré tout dans une transaction ;
+- ajout de tests d'intégration couvrant l'échec de `COMMIT` sur contrainte
+  différée, le diagnostic d'échec de rollback, le retour en autocommit, la
+  réutilisation de la connexion, la réutilisation d'un statement préparé après
+  rollback et un itérateur de lecture restant actif pendant un commit réussi ;
+- documentation du fait que la sûreté aux exceptions de `TransactionGuard`
+  repose sur la revue structurelle et la compilation stricte, et non sur une
+  injection déterministe de `bad_alloc` ; les tests valident les états obtenus,
+  le nettoyage et la réutilisation de la connexion.
+
+### Sûreté aux exceptions HTTP et sockets
+
+- correction du handler d'exception HTTP qui concaténait encore une
+  `std::string` après interception de `std::bad_alloc`, avec un diagnostic OOM
+  littéral ne nécessitant aucune allocation C++ supplémentaire ;
+- conversion des autres exceptions HTTP en diagnostic Lua sans concaténation
+  C++ dans le handler ;
+- ajout d'une frontière anti-exception commune à toutes les fonctions et
+  méthodes publiques de `babet.socket`, empêchant toute exception C++ de
+  traverser une `lua_CFunction` alors que Lua est compilé en C ;
+- création du userdata propriétaire avant l'acquisition d'un FD ou d'un objet
+  OpenSSL pour `connect`, `listen`, `accept` et `connect_tls`, afin qu'une erreur
+  mémoire Lua par `longjmp` ne puisse abandonner une ressource sans propriétaire ;
+- ajout d'une garde dédiée à `starttls`, qui restaure les flags avant le début
+  du handshake et ferme le flux si une exception survient après le premier
+  échange TLS ;
+- ajout d'un test local vérifiant qu'une redirection HTTP vers une autre origine
+  ne retransmet pas le header `Authorization` ;
+- documentation du fait que la sûreté OOM des sockets repose sur la revue
+  structurelle, la compilation stricte et l'analyse statique, sans injection
+  déterministe de `bad_alloc`.
+
+### Validation de la release
+
+L'arbre exact de Babet 2.9.2 a validé :
+
+- 3370 PASS / 0 FAIL en mode dossier sous ASan + UBSan ;
+- 3357 PASS / 0 FAIL en mode embarqué sous ASan + UBSan ;
+- 3357 PASS / 0 FAIL en mode embarqué via `PATH` sous ASan + UBSan ;
+- 3371 PASS / 0 FAIL en mode dossier avec le build normal final ;
+- 3357 PASS / 0 FAIL en mode embarqué avec le build normal final ;
+- 3357 PASS / 0 FAIL en mode embarqué via `PATH` avec le build normal final ;
+- 5/5 tests du préflight de bootstrap Zstandard ;
+- 8/8 tests du préflight de décodage inotify ;
+- 9/9 tests du préflight des budgets de sérialisation workers ;
+- 11 PASS / 0 FAIL / 0 WARN dans les smoke tests réseau finaux.
+
+L'écart d'un test entre les modes dossier normal et sanitizers est attendu :
+le test workers au-delà d'un million de nœuds n'est activé qu'une seule fois,
+dans le mode dossier du build normal.
+
+## [2.9.1] - 2026-07-24
+
+### Correctif HTTP pour les réponses chunked et sans `Content-Length`
+
+- correction d'une régression introduite par Babet 2.9.0 lors de la
+  neutralisation de la limite interne de cpp-httplib 0.45.0 : la valeur `0`
+  était interprétée comme une limite nulle sur les chemins de lecture
+  `Transfer-Encoding: chunked` et sans `Content-Length`, provoquant
+  `http: Failed to read connection` dès le premier octet reçu ;
+- remplacement de cette valeur par la plus grande valeur `std::size_t`
+  représentable, de sorte que les receivers de Babet restent l'unique autorité
+  pour `max_body_size` et `max_file_size` ;
+- conservation des garanties existantes : aucune réponse mémoire partielle,
+  destination existante préservée après erreur, temporaire de téléchargement
+  supprimé et diagnostic explicite en cas de dépassement ;
+- ajout de tests locaux déterministes pour les réponses chunked de 128 Kio, les
+  limites exactes et juste inférieures, les téléchargements, les chunks
+  fragmentés avec extensions et trailers, les réponses délimitées par fermeture
+  de connexion et les flux chunked tronqués ;
+- ajout de gardes indépendantes dans `smoke_test_network.sh`, exécutées par
+  `run_tests.sh --release`, qui vérifient les receivers mémoire et fichier en
+  HTTPS local pour le cadrage chunked, puis en HTTP local pour le cadrage par
+  fermeture de connexion ;
+- correction validée pour le cas réel de l'API AUR utilisé par yaourt, sans
+  dépendre de ce service externe dans les tests bloquants ;
+- durcissement du bootstrap de Zstandard : une installation n'est désormais
+  considérée complète que si `libzstd.a`, `zstd.h` et `zstd_errors.h` sont
+  tous présents ; une extraction source interrompue ou incomplète est
+  automatiquement remplacée par une réextraction propre dans un dossier
+  temporaire ;
+- ajout d'un préflight local sans réseau à `run_tests.sh --release`, couvrant
+  l'installation partielle, la source partielle, la réutilisation d'une source
+  complète et le refus d'une archive source mal formée.
+
 ## [2.9.0] - 2026-07-17
 
 ### Résumé de la version

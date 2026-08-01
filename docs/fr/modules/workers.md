@@ -39,7 +39,7 @@ est strictement coopérative.
   - [Scalaires et chaînes](#workers-transfer-scalars)
   - [Tables listes et objets](#workers-transfer-tables)
   - [Valeurs refusées](#workers-transfer-rejected)
-  - [Copies, identité et profondeur](#workers-transfer-copy)
+  - [Copies, identité, profondeur et budgets](#workers-transfer-copy)
 - [Résultat final du worker](#workers-result)
   - [`status()` — observer sans consommer](#workers-status)
   - [`join(timeout?)` — attendre et consommer](#workers-join)
@@ -479,7 +479,8 @@ Ne traversent pas les états Lua :
 - clés non string dans une table objet ;
 - nombres `NaN` ou infinis ;
 - chaînes avec NUL ou octets non acceptés comme UTF-8 ;
-- structures imbriquées au-delà de la limite.
+- structures imbriquées ou développées au-delà des limites de profondeur,
+  de nœuds ou d'octets.
 
 Un chemin, une URL ou une configuration sérialisable doit être transmis à la
 place de l'objet système lui-même. Le worker ouvre ensuite sa propre ressource.
@@ -496,7 +497,7 @@ babet.workers.spawn(code, {
 ```
 
 <a id="workers-transfer-copy"></a>
-### Copies, identité et profondeur
+### Copies, identité, profondeur et budgets
 
 Le transport crée une copie par valeur :
 
@@ -505,7 +506,10 @@ Le transport crée une copie par valeur :
 - deux références vers la même sous-table deviennent deux tables séparées ;
 - les cycles sont refusés ;
 - la profondeur maximale est de 32 niveaux selon le compteur interne de
-  sérialisation.
+  sérialisation ;
+- une opération peut développer au plus **1 000 000 de valeurs JSON** ;
+- la représentation estimée doit rester dans un budget conservateur de
+  **64 Mio**.
 
 ```lua
 local shared = { value = 1 }
@@ -515,7 +519,28 @@ local args = { a = shared, b = shared }
 -- mais ne sont pas la même table.
 ```
 
-La limite protège les piles C++ et Lua contre des structures pathologiques.
+La limite de profondeur protège les piles C++ et Lua. Les deux budgets
+supplémentaires empêchent une petite structure Lua de produire une quantité
+exponentielle de données lorsque la même sous-table ou la même chaîne est
+référencée de nombreuses fois.
+
+Chaque valeur développée consomme exactement un nœud et un coût fixe de
+32 octets. Chaque occurrence d'une chaîne, y compris une clé d'objet, consomme
+également un majorant de `6 × taille_en_octets + 2`. Le facteur six couvre le
+pire échappement JSON d'un octet de contrôle. Les deux plafonds se recouvrent
+volontairement : ils bornent à la fois le nombre d'objets du DOM JSON et la
+charge textuelle développée.
+
+Ces limites s'appliquent indépendamment à chaque opération : arguments de
+`spawn`, résultat final, `job:send`, `worker.send` ou `channel:send`. Une valeur
+refusée n'est pas ajoutée à la queue. Le contrôle identique effectué à la
+réception vérifie la cohérence du message ; la borne mémoire principale est
+appliquée à l'émission, avant la copie des chaînes et avant la publication du
+JSON interne.
+
+Les plafonds font partie du contrat public. Les réduire dans une version
+ultérieure pourrait rendre invalides des transferts auparavant acceptés et
+devrait être annoncé comme un changement incompatible.
 
 <a id="workers-result"></a>
 ## Résultat final du worker
@@ -627,6 +652,11 @@ Un timeout :
 - ne consomme ni le résultat ni l'erreur ;
 - permet encore `status`, `send`, `recv`, `close`, `cancel` et un nouvel appel à
   `join`.
+
+Le timeout borne uniquement cet appel à `join()`. Si le worker reste actif puis
+que sa dernière référence est collectée, notamment pendant la fermeture de
+l'état Lua, son `__gc` doit encore effectuer un `pthread_join()` sans timeout et
+peut donc bloquer la fin du programme.
 
 Même lorsqu'un worker retourne légitimement `nil`, un succès reste
 reconnaissable grâce à `ok == true`.
@@ -1640,6 +1670,7 @@ assert(not ok)
 pendant la création :
 
 - `args` non transférables ;
+- dépassement d'un budget de sérialisation ;
 - échec de sérialisation JSON ;
 - initialisation d'une queue ou du signal de terminaison impossible ;
 - échec de `pthread_create`.

@@ -637,7 +637,7 @@ bool set_nonblocking(int fd, const char *prefix, const char *label,
     return true;
 }
 
-void close_fd(int &fd)
+void close_fd(int &fd) noexcept
 {
     if (fd >= 0)
     {
@@ -646,7 +646,7 @@ void close_fd(int &fd)
     }
 }
 
-void close_process_fds(LaunchedProcess &process)
+void close_process_fds(LaunchedProcess &process) noexcept
 {
     close_fd(process.stdin_fd);
     close_fd(process.stdout_fd);
@@ -686,8 +686,9 @@ LaunchResult launch(const LaunchSpec &spec)
     int stdin_target = -1;
     int stdout_target = -1;
     int stderr_target = -1;
+    LaunchedProcess process;
 
-    auto close_prepared = [&]() {
+    auto close_prepared = [&]() noexcept {
         close_pair(pipe_in);
         close_pair(pipe_out);
         close_pair(pipe_err);
@@ -709,305 +710,327 @@ LaunchResult launch(const LaunchSpec &spec)
         return false;
     };
 
-    if (spec.stdin_redirection.kind == StreamRedirectionKind::pipe &&
-        !make_stream_pipe(pipe_in, "stdin"))
+    try
     {
-        close_prepared();
-        return result;
-    }
-    if (spec.stdout_redirection.kind == StreamRedirectionKind::pipe &&
-        !make_stream_pipe(pipe_out, "stdout"))
-    {
-        close_prepared();
-        return result;
-    }
-    if (spec.stderr_redirection.kind == StreamRedirectionKind::pipe &&
-        !make_stream_pipe(pipe_err, "stderr"))
-    {
-        close_prepared();
-        return result;
-    }
-
-    if (spec.stdin_redirection.kind == StreamRedirectionKind::null_device &&
-        !open_null_redirection(true, spec.error_prefix, "stdin",
-                               stdin_target, result.error))
-    {
-        close_prepared();
-        return result;
-    }
-    if (spec.stdout_redirection.kind == StreamRedirectionKind::null_device &&
-        !open_null_redirection(false, spec.error_prefix, "stdout",
-                               stdout_target, result.error))
-    {
-        close_prepared();
-        return result;
-    }
-    if (spec.stdout_redirection.kind == StreamRedirectionKind::file &&
-        !open_output_redirection(spec.stdout_redirection.file,
-                                 spec.error_prefix, "stdout",
-                                 stdout_target, result.error))
-    {
-        close_prepared();
-        return result;
-    }
-    if (spec.stderr_redirection.kind == StreamRedirectionKind::null_device &&
-        !open_null_redirection(false, spec.error_prefix, "stderr",
-                               stderr_target, result.error))
-    {
-        close_prepared();
-        return result;
-    }
-    if (spec.stderr_redirection.kind == StreamRedirectionKind::file &&
-        !open_output_redirection(spec.stderr_redirection.file,
-                                 spec.error_prefix, "stderr",
-                                 stderr_target, result.error))
-    {
-        close_prepared();
-        return result;
-    }
-    if (!make_stream_pipe(pipe_exec, "launch-status"))
-    {
-        close_prepared();
-        return result;
-    }
-
-    const pid_t pid = ::fork();
-    if (pid < 0)
-    {
-        result.error = prefixed(spec.error_prefix,
-                                std::string("fork() failed: ") +
-                                    std::strerror(errno));
-        close_prepared();
-        return result;
-    }
-
-    if (pid == 0)
-    {
-        ::setpgid(0, 0);
-
-        auto duplicate_stream = [&](StreamRedirectionKind kind,
-                                    int pipe_child_fd, int target_fd,
-                                    int standard_fd) {
-            if (kind == StreamRedirectionKind::inherit)
-            {
-                return true;
-            }
-            const int source = kind == StreamRedirectionKind::pipe
-                                   ? pipe_child_fd
-                                   : target_fd;
-            return source >= 0 && ::dup2(source, standard_fd) >= 0;
-        };
-
-        if (!duplicate_stream(spec.stdin_redirection.kind, pipe_in[0],
-                              stdin_target, STDIN_FILENO) ||
-            !duplicate_stream(spec.stdout_redirection.kind, pipe_out[1],
-                              stdout_target, STDOUT_FILENO))
+        if (spec.stdin_redirection.kind == StreamRedirectionKind::pipe &&
+            !make_stream_pipe(pipe_in, "stdin"))
         {
-            report_launch_failure_and_exit(pipe_exec[1], errno);
+            close_prepared();
+            return result;
+        }
+        if (spec.stdout_redirection.kind == StreamRedirectionKind::pipe &&
+            !make_stream_pipe(pipe_out, "stdout"))
+        {
+            close_prepared();
+            return result;
+        }
+        if (spec.stderr_redirection.kind == StreamRedirectionKind::pipe &&
+            !make_stream_pipe(pipe_err, "stderr"))
+        {
+            close_prepared();
+            return result;
         }
 
-        if (spec.stderr_redirection.kind ==
-            StreamRedirectionKind::stdout_stream)
+        if (spec.stdin_redirection.kind ==
+                StreamRedirectionKind::null_device &&
+            !open_null_redirection(true, spec.error_prefix, "stdin",
+                                   stdin_target, result.error))
         {
-            if (::dup2(STDOUT_FILENO, STDERR_FILENO) < 0)
+            close_prepared();
+            return result;
+        }
+        if (spec.stdout_redirection.kind ==
+                StreamRedirectionKind::null_device &&
+            !open_null_redirection(false, spec.error_prefix, "stdout",
+                                   stdout_target, result.error))
+        {
+            close_prepared();
+            return result;
+        }
+        if (spec.stdout_redirection.kind == StreamRedirectionKind::file &&
+            !open_output_redirection(spec.stdout_redirection.file,
+                                     spec.error_prefix, "stdout",
+                                     stdout_target, result.error))
+        {
+            close_prepared();
+            return result;
+        }
+        if (spec.stderr_redirection.kind ==
+                StreamRedirectionKind::null_device &&
+            !open_null_redirection(false, spec.error_prefix, "stderr",
+                                   stderr_target, result.error))
+        {
+            close_prepared();
+            return result;
+        }
+        if (spec.stderr_redirection.kind == StreamRedirectionKind::file &&
+            !open_output_redirection(spec.stderr_redirection.file,
+                                     spec.error_prefix, "stderr",
+                                     stderr_target, result.error))
+        {
+            close_prepared();
+            return result;
+        }
+        if (!make_stream_pipe(pipe_exec, "launch-status"))
+        {
+            close_prepared();
+            return result;
+        }
+
+        const pid_t pid = ::fork();
+        if (pid < 0)
+        {
+            result.error = prefixed(spec.error_prefix,
+                                    std::string("fork() failed: ") +
+                                        std::strerror(errno));
+            close_prepared();
+            return result;
+        }
+
+        if (pid == 0)
+        {
+            ::setpgid(0, 0);
+
+            auto duplicate_stream = [&](StreamRedirectionKind kind,
+                                        int pipe_child_fd, int target_fd,
+                                        int standard_fd) {
+                if (kind == StreamRedirectionKind::inherit)
+                {
+                    return true;
+                }
+                const int source = kind == StreamRedirectionKind::pipe
+                                       ? pipe_child_fd
+                                       : target_fd;
+                return source >= 0 && ::dup2(source, standard_fd) >= 0;
+            };
+
+            if (!duplicate_stream(spec.stdin_redirection.kind, pipe_in[0],
+                                  stdin_target, STDIN_FILENO) ||
+                !duplicate_stream(spec.stdout_redirection.kind, pipe_out[1],
+                                  stdout_target, STDOUT_FILENO))
             {
                 report_launch_failure_and_exit(pipe_exec[1], errno);
             }
-        }
-        else if (!duplicate_stream(spec.stderr_redirection.kind, pipe_err[1],
-                                   stderr_target, STDERR_FILENO))
-        {
+
+            if (spec.stderr_redirection.kind ==
+                StreamRedirectionKind::stdout_stream)
+            {
+                if (::dup2(STDOUT_FILENO, STDERR_FILENO) < 0)
+                {
+                    report_launch_failure_and_exit(pipe_exec[1], errno);
+                }
+            }
+            else if (!duplicate_stream(spec.stderr_redirection.kind,
+                                       pipe_err[1], stderr_target,
+                                       STDERR_FILENO))
+            {
+                report_launch_failure_and_exit(pipe_exec[1], errno);
+            }
+
+            close_pair(pipe_in);
+            close_pair(pipe_out);
+            close_pair(pipe_err);
+            close_fd(stdin_target);
+            close_fd(stdout_target);
+            close_fd(stderr_target);
+            ::close(pipe_exec[0]);
+
+            if (spec.has_cwd && ::chdir(spec.cwd.c_str()) != 0)
+            {
+                report_launch_failure_and_exit(pipe_exec[1], errno);
+            }
+
+#ifdef __GLIBC__
+            ::execvpe(spec.command.c_str(), argv.data(), envp.data());
+#else
+            environ = envp.data();
+            ::execvp(spec.command.c_str(), argv.data());
+#endif
+
             report_launch_failure_and_exit(pipe_exec[1], errno);
         }
 
-        close_pair(pipe_in);
-        close_pair(pipe_out);
-        close_pair(pipe_err);
+        // À partir d'ici, toute exception doit nettoyer l'enfant avant de
+        // remonter vers la frontière Lua. Aucun appel lua_* n'est autorisé
+        // dans cette région : un longjmp contournerait le catch ci-dessous.
+        process.pid = pid;
+        ::setpgid(pid, pid);
+
+        close_fd(pipe_in[0]);
+        close_fd(pipe_out[1]);
+        close_fd(pipe_err[1]);
+        close_fd(pipe_exec[1]);
         close_fd(stdin_target);
         close_fd(stdout_target);
         close_fd(stderr_target);
-        ::close(pipe_exec[0]);
 
-        if (spec.has_cwd && ::chdir(spec.cwd.c_str()) != 0)
+        process.stdin_fd = std::exchange(pipe_in[1], -1);
+        process.stdout_fd = std::exchange(pipe_out[0], -1);
+        process.stderr_fd = std::exchange(pipe_err[0], -1);
+        process.stdin_piped =
+            spec.stdin_redirection.kind == StreamRedirectionKind::pipe;
+        process.stdout_piped =
+            spec.stdout_redirection.kind == StreamRedirectionKind::pipe;
+        process.stderr_piped =
+            spec.stderr_redirection.kind == StreamRedirectionKind::pipe;
+
+        std::string nonblock_error;
+        if (!set_nonblocking(pipe_exec[0], spec.error_prefix, "launch pipe",
+                             nonblock_error))
         {
-            report_launch_failure_and_exit(pipe_exec[1], errno);
+            result.error = std::move(nonblock_error);
+            close_process_fds(process);
+            close_fd(pipe_exec[0]);
+            int ignored_status = 0;
+            if (terminate_and_reap(pid, ignored_status))
+            {
+                process.pid = -1;
+            }
+            return result;
         }
 
-#ifdef __GLIBC__
-        ::execvpe(spec.command.c_str(), argv.data(), envp.data());
-#else
-        environ = envp.data();
-        ::execvp(spec.command.c_str(), argv.data());
-#endif
-
-        report_launch_failure_and_exit(pipe_exec[1], errno);
-    }
-
-    ::setpgid(pid, pid);
-
-    if (pipe_in[0] >= 0)
-    {
-        ::close(pipe_in[0]);
-        pipe_in[0] = -1;
-    }
-    if (pipe_out[1] >= 0)
-    {
-        ::close(pipe_out[1]);
-        pipe_out[1] = -1;
-    }
-    if (pipe_err[1] >= 0)
-    {
-        ::close(pipe_err[1]);
-        pipe_err[1] = -1;
-    }
-    ::close(pipe_exec[1]);
-    pipe_exec[1] = -1;
-    close_fd(stdin_target);
-    close_fd(stdout_target);
-    close_fd(stderr_target);
-
-    LaunchedProcess process;
-    process.pid = pid;
-    process.stdin_fd = pipe_in[1];
-    process.stdout_fd = pipe_out[0];
-    process.stderr_fd = pipe_err[0];
-    process.stdin_piped =
-        spec.stdin_redirection.kind == StreamRedirectionKind::pipe;
-    process.stdout_piped =
-        spec.stdout_redirection.kind == StreamRedirectionKind::pipe;
-    process.stderr_piped =
-        spec.stderr_redirection.kind == StreamRedirectionKind::pipe;
-
-    std::string nonblock_error;
-    if (!set_nonblocking(pipe_exec[0], spec.error_prefix, "launch pipe",
-                         nonblock_error))
-    {
-        result.error = std::move(nonblock_error);
-        close_process_fds(process);
-        ::close(pipe_exec[0]);
-        int ignored_status = 0;
-        terminate_and_reap(pid, ignored_status);
-        return result;
-    }
-
-    int launch_errno = 0;
-    ssize_t launch_bytes = 0;
-    for (;;)
-    {
-        int timeout_ms = -1;
-        if (spec.has_deadline)
+        int launch_errno = 0;
+        ssize_t launch_bytes = 0;
+        for (;;)
         {
-            const long long remaining = spec.deadline_ms - now_ms();
-            timeout_ms = remaining <= 0
-                             ? 0
-                             : (remaining > INT_MAX
-                                    ? INT_MAX
-                                    : static_cast<int>(remaining));
-        }
+            int timeout_ms = -1;
+            if (spec.has_deadline)
+            {
+                const long long remaining = spec.deadline_ms - now_ms();
+                timeout_ms = remaining <= 0
+                                 ? 0
+                                 : (remaining > INT_MAX
+                                        ? INT_MAX
+                                        : static_cast<int>(remaining));
+            }
 
-        struct pollfd pfd{};
-        pfd.fd = pipe_exec[0];
-        pfd.events = POLLIN;
-        const int pr = ::poll(&pfd, 1, timeout_ms);
-        if (pr < 0)
-        {
-            if (errno == EINTR)
+            struct pollfd pfd{};
+            pfd.fd = pipe_exec[0];
+            pfd.events = POLLIN;
+            const int pr = ::poll(&pfd, 1, timeout_ms);
+            if (pr < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                result.error = prefixed(
+                    spec.error_prefix,
+                    std::string("launch poll failed: ") +
+                        std::strerror(errno));
+                break;
+            }
+            if (pr == 0)
+            {
+                result.timed_out = true;
+                break;
+            }
+
+            launch_bytes = ::read(pipe_exec[0], &launch_errno,
+                                  sizeof(launch_errno));
+            if (launch_bytes > 0)
+            {
+                if (launch_bytes !=
+                    static_cast<ssize_t>(sizeof(launch_errno)))
+                {
+                    result.error = prefixed(
+                        spec.error_prefix,
+                        "incomplete launch error received from child");
+                }
+                break;
+            }
+            if (launch_bytes == 0)
+            {
+                break;
+            }
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
             {
                 continue;
             }
             result.error = prefixed(
                 spec.error_prefix,
-                std::string("launch poll failed: ") + std::strerror(errno));
+                std::string("cannot read launch status: ") +
+                    std::strerror(errno));
             break;
         }
-        if (pr == 0)
+        close_fd(pipe_exec[0]);
+
+        if (result.timed_out || !result.error.empty())
         {
-            result.timed_out = true;
-            break;
+            close_process_fds(process);
+            result.status_valid = terminate_and_reap(pid, result.status);
+            if (result.status_valid)
+            {
+                process.pid = -1;
+            }
+            if (!result.error.empty() && !result.status_valid)
+            {
+                result.error +=
+                    " (child could not be reaped within cleanup deadline)";
+            }
+            return result;
         }
 
-        launch_bytes = ::read(pipe_exec[0], &launch_errno,
-                              sizeof(launch_errno));
         if (launch_bytes > 0)
         {
-            if (launch_bytes != static_cast<ssize_t>(sizeof(launch_errno)))
+            close_process_fds(process);
+            if (wait_child_until(pid, result.status, now_ms() + 2000) !=
+                ChildWaitResult::reaped)
             {
-                result.error = prefixed(
-                    spec.error_prefix,
-                    "incomplete launch error received from child");
+                result.status_valid = terminate_and_reap(pid, result.status);
             }
-            break;
+            else
+            {
+                result.status_valid = true;
+            }
+            if (result.status_valid)
+            {
+                process.pid = -1;
+            }
+            result.error = prefixed(
+                spec.error_prefix,
+                std::string("cannot launch '") + spec.command + "': " +
+                    std::strerror(launch_errno));
+            return result;
         }
-        if (launch_bytes == 0)
-        {
-            break;
-        }
-        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
-        {
-            continue;
-        }
-        result.error = prefixed(
-            spec.error_prefix,
-            std::string("cannot read launch status: ") +
-                std::strerror(errno));
-        break;
-    }
-    ::close(pipe_exec[0]);
-    pipe_exec[0] = -1;
 
-    if (result.timed_out || !result.error.empty())
-    {
-        close_process_fds(process);
-        result.status_valid = terminate_and_reap(pid, result.status);
-        if (!result.error.empty() && !result.status_valid)
+        if ((process.stdin_piped &&
+             !set_nonblocking(process.stdin_fd, spec.error_prefix,
+                              "stdin pipe", nonblock_error)) ||
+            (process.stdout_piped &&
+             !set_nonblocking(process.stdout_fd, spec.error_prefix,
+                              "stdout pipe", nonblock_error)) ||
+            (process.stderr_piped &&
+             !set_nonblocking(process.stderr_fd, spec.error_prefix,
+                              "stderr pipe", nonblock_error)))
         {
-            result.error +=
-                " (child could not be reaped within cleanup deadline)";
-        }
-        return result;
-    }
-
-    if (launch_bytes > 0)
-    {
-        close_process_fds(process);
-        if (wait_child_until(pid, result.status, now_ms() + 2000) !=
-            ChildWaitResult::reaped)
-        {
+            result.error = std::move(nonblock_error);
+            close_process_fds(process);
             result.status_valid = terminate_and_reap(pid, result.status);
+            if (result.status_valid)
+            {
+                process.pid = -1;
+            }
+            return result;
         }
-        else
-        {
-            result.status_valid = true;
-        }
-        result.error = prefixed(
-            spec.error_prefix,
-            std::string("cannot launch '") + spec.command + "': " +
-                std::strerror(launch_errno));
+
+        result.success = true;
+        result.process = process;
+        process.pid = -1;
+        process.stdin_fd = -1;
+        process.stdout_fd = -1;
+        process.stderr_fd = -1;
         return result;
     }
-
-    if ((process.stdin_piped &&
-         !set_nonblocking(process.stdin_fd, spec.error_prefix,
-                          "stdin pipe", nonblock_error)) ||
-        (process.stdout_piped &&
-         !set_nonblocking(process.stdout_fd, spec.error_prefix,
-                          "stdout pipe", nonblock_error)) ||
-        (process.stderr_piped &&
-         !set_nonblocking(process.stderr_fd, spec.error_prefix,
-                          "stderr pipe", nonblock_error)))
+    catch (...)
     {
-        result.error = std::move(nonblock_error);
-        close_process_fds(process);
-        result.status_valid = terminate_and_reap(pid, result.status);
-        return result;
+        close_prepared();
+        emergency_kill_and_reap(process);
+        throw;
     }
-
-    result.success = true;
-    result.process = process;
-    return result;
 }
 
-void close_pipeline_fds(LaunchedPipeline &pipeline)
+void close_pipeline_fds(LaunchedPipeline &pipeline) noexcept
 {
     close_fd(pipeline.stdin_fd);
     close_fd(pipeline.stdout_fd);
@@ -1015,6 +1038,99 @@ void close_pipeline_fds(LaunchedPipeline &pipeline)
     {
         close_fd(child.stderr_fd);
     }
+}
+
+
+bool emergency_kill_and_reap(LaunchedProcess &process,
+                             long long reap_timeout_ms) noexcept
+{
+    close_process_fds(process);
+    if (process.pid <= 0)
+    {
+        return true;
+    }
+
+    kill_group(process.pid, SIGKILL);
+    const long long deadline = now_ms() + std::max<long long>(0, reap_timeout_ms);
+    for (;;)
+    {
+        int status = 0;
+        const pid_t waited = ::waitpid(process.pid, &status, WNOHANG);
+        if (waited == process.pid || (waited < 0 && errno == ECHILD))
+        {
+            process.pid = -1;
+            return true;
+        }
+        if (waited < 0 && errno != EINTR)
+        {
+            return false;
+        }
+        if (now_ms() >= deadline)
+        {
+            return false;
+        }
+        struct timespec pause{0, 10 * 1000 * 1000};
+        while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
+        {
+        }
+    }
+}
+
+bool emergency_kill_and_reap(LaunchedPipeline &pipeline,
+                             long long reap_timeout_ms) noexcept
+{
+    close_pipeline_fds(pipeline);
+
+    size_t remaining = 0;
+    for (auto &child : pipeline.children)
+    {
+        if (child.pid > 0)
+        {
+            kill_group(child.pid, SIGKILL);
+            ++remaining;
+        }
+    }
+    if (remaining == 0)
+    {
+        return true;
+    }
+
+    const long long deadline = now_ms() + std::max<long long>(0, reap_timeout_ms);
+    while (remaining > 0)
+    {
+        for (auto &child : pipeline.children)
+        {
+            if (child.pid <= 0)
+            {
+                continue;
+            }
+            int status = 0;
+            const pid_t waited = ::waitpid(child.pid, &status, WNOHANG);
+            if (waited == child.pid || (waited < 0 && errno == ECHILD))
+            {
+                child.pid = -1;
+                --remaining;
+            }
+            else if (waited < 0 && errno != EINTR)
+            {
+                child.pid = -1;
+                --remaining;
+            }
+        }
+        if (remaining == 0)
+        {
+            return true;
+        }
+        if (now_ms() >= deadline)
+        {
+            return false;
+        }
+        struct timespec pause{0, 10 * 1000 * 1000};
+        while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
+        {
+        }
+    }
+    return true;
 }
 
 PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
@@ -1025,6 +1141,12 @@ PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
     {
         result.error = prefixed(spec.error_prefix,
                                 "at least two stages are required");
+        return result;
+    }
+    if (count > MAX_PIPELINE_STAGES)
+    {
+        result.error = prefixed(spec.error_prefix,
+                                "too many pipeline stages");
         return result;
     }
 
@@ -1075,7 +1197,7 @@ PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
     auto stderrs = make_pipe_vector(count);
     auto launch_pipes = make_pipe_vector(count);
 
-    auto close_all_raw_pipes = [&]() {
+    auto close_all_raw_pipes = [&]() noexcept {
         close_pair(input);
         close_pair(output);
         for (auto &pipe : links)
@@ -1104,11 +1226,16 @@ PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
         return false;
     };
 
-    if (!create_pipe(input, "stdin") || !create_pipe(output, "stdout"))
+    LaunchedPipeline launched;
+    launched.children.reserve(count);
+
+    try
     {
-        close_all_raw_pipes();
-        return result;
-    }
+        if (!create_pipe(input, "stdin") || !create_pipe(output, "stdout"))
+        {
+            close_all_raw_pipes();
+            return result;
+        }
     for (auto &pipe : links)
     {
         if (!create_pipe(pipe.data(), "pipeline"))
@@ -1134,60 +1261,61 @@ PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
         }
     }
 
-    LaunchedPipeline launched;
-    launched.children.reserve(count);
-
     auto terminate_and_reap_all = [&](long long term_ms,
-                                      long long kill_ms) -> bool {
+                                      long long kill_ms) noexcept -> bool {
         for (const auto &child : launched.children)
         {
-            kill_group(child.pid, SIGTERM);
+            if (child.pid > 0)
+            {
+                kill_group(child.pid, SIGTERM);
+            }
         }
 
-        // Ne pas récupérer les leaders pendant la période de grâce : leur PID
-        // continue d’ancrer le groupe et empêche qu’un SIGKILL ultérieur vise
-        // un identifiant recyclé. Cela garantit aussi la suppression d’un
-        // descendant qui ignorerait SIGTERM après la sortie du leader direct.
+        // Tous les groupes reçoivent SIGTERM immédiatement. Les leaders déjà
+        // terminés restent volontairement non réapés pendant la grâce afin que
+        // leur PID, également utilisé comme PGID, ne puisse pas être recyclé
+        // avant l'éventuel SIGKILL final.
         const long long term_deadline = now_ms() + term_ms;
         while (now_ms() < term_deadline)
         {
-            const long long remaining = term_deadline - now_ms();
+            const long long remaining_ms = term_deadline - now_ms();
             struct timespec pause{
-                static_cast<time_t>(remaining / 1000),
-                static_cast<long>((remaining % 1000) * 1000000LL)};
+                static_cast<time_t>(remaining_ms / 1000),
+                static_cast<long>((remaining_ms % 1000) * 1000000LL)};
             while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
             {
             }
         }
 
+        size_t remaining = 0;
         for (const auto &child : launched.children)
         {
-            kill_group(child.pid, SIGKILL);
+            if (child.pid > 0)
+            {
+                kill_group(child.pid, SIGKILL);
+                ++remaining;
+            }
         }
 
-        std::vector<unsigned char> reaped(launched.children.size(), 0);
-        size_t remaining = launched.children.size();
         const long long kill_deadline = now_ms() + kill_ms;
         while (remaining > 0)
         {
-            for (size_t i = 0; i < launched.children.size(); ++i)
+            for (auto &child : launched.children)
             {
-                if (reaped[i])
+                if (child.pid <= 0)
                 {
                     continue;
                 }
                 int status = 0;
-                const pid_t r = ::waitpid(launched.children[i].pid,
-                                          &status, WNOHANG);
-                if (r == launched.children[i].pid ||
-                    (r < 0 && errno == ECHILD))
+                const pid_t r = ::waitpid(child.pid, &status, WNOHANG);
+                if (r == child.pid || (r < 0 && errno == ECHILD))
                 {
-                    reaped[i] = 1;
+                    child.pid = -1;
                     --remaining;
                 }
                 else if (r < 0 && errno != EINTR)
                 {
-                    reaped[i] = 1;
+                    child.pid = -1;
                     --remaining;
                 }
             }
@@ -1203,9 +1331,11 @@ PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
         return remaining == 0;
     };
 
-    for (size_t i = 0; i < count; ++i)
-    {
-        const pid_t pid = ::fork();
+        // Dès le premier fork réussi, aucune API Lua ne doit être appelée dans
+        // cette région : un longjmp contournerait le catch et le nettoyage.
+        for (size_t i = 0; i < count; ++i)
+        {
+            const pid_t pid = ::fork();
         if (pid < 0)
         {
             result.error = prefixed(
@@ -1431,11 +1561,19 @@ PipelineLaunchResult launch_pipeline(const PipelineLaunchSpec &spec)
         }
     }
 
-    launched.stdin_fd = input[1];
-    launched.stdout_fd = output[0];
-    result.success = true;
-    result.pipeline = std::move(launched);
-    return result;
+        launched.stdin_fd = std::exchange(input[1], -1);
+        launched.stdout_fd = std::exchange(output[0], -1);
+        result.success = true;
+        result.pipeline = std::move(launched);
+        return result;
+    }
+    catch (...)
+    {
+        close_all_raw_pipes();
+        close_pipeline_fds(launched);
+        emergency_kill_and_reap(launched);
+        throw;
+    }
 }
 
 int exit_code_from_status(int status, bool status_valid)

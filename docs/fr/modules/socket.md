@@ -675,6 +675,11 @@ Ne compare une erreur complète que pour les chaînes stables et typées comme
 `"timeout"`, `"closed"` et `"interrupted"`. Les messages système peuvent
 varier selon la libc et le noyau.
 
+Une exception C++ interne ne traverse jamais Lua. Un échec d'allocation est
+converti en `(nil, "socket: out of memory")`; les autres exceptions internes
+reçoivent un diagnostic littéral stable. Cette protection couvre toutes les
+fonctions et méthodes publiques de `babet.socket`.
+
 <a id="socket-design"></a>
 ## Sécurité, performances et limites
 
@@ -696,3 +701,12 @@ varier selon la libc et le noyau.
 - **Pas de half-close exposé.** Babet n'expose pas `shutdown(SHUT_WR)` ; seule
   la fermeture complète est disponible.
 - **Pas de keepalive configuré.** Les options TCP avancées ne sont pas exposées.
+- **Propriété des ressources pendant la construction.** `connect`, `listen`,
+  `accept` et `connect_tls` créent leur userdata Lua avant d'acquérir un FD ou
+  un objet OpenSSL. Une erreur mémoire de Lua ne peut donc pas abandonner une
+  ressource encore sans propriétaire. `starttls` emploie une garde séparée et
+  ferme le flux dès que le handshake a commencé si une exception survient.
+- **Limite des tests OOM.** Cette sûreté est établie par revue structurelle,
+  compilation stricte et analyse statique, pas par injection déterministe de
+  `bad_alloc`; les tests d'intégration couvrent les cycles de vie et les chemins
+  d'échec observables.

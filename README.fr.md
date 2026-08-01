@@ -17,14 +17,17 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.9.0**. Voir le
+Version stable et auditée actuelle : **2.9.2**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.9.0 ajoute les redirections configurables de `babet.spawn()`, le module
-Base64 natif binaire `babet.base64`, l’écriture sécurisée
-`babet.writeFileAtomic()`, un cycle de vie workers renforcé et des channels
-directs, bornés et partagés entre workers.
+Babet 2.9.2 renforce la sérialisation des workers, le nettoyage des processus et
+pipelines, la récupération des transactions SQLite ainsi que les frontières
+d'exception HTTP et sockets, sans modifier l'API Lua. La validation déterministe
+est également enrichie pour Zstandard, inotify et les budgets de sérialisation.
+Les nouveautés fonctionnelles de la série 2.9 restent les redirections de
+`babet.spawn()`, le module `babet.base64`, `babet.writeFileAtomic()`, le cycle
+de vie workers renforcé et les channels directs entre workers.
 
 Babet s’utilise de trois façons :
 
@@ -323,18 +326,18 @@ normal, puis lance les smoke tests réseau :
 ./run_tests.sh --release
 ```
 
-Les contrôles TLS bloquants de Babet utilisent un serveur HTTPS local généré
-à la volée. Les sondes HTTPS publiques sont informatives par défaut, afin
-qu’une panne tierce, un proxy, un filtrage DNS ou une interception TLS
-n’invalide pas la release. Pour les rendre bloquantes :
+Les contrôles bloquants du cadrage HTTP et de TLS utilisent des serveurs
+HTTP/HTTPS locaux générés à la volée. Les sondes HTTPS publiques sont
+informatives par défaut, afin qu’une panne tierce, un proxy, un filtrage DNS ou
+une interception TLS n’invalide pas la release. Pour les rendre bloquantes :
 
 ```sh
 BABET_SMOKE_STRICT_EXTERNAL=1 ./run_tests.sh --release
 ```
 
 L’étape réseau nécessite les commandes `python3` et `openssl`. Les contrôles
-TLS bloquants restent locaux ; le contrôle TCP borné utilise une adresse
-réservée TEST-NET.
+HTTP et TLS bloquants restent locaux ; le contrôle TCP borné utilise une
+adresse réservée TEST-NET.
 
 Valgrind est facultatif ; ASan et UBSan sont les contrôles mémoire et
 comportement indéfini principaux du projet.

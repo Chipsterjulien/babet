@@ -42,6 +42,31 @@ if [ "${RELEASE_VALIDATION}" -eq 1 ]; then
     exec bash "${SCRIPT_DIR}/validate_release.sh"
 fi
 
+print_preflight_stage() {
+    echo
+    echo "============================================================"
+    echo "$1"
+    echo "============================================================"
+}
+
+print_preflight_stage "Préflight — bootstrap Zstandard"
+if ! bash "${SCRIPT_DIR}/tools/test_zstd_bootstrap.sh"; then
+    echo "ÉCHEC : le préflight du bootstrap Zstandard a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — décodage des buffers inotify"
+if ! bash "${SCRIPT_DIR}/tools/test_inotify_buffer.sh"; then
+    echo "ÉCHEC : le préflight du décodage inotify a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — budgets de sérialisation workers"
+if ! bash "${SCRIPT_DIR}/tools/test_workers_serialization_budget.sh"; then
+    echo "ÉCHEC : le préflight des budgets workers a échoué."
+    exit 1
+fi
+
 BUILD_ARGS=()
 if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
     BUILD_ARGS+=(--sanitizers)
@@ -100,7 +125,19 @@ modes_total=0
 echo "### Test 1/2 : mode dossier ###"
 modes_total=$((modes_total + 1))
 
-dir_output=$(cd "${TEST_DIR}" && ./"${PROJECT_NAME}" . __ARG__a __ARG__b 2>&1)
+# Le test d'intégration du plafond de nœuds workers matérialise près d'un
+# million de valeurs JSON. Il s'exécute une seule fois : mode dossier du build
+# normal. Les autres modes forcent explicitement la variable à vide pour qu'un
+# environnement utilisateur ne puisse pas répéter ce test lourd.
+if [ "${ENABLE_SANITIZERS}" -eq 0 ]; then
+    WORKERS_NODE_LIMIT_TEST=1
+else
+    WORKERS_NODE_LIMIT_TEST=
+fi
+
+dir_output=$(cd "${TEST_DIR}" \
+    && BABET_TEST_WORKERS_NODE_LIMIT="${WORKERS_NODE_LIMIT_TEST}" \
+        ./"${PROJECT_NAME}" . __ARG__a __ARG__b 2>&1)
 dir_rc=$?
 
 if [ ${dir_rc} -eq 0 ]; then
@@ -134,7 +171,9 @@ else
     elif [ ! -f "${EMBEDDED_BIN}" ]; then
         echo "  -> mode embarqué : ÉCHEC (exécutable embarqué non produit)"
     else
-        emb_output=$(cd "${ISOLATED_DIR}" && ./babet_embedded __ARG__a __ARG__b 2>&1)
+        emb_output=$(cd "${ISOLATED_DIR}" \
+            && BABET_TEST_WORKERS_NODE_LIMIT= \
+                ./babet_embedded __ARG__a __ARG__b 2>&1)
         emb_rc=$?
 
         if [ ${emb_rc} -eq 0 ]; then
@@ -155,7 +194,10 @@ else
         # dans le PATH. Le cwd doit être writable pour que le harnais puisse
         # créer son sandbox, donc on utilise un autre tmpdir.
         PATH_TEST_CWD=$(mktemp -d)
-        emb_path_output=$(cd "${PATH_TEST_CWD}" && PATH="${ISOLATED_DIR}:$PATH" babet_embedded __ARG__a __ARG__b 2>&1)
+        emb_path_output=$(cd "${PATH_TEST_CWD}" \
+            && BABET_TEST_WORKERS_NODE_LIMIT= \
+                PATH="${ISOLATED_DIR}:$PATH" \
+                babet_embedded __ARG__a __ARG__b 2>&1)
         emb_path_rc=$?
         rm -rf "${PATH_TEST_CWD}"
 

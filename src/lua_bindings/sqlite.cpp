@@ -20,6 +20,7 @@ extern "C"
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <set>
 #include <string>
 
@@ -1631,6 +1632,84 @@ namespace
         return false;
     }
 
+    // Owns the explicit transaction after BEGIN succeeds. The destructor is
+    // deliberately allocation-free on the C++ side: if an exception escapes
+    // any diagnostic or callback-processing allocation, it attempts an
+    // immediate ROLLBACK and always clears the helper-active flag.
+    //
+    // Lua is compiled as C and longjmp does not run C++ destructors. Therefore
+    // db_transaction_impl must not call any unprotected Lua API while this
+    // guard is armed. The two fixed pushes before lua_pcall are reserved before
+    // BEGIN; lua_pcall itself contains callback errors.
+    class TransactionGuard
+    {
+    public:
+        explicit TransactionGuard(Db *owner) noexcept
+            : owner_(owner), handle_(owner ? owner->handle : nullptr)
+        {
+        }
+
+        TransactionGuard(const TransactionGuard &) = delete;
+        TransactionGuard &operator=(const TransactionGuard &) = delete;
+
+        ~TransactionGuard() noexcept
+        {
+            rollback_now();
+        }
+
+        void callback_started() noexcept
+        {
+            if (owner_)
+            {
+                owner_->transaction_helper_active = true;
+            }
+        }
+
+        void callback_finished() noexcept
+        {
+            if (owner_)
+            {
+                owner_->transaction_helper_active = false;
+            }
+        }
+
+        void release() noexcept
+        {
+            callback_finished();
+            armed_ = false;
+        }
+
+        // Performs one best-effort emergency rollback and disarms the guard.
+        // The return value tells the caller whether SQLite is back in
+        // autocommit mode afterwards.
+        bool rollback_now() noexcept
+        {
+            callback_finished();
+            if (!armed_)
+            {
+                return true;
+            }
+
+            if (handle_ && sqlite3_get_autocommit(handle_) == 0)
+            {
+                char *sqlite_error = nullptr;
+                sqlite3_exec(handle_, "ROLLBACK", nullptr, nullptr,
+                             &sqlite_error);
+                sqlite3_free(sqlite_error);
+            }
+
+            const bool clean =
+                !handle_ || sqlite3_get_autocommit(handle_) != 0;
+            armed_ = false;
+            return clean;
+        }
+
+    private:
+        Db *owner_ = nullptr;
+        sqlite3 *handle_ = nullptr;
+        bool armed_ = true;
+    };
+
     // db:in_transaction() -> boolean | (nil, err)
     int db_in_transaction(lua_State *L)
     {
@@ -1651,7 +1730,7 @@ namespace
     // db:transaction(fn, mode?) -> true, ...callback_results | (nil, err)
     // Only a Lua error rolls back. Normal callback returns, including nil or
     // false values, are committed and forwarded after the leading true.
-    int db_transaction(lua_State *L)
+    int db_transaction_impl(lua_State *L)
     {
         int top = lua_gettop(L);
         if (top < 2 || top > 3)
@@ -1676,6 +1755,15 @@ namespace
         {
             return push_sqlite_fail(
                 L, "connection is already inside a transaction");
+        }
+
+        // Reserve the two fixed stack slots needed to invoke callback(db)
+        // before BEGIN. lua_checkstack reports failure instead of longjmp, so
+        // no transaction can be left open by a stack-growth failure here.
+        if (!lua_checkstack(L, 2))
+        {
+            return push_fail(
+                L, "sqlite: transaction could not reserve Lua stack");
         }
 
         const char *begin_sql = "BEGIN DEFERRED";
@@ -1711,29 +1799,49 @@ namespace
             }
         }
 
-        std::string begin_error;
-        if (!exec_transaction_control(db->handle, begin_sql, "begin",
-                                      begin_error))
         {
-            return push_sqlite_fail(L, begin_error);
+            std::string begin_error;
+            if (!exec_transaction_control(db->handle, begin_sql, "begin",
+                                          begin_error))
+            {
+                return push_sqlite_fail(L, begin_error);
+            }
         }
 
+        TransactionGuard transaction_guard(db);
+
         // Keep only db and callback below the callback results.
+        // The required capacity was reserved before BEGIN, so these fixed
+        // stack operations cannot allocate while the guard is armed.
         lua_settop(L, 2);
         lua_pushvalue(L, 2);
         lua_pushvalue(L, 1);
 
-        db->transaction_helper_active = true;
+        transaction_guard.callback_started();
         int call_status = lua_pcall(L, 1, LUA_MULTRET, 0);
-        db->transaction_helper_active = false;
+        transaction_guard.callback_finished();
 
         if (call_status != LUA_OK)
         {
-            std::string callback_error =
-                lua_value_to_display_string(L, -1);
             std::string rollback_error;
             bool rollback_ok = exec_transaction_control(
                 db->handle, "ROLLBACK", "rollback", rollback_error);
+
+            bool connection_clean =
+                sqlite3_get_autocommit(db->handle) != 0;
+            if (connection_clean)
+            {
+                transaction_guard.release();
+            }
+            else
+            {
+                connection_clean = transaction_guard.rollback_now();
+            }
+
+            // The transaction is now closed, or an explicit warning will be
+            // appended. Lua diagnostics may allocate from this point onward.
+            std::string callback_error =
+                lua_value_to_display_string(L, -1);
 
             std::string message = "transaction callback failed: ";
             message += callback_error;
@@ -1742,11 +1850,53 @@ namespace
                 message += "; ";
                 message += rollback_error;
             }
+            if (!connection_clean)
+            {
+                message +=
+                    "; emergency rollback failed; connection remains inside "
+                    "a transaction";
+            }
             lua_settop(L, 0);
             return push_sqlite_fail(L, message);
         }
 
         int callback_results = lua_gettop(L) - 2;
+
+        // Reserve the leading success boolean before COMMIT. A failure here
+        // still permits a normal rollback without any unprotected Lua call.
+        if (!lua_checkstack(L, 1))
+        {
+            std::string rollback_error;
+            bool rollback_ok = exec_transaction_control(
+                db->handle, "ROLLBACK", "rollback", rollback_error);
+            bool connection_clean =
+                sqlite3_get_autocommit(db->handle) != 0;
+            if (connection_clean)
+            {
+                transaction_guard.release();
+            }
+            else
+            {
+                connection_clean = transaction_guard.rollback_now();
+            }
+
+            std::string message =
+                "transaction could not reserve result stack";
+            if (!rollback_ok)
+            {
+                message += "; ";
+                message += rollback_error;
+            }
+            if (!connection_clean)
+            {
+                message +=
+                    "; emergency rollback failed; connection remains inside "
+                    "a transaction";
+            }
+            lua_settop(L, 0);
+            return push_sqlite_fail(L, message);
+        }
+
         std::string commit_error;
         if (!exec_transaction_control(db->handle, "COMMIT", "commit",
                                       commit_error))
@@ -1754,20 +1904,57 @@ namespace
             std::string rollback_error;
             bool rollback_ok = exec_transaction_control(
                 db->handle, "ROLLBACK", "rollback", rollback_error);
+
+            bool connection_clean =
+                sqlite3_get_autocommit(db->handle) != 0;
+            if (connection_clean)
+            {
+                transaction_guard.release();
+            }
+            else
+            {
+                connection_clean = transaction_guard.rollback_now();
+            }
             if (!rollback_ok)
             {
                 commit_error += "; ";
                 commit_error += rollback_error;
             }
+            if (!connection_clean)
+            {
+                commit_error +=
+                    "; emergency rollback failed; connection remains inside "
+                    "a transaction";
+            }
             lua_settop(L, 0);
             return push_sqlite_fail(L, commit_error);
         }
+
+        transaction_guard.release();
 
         lua_pushboolean(L, 1);
         lua_insert(L, 3);
         lua_remove(L, 1);
         lua_remove(L, 1);
         return callback_results + 1;
+    }
+
+    int db_transaction(lua_State *L)
+    {
+        try
+        {
+            return db_transaction_impl(L);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return push_fail(
+                L, "sqlite: transaction out of memory");
+        }
+        catch (...)
+        {
+            return push_fail(
+                L, "sqlite: internal transaction failure");
+        }
     }
 
     // ============================================================

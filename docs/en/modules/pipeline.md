@@ -305,10 +305,13 @@ where a command exits without waiting for a background child. The leader PID
 therefore remains reserved until signalling and cannot be recycled for an
 unrelated process.
 
-For `terminate()`, exited leaders deliberately remain unreaped for the whole
-grace period: descendants retain that time to react to `SIGTERM`, then the group
-receives `SIGKILL` before final reaping. A stage that deliberately creates a new
-session or process group escapes this POSIX guarantee.
+For `terminate()`, every group member receives `SIGTERM` at the beginning of
+the grace period. Direct leaders that have already exited deliberately remain
+unreaped for the whole period: their PID, which is also used as the PGID,
+cannot be recycled before the optional final `SIGKILL` sent to the group. A
+stage that deliberately creates a new session or process group escapes this
+POSIX guarantee. A script that knows its processes are cooperative may select a
+shorter grace period, for example `pipeline:terminate(0.05)`.
 
 ## `close()`, GC and Lua `<close>`
 
@@ -336,9 +339,18 @@ GC is a safety net, not a synchronization mechanism. Use `wait()`,
 ## Launch errors and reuse
 
 Validation, pipe, `fork`, `chdir`, `exec`, and `launch_timeout` failures return
-`nil, err`. When a
-stage fails during launch, every already-created stage is terminated and
-reaped; Lua never receives a partially valid object.
+`nil, err`. When a stage fails during launch, every already-created stage is
+terminated and reaped; Lua never receives a partially valid object. The
+launcher itself enforces the public 32-stage limit independently of the Lua
+binding's validation.
+
+After the first `fork()`, and throughout synchronous `pipeline()` capture,
+Babet retains an emergency owner for descriptors and direct children. If an
+internal C++ exception occurs, emergency cleanup closes streams, immediately
+sends `SIGKILL` only to groups whose leader has not already been reaped, and
+then performs a bounded reap attempt. `terminate()`'s grace period is not used
+during stack unwinding. For `spawnPipeline()`, resources are transferred to the
+userdata only after launch has completed successfully.
 
 Non-destructive `"timeout"` and `"interrupted"` errors allow another call.
 `"closed"` means the relevant stream or object can no longer perform that

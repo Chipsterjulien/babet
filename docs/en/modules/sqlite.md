@@ -221,7 +221,70 @@ end)
 
 Callback errors are caught: Babet attempts `ROLLBACK` and returns
 `(nil, "sqlite: transaction callback failed: ...")` rather than rethrowing.
-A failed `COMMIT` also returns `(nil, err)` after a best-effort rollback.
+A failed `COMMIT` also returns `(nil, err)` after a best-effort rollback. Any
+values returned by the callback are discarded in that case.
+
+After a successful `BEGIN`, Babet explicitly owns the transaction until
+`COMMIT` or `ROLLBACK`. The Lua stack space required to call the callback is
+reserved before `BEGIN`; an internal C++ exception also triggers an immediate
+rollback attempt. Callback diagnostics are formatted only after that attempt,
+so an unusual Lua error object cannot leave the connection in an intermediate
+state.
+
+If the normal rollback fails, the returned message contains both the original
+failure and the rollback failure, followed by one final emergency rollback
+attempt. After an error, `db:in_transaction()` can be used to verify explicitly
+that the connection has returned to autocommit mode before continuing.
+
+#### Example: failure during commit
+
+A deferred constraint may be checked only by `COMMIT`:
+
+```lua
+assert(db:exec("PRAGMA foreign_keys = ON"))
+assert(db:exec([[
+    CREATE TABLE parent(id INTEGER PRIMARY KEY);
+    CREATE TABLE child(
+        id INTEGER PRIMARY KEY,
+        parent_id INTEGER NOT NULL,
+        FOREIGN KEY(parent_id) REFERENCES parent(id)
+            DEFERRABLE INITIALLY DEFERRED
+    )
+]]))
+
+local ok, err = db:transaction(function(tx)
+    assert(tx:exec(
+        "INSERT INTO child(id, parent_id) VALUES(?, ?)",
+        { 1, 999 }))
+    return "this result will not be forwarded"
+end)
+
+assert(ok == nil)
+assert(type(err) == "string")
+assert(db:in_transaction() == false)
+```
+
+The `INSERT` is rolled back and the connection remains reusable when rollback
+succeeds.
+
+#### Example: reusing a prepared statement after rollback
+
+```lua
+local insert = assert(db:prepare(
+    "INSERT INTO log(id, value) VALUES(?, ?)"))
+
+local ok, err = db:transaction(function()
+    assert(insert:exec({ 1, "rolled back" }))
+    error("intentional failure")
+end)
+
+assert(ok == nil and type(err) == "string")
+assert(insert:exec({ 2, "kept" }))
+insert:finalize()
+```
+
+Rollback resets SQLite's transactional state and the prepared statement can be
+reused normally afterwards.
 
 Intentional limitations:
 

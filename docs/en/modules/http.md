@@ -463,8 +463,16 @@ local r = assert(babet.http.get(url, {
 The result describes the final response. Redirect history and `max_redirects`
 are not exposed; cpp-httplib's internal limit applies.
 
-For untrusted URLs, consider redirects to another domain, HTTPS-to-HTTP
-downgrade, internal/metadata addresses, and sensitive-header handling.
+When a redirect changes scheme, host, or port, cpp-httplib 0.45 removes
+`Host`, `Authorization`, and `Proxy-Authorization` before issuing the next
+request. A same-origin redirect keeps `Authorization`. Other script-provided
+headers, notably `Cookie` or custom secrets, are not covered by a general
+stripping rule, so do not follow an untrusted destination with such headers.
+
+For untrusted URLs, also consider HTTPS-to-HTTP downgrade, internal or cloud
+metadata addresses, and the final destinations explicitly allowed by the
+application. The local regression suite verifies that `Authorization` is not
+forwarded across origins.
 
 <a id="http-max-body"></a>
 ## `max_body_size`
@@ -491,6 +499,12 @@ nil, "http: response body exceeds max_body_size"
 
 No partial body is exposed. The guard applies to actual received bytes, not
 only Content-Length, including chunked or misleading responses.
+
+Babet supports the three HTTP/1.1 response-body framings relevant here:
+`Content-Length`, `Transfer-Encoding: chunked`, and a body terminated by
+connection close. Babet 2.9.1 specifically fixes the latter two with
+cpp-httplib 0.45.0; limits still apply to bytes actually delivered to Babet's
+receiver.
 
 For large GET payloads, use [`babet.http.download`](#http-download) instead of
 raising this in-memory limit.
@@ -698,7 +712,9 @@ babet.http.download(url, "file", "not a table")
 Invalid values and runtime failures return `(nil, err)`: missing/bad URL,
 unsupported method, forbidden body, invalid options/query/headers, DNS/TCP/TLS,
 timeout, response/file limit, destination-path or filesystem failure, and
-converted internal exceptions.
+converted internal exceptions. Allocation failure returns
+`(nil, "http: out of memory")`; other internal exceptions return
+`(nil, "http: internal failure")`.
 
 Any received HTTP status, including 3xx/4xx/5xx, returns a normal response.
 For `download`, only 2xx is saved; all other statuses return `saved = false`.

@@ -6,6 +6,11 @@
 #   2. restauration du build normal + tests complets ;
 #   3. smoke tests réseau avec le binaire normal final.
 #
+# Chaque appel à run_tests.sh exécute d'abord les préflights hermétiques du
+# bootstrap Zstandard, du décodage des buffers inotify et des budgets de
+# sérialisation workers. Ils passent donc une fois pour le build sanitizer et
+# une fois pour le build normal.
+#
 # Le réseau est volontairement testé APRES la restauration du build normal :
 # les sanitizers servent à détecter les erreurs mémoire/UB, mais peuvent
 # modifier les timings et les interpositions système. Le smoke test valide le

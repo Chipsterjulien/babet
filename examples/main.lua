@@ -34,17 +34,20 @@ end
 
 -- (nil, "msg") attendu en échec
 local function ok_fail(name, val, err)
-    ok(name, val == nil and type(err) == "string",
+    ok(name, val == nil and type(err) == "string" and #err > 0,
         "val=" .. tostring(val) .. " err=" .. tostring(err))
 end
 
 -- erreur Lua attendue (validation stricte d'un argument)
 local function ok_raises(name, fn, needle)
+    if type(needle) ~= "string" or #needle == 0 then
+        ok(name, false, "test bug: ok_raises requires a non-empty needle")
+        return
+    end
+
     local call_ok, err = pcall(fn)
     local good = call_ok == false and type(err) == "string"
-    if good and needle then
-        good = err:find(needle, 1, true) ~= nil
-    end
+        and err:find(needle, 1, true) ~= nil
     ok(name, good, tostring(err))
 end
 
@@ -824,13 +827,13 @@ do
 
     -- Validation stricte : erreurs de programmation levées côté Lua.
     ok_raises("base64 encode requires an argument",
-        function() B.encode() end)
+        function() B.encode() end, "expects one or two arguments")
     ok_raises("base64 encode rejects extra arguments",
-        function() B.encode("x", nil, true) end)
+        function() B.encode("x", nil, true) end, "expects one or two arguments")
     ok_raises("base64 encode data must be a strict string",
-        function() B.encode(42) end)
+        function() B.encode(42) end, "string expected")
     ok_raises("base64 encode opts must be a table",
-        function() B.encode("x", true) end)
+        function() B.encode("x", true) end, "table expected")
     ok_raises("base64 encode url_safe must be a boolean",
         function() B.encode("x", { url_safe = 1 }) end, "boolean")
     ok_raises("base64 encode padding must be a boolean",
@@ -843,13 +846,13 @@ do
         B.encode("x", nil) == "eA==")
 
     ok_raises("base64 decode requires an argument",
-        function() B.decode() end)
+        function() B.decode() end, "expects one or two arguments")
     ok_raises("base64 decode rejects extra arguments",
-        function() B.decode("", nil, true) end)
+        function() B.decode("", nil, true) end, "expects one or two arguments")
     ok_raises("base64 decode text must be a strict string",
-        function() B.decode(42) end)
+        function() B.decode(42) end, "string expected")
     ok_raises("base64 decode opts must be a table",
-        function() B.decode("", true) end)
+        function() B.decode("", true) end, "table expected")
     ok_raises("base64 decode url_safe must be a boolean",
         function() B.decode("", { url_safe = 1 }) end, "boolean")
     ok_raises("base64 decode allow_unpadded must be a boolean",
@@ -3020,7 +3023,8 @@ do
     ok("pipeline commands must be a table",
         pcall(function() babet.pipeline("bad") end) == false)
     ok_raises("pipeline rejects extra arguments",
-        function() babet.pipeline({}, {}, true) end)
+        function() babet.pipeline({}, {}, true) end,
+        "pipeline expects a commands table and optional opts")
 
     local max_stages = {}
     for i = 1, 32 do max_stages[i] = { "true" } end
@@ -3420,11 +3424,13 @@ do
     ok("babet.spawnPipeline is a function",
         type(babet.spawnPipeline) == "function")
     ok_raises("spawnPipeline without commands raises",
-        function() babet.spawnPipeline() end)
+        function() babet.spawnPipeline() end,
+        "spawnPipeline expects a commands table and optional opts")
     ok_raises("spawnPipeline commands must be a table",
-        function() babet.spawnPipeline("bad") end)
+        function() babet.spawnPipeline("bad") end,
+        "spawnPipeline expects a commands table and optional opts")
     ok_raises("spawnPipeline rejects extra arguments",
-        function() babet.spawnPipeline({}, {}, true) end)
+        function() babet.spawnPipeline({}, {}, true) end, "spawnPipeline expects a commands table and optional opts")
 
     local p, e = babet.spawnPipeline({ { "cat" } })
     ok_fail("spawnPipeline requires at least two stages", p, e)
@@ -3540,19 +3546,19 @@ do
     ok("pipeline is_running(stage) initially true",
         p:is_running(1) == true and p:is_running(2) == true)
     ok_raises("pipeline pids rejects extra arguments",
-        function() p:pids(true) end)
+        function() p:pids(true) end, "pipeline.pids expects no argument")
     ok_raises("pipeline is_running stage must be an integer",
-        function() p:is_running("1") end)
+        function() p:is_running("1") end, "stage must be an integer")
     ok_raises("pipeline is_running rejects stage zero",
-        function() p:is_running(0) end)
+        function() p:is_running(0) end, "stage out of range")
     ok_raises("pipeline is_running rejects stage above count",
-        function() p:is_running(3) end)
+        function() p:is_running(3) end, "stage out of range")
     ok_raises("pipeline read_stderr stage must be an integer",
-        function() p:read_stderr("1") end)
+        function() p:read_stderr("1") end, "stage must be an integer")
     ok_raises("pipeline read_stderr rejects stage zero",
-        function() p:read_stderr(0) end)
+        function() p:read_stderr(0) end, "stage out of range")
     ok_raises("pipeline read_stderr rejects stage above count",
-        function() p:read_stderr(3) end)
+        function() p:read_stderr(3) end, "stage out of range")
 
     local zero_written, zero_err = p:write("", 0)
     ok("pipeline write empty string returns 0",
@@ -3801,23 +3807,24 @@ do
     p, e = babet.spawnPipeline({ { "cat" }, { "cat" } })
     ok("spawnPipeline method-validation fixture", p ~= nil and e == nil, tostring(e))
     ok_raises("pipeline read_stdout rejects extra arguments",
-        function() p:read_stdout(1, 0, true) end)
+        function() p:read_stdout(1, 0, true) end, "expects optional max_bytes and timeout")
     ok_raises("pipeline read_stderr rejects extra arguments",
-        function() p:read_stderr(1, 1, 0, true) end)
+        function() p:read_stderr(1, 1, 0, true) end,
+        "expects stage, optional max_bytes and timeout")
     ok_raises("pipeline write rejects extra arguments",
-        function() p:write("x", 0, true) end)
+        function() p:write("x", 0, true) end, "pipeline.write expects data and optional timeout")
     ok_raises("pipeline is_running rejects extra arguments",
-        function() p:is_running(1, true) end)
+        function() p:is_running(1, true) end, "pipeline.is_running expects an optional stage")
     ok_raises("pipeline terminate rejects extra arguments",
-        function() p:terminate(0, true) end)
+        function() p:terminate(0, true) end, "pipeline.terminate expects an optional grace period")
     ok_raises("pipeline read_stdout rejects max_bytes <= 0",
-        function() p:read_stdout(0) end)
+        function() p:read_stdout(0) end, "max_bytes must be between 1 and")
     ok_raises("pipeline read_stdout rejects max_bytes > 16 MiB",
-        function() p:read_stdout(16 * 1024 * 1024 + 1) end)
+        function() p:read_stdout(16 * 1024 * 1024 + 1) end, "max_bytes must be between 1 and")
     ok_raises("pipeline read_stderr rejects max_bytes <= 0",
-        function() p:read_stderr(1, 0) end)
+        function() p:read_stderr(1, 0) end, "max_bytes must be between 1 and")
     ok_raises("pipeline read_stderr rejects max_bytes > 16 MiB",
-        function() p:read_stderr(1, 16 * 1024 * 1024 + 1) end)
+        function() p:read_stderr(1, 16 * 1024 * 1024 + 1) end, "max_bytes must be between 1 and")
     local bad_read, bad_read_err = p:read_stdout(1, -1)
     ok("pipeline read_stdout rejects negative timeout cleanly",
         bad_read == nil and type(bad_read_err) == "string")
@@ -3831,7 +3838,7 @@ do
     ok("pipeline read_stderr rejects timeout above INT_MAX ms",
         bad_read == nil and type(bad_read_err) == "string")
     ok_raises("pipeline write requires a string",
-        function() p:write(42) end)
+        function() p:write(42) end, "string expected")
     local bad_write, bad_write_err = p:write("x", -1)
     ok("pipeline write rejects negative timeout cleanly",
         bad_write == nil and type(bad_write_err) == "string")
@@ -3839,9 +3846,9 @@ do
     ok("pipeline write rejects timeout above INT_MAX ms",
         bad_write == nil and type(bad_write_err) == "string")
     ok_raises("pipeline close_stdin rejects extra arguments",
-        function() p:close_stdin(true) end)
+        function() p:close_stdin(true) end, "pipeline.close_stdin expects no argument")
     ok_raises("pipeline wait rejects extra arguments",
-        function() p:wait(0, 1) end)
+        function() p:wait(0, 1) end, "pipeline.wait expects an optional timeout")
     local bad_wait, bad_wait_err = p:wait(-1)
     ok("pipeline wait rejects negative timeout cleanly",
         bad_wait == nil and type(bad_wait_err) == "string")
@@ -3855,9 +3862,9 @@ do
     ok("pipeline terminate rejects grace above INT_MAX ms",
         bad_term == nil and type(bad_term_err) == "string")
     ok_raises("pipeline kill rejects extra arguments",
-        function() p:kill(true) end)
+        function() p:kill(true) end, "pipeline.kill expects no argument")
     ok_raises("pipeline close rejects extra arguments",
-        function() p:close(true) end)
+        function() p:close(true) end, "pipeline.close expects no argument")
     p:close()
 end
 
@@ -5599,6 +5606,63 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = True
 
+    def _write_fragmented(self, data):
+        if not data:
+            return
+        split = max(1, len(data) // 2)
+        self.wfile.write(data[:split])
+        self.wfile.flush()
+        self.wfile.write(data[split:])
+        self.wfile.flush()
+
+    def _send_chunked(self, status, body=b"", headers=(),
+                      chunk_sizes=(4096,), extensions=False,
+                      trailers=(), fragmented=False, terminate=True):
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Transfer-Encoding", "chunked")
+        if trailers:
+            self.send_header("Trailer", ", ".join(name for name, _ in trailers))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD":
+            offset = 0
+            index = 0
+            while offset < len(body):
+                requested = chunk_sizes[index % len(chunk_sizes)]
+                chunk = body[offset:offset + requested]
+                suffix = ";babet=%d" % index if extensions else ""
+                header = ("%X%s\r\n" % (len(chunk), suffix)).encode("ascii")
+                if fragmented:
+                    self._write_fragmented(header)
+                    self._write_fragmented(chunk)
+                    self._write_fragmented(b"\r\n")
+                else:
+                    self.wfile.write(header)
+                    self.wfile.write(chunk)
+                    self.wfile.write(b"\r\n")
+                offset += len(chunk)
+                index += 1
+            if terminate:
+                self.wfile.write(b"0\r\n")
+                for name, value in trailers:
+                    self.wfile.write((name + ": " + value + "\r\n").encode("ascii"))
+                self.wfile.write(b"\r\n")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def _send_close_delimited(self, status, body=b"", headers=()):
+        self.send_response(status)
+        for name, value in headers:
+            self.send_header(name, value)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if self.command != "HEAD" and body:
+            self.wfile.write(body)
+        self.wfile.flush()
+        self.close_connection = True
+
     def _echo(self):
         body = self._read_body()
         self._send(200, body, [
@@ -5622,6 +5686,26 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/large":
             self._send(200, b"x" * 4096,
                        [("Content-Type", "application/octet-stream")])
+        elif path == "/chunked":
+            self._send_chunked(200, b"chunked-" * 16384,
+                               [("Content-Type", "application/octet-stream")])
+        elif path == "/chunked-fragmented":
+            self._send_chunked(
+                200, b"fragmented-" * 1000 + b"END",
+                [("Content-Type", "application/octet-stream")],
+                chunk_sizes=(1, 2, 3, 7, 31, 257, 4097),
+                extensions=True,
+                trailers=(("X-Chunked-Trailer", "complete"),),
+                fragmented=True)
+        elif path == "/chunked-truncated":
+            self._send_chunked(
+                200, b"incomplete",
+                [("Content-Type", "application/octet-stream")],
+                chunk_sizes=(32,), terminate=False)
+        elif path == "/close-delimited":
+            self._send_close_delimited(
+                200, b"close---" * 16384,
+                [("Content-Type", "application/octet-stream")])
         elif path == "/empty":
             self._send(204, b"",
                        [("Content-Type", "application/octet-stream")])
@@ -5631,6 +5715,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/redirect":
             self._send(302, b"redirect-body",
                        [("Location", "/probe.bin")])
+        elif path == "/auth-redirect":
+            target = "http://localhost:%d/auth-target" % self.server.server_port
+            self._send(302, b"redirect-body", [("Location", target)])
+        elif path == "/auth-target":
+            auth = self.headers.get("Authorization", "").encode("utf-8")
+            self._send(200, auth, [("Content-Type", "text/plain")])
         elif path == "/slow":
             time.sleep(0.5)
             self._send(200, b"slow", [("Content-Type", "text/plain")])
@@ -5783,6 +5873,75 @@ server.serve_forever()
                     == "table")
             ok("HTTP download writes binary-safe content",
                 read_binary(download_path) == "AB\0CD")
+
+            local chunked_download_path = download_dir .. "/chunked.bin"
+            local chunked_download, chunked_download_err = H.download(
+                base .. "/chunked", chunked_download_path, {
+                    timeout = 5,
+                    max_file_size = 131072,
+                })
+            ok("HTTP download accepts a chunked response at exact limit",
+                type(chunked_download) == "table"
+                and chunked_download_err == nil
+                and chunked_download.status == 200
+                and chunked_download.saved == true
+                and chunked_download.bytes == 131072,
+                "err=" .. tostring(chunked_download_err))
+            ok("HTTP chunked download writes the complete body",
+                read_binary(chunked_download_path)
+                    == string.rep("chunked-", 16384))
+
+            local chunked_limited_path = download_dir
+                .. "/chunked-limited.bin"
+            write_binary(chunked_limited_path, "CHUNKED-ORIGINAL")
+            local chunked_limited, chunked_limited_err = H.download(
+                base .. "/chunked", chunked_limited_path, {
+                    timeout = 5,
+                    max_file_size = 131071,
+                })
+            ok_fail("HTTP chunked download enforces max_file_size boundary",
+                chunked_limited, chunked_limited_err)
+            ok("HTTP chunked download limit error is explicit",
+                chunked_limited == nil
+                and tostring(chunked_limited_err):find(
+                    "max_file_size", 1, true) ~= nil,
+                "err=" .. tostring(chunked_limited_err))
+            ok("HTTP chunked download limit preserves destination",
+                read_binary(chunked_limited_path) == "CHUNKED-ORIGINAL")
+            ok("HTTP chunked download limit removes temporary file",
+                count_download_temps(download_dir) == 0)
+
+            local close_download_path = download_dir .. "/close-delimited.bin"
+            local close_download, close_download_err = H.download(
+                base .. "/close-delimited", close_download_path, {
+                    timeout = 5,
+                    max_file_size = 131072,
+                })
+            ok("HTTP download accepts a close-delimited response",
+                type(close_download) == "table"
+                and close_download_err == nil
+                and close_download.status == 200
+                and close_download.saved == true
+                and close_download.bytes == 131072,
+                "err=" .. tostring(close_download_err))
+            ok("HTTP close-delimited download writes the complete body",
+                read_binary(close_download_path)
+                    == string.rep("close---", 16384))
+
+            local truncated_download_path = download_dir
+                .. "/chunked-truncated.bin"
+            write_binary(truncated_download_path, "TRUNCATED-ORIGINAL")
+            local truncated_download, truncated_download_err = H.download(
+                base .. "/chunked-truncated", truncated_download_path, {
+                    timeout = 5,
+                    max_file_size = 1024,
+                })
+            ok_fail("HTTP download rejects a truncated chunked response",
+                truncated_download, truncated_download_err)
+            ok("HTTP truncated chunked download preserves destination",
+                read_binary(truncated_download_path) == "TRUNCATED-ORIGINAL")
+            ok("HTTP truncated chunked download removes temporary file",
+                count_download_temps(download_dir) == 0)
 
             write_binary(download_path, "OLD")
             local replaced, replace_err = H.download(
@@ -5993,6 +6152,84 @@ server.serve_forever()
                 and #large_ok.body == 4096,
                 "err=" .. tostring(large_err))
 
+            local chunked, chunked_err = babet.http.get(base .. "/chunked", {
+                timeout = 5,
+                max_body_size = 131072,
+            })
+            ok("HTTP chunked response is read completely at exact limit",
+                type(chunked) == "table" and chunked_err == nil
+                and chunked.status == 200
+                and chunked.body == string.rep("chunked-", 16384),
+                "len=" .. tostring(chunked and #chunked.body)
+                    .. " err=" .. tostring(chunked_err))
+
+            local chunked_too_big, chunked_too_big_err = babet.http.get(
+                base .. "/chunked", {
+                    timeout = 5,
+                    max_body_size = 131071,
+                })
+            ok_fail("HTTP chunked response enforces max_body_size boundary",
+                chunked_too_big, chunked_too_big_err)
+            ok("  chunked limit exposes no partial body and stays explicit",
+                chunked_too_big == nil
+                and tostring(chunked_too_big_err):find(
+                    "max_body_size", 1, true) ~= nil,
+                "err=" .. tostring(chunked_too_big_err))
+
+            local fragmented, fragmented_err = babet.http.get(
+                base .. "/chunked-fragmented", {
+                    timeout = 5,
+                    max_body_size = 11003,
+                })
+            -- cpp-httplib consumes the trailing section but stores its fields
+            -- separately from the initial response headers. Babet does not
+            -- currently expose that separate trailer collection; successful
+            -- completion plus the declared Trailer header verifies the framing.
+            ok("HTTP fragmented chunked response supports extensions and trailers",
+                type(fragmented) == "table" and fragmented_err == nil
+                and fragmented.body == string.rep("fragmented-", 1000) .. "END"
+                and type(fragmented.headers) == "table"
+                and fragmented.headers["trailer"] == "X-Chunked-Trailer",
+                "err=" .. tostring(fragmented_err))
+
+            local close_delimited, close_delimited_err = babet.http.get(
+                base .. "/close-delimited", {
+                    timeout = 5,
+                    max_body_size = 131072,
+                })
+            ok("HTTP close-delimited response is read completely",
+                type(close_delimited) == "table"
+                and close_delimited_err == nil
+                and close_delimited.status == 200
+                and close_delimited.body == string.rep("close---", 16384),
+                "err=" .. tostring(close_delimited_err))
+
+            local close_too_big, close_too_big_err = babet.http.get(
+                base .. "/close-delimited", {
+                    timeout = 5,
+                    max_body_size = 131071,
+                })
+            ok_fail("HTTP close-delimited response enforces max_body_size",
+                close_too_big, close_too_big_err)
+            ok("  close-delimited limit exposes no partial body",
+                close_too_big == nil
+                and tostring(close_too_big_err):find(
+                    "max_body_size", 1, true) ~= nil,
+                "err=" .. tostring(close_too_big_err))
+
+            local truncated_chunked, truncated_chunked_err = babet.http.get(
+                base .. "/chunked-truncated", {
+                    timeout = 5,
+                    max_body_size = 1024,
+                })
+            ok_fail("HTTP truncated chunked response is rejected",
+                truncated_chunked, truncated_chunked_err)
+            ok("  truncated chunked response exposes no partial body",
+                truncated_chunked == nil
+                and type(truncated_chunked_err) == "string"
+                and truncated_chunked_err:find("http: ", 1, true) == 1,
+                "err=" .. tostring(truncated_chunked_err))
+
             local r404, e404 = babet.http.get(
                 base .. "/nexiste_pas", { timeout = 5 })
             ok("GET 404 -> (table, nil) [4xx is not an error]",
@@ -6081,6 +6318,19 @@ server.serve_forever()
                 "status=" .. tostring(followed and followed.status)
                 .. " body=" .. tostring(followed and followed.body)
                 .. " err=" .. tostring(followed_err))
+
+            local cross_origin, cross_origin_err = babet.http.get(
+                base .. "/auth-redirect", {
+                    timeout = 5,
+                    follow_redirects = true,
+                    headers = { Authorization = "Bearer babet-secret" },
+                })
+            ok("HTTP cross-origin redirect strips Authorization",
+                type(cross_origin) == "table"
+                and cross_origin.status == 200
+                and cross_origin.body == "",
+                "body=" .. tostring(cross_origin and cross_origin.body)
+                .. " err=" .. tostring(cross_origin_err))
 
             local head = babet.http.request({
                 url = base .. "/anything", method = "HEAD", timeout = 5,
@@ -8752,6 +9002,114 @@ do
         end
         ok("failed transaction inserted no partial row", row4 == nil)
 
+        -- A deferred foreign-key violation is reported only by COMMIT. The
+        -- helper must discard callback results, roll back the write, leave
+        -- autocommit restored and keep the connection reusable.
+        assert(db:exec("PRAGMA foreign_keys = ON"))
+        assert(db:exec([[
+            CREATE TABLE tx_parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE tx_child(
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER NOT NULL,
+                FOREIGN KEY(parent_id) REFERENCES tx_parent(id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+        ]]))
+
+        local commit_fail_ok, commit_fail_err, leaked_callback_result =
+            db:transaction(function(tx)
+            assert(tx:exec(
+                "INSERT INTO tx_child(id, parent_id) VALUES(?, ?)",
+                { 1, 999 }))
+            return "must-not-be-forwarded"
+        end)
+        ok("transaction commit failure returns (nil, err)",
+            commit_fail_ok == nil
+            and type(commit_fail_err) == "string"
+            and commit_fail_err:find("commit", 1, true) ~= nil
+            and leaked_callback_result == nil)
+
+        local child_count = -1
+        for row in db:query("SELECT COUNT(*) AS n FROM tx_child") do
+            child_count = row.n
+        end
+        ok("failed commit rolls back deferred writes", child_count == 0)
+        ok("failed commit restores autocommit",
+            db:in_transaction() == false)
+
+        local commit_reuse_ok = db:transaction(function(tx)
+            assert(tx:exec("INSERT INTO tx_parent(id) VALUES(?)", { 999 }))
+            assert(tx:exec(
+                "INSERT INTO tx_child(id, parent_id) VALUES(?, ?)",
+                { 2, 999 }))
+        end)
+        ok("connection is reusable after failed commit",
+            commit_reuse_ok == true)
+
+        -- A prepared statement used by a failing callback must be reset by
+        -- SQLite's rollback and remain reusable afterwards.
+        local reusable_stmt = assert(db:prepare(
+            "INSERT INTO tx_log(id, value) VALUES(?, ?)"))
+        local prepared_tx_ok, prepared_tx_err = db:transaction(function()
+            assert(reusable_stmt:exec({ 40, "prepared-rolled-back" }))
+            error("prepared callback failure")
+        end)
+        ok("prepared statement callback error triggers rollback",
+            prepared_tx_ok == nil and type(prepared_tx_err) == "string"
+            and prepared_tx_err:find("callback failed", 1, true) ~= nil)
+
+        local prepared_rolled_back
+        for row in db:query("SELECT id FROM tx_log WHERE id = 40") do
+            prepared_rolled_back = row
+        end
+        ok("prepared statement write is rolled back",
+            prepared_rolled_back == nil)
+
+        local prepared_reuse_ok, prepared_reuse_err =
+            reusable_stmt:exec({ 41, "prepared-reused" })
+        ok("prepared statement is reusable after rollback",
+            prepared_reuse_ok == true and prepared_reuse_err == nil)
+        reusable_stmt:finalize()
+
+        -- A read iterator may remain active while COMMIT completes; it must
+        -- continue from the same statement afterwards.
+        local active_iter
+        local iter_tx_ok, first_iter_id = db:transaction(function(tx)
+            active_iter = assert(tx:query(
+                "SELECT id FROM tx_log ORDER BY id"))
+            local first = active_iter()
+            return first and first.id
+        end)
+        local second_iter_row = active_iter and active_iter()
+        ok("active read iterator survives transaction commit",
+            iter_tx_ok == true and first_iter_id == 1
+            and type(second_iter_row) == "table"
+            and second_iter_row.id == 2)
+        if active_iter then active_iter:close() end
+
+        -- Defensive branch coverage: manual transaction control is forbidden
+        -- by the public contract, but a callback that already rolled back must
+        -- still produce a combined diagnostic and leave the DB reusable.
+        local rollback_fail_ok, rollback_fail_err = db:transaction(function(tx)
+            assert(tx:exec("ROLLBACK"))
+            error("forced callback error after manual control")
+        end)
+        ok("transaction reports callback and rollback failures",
+            rollback_fail_ok == nil
+            and type(rollback_fail_err) == "string"
+            and rollback_fail_err:find("callback failed", 1, true) ~= nil
+            and rollback_fail_err:find("rollback:", 1, true) ~= nil)
+        ok("rollback failure path leaves autocommit restored",
+            db:in_transaction() == false)
+
+        local rollback_reuse_ok = db:transaction(function(tx)
+            assert(tx:exec(
+                "INSERT INTO tx_log(id, value) VALUES(?, ?)",
+                { 50, "after-rollback-failure" }))
+        end)
+        ok("connection is reusable after rollback failure",
+            rollback_reuse_ok == true)
+
         -- Every documented transaction mode is accepted.
         for i, mode in ipairs({ "deferred", "immediate", "exclusive" }) do
             local mode_ok = db:transaction(function(tx)
@@ -10619,6 +10977,9 @@ do
                 "evs=" .. tostring(evs) .. " err=" .. tostring(rerr))
             ok("  events list contains a 'create' for the file",
                 find_event(evs or {}, "audit_read0.txt", "create") ~= nil)
+            ok("  the same read() returns both create and close_write",
+                find_event(evs or {}, "audit_read0.txt", "create") ~= nil
+                and find_event(evs or {}, "audit_read0.txt", "close_write") ~= nil)
         end
 
         -- (2) NaN and Inf must be rejected on timeout argument.
@@ -10745,6 +11106,335 @@ do
     ok("babet.workers is a table", type(W) == "table")
     ok("workers.spawn is a function", type(W.spawn) == "function")
     ok("workers.channel is a function", type(W.channel) == "function")
+
+    -- ----- budgets de sérialisation et fidélité numérique ---------
+
+    local function make_shared_tree(depth, leaf)
+        local value = leaf
+        for _ = 1, depth do
+            value = { value, value }
+        end
+        return value
+    end
+
+    local function make_string_amplifier(copies)
+        local shared = string.rep("x", 1000000)
+        local value = {}
+        for i = 1, copies do
+            value[i] = shared
+        end
+        return value
+    end
+
+    local function exact_integer_list(actual, expected)
+        if type(actual) ~= "table" then
+            return false, "actual=" .. type(actual)
+        end
+        for i = 1, #expected do
+            if actual[i] ~= expected[i]
+                or math.type(actual[i]) ~= "integer" then
+                return false,
+                    "index=" .. i
+                    .. " expected=" .. tostring(expected[i])
+                    .. " actual=" .. tostring(actual[i])
+                    .. " type=" .. tostring(math.type(actual[i]))
+            end
+        end
+        if #actual ~= #expected then
+            return false,
+                "length=" .. tostring(#actual)
+                .. " expected=" .. tostring(#expected)
+        end
+        return true, nil
+    end
+
+    local integer_probes = {
+        math.maxinteger,
+        math.mininteger,
+        1 << 53,
+        (1 << 53) + 1,
+        (1 << 53) + 2,
+        -(1 << 53) - 1,
+    }
+
+    do
+        local job = assert(W.spawn("return worker.args", integer_probes))
+        local joined, back = job:join(5)
+        local exact, detail = exact_integer_list(back, integer_probes)
+        ok("workers integers: spawn args -> return stays exact",
+            joined == true and exact,
+            "joined=" .. tostring(joined) .. " " .. tostring(detail))
+    end
+
+    do
+        local job = assert(W.spawn([[
+            local received, value = worker.recv(2)
+            if not received then return { recv_error = value } end
+            return value
+        ]]))
+        local sent, send_err = job:send(integer_probes, 1)
+        local joined, back = job:join(5)
+        local exact, detail = exact_integer_list(back, integer_probes)
+        ok("workers integers: job.send -> worker.recv stays exact",
+            sent == true and send_err == nil
+            and joined == true and exact,
+            "sent=" .. tostring(sent)
+            .. " joined=" .. tostring(joined)
+            .. " " .. tostring(detail))
+    end
+
+    do
+        local job = assert(W.spawn([[
+            local sent, err = worker.send(worker.args, 1)
+            return { sent = sent, err = err }
+        ]], integer_probes))
+        local received, back = job:recv(5)
+        local joined, status = job:join(5)
+        local exact, detail = exact_integer_list(back, integer_probes)
+        ok("workers integers: worker.send -> job.recv stays exact",
+            received == true and exact
+            and joined == true and type(status) == "table"
+            and status.sent == true and status.err == nil,
+            "received=" .. tostring(received)
+            .. " joined=" .. tostring(joined)
+            .. " " .. tostring(detail))
+    end
+
+    do
+        local channel = assert(W.channel({ capacity = 1 }))
+        local sent, send_err = channel:send(integer_probes, 0)
+        local received, back = channel:recv(0)
+        local exact, detail = exact_integer_list(back, integer_probes)
+        ok("workers integers: channel round-trip stays exact",
+            sent == true and send_err == nil
+            and received == true and exact,
+            "sent=" .. tostring(sent)
+            .. " received=" .. tostring(received)
+            .. " " .. tostring(detail))
+    end
+
+    do
+        local labels = { "NaN", "+Inf", "-Inf" }
+        local values = { 0 / 0, math.huge, -math.huge }
+        local all_rejected = true
+        local details = {}
+        for i, value in ipairs(values) do
+            local job, err = W.spawn("return true", { value = value })
+            local good = job == nil and type(err) == "string"
+                and err:find("NaN or Inf", 1, true) ~= nil
+            all_rejected = all_rejected and good
+            details[#details + 1] = labels[i] .. "=" .. tostring(err)
+        end
+        ok("workers non-finite: spawn args rejects NaN and infinities",
+            all_rejected, table.concat(details, " | "))
+    end
+
+    do
+        local codes = {
+            "return 0 / 0",
+            "return math.huge",
+            "return -math.huge",
+        }
+        local all_rejected = true
+        local details = {}
+        for i, code in ipairs(codes) do
+            local job = assert(W.spawn(code))
+            local joined, err = job:join(5)
+            local good = joined == false and type(err) == "string"
+                and err:find("NaN or Inf", 1, true) ~= nil
+            all_rejected = all_rejected and good
+            details[#details + 1] = i .. "=" .. tostring(err)
+        end
+        ok("workers non-finite: worker return rejects NaN and infinities",
+            all_rejected, table.concat(details, " | "))
+    end
+
+    do
+        local job = assert(W.spawn([[
+            local received, value = worker.recv(2)
+            if not received then return { recv_error = value } end
+            return value
+        ]]))
+        local values = { 0 / 0, math.huge, -math.huge }
+        local all_rejected = true
+        local details = {}
+        for i, value in ipairs(values) do
+            local sent, err = job:send(value, 0)
+            local good = sent == nil and type(err) == "string"
+                and err:find("NaN or Inf", 1, true) ~= nil
+            all_rejected = all_rejected and good
+            details[#details + 1] = i .. "=" .. tostring(err)
+        end
+        local marker_sent = job:send("after-non-finite", 1)
+        local joined, result = job:join(5)
+        ok("workers non-finite: job.send rejects without publishing",
+            all_rejected and marker_sent == true
+            and joined == true and result == "after-non-finite",
+            table.concat(details, " | "))
+    end
+
+    do
+        local job = assert(W.spawn([[
+            local values = { 0 / 0, math.huge, -math.huge }
+            local results = {}
+            for i, value in ipairs(values) do
+                local sent, err = worker.send(value, 0)
+                results[i] = { sent = sent, err = err }
+            end
+            return results
+        ]]))
+        local joined, results = job:join(5)
+        local all_rejected = joined == true and type(results) == "table"
+        local details = {}
+        for i = 1, 3 do
+            local entry = type(results) == "table" and results[i] or nil
+            local good = type(entry) == "table"
+                and entry.sent == false and type(entry.err) == "string"
+                and entry.err:find("NaN or Inf", 1, true) ~= nil
+            all_rejected = all_rejected and good
+            details[#details + 1] = i .. "="
+                .. tostring(entry and entry.err)
+        end
+        local received, reason = job:recv(0)
+        ok("workers non-finite: worker.send rejects without publishing",
+            all_rejected and received == false and reason == "closed",
+            table.concat(details, " | "))
+    end
+
+    do
+        local channel = assert(W.channel({ capacity = 1 }))
+        local values = { 0 / 0, math.huge, -math.huge }
+        local all_rejected = true
+        local details = {}
+        for i, value in ipairs(values) do
+            local sent, err = channel:send(value, 0)
+            local good = sent == nil and type(err) == "string"
+                and err:find("NaN or Inf", 1, true) ~= nil
+            all_rejected = all_rejected and good
+            details[#details + 1] = i .. "=" .. tostring(err)
+        end
+        local marker_sent = channel:send("after-non-finite", 0)
+        local received, result = channel:recv(0)
+        ok("workers non-finite: channel rejects without publishing",
+            all_rejected and marker_sent == true
+            and received == true and result == "after-non-finite",
+            table.concat(details, " | "))
+    end
+
+    -- Test lourd activé une seule fois par run_tests.sh : le tableau plat
+    -- franchit le plafond d'un seul nœud avec peu d'allocations C++.
+    if os.getenv("BABET_TEST_WORKERS_NODE_LIMIT") == "1" then
+        do
+            local flat = {}
+            for i = 1, 1000000 do
+                flat[i] = true
+            end
+
+            local job, err = W.spawn("return true", flat)
+            ok("workers budget: spawn args hits node limit",
+                job == nil and type(err) == "string"
+                and err:find("serialization node budget", 1, true) ~= nil,
+                tostring(err))
+        end
+        collectgarbage("collect")
+    end
+
+    do
+        local accepted = make_shared_tree(14, true)
+        local channel = assert(W.channel({ capacity = 1 }))
+        local sent, send_err = channel:send(accepted, 0)
+        local received, back = channel:recv(5)
+        local cursor = back
+        local shape_ok = received == true
+        for level = 1, 14 do
+            shape_ok = shape_ok and type(cursor) == "table"
+            if not shape_ok then break end
+
+            if level < 14 then
+                shape_ok = type(cursor[1]) == "table"
+                    and type(cursor[2]) == "table"
+            else
+                shape_ok = cursor[1] == true and cursor[2] == true
+            end
+            if not shape_ok then break end
+            cursor = cursor[1]
+        end
+        ok("workers budget: shared tree below limits round-trips",
+            sent == true and send_err == nil and shape_ok
+            and cursor == true and back[1] ~= back[2],
+            "sent=" .. tostring(sent)
+            .. " received=" .. tostring(received))
+    end
+
+    do
+        local job, err = W.spawn("return true", make_string_amplifier(12))
+        ok("workers budget: spawn args hits byte limit",
+            job == nil and type(err) == "string"
+            and err:find("serialization byte budget", 1, true) ~= nil,
+            tostring(err))
+    end
+
+    do
+        local job = assert(W.spawn([[
+            local shared = string.rep("x", 1000000)
+            local value = {}
+            for i = 1, 12 do value[i] = shared end
+            return value
+        ]]))
+        local joined, err = job:join(30)
+        ok("workers budget: worker return hits byte limit",
+            joined == false and type(err) == "string"
+            and err:find("serialization byte budget", 1, true) ~= nil,
+            tostring(err))
+    end
+
+    do
+        local job = assert(W.spawn([[
+            local received, value = worker.recv()
+            if not received then return { recv_error = value } end
+            return value
+        ]]))
+        local sent, err = job:send(make_string_amplifier(12), 0)
+        local marker_sent = job:send("after-budget", 1)
+        local joined, result = job:join(5)
+        ok("workers budget: job.send rejects atomically",
+            sent == nil and type(err) == "string"
+            and err:find("serialization byte budget", 1, true) ~= nil
+            and marker_sent == true
+            and joined == true and result == "after-budget",
+            tostring(err))
+    end
+
+    do
+        local job = assert(W.spawn([[
+            local shared = string.rep("x", 1000000)
+            local value = {}
+            for i = 1, 12 do value[i] = shared end
+            local sent, err = worker.send(value, 0)
+            return { sent = sent, err = err }
+        ]]))
+        local joined, result = job:join(30)
+        local received, reason = job:recv(0)
+        ok("workers budget: worker.send rejects atomically",
+            joined == true and type(result) == "table"
+            and result.sent == false and type(result.err) == "string"
+            and result.err:find("serialization byte budget", 1, true) ~= nil
+            and received == false and reason == "closed",
+            tostring(result and result.err))
+    end
+
+    do
+        local channel = assert(W.channel({ capacity = 1 }))
+        local sent, err = channel:send(make_string_amplifier(12), 0)
+        local marker_sent = channel:send("after-budget", 0)
+        local received, result = channel:recv(0)
+        ok("workers budget: channel send rejects atomically",
+            sent == nil and type(err) == "string"
+            and err:find("serialization byte budget", 1, true) ~= nil
+            and marker_sent == true
+            and received == true and result == "after-budget",
+            tostring(err))
+    end
 
     -- ----- channels directs entre parent et workers ---------------
 
@@ -16186,12 +16876,12 @@ return result
         end,
         "expects 3 or 4 arguments")
     ok_raises("archive.list rejects non-string path",
-        function() return babet.archive.list({}) end)
+        function() return babet.archive.list({}) end, "string expected")
     ok_raises("archive.list rejects NUL in archive path",
         function() return babet.archive.list(valid_zip .. "\0ignored") end,
         "NUL")
     ok_raises("archive.test rejects non-string path",
-        function() return babet.archive.test({}) end)
+        function() return babet.archive.test({}) end, "string expected")
     ok_raises("archive.test rejects NUL in archive path",
         function() return babet.archive.test(valid_zip .. "\0ignored") end,
         "NUL")
@@ -16745,6 +17435,23 @@ return result.files
                 babet.archive.list(trailing_gzip)
             ok_fail("archive.list rejects non-gzip trailing data after a gzip member",
                 trailing_gzip_list, trailing_gzip_err)
+            ok("single-byte gzip trailing-data error is explicit",
+                type(trailing_gzip_err) == "string"
+                and trailing_gzip_err:find(
+                    "non-gzip trailing data", 1, true) ~= nil,
+                "err=" .. tostring(trailing_gzip_err))
+
+            local trailing_gzip_two = root .. "/trailing-garbage-two.tar.gz"
+            assert(write_bytes(trailing_gzip_two, gzip_raw .. "XY"))
+            local trailing_gzip_two_list, trailing_gzip_two_err =
+                babet.archive.list(trailing_gzip_two)
+            ok_fail("archive.list rejects two-byte non-gzip trailing data",
+                trailing_gzip_two_list, trailing_gzip_two_err)
+            ok("two-byte gzip trailing-data error is explicit",
+                type(trailing_gzip_two_err) == "string"
+                and trailing_gzip_two_err:find(
+                    "non-gzip trailing data", 1, true) ~= nil,
+                "err=" .. tostring(trailing_gzip_two_err))
 
             local corrupt_gzip = root .. "/corrupt.tar.gz"
             local crc_position = #gzip_raw - 7
@@ -18826,7 +19533,7 @@ return { result.files, result.directories, result.include_patterns,
         function() return babet.archive.create(42, root .. "/x.zip") end,
         "directory string or a dense array")
     ok_raises("archive.create destination is a strict string",
-        function() return babet.archive.create(create_source, {}) end)
+        function() return babet.archive.create(create_source, {}) end, "string expected")
     ok_raises("archive.create rejects NUL in source",
         function()
             return babet.archive.create(create_source .. "\0ignored", root .. "/x.zip")

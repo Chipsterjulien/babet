@@ -274,8 +274,13 @@ bool validate_gzip_stream_fd(int fd, std::uint64_t archive_size,
         }
 
         unsigned char second = 0;
-        if (offset + 1 >= archive_size ||
-            !read_byte_at(fd, offset + 1, second, display_path, err))
+        if (offset + 1 >= archive_size)
+        {
+            err = "archive: non-gzip trailing data after gzip TAR stream in '" +
+                  display_path + "'";
+            return false;
+        }
+        if (!read_byte_at(fd, offset + 1, second, display_path, err))
         {
             return false;
         }

@@ -1,5 +1,6 @@
 #include "workers.hpp"
 #include "lua_utils.hpp"
+#include "workers_serialization_budget.hpp"
 #include "../project_core/bundled_modules.hpp"
 #include "../project_core/embedded_searcher.hpp"
 
@@ -835,6 +836,68 @@ namespace
 
     constexpr int MAX_SERIALIZATION_DEPTH = 32;
 
+    using babet::workers_detail::SerializationBudget;
+    using babet::workers_detail::SerializationBudgetStatus;
+
+    bool consume_serialization_node(
+        SerializationBudget &budget,
+        std::string &err,
+        std::string_view context)
+    {
+        switch (babet::workers_detail::consume_node(budget))
+        {
+        case SerializationBudgetStatus::ok:
+            return true;
+        case SerializationBudgetStatus::node_limit:
+            set_transfer_error(
+                err, context,
+                "value exceeds the serialization node budget");
+            return false;
+        case SerializationBudgetStatus::byte_limit:
+            set_transfer_error(
+                err, context,
+                "value exceeds the serialization byte budget");
+            return false;
+        case SerializationBudgetStatus::string_too_large:
+            break;
+        }
+
+        set_transfer_error(
+            err, context,
+            "internal serialization budget failure");
+        return false;
+    }
+
+    bool consume_serialization_string(
+        SerializationBudget &budget,
+        std::size_t length,
+        std::string &err,
+        std::string_view context)
+    {
+        switch (babet::workers_detail::consume_string(budget, length))
+        {
+        case SerializationBudgetStatus::ok:
+            return true;
+        case SerializationBudgetStatus::byte_limit:
+            set_transfer_error(
+                err, context,
+                "value exceeds the serialization byte budget");
+            return false;
+        case SerializationBudgetStatus::string_too_large:
+            set_transfer_error(
+                err, context,
+                "string is too large to serialize");
+            return false;
+        case SerializationBudgetStatus::node_limit:
+            break;
+        }
+
+        set_transfer_error(
+            err, context,
+            "internal serialization budget failure");
+        return false;
+    }
+
     Worker *check_worker(lua_State *L, int idx)
     {
         return static_cast<Worker *>(luaL_checkudata(L, idx, WORKER_META));
@@ -884,6 +947,7 @@ namespace
     bool lua_to_json(lua_State *L, int idx, json &out,
                      std::string &err, int depth,
                      std::unordered_set<const void *> &visited,
+                     SerializationBudget &budget,
                      std::string_view context);
 
     // Vérifie directement qu'une string Lua est un UTF-8 canonique :
@@ -989,6 +1053,7 @@ namespace
     bool lua_table_to_json(lua_State *L, int idx, json &out,
                            std::string &err, int depth,
                            std::unordered_set<const void *> &visited,
+                           SerializationBudget &budget,
                            std::string_view context)
     {
         // Détection de cycle : si on revoit la même table, c'est circulaire.
@@ -1079,7 +1144,7 @@ namespace
                 lua_geti(L, idx, i);
                 json elem;
                 if (!lua_to_json(L, lua_gettop(L), elem, err, depth + 1,
-                                 visited, context))
+                                 visited, budget, context))
                 {
                     lua_pop(L, 1);
                     return false;
@@ -1113,10 +1178,16 @@ namespace
                 lua_pop(L, 2);
                 return false;
             }
+            if (!consume_serialization_string(
+                    budget, klen, err, context))
+            {
+                lua_pop(L, 2);
+                return false;
+            }
             std::string key(kp, klen);
             json val;
             if (!lua_to_json(L, lua_gettop(L), val, err, depth + 1,
-                             visited, context))
+                             visited, budget, context))
             {
                 lua_pop(L, 2);
                 return false;
@@ -1130,11 +1201,16 @@ namespace
     bool lua_to_json(lua_State *L, int idx, json &out,
                      std::string &err, int depth,
                      std::unordered_set<const void *> &visited,
+                     SerializationBudget &budget,
                      std::string_view context)
     {
         if (depth > MAX_SERIALIZATION_DEPTH)
         {
             set_transfer_error(err, context, "value too deeply nested");
+            return false;
+        }
+        if (!consume_serialization_node(budget, err, context))
+        {
             return false;
         }
         // CORRECTIF (revue Gemini post-audit v21, vérifié) : réserver
@@ -1190,12 +1266,17 @@ namespace
                     "string contains non-UTF-8 bytes or NUL");
                 return false;
             }
+            if (!consume_serialization_string(
+                    budget, len, err, context))
+            {
+                return false;
+            }
             out = std::string(s, len);
             return true;
         }
         case LUA_TTABLE:
             return lua_table_to_json(
-                L, idx, out, err, depth, visited, context);
+                L, idx, out, err, depth, visited, budget, context);
         case LUA_TFUNCTION:
             set_transfer_error(
                 err, context,
@@ -1230,11 +1311,16 @@ namespace
 
     bool json_to_lua(lua_State *L, const json &j,
                      std::string &err, int depth,
+                     SerializationBudget &budget,
                      std::string_view context)
     {
         if (depth > MAX_SERIALIZATION_DEPTH)
         {
             set_transfer_error(err, context, "value too deeply nested");
+            return false;
+        }
+        if (!consume_serialization_node(budget, err, context))
+        {
             return false;
         }
         // CORRECTIF (revue Gemini post-audit v21, vérifié) : même
@@ -1258,12 +1344,6 @@ namespace
             lua_pushboolean(L, j.get<bool>() ? 1 : 0);
             return true;
         }
-        if (j.is_number_integer())
-        {
-            lua_pushinteger(L,
-                            static_cast<lua_Integer>(j.get<int64_t>()));
-            return true;
-        }
         if (j.is_number_unsigned())
         {
             uint64_t v = j.get<uint64_t>();
@@ -1277,6 +1357,12 @@ namespace
             }
             return true;
         }
+        if (j.is_number_integer())
+        {
+            lua_pushinteger(L,
+                            static_cast<lua_Integer>(j.get<int64_t>()));
+            return true;
+        }
         if (j.is_number_float())
         {
             lua_pushnumber(L, j.get<double>());
@@ -1285,6 +1371,11 @@ namespace
         if (j.is_string())
         {
             const std::string &s = j.get_ref<const std::string &>();
+            if (!consume_serialization_string(
+                    budget, s.size(), err, context))
+            {
+                return false;
+            }
             lua_pushlstring(L, s.data(), s.size());
             return true;
         }
@@ -1294,7 +1385,8 @@ namespace
             lua_Integer idx = 1;
             for (const auto &elem : j)
             {
-                if (!json_to_lua(L, elem, err, depth + 1, context))
+                if (!json_to_lua(
+                        L, elem, err, depth + 1, budget, context))
                 {
                     lua_pop(L, 1);
                     return false;
@@ -1308,12 +1400,21 @@ namespace
             lua_createtable(L, 0, static_cast<int>(j.size()));
             for (auto it = j.begin(); it != j.end(); ++it)
             {
-                if (!json_to_lua(L, it.value(), err, depth + 1, context))
+                const std::string &key = it.key();
+                if (!consume_serialization_string(
+                        budget, key.size(), err, context))
                 {
                     lua_pop(L, 1);
                     return false;
                 }
-                lua_setfield(L, -2, it.key().c_str());
+                if (!json_to_lua(
+                        L, it.value(), err, depth + 1,
+                        budget, context))
+                {
+                    lua_pop(L, 1);
+                    return false;
+                }
+                lua_setfield(L, -2, key.c_str());
             }
             return true;
         }
@@ -1370,28 +1471,46 @@ namespace
         // le timeout AVANT toute allocation C++ (json, std::string, set).
         int64_t timeout_ms = parse_timeout_arg(L, 2);
 
-        // Sérialiser la valeur (arg 1) -> JSON string.
-        json msg_j;
-        std::string err;
-        std::unordered_set<const void *> visited;
-        if (!lua_to_json(
-                L, 1, msg_j, err, 0, visited, "worker.send"))
-        {
-            // Convention pcall-style côté worker : (false, err).
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, err.c_str());
-            return 2;
-        }
+        // Sérialiser la valeur (arg 1) -> JSON string. La construction
+        // du DOM et dump() peuvent tous deux allouer : aucune exception
+        // C++ ne doit traverser la lua_CFunction.
         std::string msg_str;
         try
         {
+            json msg_j;
+            std::string err;
+            std::unordered_set<const void *> visited;
+            SerializationBudget budget;
+            if (!lua_to_json(
+                    L, 1, msg_j, err, 0, visited, budget,
+                    "worker.send"))
+            {
+                // Convention pcall-style côté worker : (false, err).
+                lua_pushboolean(L, 0);
+                lua_pushlstring(L, err.data(), err.size());
+                return 2;
+            }
             msg_str = msg_j.dump();
         }
-        catch (const std::exception &e)
+        catch (const std::bad_alloc &)
         {
             lua_pushboolean(L, 0);
-            lua_pushstring(L,
-                           (std::string("workers: failed to serialize message: ") + e.what()).c_str());
+            lua_pushliteral(
+                L, "worker.send: out of memory during serialization");
+            return 2;
+        }
+        catch (const std::exception &)
+        {
+            lua_pushboolean(L, 0);
+            lua_pushliteral(
+                L, "worker.send: internal serialization failure");
+            return 2;
+        }
+        catch (...)
+        {
+            lua_pushboolean(L, 0);
+            lua_pushliteral(
+                L, "worker.send: unknown serialization failure");
             return 2;
         }
 
@@ -1465,7 +1584,9 @@ namespace
         {
             json j = json::parse(msg_str);
             std::string err;
-            if (!json_to_lua(L, j, err, 0, "worker.recv"))
+            SerializationBudget budget;
+            if (!json_to_lua(
+                    L, j, err, 0, budget, "worker.recv"))
             {
                 lua_pushboolean(L, 0);
                 lua_pushstring(L, err.c_str());
@@ -1578,8 +1699,10 @@ namespace
             try
             {
                 json args_j = json::parse(w->args_json);
+                SerializationBudget budget;
                 if (!json_to_lua(
-                        L, args_j, err, 0, "workers.spawn"))
+                        L, args_j, err, 0, budget,
+                        "workers.spawn"))
                 {
                     w->err_msg = err;
                     // Fermer et détruire l'état enfant avant de publier
@@ -1688,9 +1811,10 @@ namespace
         // Sérialiser le résultat.
         json result_j;
         std::unordered_set<const void *> result_visited;
+        SerializationBudget result_budget;
         if (!lua_to_json(
                 L, -1, result_j, err, 0, result_visited,
-                "worker return"))
+                result_budget, "worker return"))
         {
             // L'utilisateur a retourné un truc non sérialisable.
             w->err_msg = std::string(
@@ -1934,23 +2058,37 @@ namespace
         std::string args_json_str = "null";
         if (lua_istable(L, 2))
         {
-            json args_j;
-            std::string err;
-            std::unordered_set<const void *> args_visited;
-            if (!lua_to_json(
-                    L, 2, args_j, err, 0, args_visited,
-                    "workers: spawn"))
-            {
-                return push_fail(L, err);
-            }
             try
             {
+                json args_j;
+                std::string err;
+                std::unordered_set<const void *> args_visited;
+                SerializationBudget budget;
+                if (!lua_to_json(
+                        L, 2, args_j, err, 0, args_visited,
+                        budget, "workers: spawn"))
+                {
+                    return push_fail(L, err);
+                }
                 args_json_str = args_j.dump();
             }
-            catch (const std::exception &e)
+            catch (const std::bad_alloc &)
             {
-                return push_fail(L,
-                                 std::string("workers: failed to dump args: ") + e.what());
+                return push_fail(
+                    L,
+                    "workers.spawn: out of memory during serialization");
+            }
+            catch (const std::exception &)
+            {
+                return push_fail(
+                    L,
+                    "workers.spawn: internal serialization failure");
+            }
+            catch (...)
+            {
+                return push_fail(
+                    L,
+                    "workers.spawn: unknown serialization failure");
             }
         }
 
@@ -2069,8 +2207,10 @@ namespace
         {
             json r = json::parse(result_json);
             std::string conversion_error;
+            SerializationBudget budget;
             if (!json_to_lua(
-                    L, r, conversion_error, 0, "workers.join"))
+                    L, r, conversion_error, 0, budget,
+                    "workers.join"))
             {
                 lua_settop(L, initial_top);
                 std::snprintf(
@@ -2451,9 +2591,10 @@ namespace
             json message;
             std::string error;
             std::unordered_set<const void *> visited;
+            SerializationBudget budget;
             if (!lua_to_json(
                     L, 2, message, error, 0, visited,
-                    "workers.channel.send"))
+                    budget, "workers.channel.send"))
             {
                 return push_fail(L, error);
             }
@@ -2484,14 +2625,20 @@ namespace
         catch (const std::bad_alloc &)
         {
             return push_fail(
-                L, "workers.channel.send: out of memory");
+                L,
+                "workers.channel.send: out of memory during serialization");
         }
-        catch (const std::exception &e)
+        catch (const std::exception &)
         {
             return push_fail(
                 L,
-                std::string("workers.channel.send: failed to serialize message: ") +
-                    e.what());
+                "workers.channel.send: internal serialization failure");
+        }
+        catch (...)
+        {
+            return push_fail(
+                L,
+                "workers.channel.send: unknown serialization failure");
         }
     }
 
@@ -2536,8 +2683,10 @@ namespace
         {
             json message = json::parse(serialized);
             std::string error;
+            SerializationBudget budget;
             if (!json_to_lua(
-                    L, message, error, 0, "workers.channel.recv"))
+                    L, message, error, 0, budget,
+                    "workers.channel.recv"))
             {
                 return push_fail(L, error);
             }
@@ -2662,23 +2811,36 @@ namespace
         // Sérialiser la valeur (arg 2) -> JSON string.
         // Toute valeur Lua passe : nil, boolean, number, string,
         // table sérialisable. Refus si function/userdata/coroutine/cycle.
-        json msg_j;
-        std::string err;
-        std::unordered_set<const void *> visited;
-        if (!lua_to_json(
-                L, 2, msg_j, err, 0, visited, "workers.send"))
-        {
-            return push_fail(L, err);
-        }
+        // lua_to_json() construit aussi le DOM et doit rester dans le try.
         std::string msg_str;
         try
         {
+            json msg_j;
+            std::string err;
+            std::unordered_set<const void *> visited;
+            SerializationBudget budget;
+            if (!lua_to_json(
+                    L, 2, msg_j, err, 0, visited, budget,
+                    "workers.send"))
+            {
+                return push_fail(L, err);
+            }
             msg_str = msg_j.dump();
         }
-        catch (const std::exception &e)
+        catch (const std::bad_alloc &)
         {
-            return push_fail(L,
-                             std::string("workers: failed to serialize message: ") + e.what());
+            return push_fail(
+                L, "workers.send: out of memory during serialization");
+        }
+        catch (const std::exception &)
+        {
+            return push_fail(
+                L, "workers.send: internal serialization failure");
+        }
+        catch (...)
+        {
+            return push_fail(
+                L, "workers.send: unknown serialization failure");
         }
 
         // Push dans l'inbox.
@@ -2723,7 +2885,9 @@ namespace
         {
             json j = json::parse(msg_str);
             std::string err;
-            if (!json_to_lua(L, j, err, 0, "workers.recv"))
+            SerializationBudget budget;
+            if (!json_to_lua(
+                    L, j, err, 0, budget, "workers.recv"))
             {
                 // Cas extrêmement rare : message qui a été sérialisé mais
                 // ne se deserialise pas. Remontée propre.

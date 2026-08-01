@@ -38,7 +38,7 @@ cooperative.
   - [Scalars and strings](#workers-transfer-scalars)
   - [List and object tables](#workers-transfer-tables)
   - [Rejected values](#workers-transfer-rejected)
-  - [Copies, identity, and depth](#workers-transfer-copy)
+  - [Copies, identity, depth, and budgets](#workers-transfer-copy)
 - [Final worker result](#workers-result)
   - [`status()` — observe without consuming](#workers-status)
   - [`join(timeout?)` — wait and consume](#workers-join)
@@ -442,7 +442,7 @@ These values do not cross Lua states:
 - non-string keys in object tables;
 - `NaN` or infinite numbers;
 - strings with NUL or bytes rejected as UTF-8;
-- structures beyond the nesting limit.
+- structures beyond the depth, node, or byte budgets.
 
 Pass a path, URL, or serializable configuration instead of the system object
 itself. The worker then opens its own resource.
@@ -459,7 +459,7 @@ babet.workers.spawn(code, {
 ```
 
 <a id="workers-transfer-copy"></a>
-### Copies, identity, and depth
+### Copies, identity, depth, and budgets
 
 Transport copies values:
 
@@ -468,7 +468,10 @@ Transport copies values:
 - two references to the same subtable become two separate tables;
 - cycles are rejected;
 - maximum nesting is 32 levels according to the internal serialization
-  counter.
+  counter;
+- one operation may expand to at most **1,000,000 JSON values**;
+- the estimated representation must remain within a conservative **64 MiB**
+  budget.
 
 ```lua
 local shared = { value = 1 }
@@ -478,7 +481,25 @@ local args = { a = shared, b = shared }
 -- but are not the same table.
 ```
 
-The limit protects the C++ and Lua stacks from pathological structures.
+The depth limit protects the C++ and Lua stacks. The two additional budgets
+prevent a small Lua structure from expanding into an exponential amount of
+data when the same subtable or string is referenced repeatedly.
+
+Every expanded value consumes exactly one node and a fixed cost of 32 bytes.
+Every string occurrence, including an object key, also consumes an upper bound
+of `6 × byte_length + 2`. The factor of six covers the worst JSON escaping of a
+control byte. The two ceilings deliberately overlap: together they bound both
+the number of objects in the JSON DOM and the expanded text payload.
+
+The limits apply independently to each operation: `spawn` arguments, final
+result, `job:send`, `worker.send`, or `channel:send`. A rejected value is not
+added to the queue. The identical receive-side check validates message
+consistency; the primary memory bound is applied by the sender before strings
+are copied and before the internal JSON is published.
+
+These ceilings are part of the public contract. Lowering them in a later
+release could reject transfers that used to succeed and should be announced as
+an incompatible change.
 
 <a id="workers-result"></a>
 ## Final worker result
@@ -589,6 +610,11 @@ A timeout:
 - does not join the pthread;
 - consumes neither result nor error;
 - still allows `status`, `send`, `recv`, `close`, `cancel`, and another `join`.
+
+The timeout bounds only this call to `join()`. If the worker remains active and
+its last reference is later collected, notably while the Lua state is closing,
+its `__gc` must still perform an unbounded `pthread_join()` and can therefore
+block program termination.
 
 Even when the worker legitimately returns `nil`, success is distinguishable by
 `ok == true`.
@@ -1481,6 +1507,7 @@ assert(not ok)
 `spawn` returns `(nil, err)` for runtime failures before or during creation:
 
 - non-transferable `args`;
+- serialization-budget exhaustion;
 - JSON serialization failure;
 - queue or completion-signal initialization failure;
 - `pthread_create` failure.
@@ -1517,10 +1544,12 @@ The diagnostic does not automatically contain a complete traceback.
 
 The userdata has a safety-net `__gc`. When collected:
 
-1. inbox and outbox are closed;
-2. queue waiters are awakened;
-3. Babet calls `pthread_join` when needed;
-4. pthread primitives and internal strings are destroyed.
+1. the cancellation flag is set;
+2. inbox and outbox are closed;
+3. queue waiters are awakened;
+4. Babet calls `pthread_join` when needed;
+5. pthread primitives, the completion signal, and internal strings are
+   destroyed.
 
 This prevents freeing state still used by a thread. It can nevertheless block
 when the worker cannot terminate.

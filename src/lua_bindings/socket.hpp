@@ -36,6 +36,10 @@
  *     and are delivered before later receive operations.
  *   - `send` transmits the whole Lua string or fails; payloads are binary-safe.
  *   - Userdata owns its FD/SSL object and `__gc` closes forgotten sockets.
+ *     Constructors establish that Lua ownership before acquiring the resource,
+ *     so a Lua memory-error longjmp cannot abandon an unowned FD or SSL object.
+ *   - Internal C++ exceptions are converted to fixed `(nil, err)` results and
+ *     never cross the Lua C boundary.
  *   - Created/accepted FDs are close-on-exec. Listening sockets use
  *     SO_REUSEADDR internally.
  *   - TLS verification is enabled by default with TLS 1.2 minimum. SNI is

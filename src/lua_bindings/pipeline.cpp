@@ -11,6 +11,7 @@
 #include <cstring>
 #include <ctime>
 #include <limits>
+#include <new>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -27,7 +28,6 @@ namespace
 constexpr const char *PIPELINE_META = "babet.pipeline_process";
 constexpr size_t DEFAULT_MAX_OUTPUT = 10u * 1024u * 1024u;
 constexpr size_t MAX_MAX_OUTPUT = 2u * 1024u * 1024u * 1024u;
-constexpr size_t MAX_PIPELINE_STAGES = 32;
 constexpr size_t DEFAULT_READ_SIZE = 64u * 1024u;
 constexpr size_t MAX_READ_SIZE = 16u * 1024u * 1024u;
 constexpr double DEFAULT_TERMINATE_GRACE = 2.0;
@@ -66,10 +66,10 @@ struct ChildState
 struct PipelineProcess
 {
     size_t count;
-    pid_t pids[MAX_PIPELINE_STAGES];
-    int stderr_fds[MAX_PIPELINE_STAGES];
-    int statuses[MAX_PIPELINE_STAGES];
-    bool status_valid[MAX_PIPELINE_STAGES];
+    pid_t pids[babet_process::MAX_PIPELINE_STAGES];
+    int stderr_fds[babet_process::MAX_PIPELINE_STAGES];
+    int statuses[babet_process::MAX_PIPELINE_STAGES];
+    bool status_valid[babet_process::MAX_PIPELINE_STAGES];
     int stdin_fd;
     int stdout_fd;
     bool closed;
@@ -360,7 +360,7 @@ bool collect_stages(
     std::string &err)
 {
     size_t count = 0;
-    if (!dense_array(L, idx, 2, MAX_PIPELINE_STAGES,
+    if (!dense_array(L, idx, 2, babet_process::MAX_PIPELINE_STAGES,
                      "commands", count, err))
     {
         return false;
@@ -442,7 +442,12 @@ void kill_all(const std::vector<ChildState> &children, int signal)
 {
     for (const ChildState &child : children)
     {
-        babet_process::kill_group(child.pid, signal);
+        // Un PID réapé peut être recyclé. Ne jamais ressignaler un étage dont
+        // le statut a déjà été consommé.
+        if (!child.status_valid && child.pid > 0)
+        {
+            babet_process::kill_group(child.pid, signal);
+        }
     }
 }
 
@@ -460,6 +465,83 @@ void reap_all(std::vector<ChildState> &children, long long deadline)
             result == babet_process::ChildWaitResult::reaped;
     }
 }
+
+
+class LaunchedPipelineGuard
+{
+public:
+    explicit LaunchedPipelineGuard(
+        babet_process::LaunchedPipeline &pipeline) noexcept
+        : pipeline_(pipeline)
+    {
+    }
+
+    LaunchedPipelineGuard(const LaunchedPipelineGuard &) = delete;
+    LaunchedPipelineGuard &operator=(const LaunchedPipelineGuard &) = delete;
+
+    ~LaunchedPipelineGuard() noexcept
+    {
+        if (armed_)
+        {
+            babet_process::emergency_kill_and_reap(pipeline_);
+        }
+    }
+
+    void release() noexcept
+    {
+        armed_ = false;
+    }
+
+private:
+    babet_process::LaunchedPipeline &pipeline_;
+    bool armed_ = true;
+};
+
+class SyncPipelineGuard
+{
+public:
+    SyncPipelineGuard(int &stdin_fd, int &stdout_fd,
+                      std::vector<ChildState> &children) noexcept
+        : stdin_fd_(stdin_fd), stdout_fd_(stdout_fd), children_(children)
+    {
+    }
+
+    SyncPipelineGuard(const SyncPipelineGuard &) = delete;
+    SyncPipelineGuard &operator=(const SyncPipelineGuard &) = delete;
+
+    ~SyncPipelineGuard() noexcept
+    {
+        cleanup_now();
+    }
+
+    void cleanup_now() noexcept
+    {
+        if (!armed_)
+        {
+            return;
+        }
+        babet_process::close_fd(stdin_fd_);
+        babet_process::close_fd(stdout_fd_);
+        for (ChildState &child : children_)
+        {
+            babet_process::close_fd(child.stderr_fd);
+        }
+        kill_all(children_, SIGKILL);
+        reap_all(children_, babet_process::now_ms() + 500);
+        armed_ = false;
+    }
+
+    void release() noexcept
+    {
+        armed_ = false;
+    }
+
+private:
+    int &stdin_fd_;
+    int &stdout_fd_;
+    std::vector<ChildState> &children_;
+    bool armed_ = true;
+};
 
 bool drain_fd(int fd, std::string &buffer, size_t limit, bool &truncated)
 {
@@ -660,7 +742,7 @@ PipelineProcess *push_empty_pipeline_process(lua_State *L)
     pipeline->stdin_fd = -1;
     pipeline->stdout_fd = -1;
     pipeline->closed = true;
-    for (size_t i = 0; i < MAX_PIPELINE_STAGES; ++i)
+    for (size_t i = 0; i < babet_process::MAX_PIPELINE_STAGES; ++i)
     {
         pipeline->pids[i] = -1;
         pipeline->stderr_fds[i] = -1;
@@ -672,10 +754,14 @@ PipelineProcess *push_empty_pipeline_process(lua_State *L)
     return pipeline;
 }
 
-void initialize_pipeline_process(
+bool initialize_pipeline_process(
     PipelineProcess *pipeline,
     babet_process::LaunchedPipeline &launched)
 {
+    if (launched.children.size() > babet_process::MAX_PIPELINE_STAGES)
+    {
+        return false;
+    }
     pipeline->count = launched.children.size();
     pipeline->stdin_fd = launched.stdin_fd;
     pipeline->stdout_fd = launched.stdout_fd;
@@ -691,6 +777,7 @@ void initialize_pipeline_process(
         pipeline->status_valid[i] = false;
         launched.children[i].stderr_fd = -1;
     }
+    return true;
 }
 
 enum class StageRefreshResult
@@ -1496,6 +1583,8 @@ babet_process::ChildWaitResult wait_pipeline_stage_until(
 
 int lua_pipeline(lua_State *L)
 {
+    try
+    {
     if (!lua_arity_between(L, 1, 2) || lua_type(L, 1) != LUA_TTABLE)
     {
         return luaL_error(L,
@@ -1537,18 +1626,35 @@ int lua_pipeline(lua_State *L)
         return push_fail(L, launched.error);
     }
 
-    int stdin_fd = launched.pipeline.stdin_fd;
-    int stdout_fd = launched.pipeline.stdout_fd;
-    launched.pipeline.stdin_fd = -1;
-    launched.pipeline.stdout_fd = -1;
+    // La garde est armée immédiatement après le lancement, avant toute
+    // allocation supplémentaire du chemin synchrone.
+    LaunchedPipelineGuard launch_guard(launched.pipeline);
+
+    // IMPORTANT : aucun appel lua_* n'est autorisé tant que cette première
+    // garde est armée. Une erreur Lua utilise longjmp et contournerait son
+    // destructeur avant le transfert vers SyncPipelineGuard.
 
     std::vector<ChildState> children;
     children.reserve(launched.pipeline.children.size());
-    for (auto &child : launched.pipeline.children)
+    for (const auto &child : launched.pipeline.children)
     {
-        children.push_back({child.pid, child.stderr_fd, 0, false});
-        child.stderr_fd = -1;
+        children.push_back({child.pid, -1, 0, false});
     }
+
+    int stdin_fd = std::exchange(launched.pipeline.stdin_fd, -1);
+    int stdout_fd = std::exchange(launched.pipeline.stdout_fd, -1);
+    for (size_t i = 0; i < children.size(); ++i)
+    {
+        children[i].stderr_fd =
+            std::exchange(launched.pipeline.children[i].stderr_fd, -1);
+    }
+
+    SyncPipelineGuard emergency_guard(stdin_fd, stdout_fd, children);
+    launch_guard.release();
+
+    // IMPORTANT : aucun appel lua_* n'est autorisé tant que la garde
+    // synchrone est armée. Une erreur Lua ferait un longjmp et contournerait
+    // son destructeur.
 
     if (!options.has_stdin)
     {
@@ -1746,6 +1852,7 @@ int lua_pipeline(lua_State *L)
     {
         kill_all(children, SIGKILL);
         reap_all(children, babet_process::now_ms() + TERM_GRACE_MS);
+        emergency_guard.cleanup_now();
         return push_fail(L, error);
     }
 
@@ -1809,15 +1916,29 @@ int lua_pipeline(lua_State *L)
 
     if (!error.empty())
     {
+        emergency_guard.cleanup_now();
         return push_fail(L, error);
     }
+    emergency_guard.cleanup_now();
     return push_sync_result(L, stdout_buffer, stderr_buffers,
                             stderr_truncated, children, timed_out,
                             stdout_truncated);
+    }
+    catch (const std::bad_alloc &)
+    {
+        return push_fail(L, "pipeline: out of memory during execution");
+    }
+    catch (...)
+    {
+        return push_fail(L, "pipeline: internal execution failure");
+    }
 }
 
 int lua_spawn_pipeline(lua_State *L)
 {
+    bool empty_userdata_pushed = false;
+    try
+    {
     if (!lua_arity_between(L, 1, 2) || lua_type(L, 1) != LUA_TTABLE)
     {
         return luaL_error(
@@ -1838,6 +1959,7 @@ int lua_spawn_pipeline(lua_State *L)
     }
 
     PipelineProcess *pipeline = push_empty_pipeline_process(L);
+    empty_userdata_pushed = true;
 
     babet_process::PipelineLaunchSpec spec;
     spec.stages = std::move(stages);
@@ -1850,6 +1972,7 @@ int lua_spawn_pipeline(lua_State *L)
     if (!launched.success)
     {
         lua_pop(L, 1);
+        empty_userdata_pushed = false;
         if (launched.timed_out)
         {
             return push_fail(L, "spawnPipeline: launch timed out");
@@ -1857,9 +1980,33 @@ int lua_spawn_pipeline(lua_State *L)
         return push_fail(L, launched.error);
     }
 
-    initialize_pipeline_process(pipeline, launched.pipeline);
+    if (!initialize_pipeline_process(pipeline, launched.pipeline))
+    {
+        babet_process::emergency_kill_and_reap(launched.pipeline);
+        lua_pop(L, 1);
+        empty_userdata_pushed = false;
+        return push_fail(L, "spawnPipeline: too many launched stages");
+    }
+    empty_userdata_pushed = false; // le userdata possède désormais les ressources
     lua_pushnil(L);
     return 2;
+    }
+    catch (const std::bad_alloc &)
+    {
+        if (empty_userdata_pushed)
+        {
+            lua_pop(L, 1);
+        }
+        return push_fail(L, "spawnPipeline: out of memory during launch");
+    }
+    catch (...)
+    {
+        if (empty_userdata_pushed)
+        {
+            lua_pop(L, 1);
+        }
+        return push_fail(L, "spawnPipeline: internal launch failure");
+    }
 }
 
 void register_pipeline(lua_State *L)

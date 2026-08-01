@@ -318,11 +318,14 @@ d'une terminaison normale où la commande a quitté sans attendre un enfant lanc
 en arrière-plan. Le PID du leader reste ainsi réservé jusqu'au signal et ne peut
 pas être recyclé vers un processus étranger.
 
-Pour `terminate()`, les leaders terminés restent volontairement non récupérés
-pendant toute la période de grâce : les descendants conservent ce délai pour
-réagir à `SIGTERM`, puis le groupe reçoit `SIGKILL` avant la récupération finale.
-Une étape qui crée volontairement une nouvelle session ou un nouveau groupe de
-processus échappe à cette garantie POSIX.
+Pour `terminate()`, tous les membres du groupe reçoivent `SIGTERM` dès le
+début de la période de grâce. Les leaders directs déjà terminés restent
+volontairement non récupérés pendant toute cette période : leur PID, également
+utilisé comme PGID, ne peut ainsi pas être recyclé avant l'éventuel `SIGKILL`
+final envoyé au groupe. Une étape qui crée volontairement une nouvelle session
+ou un nouveau groupe de processus échappe à cette garantie POSIX. Un script qui
+connaît ses processus comme coopératifs peut choisir une grâce plus courte, par
+exemple `pipeline:terminate(0.05)`.
 
 ## `close()`, GC et Lua `<close>`
 
@@ -351,8 +354,20 @@ nettoyage compte.
 ## Erreurs de lancement et réutilisation
 
 Les erreurs de validation, de pipe, de `fork`, de `chdir` ou d'`exec`, ainsi
-qu'un `launch_timeout`, renvoient `nil, err`. Si une étape échoue pendant le lancement, toutes celles déjà créées
-sont arrêtées et récupérées ; aucun objet partiellement valide n'est exposé.
+qu'un `launch_timeout`, renvoient `nil, err`. Si une étape échoue pendant le
+lancement, toutes celles déjà créées sont arrêtées et récupérées ; aucun objet
+partiellement valide n'est exposé. Le lanceur applique lui-même la limite
+publique de 32 étapes, indépendamment de la validation effectuée par le binding
+Lua.
+
+Après le premier `fork()`, puis pendant la capture synchrone de `pipeline()`,
+Babet conserve un propriétaire de secours pour les descripteurs et les enfants
+directs. Si une exception C++ interne survient, le nettoyage d'urgence ferme les
+flux, envoie immédiatement `SIGKILL` uniquement aux groupes dont le leader n'a
+pas encore été récupéré, puis tente une récupération bornée. La période de
+grâce de `terminate()` n'est pas utilisée pendant un déroulement de pile. Pour
+`spawnPipeline()`, les ressources ne sont transférées au userdata qu'après un
+lancement entièrement réussi.
 
 Les erreurs non destructives `"timeout"` et `"interrupted"` autorisent un
 nouvel appel. `"closed"` signifie que le flux ou l'objet concerné ne peut plus

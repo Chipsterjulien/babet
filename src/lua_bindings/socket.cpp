@@ -8,7 +8,9 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <mutex>
+#include <new>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -79,23 +81,27 @@ namespace
         return lua_tointeger(L, idx);
     }
 
-    // Pousse un nouveau userdata Sock initialisé, métatable posée.
-    // CORRECTIF (placement new) : Sock contient maintenant un
-    // std::string (recv_pending) dont le constructeur doit être
-    // appelé explicitement, lua_newuserdata ne faisant qu'un malloc.
-    // Le destructeur est appelé symétriquement dans sock_gc.
-    Sock *push_new_sock(lua_State *L, int fd, bool listening)
+    // Crée le propriétaire Lua AVANT d'acquérir un FD ou un SSL*.
+    // lua_newuserdata peut faire un longjmp en cas d'OOM : aucune garde
+    // C++ ne survivrait à ce saut. Un userdata vide rend donc cette
+    // frontière sûre ; les ressources sont attachées seulement ensuite.
+    Sock *push_empty_sock(lua_State *L)
     {
         void *raw = lua_newuserdata(L, sizeof(Sock));
         Sock *s = new (raw) Sock(); // placement new : init du std::string
-        s->fd = fd;
-        s->listening = listening;
+        s->fd = -1;
+        s->listening = false;
         s->timeout_ms = 0;
-        s->ssl = nullptr; // TCP brut par défaut, TLS posé après par connect_tls/starttls
-        // recv_pending : déjà initialisé à "" par le constructeur par défaut.
+        s->ssl = nullptr;
         luaL_getmetatable(L, SOCK_META);
         lua_setmetatable(L, -2);
         return s;
+    }
+
+    void attach_plain_sock(Sock *s, int fd, bool listening) noexcept
+    {
+        s->fd = fd;
+        s->listening = listening;
     }
 
     // Helpers d'erreur format-friendly.
@@ -107,6 +113,31 @@ namespace
         msg += ": ";
         msg += std::strerror(saved);
         return push_fail(L, msg);
+    }
+
+    // Toute fonction exposée à Lua passe par cette frontière. Lua 5.5
+    // est compilé en C dans Babet : une exception C++ ne doit jamais
+    // traverser une lua_CFunction. Les diagnostics restent littéraux
+    // afin de ne pas réallouer dans le handler OOM.
+    template <int (*Fn)(lua_State *)>
+    int socket_lua_boundary(lua_State *L)
+    {
+        try
+        {
+            return Fn(L);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return push_fail(L, "socket: out of memory");
+        }
+        catch (const std::exception &)
+        {
+            return push_fail(L, "socket: internal failure");
+        }
+        catch (...)
+        {
+            return push_fail(L, "socket: unknown internal failure");
+        }
     }
 
     // -----------------------------------------------------------------
@@ -992,6 +1023,99 @@ namespace
         ERR_clear_error();
     }
 
+    void close_sock_resources(Sock *s) noexcept
+    {
+        if (s->ssl != nullptr)
+        {
+            SSL_free(s->ssl);
+            s->ssl = nullptr;
+            ERR_clear_error();
+        }
+        if (s->fd >= 0)
+        {
+            ::close(s->fd);
+            s->fd = -1;
+        }
+        s->listening = false;
+        s->recv_pending.clear();
+    }
+
+    // Possède le SSL temporaire d'un STARTTLS jusqu'à son transfert au
+    // Sock existant. La garde ne protège que des exceptions C++ : aucun
+    // appel lua_* ne doit être ajouté tant qu'elle est armée, car un
+    // longjmp Lua sauterait son destructeur. Les chemins Lua nettoient
+    // explicitement la garde avant de pousser leur diagnostic.
+    class PendingTlsUpgradeGuard
+    {
+    public:
+        PendingTlsUpgradeGuard(Sock *sock, SSL *ssl) noexcept
+            : sock_(sock), ssl_(ssl)
+        {
+        }
+
+        PendingTlsUpgradeGuard(const PendingTlsUpgradeGuard &) = delete;
+        PendingTlsUpgradeGuard &operator=(const PendingTlsUpgradeGuard &) = delete;
+
+        ~PendingTlsUpgradeGuard() noexcept
+        {
+            cleanup();
+        }
+
+        void mark_nonblocking(int original_flags) noexcept
+        {
+            original_flags_ = original_flags;
+            restore_flags_ = true;
+        }
+
+        void mark_handshake_started() noexcept
+        {
+            close_socket_ = true;
+        }
+
+        void cleanup() noexcept
+        {
+            if (ssl_ != nullptr)
+            {
+                SSL_free(ssl_);
+                ssl_ = nullptr;
+                ERR_clear_error();
+            }
+
+            if (close_socket_)
+            {
+                if (sock_->fd >= 0)
+                {
+                    ::close(sock_->fd);
+                    sock_->fd = -1;
+                }
+                sock_->recv_pending.clear();
+            }
+            else if (restore_flags_ && sock_->fd >= 0)
+            {
+                (void)::fcntl(sock_->fd, F_SETFL, original_flags_);
+            }
+
+            restore_flags_ = false;
+            close_socket_ = false;
+        }
+
+        SSL *release() noexcept
+        {
+            SSL *released = ssl_;
+            ssl_ = nullptr;
+            restore_flags_ = false;
+            close_socket_ = false;
+            return released;
+        }
+
+    private:
+        Sock *sock_;
+        SSL *ssl_;
+        int original_flags_ = -1;
+        bool restore_flags_ = false;
+        bool close_socket_ = false;
+    };
+
     // -----------------------------------------------------------------
     // Helpers IO TLS (sous-étape 1.3)
     // -----------------------------------------------------------------
@@ -1826,6 +1950,10 @@ namespace
             return push_fail(L, timeout_error);
         }
 
+        // Créer l'userdata vide avant accept4 : un OOM Lua ne peut alors
+        // jamais abandonner un client_fd qui n'aurait pas de propriétaire.
+        Sock *owner = push_empty_sock(L);
+
         // DEADLINE GLOBALE : accept() bloque jusqu'à arrivée d'un
         // client. Si EINTR au milieu, on reboucle avec le temps
         // restant, jamais infini.
@@ -1858,6 +1986,7 @@ namespace
                                   SOCK_CLOEXEC);
             if (client_fd >= 0)
             {
+                attach_plain_sock(owner, client_fd, false);
                 ensure_cloexec(client_fd); // ceinture + bretelles
                 break;
             }
@@ -1886,7 +2015,6 @@ namespace
             }
             return push_errno_fail(L, "accept");
         }
-        push_new_sock(L, client_fd, false);
         return 1;
     }
 
@@ -2016,7 +2144,7 @@ namespace
     // __gc : filet de sécurité. Si l'utilisateur a oublié :close(),
     // on ferme à la collecte de l'userdata. Pas de fuite de FD ni de SSL.
     // CORRECTIF (placement new) : on appelle aussi explicitement le
-    // destructeur du Sock, car push_new_sock utilise placement new
+    // destructeur du Sock, car push_empty_sock utilise placement new
     // pour initialiser le std::string recv_pending.
     int sock_gc(lua_State *L)
     {
@@ -2128,44 +2256,121 @@ namespace
         // Essaie chaque addrinfo dans l'ordre (IPv4/IPv6 selon DNS).
         int fd = -1;
         int last_errno = 0;
-        for (struct addrinfo *ai = res; ai != nullptr; ai = ai->ai_next)
+        try
         {
-            // SOCK_CLOEXEC dans le type : atomique, jamais hérité par
-            // un fork+exec concurrent (cf. ensure_cloexec).
-            fd = ::socket(ai->ai_family,
-                          ai->ai_socktype | SOCK_CLOEXEC,
-                          ai->ai_protocol);
-            if (fd < 0)
+            for (struct addrinfo *ai = res; ai != nullptr; ai = ai->ai_next)
             {
-                last_errno = errno;
-                continue;
-            }
-            ensure_cloexec(fd); // belt + suspenders
+                // SOCK_CLOEXEC dans le type : atomique, jamais hérité par
+                // un fork+exec concurrent (cf. ensure_cloexec).
+                fd = ::socket(ai->ai_family,
+                              ai->ai_socktype | SOCK_CLOEXEC,
+                              ai->ai_protocol);
+                if (fd < 0)
+                {
+                    last_errno = errno;
+                    continue;
+                }
+                ensure_cloexec(fd); // belt + suspenders
 
-            // Non-bloquant SYSTÉMATIQUE le temps du connect (remis
-            // bloquant en cas de succès). Si fcntl échoue (quasi
-            // impossible), on ne peut pas garantir le pattern : on
-            // abandonne cette adresse plutôt que de risquer un
-            // connect kernel bloquant non maîtrisé.
-            int flags = ::fcntl(fd, F_GETFL, 0);
-            if (flags < 0 ||
-                ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-            {
-                last_errno = errno;
-                ::close(fd);
-                fd = -1;
-                continue;
-            }
+                // Non-bloquant SYSTÉMATIQUE le temps du connect (remis
+                // bloquant en cas de succès). Si fcntl échoue (quasi
+                // impossible), on ne peut pas garantir le pattern : on
+                // abandonne cette adresse plutôt que de risquer un
+                // connect kernel bloquant non maîtrisé.
+                int flags = ::fcntl(fd, F_GETFL, 0);
+                if (flags < 0 ||
+                    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+                {
+                    last_errno = errno;
+                    ::close(fd);
+                    fd = -1;
+                    continue;
+                }
 
-            int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
-            if (rc == 0)
-            {
-                // Connecté direct (loopback typique) : remettre
-                // bloquant. CORRECTIF (revue ChatGPT, ajusté) : si la
-                // restauration échoue (quasi impossible), le socket
-                // resterait silencieusement non-bloquant alors que ses
-                // méthodes supposent le mode bloquant sans timeout —
-                // on préfère abandonner cette adresse proprement.
+                int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
+                if (rc == 0)
+                {
+                    // Connecté direct (loopback typique) : remettre
+                    // bloquant. CORRECTIF (revue ChatGPT, ajusté) : si la
+                    // restauration échoue (quasi impossible), le socket
+                    // resterait silencieusement non-bloquant alors que ses
+                    // méthodes supposent le mode bloquant sans timeout —
+                    // on préfère abandonner cette adresse proprement.
+                    if (::fcntl(fd, F_SETFL, flags) < 0)
+                    {
+                        last_errno = errno;
+                        ::close(fd);
+                        fd = -1;
+                        continue;
+                    }
+                    break;
+                }
+                // CORRECTIF (revue ChatGPT, sémantique CORRIGÉE) : un
+                // EINTR de connect() est traité comme EINPROGRESS, pas
+                // comme une erreur. POSIX : « si connect() est interrompu
+                // par un signal, la connexion est établie de façon
+                // asynchrone » — la suite correcte est d'attendre POLLOUT
+                // (où l'interruption par signal géré est déjà rendue
+                // proprement en "interrupted" via wait_ready_deadline),
+                // PAS de fermer le FD. Sur Linux un connect NON-BLOQUANT
+                // ne rend pas EINTR ; ce traitement est une robustesse
+                // portable. NB : la revue proposait de rendre
+                // "interrupted" ici — c'était incorrect : la tentative
+                // continue en arrière-plan, l'abandonner casserait des
+                // connects légitimes.
+                if (errno != EINPROGRESS && errno != EINTR)
+                {
+                    // Échec immédiat (réseau inaccessible, refus
+                    // synchrone…) : adresse suivante — la deadline
+                    // globale continue de courir.
+                    last_errno = errno;
+                    ::close(fd);
+                    fd = -1;
+                    continue;
+                }
+                // En cours, attendre POLLOUT sous la deadline GLOBALE.
+                int wr = wait_ready_deadline(fd, POLLOUT, deadline);
+                if (wr == WAIT_INTERRUPTED)
+                {
+                    // Phase B signal : on signale via err (le caller
+                    // distingue "interrupted" de "timed out"). On ne
+                    // tente PAS les autres addrinfo : si l'utilisateur
+                    // a demandé l'arrêt, on s'arrête.
+                    err = "interrupted";
+                    ::close(fd);
+                    fd = -1;
+                    break;
+                }
+                if (wr == 0)
+                {
+                    // Deadline globale expirée : inutile d'essayer les
+                    // autres addrinfo, elles n'auraient plus aucun
+                    // budget.
+                    timed_out = true;
+                    ::close(fd);
+                    fd = -1;
+                    break;
+                }
+                if (wr < 0)
+                {
+                    last_errno = errno;
+                    ::close(fd);
+                    fd = -1;
+                    continue;
+                }
+                // Récupérer le statut réel de connect via SO_ERROR
+                int soerr = 0;
+                socklen_t slen = sizeof(soerr);
+                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0 || soerr != 0)
+                {
+                    last_errno = (soerr != 0) ? soerr : errno;
+                    ::close(fd);
+                    fd = -1;
+                    continue;
+                }
+                // Succès : remettre bloquant. Même garde que le connect
+                // direct ci-dessus : une restauration échouée rendrait un
+                // socket silencieusement non-bloquant.
                 if (::fcntl(fd, F_SETFL, flags) < 0)
                 {
                     last_errno = errno;
@@ -2175,80 +2380,15 @@ namespace
                 }
                 break;
             }
-            // CORRECTIF (revue ChatGPT, sémantique CORRIGÉE) : un
-            // EINTR de connect() est traité comme EINPROGRESS, pas
-            // comme une erreur. POSIX : « si connect() est interrompu
-            // par un signal, la connexion est établie de façon
-            // asynchrone » — la suite correcte est d'attendre POLLOUT
-            // (où l'interruption par signal géré est déjà rendue
-            // proprement en "interrupted" via wait_ready_deadline),
-            // PAS de fermer le FD. Sur Linux un connect NON-BLOQUANT
-            // ne rend pas EINTR ; ce traitement est une robustesse
-            // portable. NB : la revue proposait de rendre
-            // "interrupted" ici — c'était incorrect : la tentative
-            // continue en arrière-plan, l'abandonner casserait des
-            // connects légitimes.
-            if (errno != EINPROGRESS && errno != EINTR)
+        }
+        catch (...)
+        {
+            if (fd >= 0)
             {
-                // Échec immédiat (réseau inaccessible, refus
-                // synchrone…) : adresse suivante — la deadline
-                // globale continue de courir.
-                last_errno = errno;
                 ::close(fd);
-                fd = -1;
-                continue;
             }
-            // En cours, attendre POLLOUT sous la deadline GLOBALE.
-            int wr = wait_ready_deadline(fd, POLLOUT, deadline);
-            if (wr == WAIT_INTERRUPTED)
-            {
-                // Phase B signal : on signale via err (le caller
-                // distingue "interrupted" de "timed out"). On ne
-                // tente PAS les autres addrinfo : si l'utilisateur
-                // a demandé l'arrêt, on s'arrête.
-                err = "interrupted";
-                ::close(fd);
-                fd = -1;
-                break;
-            }
-            if (wr == 0)
-            {
-                // Deadline globale expirée : inutile d'essayer les
-                // autres addrinfo, elles n'auraient plus aucun
-                // budget.
-                timed_out = true;
-                ::close(fd);
-                fd = -1;
-                break;
-            }
-            if (wr < 0)
-            {
-                last_errno = errno;
-                ::close(fd);
-                fd = -1;
-                continue;
-            }
-            // Récupérer le statut réel de connect via SO_ERROR
-            int soerr = 0;
-            socklen_t slen = sizeof(soerr);
-            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &slen) < 0 || soerr != 0)
-            {
-                last_errno = (soerr != 0) ? soerr : errno;
-                ::close(fd);
-                fd = -1;
-                continue;
-            }
-            // Succès : remettre bloquant. Même garde que le connect
-            // direct ci-dessus : une restauration échouée rendrait un
-            // socket silencieusement non-bloquant.
-            if (::fcntl(fd, F_SETFL, flags) < 0)
-            {
-                last_errno = errno;
-                ::close(fd);
-                fd = -1;
-                continue;
-            }
-            break;
+            ::freeaddrinfo(res);
+            throw;
         }
         ::freeaddrinfo(res);
 
@@ -2300,6 +2440,9 @@ int lua_socket_connect(lua_State *L)
         return push_fail(L, err);
     }
 
+    // lua_newuserdata peut longjmp : créer le propriétaire avant le FD.
+    Sock *owner = push_empty_sock(L);
+
     bool timed_out = false;
     int fd = tcp_connect_blocking(host.c_str(), port, timeout_ms, err, timed_out);
     if (fd < 0)
@@ -2316,7 +2459,7 @@ int lua_socket_connect(lua_State *L)
         }
         return push_fail(L, err);
     }
-    push_new_sock(L, fd, false);
+    attach_plain_sock(owner, fd, false);
     return 1;
 }
 
@@ -2367,106 +2510,89 @@ int lua_socket_connect_tls(lua_State *L)
         return push_fail(L, err);
     }
 
-    // Init OpenSSL CTX en lazy au premier appel.
     if (!init_openssl_ctx(err))
     {
         return push_fail(L, err);
     }
 
-    // Phase 1 : résolution DNS bloquante (hors budget), puis TCP connect.
-    // La deadline créée juste APRÈS le DNS est partagée avec le handshake
-    // TLS : timeout borne donc TCP + handshake avec un budget unique.
-    bool timed_out = false;
-    Deadline operation_deadline = NO_DEADLINE;
-    int fd = tcp_connect_blocking(host.c_str(), port, opts.timeout_ms,
-                                  err, timed_out, &operation_deadline);
-    if (fd < 0)
-    {
-        if (timed_out)
-        {
-            return push_fail(L, "timeout");
-        }
-        if (err == "interrupted")
-        {
-            // Phase B signal : voir sock_connect.
-            signal_dispatch_pending(L);
-        }
-        return push_fail(L, err);
-    }
+    // lua_newuserdata peut longjmp. Le propriétaire Lua est donc créé
+    // avant le premier FD et reste vide tant que la connexion échoue.
+    Sock *owner = push_empty_sock(L);
 
-    // Phase 2 : créer SSL et l'attacher au fd.
-    SSL *ssl = new_ssl_for_options(opts, err);
-    if (ssl == nullptr)
+    try
     {
-        ::close(fd);
-        return push_fail(L, err);
-    }
-    if (SSL_set_fd(ssl, fd) != 1)
-    {
-        SSL_free(ssl);
-        ::close(fd);
-        return push_fail(L, format_tls_error("SSL_set_fd failed"));
-    }
-
-    // Phase 3 : appliquer les options (verify, hostname, CA, version).
-    if (!apply_tls_options(ssl, opts, host.c_str(), err))
-    {
-        SSL_free(ssl);
-        ::close(fd);
-        return push_fail(L, err);
-    }
-
-    // Phase 4 : passer en non-bloquant pour le handshake, et GARDER
-    // le FD en non-bloquant après le succès. C'est crucial pour que
-    // les opérations TLS suivantes (SSL_read/SSL_write via les
-    // méthodes send/recv) respectent réellement la deadline globale :
-    // sans ça, poll() pouvait dire "prêt" puis SSL_read/SSL_write
-    // bloquait dans le noyau au-delà du timeout. Avec O_NONBLOCK
-    // permanent + la boucle WANT_READ/WANT_WRITE dans tls_send_some/
-    // tls_recv_some, la deadline est garantie.
-    //
-    // Pattern standard côté curl/nginx/etc. : une fois en TLS, on
-    // pilote tout via SSL_get_error et poll, le FD ne sert plus
-    // jamais directement à l'utilisateur.
-    //
-    // En cas d'ÉCHEC handshake, on remet bloquant avant de fermer
-    // (cohérence : le FD reste bloquant si jamais quelqu'un le voyait
-    // dans un état intermédiaire avant ::close).
-    // CORRECTIF (revue ChatGPT post-audit v21) : si fcntl échoue
-    // (quasi impossible), le handshake tournerait sur un FD BLOQUANT
-    // et la deadline ne serait plus garantie — on échoue franchement
-    // plutôt que de dégrader silencieusement le contrat.
-    int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
-    {
-        int e = errno;
-        SSL_free(ssl);
-        ::close(fd);
-        return push_fail(L, std::string("socket: connect_tls: fcntl: ") +
-                                std::strerror(e));
-    }
-    bool hs_ok = tls_handshake(ssl, fd, operation_deadline, err);
-    if (!hs_ok)
-    {
-        if (flags >= 0)
+        // Aucun appel lua_* ne doit être ajouté dans cette région tant que
+        // owner détient un FD ou un SSL* : un longjmp sauterait le catch.
+        bool timed_out = false;
+        Deadline operation_deadline = NO_DEADLINE;
+        int fd = tcp_connect_blocking(host.c_str(), port, opts.timeout_ms,
+                                      err, timed_out, &operation_deadline);
+        if (fd < 0)
         {
-            ::fcntl(fd, F_SETFL, flags); // remettre bloquant avant close
+            if (timed_out)
+            {
+                return push_fail(L, "timeout");
+            }
+            if (err == "interrupted")
+            {
+                signal_dispatch_pending(L);
+            }
+            return push_fail(L, err);
         }
-        SSL_free(ssl);
-        ::close(fd);
-        if (err == "interrupted")
-        {
-            signal_dispatch_pending(L);
-        }
-        return push_fail(L, err);
-    }
-    // Succès : NE PAS remettre bloquant. Le FD reste O_NONBLOCK pour
-    // toute la vie du socket TLS (cf. note ci-dessus).
+        attach_plain_sock(owner, fd, false);
 
-    // Succès : créer userdata Sock avec ssl attaché.
-    Sock *s = push_new_sock(L, fd, false);
-    s->ssl = ssl;
-    return 1;
+        SSL *ssl = new_ssl_for_options(opts, err);
+        if (ssl == nullptr)
+        {
+            close_sock_resources(owner);
+            return push_fail(L, err);
+        }
+        owner->ssl = ssl;
+
+        if (SSL_set_fd(ssl, fd) != 1)
+        {
+            std::string detail = format_tls_error("SSL_set_fd failed");
+            close_sock_resources(owner);
+            return push_fail(L, detail);
+        }
+
+        if (!apply_tls_options(ssl, opts, host.c_str(), err))
+        {
+            close_sock_resources(owner);
+            return push_fail(L, err);
+        }
+
+        int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        {
+            int e = errno;
+            std::string detail = "socket: connect_tls: fcntl: ";
+            detail += std::strerror(e);
+            close_sock_resources(owner);
+            return push_fail(L, detail);
+        }
+
+        bool hs_ok = tls_handshake(ssl, fd, operation_deadline, err);
+        if (!hs_ok)
+        {
+            (void)::fcntl(fd, F_SETFL, flags);
+            const bool interrupted = (err == "interrupted");
+            close_sock_resources(owner);
+            if (interrupted)
+            {
+                signal_dispatch_pending(L);
+            }
+            return push_fail(L, err);
+        }
+
+        // Succès : le FD reste O_NONBLOCK et owner possède déjà fd + ssl.
+        return 1;
+    }
+    catch (...)
+    {
+        close_sock_resources(owner);
+        throw;
+    }
 }
 
 // Méthode s:starttls([opts]) -> (true, nil) | (nil, err)
@@ -2521,14 +2647,6 @@ int sock_starttls(lua_State *L)
         return push_fail(L, err);
     }
 
-    // CORRECTIF (post-revue ChatGPT) : "verify strict par défaut"
-    // (TLS-C) signifie chaîne + hostname. starttls n'a pas de host
-    // par défaut comme connect_tls (qui utilise son argument host).
-    // Donc si verify=true et hostname vide, le hostname check serait
-    // SAUTÉ silencieusement — c'est une demi-mesure de sécurité qui
-    // contredit "strict par défaut". On REFUSE explicitement, avec un
-    // message qui guide vers les deux choix corrects : passer hostname,
-    // ou opt-out explicite via verify=false.
     if (opts.verify && opts.hostname.empty())
     {
         return push_fail(L,
@@ -2546,54 +2664,43 @@ int sock_starttls(lua_State *L)
     {
         return push_fail(L, err);
     }
+    PendingTlsUpgradeGuard guard(s, ssl);
+
+    // Aucun appel lua_* tant que la garde est armée. Les chemins d'erreur
+    // appellent guard.cleanup() avant de pousser leur diagnostic.
     if (SSL_set_fd(ssl, s->fd) != 1)
     {
-        SSL_free(ssl);
-        return push_fail(L, format_tls_error("SSL_set_fd failed"));
+        std::string detail = format_tls_error("SSL_set_fd failed");
+        guard.cleanup();
+        return push_fail(L, detail);
     }
 
-    // host_default = nullptr ici : starttls n'a pas reçu de host. Si
-    // opts.hostname est vide, on est en mode verify=false (vérifié
-    // au-dessus), donc le hostname check ne s'applique pas. Sinon
-    // opts.hostname est passé à apply_tls_options qui posera
-    // SSL_set1_host + SNI dessus.
     if (!apply_tls_options(ssl, opts, nullptr, err))
     {
-        SSL_free(ssl);
+        guard.cleanup();
         return push_fail(L, err);
     }
 
-    // CORRECTIF (post-revue ChatGPT, parallèle de connect_tls) :
-    // garder le FD en O_NONBLOCK après le handshake pour que les
-    // SSL_read/SSL_write ultérieurs respectent réellement la deadline
-    // globale. cf. note détaillée dans connect_tls.
-    // CORRECTIF (revue ChatGPT post-audit v21) : si fcntl échoue ici
-    // (quasi impossible), on n'a RIEN modifié — le socket reste
-    // bloquant et utilisable en clair, on échoue proprement sans le
-    // toucher.
     int flags = ::fcntl(s->fd, F_GETFL, 0);
     if (flags < 0 || ::fcntl(s->fd, F_SETFL, flags | O_NONBLOCK) < 0)
     {
         int e = errno;
-        SSL_free(ssl);
-        return push_fail(L, std::string("socket: starttls: fcntl: ") +
-                                std::strerror(e));
+        std::string detail = "socket: starttls: fcntl: ";
+        detail += std::strerror(e);
+        guard.cleanup();
+        return push_fail(L, detail);
     }
-    // Le timeout de CET appel starttls prime sur le timeout par défaut
-    // du socket. opts.timeout absent/0 signifie handshake sans limite.
+    guard.mark_nonblocking(flags);
+
+    // À partir du premier SSL_connect, le flux clair n'est plus fiable.
+    // Une exception C++ ou un échec ordinaire ferme donc le socket.
+    guard.mark_handshake_started();
     bool hs_ok = tls_handshake(ssl, s->fd,
                                make_deadline(opts.timeout_ms), err);
     if (!hs_ok)
     {
-        // Fail-closed : SSL_connect peut déjà avoir envoyé un ClientHello
-        // et consommé des octets du peer. Le flux clair n'est donc plus
-        // réutilisable de manière fiable, même si l'erreur est un timeout
-        // ou une interruption. Fermer est la seule sortie sûre.
         const bool interrupted = (err == "interrupted");
-        SSL_free(ssl);
-        ::close(s->fd);
-        s->fd = -1;
-        s->recv_pending.clear();
+        guard.cleanup();
         if (interrupted)
         {
             signal_dispatch_pending(L);
@@ -2601,13 +2708,8 @@ int sock_starttls(lua_State *L)
         }
         return push_fail(L, err);
     }
-    // Succès : NE PAS remettre bloquant. FD reste O_NONBLOCK pour
-    // toute la vie du socket TLS.
 
-    // Succès : attacher le ssl au Sock existant (transformation
-    // en place). À partir de maintenant, send/recv/... iront via
-    // SSL_read/SSL_write (sous-étape 1.3).
-    s->ssl = ssl;
+    s->ssl = guard.release();
     return push_ok(L);
 }
 
@@ -2651,6 +2753,9 @@ int lua_socket_listen(lua_State *L)
                          "socket: listen: backlog out of range");
     }
     const int backlog = static_cast<int>(requested_backlog);
+
+    // Comme connect()/accept(), listen() crée d'abord l'userdata vide.
+    Sock *owner = push_empty_sock(L);
 
     char port_str[16];
     std::snprintf(port_str, sizeof(port_str), "%lld",
@@ -2726,8 +2831,25 @@ int lua_socket_listen(lua_State *L)
         msg += std::strerror(last_errno);
         return push_fail(L, msg);
     }
-    push_new_sock(L, fd, true);
+    attach_plain_sock(owner, fd, true);
     return 1;
+}
+
+namespace
+{
+    int socket_gc_boundary(lua_State *L) noexcept
+    {
+        try
+        {
+            return sock_gc(L);
+        }
+        catch (...)
+        {
+            // Un finalizer ne doit jamais propager une exception ni tenter
+            // de produire un diagnostic Lua pendant une collecte mémoire.
+            return 0;
+        }
+    }
 }
 
 void register_socket(lua_State *L)
@@ -2741,32 +2863,32 @@ void register_socket(lua_State *L)
         lua_setfield(L, -2, "__index");
 
         // __gc : filet anti-fuite (décision SOCK-3)
-        lua_pushcfunction(L, sock_gc);
+        lua_pushcfunction(L, socket_gc_boundary);
         lua_setfield(L, -2, "__gc");
 
-        lua_pushcfunction(L, sock_tostring);
+        lua_pushcfunction(L, socket_lua_boundary<sock_tostring>);
         lua_setfield(L, -2, "__tostring");
 
-        lua_pushcfunction(L, sock_send);
+        lua_pushcfunction(L, socket_lua_boundary<sock_send>);
         lua_setfield(L, -2, "send");
-        lua_pushcfunction(L, sock_recv);
+        lua_pushcfunction(L, socket_lua_boundary<sock_recv>);
         lua_setfield(L, -2, "recv");
-        lua_pushcfunction(L, sock_recv_line);
+        lua_pushcfunction(L, socket_lua_boundary<sock_recv_line>);
         lua_setfield(L, -2, "recv_line");
-        lua_pushcfunction(L, sock_recv_all);
+        lua_pushcfunction(L, socket_lua_boundary<sock_recv_all>);
         lua_setfield(L, -2, "recv_all");
-        lua_pushcfunction(L, sock_accept);
+        lua_pushcfunction(L, socket_lua_boundary<sock_accept>);
         lua_setfield(L, -2, "accept");
-        lua_pushcfunction(L, sock_close);
+        lua_pushcfunction(L, socket_lua_boundary<sock_close>);
         lua_setfield(L, -2, "close");
-        lua_pushcfunction(L, sock_set_timeout);
+        lua_pushcfunction(L, socket_lua_boundary<sock_set_timeout>);
         lua_setfield(L, -2, "set_timeout");
-        lua_pushcfunction(L, sock_peer);
+        lua_pushcfunction(L, socket_lua_boundary<sock_peer>);
         lua_setfield(L, -2, "peer");
-        lua_pushcfunction(L, sock_sockname);
+        lua_pushcfunction(L, socket_lua_boundary<sock_sockname>);
         lua_setfield(L, -2, "sockname");
         // TLS (Chantier 7) : starttls élève un socket TCP en TLS sur place.
-        lua_pushcfunction(L, sock_starttls);
+        lua_pushcfunction(L, socket_lua_boundary<sock_starttls>);
         lua_setfield(L, -2, "starttls");
     }
     lua_pop(L, 1); // dépile la métatable, la table babet redevient au sommet
@@ -2775,13 +2897,13 @@ void register_socket(lua_State *L)
     //    Précondition : table babet au sommet (-1).
     lua_newtable(L);
 
-    lua_pushcfunction(L, lua_socket_connect);
+    lua_pushcfunction(L, socket_lua_boundary<lua_socket_connect>);
     lua_setfield(L, -2, "connect");
-    lua_pushcfunction(L, lua_socket_listen);
+    lua_pushcfunction(L, socket_lua_boundary<lua_socket_listen>);
     lua_setfield(L, -2, "listen");
     // TLS (Chantier 7) : connect_tls = variante TLS de connect.
     // Cohérent avec TLS-1 (pas de sous-module séparé).
-    lua_pushcfunction(L, lua_socket_connect_tls);
+    lua_pushcfunction(L, socket_lua_boundary<lua_socket_connect_tls>);
     lua_setfield(L, -2, "connect_tls");
 
     lua_setfield(L, -2, "socket");

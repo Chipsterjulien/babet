@@ -1,4 +1,5 @@
 #include "inotify.hpp"
+#include "inotify_buffer.hpp"
 #include "lua_utils.hpp"
 #include "signal.hpp"
 
@@ -499,15 +500,33 @@ namespace
         // variable (header fixe + name[len]).
         lua_newtable(L); // array des événements
         lua_Integer idx = 1;
-        size_t off = 0;
-        while (off + sizeof(struct inotify_event) <= static_cast<size_t>(n))
+        std::size_t off = 0;
+        const std::size_t buffer_size = static_cast<std::size_t>(n);
+        while (true)
         {
-            const struct inotify_event *ev =
-                reinterpret_cast<const struct inotify_event *>(buf + off);
+            babet::inotify_detail::RecordView view;
+            const auto status = babet::inotify_detail::next_record(
+                buf, buffer_size, off, view);
+            if (status ==
+                babet::inotify_detail::RecordStatus::truncated_header)
+            {
+                return push_fail(
+                    L, "inotify: malformed event buffer: truncated header");
+            }
+            if (status ==
+                babet::inotify_detail::RecordStatus::truncated_name)
+            {
+                return push_fail(
+                    L, "inotify: malformed event buffer: truncated name");
+            }
+            if (status == babet::inotify_detail::RecordStatus::end)
+            {
+                break;
+            }
 
             lua_newtable(L); // l'événement
 
-            if (ev->mask & IN_Q_OVERFLOW)
+            if (view.mask & IN_Q_OVERFLOW)
             {
                 // Débordement de queue : événements perdus. wd == -1,
                 // pas de nom. On le remonte EXPLICITEMENT (INOT-D).
@@ -526,14 +545,15 @@ namespace
             }
             else
             {
-                lua_pushinteger(L, ev->wd);
+                lua_pushinteger(L, view.wd);
                 lua_setfield(L, -2, "wd");
 
-                if (ev->len > 0)
+                if (view.len > 0)
                 {
                     // name est NUL-terminé et padné jusqu'à len.
-                    size_t nl = ::strnlen(ev->name, ev->len);
-                    lua_pushlstring(L, ev->name, nl);
+                    const std::size_t nl =
+                        ::strnlen(view.name, static_cast<std::size_t>(view.len));
+                    lua_pushlstring(L, view.name, nl);
                 }
                 else
                 {
@@ -542,20 +562,20 @@ namespace
                 lua_setfield(L, -2, "name");
 
                 lua_newtable(L);
-                decode_flags_into_table(L, ev->mask);
+                decode_flags_into_table(L, view.mask);
                 lua_setfield(L, -2, "events");
 
-                lua_pushboolean(L, (ev->mask & IN_ISDIR) ? 1 : 0);
+                lua_pushboolean(L, (view.mask & IN_ISDIR) ? 1 : 0);
                 lua_setfield(L, -2, "is_dir");
 
                 lua_pushinteger(L,
-                                static_cast<lua_Integer>(ev->cookie));
+                                static_cast<lua_Integer>(view.cookie));
                 lua_setfield(L, -2, "cookie");
             }
 
             lua_rawseti(L, -2, idx); // array[idx] = event
             ++idx;
-            off += sizeof(struct inotify_event) + ev->len;
+            off += view.record_size;
         }
 
         lua_pushnil(L); // (events, nil)

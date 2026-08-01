@@ -1,4 +1,4 @@
-Babet 2.9.0 roadmap
+Babet 2.9.x roadmap
 ====================
 
 [x] Lot A: add configurable babet.spawn() redirections.
@@ -12,6 +12,31 @@ Babet 2.9.0 roadmap
 [x] Lot E: add bounded direct worker-to-worker channels after lifecycle rules
     and shared transport primitives are stable.
 [x] Perform the final code/tests/docs/PDF/build/release audit.
+
+Babet 2.9.1 corrective release
+------------------------------
+
+[x] Fix chunked and connection-close HTTP response framing with cpp-httplib
+    0.45.0 while preserving Babet-owned body/file limits.
+[x] Add exact-boundary, fragmented, truncated, download-cleanup and
+    close-delimited regression tests.
+[x] Add independent blocking local smoke tests for both response receivers:
+    HTTPS for chunked framing and HTTP for connection-close framing.
+
+Babet 2.9.2 hardening release
+-----------------------------
+
+[x] Harden worker serialization with node and byte budgets, exact integer
+    fidelity and exception-safe Lua boundaries.
+[x] Harden spawn/exec/pipeline/spawnPipeline cleanup against C++ exceptions and
+    post-fork allocation failures.
+[x] Harden SQLite transaction recovery across callback, COMMIT and ROLLBACK
+    failures, with reusable connection-state tests.
+[x] Harden HTTP, socket and TLS exception boundaries and verify that
+    Authorization is stripped on cross-origin redirects.
+[x] Extend deterministic Zstandard, inotify, worker-budget and network
+    regression coverage; validate the exact release tree under ASan + UBSan and
+    the final normal build.
 
 Deferred ideas retained in notes.md:
 - bounded in-memory archive.read() if a concrete use case justifies it;
