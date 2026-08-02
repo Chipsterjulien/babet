@@ -7642,6 +7642,8 @@ do
     -- ----- contract de base ------------------------------------------
     ok("babet.sqlite is a table", type(DB) == "table")
     ok("open is a function", type(DB.open) == "function")
+    ok("sqlite.NULL is an exported lightuserdata sentinel",
+        type(DB.NULL) == "userdata" and rawequal(DB.NULL, DB.NULL))
 
     -- ----- validation des arguments ----------------------------------
     -- path manquant
@@ -7662,6 +7664,30 @@ do
         ok("open(':memory:', 'bad') raises (opts not table)", not pok)
         ok("  message mentions 'table'",
             type(perr) == "string" and perr:find("table"))
+    end
+
+    ok_raises("open rejects excess arguments",
+        function() return DB.open(":memory:", nil, true) end,
+        "one or two arguments")
+
+    ok_raises("open rejects unknown options",
+        function() return DB.open(":memory:", { typo = true }) end,
+        "unknown option")
+
+    ok_raises("open rejects non-string option keys",
+        function() return DB.open(":memory:", { [1] = true }) end,
+        "option keys must be strings")
+
+    do
+        local hostile_opts = setmetatable({}, {
+            __index = function()
+                error("sqlite.open must not invoke opts.__index")
+            end,
+        })
+        local db, err = DB.open(":memory:", hostile_opts)
+        ok("open options use raw table entries, not __index",
+            db ~= nil, tostring(err))
+        if db then db:close() end
     end
 
     -- opts.wal mauvais type
@@ -7715,6 +7741,16 @@ do
         ok("db:exec(INSERT) -> true", ok2 == true)
         ok("  no error", err3 == nil)
 
+        ok_raises("db:exec rejects excess arguments",
+            function() return db:exec("SELECT 1", nil, true) end,
+            "two or three arguments")
+        ok_raises("db:query rejects excess arguments",
+            function() return db:query("SELECT 1", nil, true) end,
+            "two or three arguments")
+        ok_raises("db:close rejects excess arguments",
+            function() return db:close(true) end,
+            "expected only self")
+
         -- exec multi-statements (séparés par ';')
         local ok3 = db:exec("INSERT INTO t VALUES (2, 'a'); INSERT INTO t VALUES (3, 'b');")
         ok("db:exec(2 INSERTs séparés par ;) -> true", ok3 == true)
@@ -7739,6 +7775,21 @@ do
             ok5 == nil and type(err5) == "string")
         ok("  err mentions 'closed'",
             type(err5) == "string" and err5:find("closed"))
+
+        local closed_prepare, closed_prepare_err = db:prepare("SELECT 1")
+        ok("db:prepare() after close -> (nil, err)",
+            closed_prepare == nil and type(closed_prepare_err) == "string"
+            and closed_prepare_err:find("closed", 1, true) ~= nil)
+
+        local closed_tx, closed_tx_err = db:transaction(function() end)
+        ok("db:transaction() after close -> (nil, err)",
+            closed_tx == nil and type(closed_tx_err) == "string"
+            and closed_tx_err:find("closed", 1, true) ~= nil)
+
+        local closed_state, closed_state_err = db:in_transaction()
+        ok("db:in_transaction() after close -> (nil, err)",
+            closed_state == nil and type(closed_state_err) == "string"
+            and closed_state_err:find("closed", 1, true) ~= nil)
     end
 
     -- ----- ouverture avec opts ---------------------------------------
@@ -8083,6 +8134,134 @@ do
         ok("bind thread (coroutine) -> raises", not pok4)
         ok("  message mentions 'thread'",
             type(perr4) == "string" and perr4:find("thread"))
+
+        db:close()
+    end
+
+    -- ----- audit intégral des nombres et de la table params ---------
+    do
+        local db = DB.open(":memory:")
+        assert(db:exec("CREATE TABLE t(a, b, c)"))
+
+        assert(db:exec("INSERT INTO t VALUES(?, ?, ?)",
+            { math.mininteger, 0, math.maxinteger }))
+        local row = db:query("SELECT a, c FROM t")()
+        ok("bind signed 64-bit integers round-trips exactly",
+            row.a == math.mininteger and row.c == math.maxinteger)
+
+        local finite_ok = true
+        local finite_errors = {}
+        for i, value in ipairs({ 0 / 0, math.huge, -math.huge }) do
+            local pok, perr = pcall(db.exec, db,
+                "INSERT INTO t(a) VALUES(?)", { value })
+            finite_ok = finite_ok and not pok
+                and type(perr) == "string"
+                and perr:find("finite", 1, true) ~= nil
+            finite_errors[i] = tostring(perr)
+        end
+        ok("bind rejects NaN and infinities explicitly", finite_ok,
+            table.concat(finite_errors, " | "))
+
+        local false_key_ok, false_key_err = pcall(db.exec, db,
+            "INSERT INTO t(a) VALUES(?)", { [1] = 1, [false] = 2 })
+        local table_key = {}
+        local table_key_ok, table_key_err = pcall(db.exec, db,
+            "INSERT INTO t(a) VALUES(?)", { [1] = 1, [table_key] = 2 })
+        ok("params table rejects unsupported key types",
+            not false_key_ok and not table_key_ok
+            and tostring(false_key_err):find("key", 1, true) ~= nil
+            and tostring(table_key_err):find("key", 1, true) ~= nil,
+            tostring(false_key_err) .. " | " .. tostring(table_key_err))
+
+        local inherited = setmetatable({}, { __index = { value = 7 } })
+        ok_raises("named binds use raw table entries, not __index",
+            function()
+                return db:exec(
+                    "INSERT INTO t(a) VALUES(:value)", inherited)
+            end,
+            "missing param")
+
+        ok_raises("numbered ?NNN placeholders are outside the contract",
+            function()
+                return db:exec("INSERT INTO t(a) VALUES(?2)", { 1, 2 })
+            end,
+            "?NNN")
+
+        db:close()
+    end
+
+    -- ----- babet.sqlite.NULL : bind explicite et diagnostics --------
+    do
+        local db = DB.open(":memory:")
+        assert(db:exec("CREATE TABLE nullable(a, b, c)"))
+
+        local named_ok, named_err = db:exec(
+            "INSERT INTO nullable(a, b) VALUES(:a, :b)",
+            { a = "named", b = DB.NULL })
+        local named_row = db:query(
+            "SELECT a, b, typeof(b) AS b_type FROM nullable WHERE a = ?",
+            { "named" })()
+        ok("sqlite.NULL binds a named SQL NULL",
+            named_ok == true and named_err == nil
+            and named_row.a == "named" and named_row.b == nil
+            and named_row.b_type == "null",
+            "err=" .. tostring(named_err))
+
+        local positional_ok, positional_err = db:exec(
+            "INSERT INTO nullable VALUES(?, ?, ?)",
+            { "left", DB.NULL, "right" })
+        local positional_row = db:query([[
+            SELECT a, b, c, typeof(b) AS b_type
+            FROM nullable WHERE a = 'left'
+        ]])()
+        ok("sqlite.NULL fills a positional hole without weakening strict binds",
+            positional_ok == true and positional_err == nil
+            and positional_row.a == "left" and positional_row.b == nil
+            and positional_row.c == "right"
+            and positional_row.b_type == "null",
+            "err=" .. tostring(positional_err))
+
+        ok_raises("a real missing positional index remains rejected",
+            function()
+                return db:exec("INSERT INTO nullable VALUES(?, ?, ?)",
+                    { [1] = "left", [3] = "right" })
+            end,
+            "missing positional param at index 2")
+
+        local upvalue = 1
+        local function holder() return upvalue end
+        local foreign_lightuserdata = debug.upvalueid(holder, 1)
+        ok_raises("unknown lightuserdata remains rejected as a bind value",
+            function()
+                return db:exec("INSERT INTO nullable(a) VALUES(?)",
+                    { foreign_lightuserdata })
+            end,
+            "light userdata")
+
+        local encoded, encode_err = babet.json.encode(DB.NULL)
+        ok("json rejects sqlite.NULL with an explicit diagnostic",
+            encoded == nil and type(encode_err) == "string"
+            and encode_err:find("babet.sqlite.NULL", 1, true) ~= nil,
+            tostring(encode_err))
+
+        assert(db:exec("DELETE FROM nullable"))
+        assert(db:exec("INSERT INTO nullable(a, b) VALUES(?, ?)",
+            { true, false }))
+        assert(db:exec("INSERT INTO nullable(a, b) VALUES(?, ?)",
+            { DB.NULL, DB.NULL }))
+        local bool_row = db:query([[
+            SELECT a, b, typeof(a) AS a_type, typeof(b) AS b_type
+            FROM nullable ORDER BY rowid LIMIT 1
+        ]])()
+        local null_row = db:query([[
+            SELECT a, b, typeof(a) AS a_type, typeof(b) AS b_type
+            FROM nullable ORDER BY rowid DESC LIMIT 1
+        ]])()
+        ok("boolean and NULL readback keeps the documented asymmetric mapping",
+            bool_row.a == 1 and bool_row.b == 0
+            and bool_row.a_type == "integer" and bool_row.b_type == "integer"
+            and null_row.a == nil and null_row.b == nil
+            and null_row.a_type == "null" and null_row.b_type == "null")
 
         db:close()
     end
@@ -8482,6 +8661,9 @@ do
         ok("1er iter() -> row", first ~= nil and first.id == 1)
 
         iter:close()
+        ok_raises("iterator close rejects excess arguments",
+            function() return iter:close(true) end,
+            "expected only self")
         -- Après close, iter() doit retourner nil (fin) au lieu de planter
         local after_close = iter()
         ok("iter() after close -> nil (terminé)", after_close == nil)
@@ -8749,6 +8931,125 @@ do
             and tostring(blob):find("3 bytes") ~= nil)
     end
 
+    -- ----- parent Db collection and SQLite zombie handles ----------
+    -- Each of the five tests below keeps the Db only through a weak value.
+    -- The first full collection runs the Db __gc finalizer and therefore
+    -- sqlite3_close_v2(); the second releases the finalized userdata and
+    -- removes it from the weak table. Every test includes `parent_collected`
+    -- in its own assertion so it cannot pass while the Db is still reachable.
+    local function collect_sqlite_parent(weak)
+        collectgarbage("collect")
+        collectgarbage("collect")
+        return weak[1] == nil
+    end
+
+    do
+        local weak = setmetatable({}, { __mode = "v" })
+        local db = assert(DB.open(":memory:"))
+        local prepared = assert(db:prepare("SELECT 42 AS answer"))
+        weak[1] = db
+        db = nil
+
+        local parent_collected = collect_sqlite_parent(weak)
+        local iter, query_err = prepared:query()
+        local row = iter and iter()
+        ok("prepared remains usable after parent Db collection",
+            parent_collected and query_err == nil
+            and row ~= nil and row.answer == 42,
+            "parent_collected=" .. tostring(parent_collected)
+            .. " err=" .. tostring(query_err)
+            .. " row=" .. tostring(row))
+        prepared:finalize()
+    end
+
+    do
+        local weak = setmetatable({}, { __mode = "v" })
+        local db = assert(DB.open(":memory:"))
+        local iter = assert(db:query("SELECT 43 AS answer"))
+        weak[1] = db
+        db = nil
+
+        local parent_collected = collect_sqlite_parent(weak)
+        local row = iter()
+        ok("iterator remains usable after parent Db collection",
+            parent_collected and row ~= nil and row.answer == 43,
+            "parent_collected=" .. tostring(parent_collected)
+            .. " row=" .. tostring(row))
+        iter:close()
+    end
+
+    do
+        local weak = setmetatable({}, { __mode = "v" })
+        local db = assert(DB.open(":memory:"))
+        assert(db:exec("CREATE TABLE unique_values(v TEXT UNIQUE)"))
+        assert(db:exec("INSERT INTO unique_values VALUES('duplicate')"))
+        local iter = assert(db:query([[
+            INSERT INTO unique_values VALUES('duplicate') RETURNING v
+        ]]))
+        weak[1] = db
+        db = nil
+
+        local parent_collected = collect_sqlite_parent(weak)
+        local call_ok, err = pcall(iter)
+        ok("iterator keeps constraint diagnostic after parent Db collection",
+            parent_collected and call_ok == false
+            and type(err) == "string"
+            and err:find("constraint", 1, true) ~= nil
+            and err:find("API misuse", 1, true) == nil,
+            "parent_collected=" .. tostring(parent_collected)
+            .. " call_ok=" .. tostring(call_ok)
+            .. " err=" .. tostring(err))
+        iter:close()
+    end
+
+    do
+        local weak = setmetatable({}, { __mode = "v" })
+        local db = assert(DB.open(":memory:"))
+        assert(db:exec("CREATE TABLE unique_values(v TEXT UNIQUE)"))
+        assert(db:exec("INSERT INTO unique_values VALUES('duplicate')"))
+        local prepared = assert(db:prepare(
+            "INSERT INTO unique_values VALUES(?)"))
+        weak[1] = db
+        db = nil
+
+        local parent_collected = collect_sqlite_parent(weak)
+        local result, err = prepared:exec({ "duplicate" })
+        ok("prepared:exec keeps constraint diagnostic after parent Db collection",
+            parent_collected and result == nil
+            and type(err) == "string"
+            and err:find("constraint", 1, true) ~= nil
+            and err:find("API misuse", 1, true) == nil,
+            "parent_collected=" .. tostring(parent_collected)
+            .. " result=" .. tostring(result)
+            .. " err=" .. tostring(err))
+        prepared:finalize()
+    end
+
+    do
+        local weak = setmetatable({}, { __mode = "v" })
+        local db = assert(DB.open(":memory:"))
+        assert(db:exec("CREATE TABLE unique_values(v TEXT UNIQUE)"))
+        assert(db:exec("INSERT INTO unique_values VALUES('duplicate')"))
+        local prepared = assert(db:prepare([[
+            INSERT INTO unique_values VALUES(?) RETURNING v
+        ]]))
+        local iter = assert(prepared:query({ "duplicate" }))
+        weak[1] = db
+        db = nil
+
+        local parent_collected = collect_sqlite_parent(weak)
+        local call_ok, err = pcall(iter)
+        ok("prepared iterator keeps constraint diagnostic after parent Db collection",
+            parent_collected and call_ok == false
+            and type(err) == "string"
+            and err:find("constraint", 1, true) ~= nil
+            and err:find("API misuse", 1, true) == nil,
+            "parent_collected=" .. tostring(parent_collected)
+            .. " call_ok=" .. tostring(call_ok)
+            .. " err=" .. tostring(err))
+        prepared:finalize()
+    end
+
     -- ----- prepare contract and reusable exec/query ----------------
     do
         local db = assert(DB.open(":memory:"))
@@ -8812,6 +9113,31 @@ do
         assert(ins:exec({ 3, DB.blob(""), "three" }))
         ok("prepared:exec can be reused", true)
 
+        assert(db:exec([[
+            CREATE TABLE nullable_values (
+                id INTEGER PRIMARY KEY,
+                payload BLOB
+            )
+        ]]))
+        local nullable = assert(db:prepare(
+            "INSERT INTO nullable_values(id, payload) VALUES(?, ?)"))
+        assert(nullable:exec({ 1, DB.blob("value") }))
+        assert(nullable:exec({ 2, DB.NULL }))
+        assert(nullable:exec({ 3, DB.blob("again") }))
+        local null_storage = {}
+        for row in db:query([[
+            SELECT typeof(payload) AS storage
+            FROM nullable_values ORDER BY id
+        ]]) do
+            null_storage[#null_storage + 1] = row.storage
+        end
+        ok("prepared statement alternates ordinary values and sqlite.NULL",
+            #null_storage == 3
+            and null_storage[1] == "blob"
+            and null_storage[2] == "null"
+            and null_storage[3] == "blob")
+        nullable:finalize()
+
         local no_params, no_params_err = ins:exec()
         ok("prepared:exec detects omitted params",
             no_params == nil and type(no_params_err) == "string"
@@ -8842,6 +9168,13 @@ do
         local iterator = assert(q:query({ 2 }))
         ok("prepared:query returns the same userdata", iterator == q)
 
+        ok_raises("prepared:exec rejects excess arguments",
+            function() return q:exec({}, true) end,
+            "optional params")
+        ok_raises("prepared:query rejects excess arguments",
+            function() return q:query({}, true) end,
+            "optional params")
+
         local ids = {}
         local storage_ok = true
         for row in iterator do
@@ -8863,6 +9196,16 @@ do
         local reset_ok, reset_err = q:reset()
         ok("prepared:reset aborts an active iteration",
             reset_ok == true and reset_err == nil)
+
+        ok_raises("prepared:reset rejects excess arguments",
+            function() return q:reset(true) end,
+            "expected only self")
+        ok_raises("prepared:close rejects excess arguments",
+            function() return q:close(true) end,
+            "expected only self")
+        ok_raises("prepared:finalize rejects excess arguments",
+            function() return q:finalize(true) end,
+            "expected only self")
 
         local count = 0
         for _ in q:query({ 1 }) do count = count + 1 end
@@ -8948,6 +9291,9 @@ do
 
         ok("in_transaction is false outside a transaction",
             db:in_transaction() == false)
+        ok_raises("in_transaction rejects excess arguments",
+            function() return db:in_transaction(true) end,
+            "expected only self")
 
         local tx_ok, a, b, c = db:transaction(function(tx)
             ok("in_transaction is true inside callback",
@@ -11106,6 +11452,28 @@ do
     ok("babet.workers is a table", type(W) == "table")
     ok("workers.spawn is a function", type(W.spawn) == "function")
     ok("workers.channel is a function", type(W.channel) == "function")
+
+    do
+        local job, err = W.spawn("return true", {
+            value = babet.sqlite.NULL,
+        })
+        ok("workers reject sqlite.NULL with an explicit diagnostic",
+            job == nil and type(err) == "string"
+            and err:find("babet.sqlite.NULL", 1, true) ~= nil,
+            tostring(err))
+
+        local channel = assert(W.channel({ capacity = 1 }))
+        local sent, send_err = channel:send(babet.sqlite.NULL, 0)
+        local marker_ok = channel:send("after-null", 0)
+        local received, marker = channel:recv(0)
+        ok("channels reject sqlite.NULL atomically with an explicit diagnostic",
+            sent == nil and type(send_err) == "string"
+            and send_err:find("babet.sqlite.NULL", 1, true) ~= nil
+            and marker_ok == true and received == true
+            and marker == "after-null",
+            tostring(send_err))
+        channel:close()
+    end
 
     -- ----- budgets de sérialisation et fidélité numérique ---------
 

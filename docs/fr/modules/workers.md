@@ -473,6 +473,7 @@ Ne traversent pas les états Lua :
 
 - fonctions et closures ;
 - userdata : socket, statement SQLite, watcher, job, fichier, etc. ;
+- la sentinelle lightuserdata réservée à SQLite `babet.sqlite.NULL` ;
 - coroutines/threads Lua ;
 - tables cycliques ;
 - tables mixtes ou creuses ;
@@ -484,6 +485,11 @@ Ne traversent pas les états Lua :
 
 Un chemin, une URL ou une configuration sérialisable doit être transmis à la
 place de l'objet système lui-même. Le worker ouvre ensuite sa propre ressource.
+
+La sentinelle NULL est refusée avec un diagnostic qui nomme explicitement
+`babet.sqlite.NULL`. Convertis-la en valeur métier comme
+`{ kind = "sql-null" }` si cette intention doit traverser une frontière worker
+ou channel.
 
 ```lua
 -- Incorrect : socket est un userdata.
@@ -925,9 +931,10 @@ assert(got == false and reason == "empty")
 ```
 
 Les mêmes valeurs JSON que pour les workers sont acceptées. Un channel, un job,
-un socket ou tout autre userdata ne peut pas être envoyé comme message. Pour une
-capture Selenium binaire, envoie de préférence son chemin, ou conserve sa forme
-Base64 puis utilise `babet.base64.decode()` au point de consommation.
+un socket, `babet.sqlite.NULL` ou tout autre userdata/lightuserdata ne peut pas
+être envoyé comme message. Un envoi refusé ne publie rien dans le channel. Pour
+une capture Selenium binaire, envoie de préférence son chemin, ou conserve sa
+forme Base64 puis utilise `babet.base64.decode()` au point de consommation.
 
 Dans un worker, `job:cancel()` réveille également un `channel:send()` ou
 `channel:recv()` bloqué pour **ce worker uniquement**. L'appel renvoie alors

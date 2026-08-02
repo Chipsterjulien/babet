@@ -1,5 +1,6 @@
 #include "json.hpp"
 #include "lua_utils.hpp"
+#include "sqlite.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -229,6 +230,12 @@ namespace
             throw std::runtime_error("json: lua stack overflow during encode");
         }
         idx = lua_absindex(L, idx);
+
+        if (is_sqlite_null(L, idx))
+        {
+            throw std::runtime_error(
+                "json: cannot encode babet.sqlite.NULL");
+        }
 
         // Sentinels d'abord : ce sont des tables, donc à tester avant le
         // cas LUA_TTABLE générique.

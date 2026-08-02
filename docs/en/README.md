@@ -15,7 +15,7 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the stable and audited **Babet 2.9.2** release.
+Documentation for the stable and audited **Babet 2.10.0** release.
 
 ## Getting started
 
@@ -25,7 +25,7 @@ Documentation for the stable and audited **Babet 2.9.2** release.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.9.2 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.10.0 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 
@@ -43,7 +43,7 @@ Documentation for the stable and audited **Babet 2.9.2** release.
 | send an HTTP request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic downloads, redirects, TLS, timeout, and size limits |
 | open a TCP connection | [`Socket — TCP`](modules/socket.md) | client, server, accept, binary streams, lines, EOF reads, timeouts, buffers, and limits |
 | encrypt TCP or perform STARTTLS | [`TLS — secure sockets`](modules/tls.md) | direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, timeout, and fail-closed state |
-| store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | opening, execution, prepared statements, explicit BLOBs, and assisted transactions |
+| store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | opening, strict parameters, explicit `NULL` and BLOB values, prepared statements, and assisted transactions |
 | encode or decode JSON | [`JSON — structured data`](modules/json.md) | scalars, arrays, objects, `null`, empty arrays, pretty printing, and errors |
 | read TOML configuration | [`TOML — configuration`](modules/toml.md) | decoding, TOML types, arrays, sections, dates, and parse errors |
 | watch a directory | [`Inotify — file events`](modules/inotify.md) | watches, events, timeout reads, moves, cookies, and closing |

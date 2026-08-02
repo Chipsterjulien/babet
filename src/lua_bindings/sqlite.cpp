@@ -18,11 +18,24 @@ extern "C"
 #include "sqlite3.h"
 
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <new>
-#include <set>
 #include <string>
+
+namespace
+{
+    // L'adresse seule porte l'identité publique de babet.sqlite.NULL.
+    // L'objet n'est jamais lu ni exposé autrement.
+    char SQLITE_NULL_SENTINEL_KEY = 0;
+}
+
+bool is_sqlite_null(lua_State *L, int idx) noexcept
+{
+    return lua_type(L, idx) == LUA_TLIGHTUSERDATA &&
+           lua_touserdata(L, idx) == &SQLITE_NULL_SENTINEL_KEY;
+}
 
 namespace
 {
@@ -82,6 +95,70 @@ namespace
         std::string full = "sqlite: ";
         full += msg;
         return push_fail(L, full);
+    }
+
+    // Toute fonction SQLite normale exposée à Lua passe par cette
+    // frontière. Lua 5.5 est compilé en C dans Babet : une exception C++
+    // ne doit jamais traverser une lua_CFunction. Les diagnostics restent
+    // littéraux afin de ne pas réallouer côté C++ dans le handler OOM.
+    template <int (*Fn)(lua_State *)>
+    int sqlite_lua_boundary(lua_State *L)
+    {
+        try
+        {
+            return Fn(L);
+        }
+        catch (const std::bad_alloc &)
+        {
+            return push_fail(L, "sqlite: out of memory");
+        }
+        catch (...)
+        {
+            return push_fail(L, "sqlite: internal failure");
+        }
+    }
+
+    // Les finalizers ne doivent jamais propager d'exception ni tenter de
+    // produire un diagnostic Lua pendant une collecte mémoire.
+    template <int (*Fn)(lua_State *)>
+    int sqlite_gc_boundary(lua_State *L) noexcept
+    {
+        try
+        {
+            return Fn(L);
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    // Construit le diagnostic d'un sqlite3_step() avant tout reset ou
+    // finalize. Le tampon renvoyé par sqlite3_errmsg() appartient à la
+    // connexion et peut être invalidé par l'appel SQLite suivant : la copie
+    // dans std::string doit donc être immédiate.
+    std::string sqlite_step_error(sqlite3_stmt *stmt, int rc)
+    {
+        sqlite3 *db = sqlite3_db_handle(stmt);
+        if (!db)
+        {
+            return sqlite3_errstr(rc);
+        }
+
+        const int db_rc = sqlite3_errcode(db);
+        constexpr int primary_code_mask = 0xff;
+
+        // rc et sqlite3_errcode() suivent tous deux le réglage des codes
+        // étendus de la connexion. Le masque compare donc les codes
+        // primaires quel que soit ce réglage. sqlite3_errstr() reçoit en
+        // revanche le code complet, car il peut fournir un texte plus précis.
+        if ((rc & primary_code_mask) != (db_rc & primary_code_mask))
+        {
+            return sqlite3_errstr(rc);
+        }
+
+        const char *message = sqlite3_errmsg(db);
+        return message ? message : sqlite3_errstr(rc);
     }
 
     // SQLite's prepare APIs take an int byte count and still treat the first
@@ -191,8 +268,41 @@ namespace
                        lua_typename(L, t));
         }
 
+        idx = lua_absindex(L, idx);
+        lua_pushnil(L);
+        while (lua_next(L, idx) != 0)
+        {
+            if (lua_type(L, -2) != LUA_TSTRING)
+            {
+                lua_pop(L, 2);
+                luaL_error(L,
+                           "sqlite.open: option keys must be strings");
+            }
+
+            size_t key_len = 0;
+            const char *key = lua_tolstring(L, -2, &key_len);
+            const bool known =
+                (key_len == 3 && std::memcmp(key, "wal", 3) == 0) ||
+                (key_len == 12 &&
+                 std::memcmp(key, "busy_timeout", 12) == 0);
+            if (!known)
+            {
+                char key_text[160];
+                const size_t copy_len =
+                    key_len < sizeof(key_text) - 1
+                        ? key_len
+                        : sizeof(key_text) - 1;
+                std::memcpy(key_text, key, copy_len);
+                key_text[copy_len] = '\0';
+                lua_pop(L, 2);
+                luaL_error(L, "sqlite.open: unknown option '%s'", key_text);
+            }
+            lua_pop(L, 1); // value; keep key for lua_next
+        }
+
         // wal
-        lua_getfield(L, idx, "wal");
+        lua_pushliteral(L, "wal");
+        lua_rawget(L, idx);
         if (!lua_isnil(L, -1))
         {
             if (!lua_is_strict_boolean(L, -1))
@@ -205,7 +315,8 @@ namespace
         lua_pop(L, 1);
 
         // busy_timeout
-        lua_getfield(L, idx, "busy_timeout");
+        lua_pushliteral(L, "busy_timeout");
+        lua_rawget(L, idx);
         if (!lua_isnil(L, -1))
         {
             if (!lua_is_strict_integer(L, -1))
@@ -247,6 +358,36 @@ namespace
             return false;
         }
         return true;
+    }
+
+    // ============================================================
+    // Userdata Stmt : propriétaire d'un sqlite3_stmt
+    // ============================================================
+    //
+    // Ce propriétaire sert à la fois aux itérateurs db:query() et aux
+    // statements temporaires de db:exec(). Dans ce second cas, il reste
+    // interne à la pile Lua : si une API Lua effectue un longjmp pendant le
+    // bind, __gc possède déjà le handle et peut le finaliser.
+    struct Stmt
+    {
+        sqlite3_stmt *handle;
+
+        Stmt() : handle(nullptr) {}
+        ~Stmt()
+        {
+            if (handle)
+            {
+                sqlite3_finalize(handle);
+                handle = nullptr;
+            }
+        }
+    };
+
+    const char *STMT_MT = "babet.sqlite.stmt";
+
+    Stmt *check_stmt(lua_State *L, int idx)
+    {
+        return static_cast<Stmt *>(luaL_checkudata(L, idx, STMT_MT));
     }
 
     // ============================================================
@@ -321,7 +462,7 @@ namespace
     //
     //   A. string Lua → TEXT (toujours). Pas de détection
     //      heuristique TEXT vs BLOB. Pour binder un BLOB strict,
-    //      attendre une future API `babet.sqlite.blob(data)`.
+    //      utiliser `babet.sqlite.blob(data)`.
     //
     //   B. SQL : '?', ':name', '@name', '$name' tous acceptés.
     //      Côté table Lua : clé sans préfixe (params.name pour
@@ -336,10 +477,8 @@ namespace
     //
     //   F. Paramètres manquants → erreur. Pas de NULL implicite.
     //
-    // Limitation : impossible de binder explicitement NULL via la
-    // table Lua (car { x = nil } est équivalent à {} en Lua). Pour
-    // un NULL, utiliser un littéral SQL (NULL, COALESCE(?, NULL)).
-    // À ajouter en V2 : sentinel `babet.sqlite.null` (idem json.null).
+    // G. babet.sqlite.NULL est la seule valeur lightuserdata acceptée et
+    //    produit sqlite3_bind_null(). Un nil reste un paramètre manquant.
 
     // Bind une seule valeur Lua à un slot de prepared statement.
     // Convention de retour :
@@ -358,18 +497,36 @@ namespace
     // peut pas utiliser SQLITE_STATIC car les strings Lua peuvent
     // être collectées par le GC entre le bind et le step.
     bool bind_one_value(lua_State *L, sqlite3_stmt *stmt, int slot, int idx,
-                        std::string &err)
+                        char *err, size_t err_size)
     {
+        if (is_sqlite_null(L, idx))
+        {
+            int rc = sqlite3_bind_null(stmt, slot);
+            if (rc != SQLITE_OK)
+            {
+                std::snprintf(
+                    err, err_size,
+                    "bind failed for babet.sqlite.NULL at slot %d: %s",
+                    slot, sqlite3_errstr(rc));
+                return false;
+            }
+            return true;
+        }
+
         int t = lua_type(L, idx);
         int rc = SQLITE_OK;
         switch (t)
         {
         case LUA_TNIL:
-            // Ne devrait pas arriver (contrat F : caller détecte
-            // missing en amont), mais on accepte tant pis et on
-            // bind NULL.
-            rc = sqlite3_bind_null(stmt, slot);
-            break;
+            // Défensif : les callers distinguent déjà un paramètre absent.
+            // Accepter nil ici affaiblirait ce contrat si un nouveau chemin
+            // de bind oubliait un jour le contrôle amont.
+            std::snprintf(
+                err, err_size,
+                "nil is a missing bind value at slot %d; "
+                "use babet.sqlite.NULL for SQL NULL",
+                slot);
+            return false;
         case LUA_TBOOLEAN:
             rc = sqlite3_bind_int(stmt, slot, lua_toboolean(L, idx) ? 1 : 0);
             break;
@@ -380,7 +537,15 @@ namespace
             }
             else
             {
-                rc = sqlite3_bind_double(stmt, slot, lua_tonumber(L, idx));
+                const lua_Number value = lua_tonumber(L, idx);
+                if (!std::isfinite(static_cast<double>(value)))
+                {
+                    std::snprintf(
+                        err, err_size,
+                        "cannot bind a non-finite number at slot %d", slot);
+                    return false;
+                }
+                rc = sqlite3_bind_double(stmt, slot, value);
             }
             break;
         case LUA_TSTRING:
@@ -389,8 +554,9 @@ namespace
             const char *s = lua_tolstring(L, idx, &len);
             if (len > static_cast<size_t>(0x7fffffff))
             {
-                err = "string too large to bind at slot " +
-                      std::to_string(slot);
+                std::snprintf(
+                    err, err_size,
+                    "string too large to bind at slot %d", slot);
                 return false;
             }
             rc = sqlite3_bind_text(stmt, slot, s,
@@ -414,16 +580,28 @@ namespace
                 }
             }
 
-            // function / table / unrelated userdata / thread / lightuserdata.
-            err = "cannot bind value of type '";
-            err += lua_typename(L, t);
-            err += "' at slot " + std::to_string(slot);
+            if (t == LUA_TLIGHTUSERDATA)
+            {
+                std::snprintf(
+                    err, err_size,
+                    "cannot bind light userdata at slot %d; "
+                    "only babet.sqlite.NULL is accepted",
+                    slot);
+                return false;
+            }
+
+            // function / table / unrelated full userdata / thread.
+            std::snprintf(
+                err, err_size,
+                "cannot bind value of type '%s' at slot %d",
+                lua_typename(L, t), slot);
             return false;
         }
         if (rc != SQLITE_OK)
         {
-            err = "bind failed at slot " + std::to_string(slot) +
-                  ": " + sqlite3_errstr(rc);
+            std::snprintf(
+                err, err_size,
+                "bind failed at slot %d: %s", slot, sqlite3_errstr(rc));
             return false;
         }
         return true;
@@ -447,20 +625,28 @@ namespace
     //   false → erreur, message dans `err`. Le caller finalise le
     //           stmt avant de propager.
     bool bind_params_from_table(lua_State *L, sqlite3_stmt *stmt,
-                                int params_idx, std::string &err)
+                                int params_idx, char *err, size_t err_size)
     {
+        params_idx = lua_absindex(L, params_idx);
         int n_params = sqlite3_bind_parameter_count(stmt);
 
-        // Inventorier les slots et collecter les noms requis.
+        // Inventorier les slots. Aucun conteneur C++ propriétaire n'est gardé
+        // pendant les futurs appels Lua : un longjmp ne peut donc contourner
+        // aucun destructeur dans ce helper.
         int positional_count = 0;
-        std::set<std::string> required_names;
         for (int i = 1; i <= n_params; ++i)
         {
             const char *name = sqlite3_bind_parameter_name(stmt, i);
             if (name)
             {
-                // name commence par :, @ ou $. On stocke sans préfixe.
-                required_names.insert(name + 1);
+                if (name[0] == '?')
+                {
+                    std::snprintf(
+                        err, err_size,
+                        "numbered ?NNN placeholders are not supported; "
+                        "use plain ? placeholders");
+                    return false;
+                }
             }
             else
             {
@@ -475,17 +661,20 @@ namespace
             const char *name = sqlite3_bind_parameter_name(stmt, i);
             if (name)
             {
-                // Slot nommé : lookup params[name_sans_prefixe].
-                lua_getfield(L, params_idx, name + 1);
+                // Slot nommé : lookup brut params[name_sans_prefixe]. Une
+                // métaméthode __index ne doit jamais fabriquer un paramètre
+                // absent ni exécuter du Lua pendant le bind.
+                lua_pushstring(L, name + 1);
+                lua_rawget(L, params_idx);
                 if (lua_isnil(L, -1))
                 {
                     lua_pop(L, 1);
-                    err = "missing param '";
-                    err += name;
-                    err += "'";
+                    std::snprintf(
+                        err, err_size, "missing param '%s'", name);
                     return false;
                 }
-                bool ok = bind_one_value(L, stmt, i, -1, err);
+                bool ok = bind_one_value(
+                    L, stmt, i, -1, err, err_size);
                 lua_pop(L, 1);
                 if (!ok)
                     return false;
@@ -498,11 +687,13 @@ namespace
                 if (lua_isnil(L, -1))
                 {
                     lua_pop(L, 1);
-                    err = "missing positional param at index " +
-                          std::to_string(pos_seen);
+                    std::snprintf(
+                        err, err_size,
+                        "missing positional param at index %d", pos_seen);
                     return false;
                 }
-                bool ok = bind_one_value(L, stmt, i, -1, err);
+                bool ok = bind_one_value(
+                    L, stmt, i, -1, err, err_size);
                 lua_pop(L, 1);
                 if (!ok)
                     return false;
@@ -516,10 +707,11 @@ namespace
         lua_pop(L, 1);
         if (has_extra_pos)
         {
-            err = "too many positional params (statement uses " +
-                  std::to_string(positional_count) +
-                  ", got at least " +
-                  std::to_string(pos_seen + 1) + ")";
+            std::snprintf(
+                err, err_size,
+                "too many positional params (statement uses %d, "
+                "got at least %d)",
+                positional_count, pos_seen + 1);
             return false;
         }
 
@@ -542,12 +734,31 @@ namespace
             {
                 size_t key_len = 0;
                 const char *key_data = lua_tolstring(L, -2, &key_len);
-                std::string key(key_data, key_len);
-                if (required_names.find(key) == required_names.end())
+                bool required = false;
+                for (int i = 1; i <= n_params; ++i)
                 {
-                    err = "extra param '";
-                    err.append(key_data, key_len);
-                    err += "' (not used by this SQL)";
+                    const char *name =
+                        sqlite3_bind_parameter_name(stmt, i);
+                    if (!name || name[0] == '?')
+                    {
+                        continue;
+                    }
+                    const size_t name_len = std::strlen(name + 1);
+                    if (name_len == key_len &&
+                        std::memcmp(name + 1, key_data, key_len) == 0)
+                    {
+                        required = true;
+                        break;
+                    }
+                }
+                if (!required)
+                {
+                    const int shown =
+                        key_len < 200 ? static_cast<int>(key_len) : 200;
+                    std::snprintf(
+                        err, err_size,
+                        "extra param '%.*s' (not used by this SQL)",
+                        shown, key_data);
                     lua_pop(L, 2); // value + key
                     return false;
                 }
@@ -556,24 +767,34 @@ namespace
             {
                 if (!lua_is_strict_integer(L, -2))
                 {
-                    err = "params table has a non-integer numeric key";
+                    std::snprintf(
+                        err, err_size,
+                        "params table has a non-integer numeric key");
                     lua_pop(L, 2);
                     return false;
                 }
                 lua_Integer idx = lua_tointeger(L, -2);
                 if (idx < 1 || idx > pos_seen)
                 {
-                    err = "extra positional param at index " +
-                          std::to_string(idx) +
-                          " (statement uses " +
-                          std::to_string(positional_count) + ")";
+                    std::snprintf(
+                        err, err_size,
+                        "extra positional param at index %lld "
+                        "(statement uses %d)",
+                        static_cast<long long>(idx), positional_count);
                     lua_pop(L, 2);
                     return false;
                 }
             }
-            // Autres types de clés (table, boolean...) : très rare et
-            // sans signification ici. On les ignore silencieusement
-            // plutôt que de raise pour rester pragmatique.
+            else
+            {
+                std::snprintf(
+                    err, err_size,
+                    "params table has unsupported key type '%s'; "
+                    "keys must be strings or positive integers",
+                    lua_typename(L, kt));
+                lua_pop(L, 2);
+                return false;
+            }
             // Pop value, keep key for next iteration.
             lua_pop(L, 1);
         }
@@ -592,6 +813,10 @@ namespace
     // faire. Cohérent avec sock:close().
     int db_close(lua_State *L)
     {
+        if (!lua_arity_is(L, 1))
+        {
+            return luaL_error(L, "sqlite.close: expected only self");
+        }
         Db *db = check_db(L, 1);
         if (db->transaction_helper_active)
         {
@@ -601,13 +826,14 @@ namespace
         if (db->handle)
         {
             int rc = sqlite3_close_v2(db->handle);
-            db->handle = nullptr;
             if (rc != SQLITE_OK)
             {
                 // close_v2 ne devrait jamais échouer en pratique, mais
-                // on retourne quand même l'info.
+                // conserver le handle permet à __gc ou à un second close()
+                // de retenter le nettoyage au lieu de perdre la ressource.
                 return push_sqlite_fail(L, sqlite3_errstr(rc));
             }
+            db->handle = nullptr;
         }
         return push_ok(L);
     }
@@ -626,6 +852,11 @@ namespace
     // Utiliser db:query() pour lire les rows.
     int db_exec(lua_State *L)
     {
+        if (!lua_arity_between(L, 2, 3))
+        {
+            return luaL_error(
+                L, "sqlite.exec: expected two or three arguments");
+        }
         Db *db = check_db(L, 1);
         if (!db->handle)
         {
@@ -655,6 +886,16 @@ namespace
             luaL_checktype(L, 3, LUA_TTABLE);
             has_params = true;
         }
+
+        // db:exec() ne renvoie pas ce userdata, mais l'utilise comme
+        // propriétaire interne. Il est construit et finalisable avant tout
+        // sqlite3_prepare_v2() : une exception C++ ou un longjmp Lua pendant
+        // le bind ne peut donc plus abandonner un sqlite3_stmt brut.
+        Stmt *stmt_owner = static_cast<Stmt *>(
+            lua_newuserdata(L, sizeof(Stmt)));
+        new (stmt_owner) Stmt();
+        luaL_getmetatable(L, STMT_MT);
+        lua_setmetatable(L, -2);
 
         // -------------------------------------------------------
         // Cas simple : pas de params → exécution statement par
@@ -690,19 +931,21 @@ namespace
             const char *sql_end = sql + sql_len;
             while (cursor < sql_end)
             {
-                sqlite3_stmt *stmt = nullptr;
                 const char *tail = nullptr;
                 int rc = sqlite3_prepare_v2(db->handle, cursor,
                                             static_cast<int>(sql_end - cursor),
-                                            &stmt, &tail);
+                                            &stmt_owner->handle, &tail);
                 if (rc != SQLITE_OK)
                 {
                     std::string msg = sqlite3_errmsg(db->handle);
-                    if (stmt)
-                        sqlite3_finalize(stmt);
+                    if (stmt_owner->handle)
+                    {
+                        sqlite3_finalize(stmt_owner->handle);
+                        stmt_owner->handle = nullptr;
+                    }
                     return push_sqlite_fail(L, msg);
                 }
-                if (!stmt)
+                if (!stmt_owner->handle)
                 {
                     // Le reste n'est que blancs/commentaires. Garde
                     // anti-boucle : si le tail ne progresse pas, on
@@ -713,27 +956,31 @@ namespace
                     continue;
                 }
 
-                if (sqlite3_bind_parameter_count(stmt) > 0)
+                if (sqlite3_bind_parameter_count(stmt_owner->handle) > 0)
                 {
-                    sqlite3_finalize(stmt);
+                    sqlite3_finalize(stmt_owner->handle);
+                    stmt_owner->handle = nullptr;
                     return push_sqlite_fail(L,
                                             "SQL contains placeholders but no params table "
                                             "provided; pass params to bind, or remove "
                                             "placeholders from SQL");
                 }
 
-                while ((rc = sqlite3_step(stmt)) == SQLITE_ROW)
+                while ((rc = sqlite3_step(stmt_owner->handle)) == SQLITE_ROW)
                 {
                     // SELECT sans params : lignes ignorées, comme le
                     // faisait sqlite3_exec avec callback nul.
                 }
                 if (rc != SQLITE_DONE)
                 {
-                    std::string msg = sqlite3_errmsg(db->handle);
-                    sqlite3_finalize(stmt);
+                    std::string msg = sqlite_step_error(
+                        stmt_owner->handle, rc);
+                    sqlite3_finalize(stmt_owner->handle);
+                    stmt_owner->handle = nullptr;
                     return push_sqlite_fail(L, msg);
                 }
-                sqlite3_finalize(stmt);
+                sqlite3_finalize(stmt_owner->handle);
+                stmt_owner->handle = nullptr;
 
                 cursor = (tail != nullptr && tail > cursor) ? tail : sql_end;
             }
@@ -743,16 +990,18 @@ namespace
         // -------------------------------------------------------
         // Cas avec params : prepare + bind + step + finalize.
         // -------------------------------------------------------
-        sqlite3_stmt *stmt = nullptr;
         const char *pzTail = nullptr;
         int rc = sqlite3_prepare_v2(db->handle, sql,
                                     static_cast<int>(sql_len),
-                                    &stmt, &pzTail);
+                                    &stmt_owner->handle, &pzTail);
         if (rc != SQLITE_OK)
         {
             std::string msg = sqlite3_errmsg(db->handle);
-            if (stmt)
-                sqlite3_finalize(stmt);
+            if (stmt_owner->handle)
+            {
+                sqlite3_finalize(stmt_owner->handle);
+                stmt_owner->handle = nullptr;
+            }
             return push_sqlite_fail(L, msg);
         }
 
@@ -761,7 +1010,11 @@ namespace
         // uniquement.
         if (!sql_tail_is_empty(pzTail))
         {
-            sqlite3_finalize(stmt);
+            if (stmt_owner->handle)
+            {
+                sqlite3_finalize(stmt_owner->handle);
+                stmt_owner->handle = nullptr;
+            }
             return push_sqlite_fail(L,
                                     "exec with params supports only one statement; "
                                     "use exec(sql) without params for multi-statement SQL");
@@ -771,7 +1024,7 @@ namespace
         // ne produit aucun sqlite3_stmt. Sans paramètres, exec est déjà un
         // no-op réussi ; avec une table vide, on conserve la même sémantique.
         // Une table non vide reste une erreur de programmation explicite.
-        if (!stmt)
+        if (!stmt_owner->handle)
         {
             if (!lua_table_is_empty(L, 3))
             {
@@ -785,26 +1038,19 @@ namespace
         // côté Lua il faut absolument finaliser le stmt (sinon leak,
         // car luaL_error fait un longjmp qui ne déroule pas la pile
         // C++ — Lua est compilé en C dans Babet).
-        std::string bind_err;
-        bool bind_ok = bind_params_from_table(L, stmt, 3, bind_err);
+        char bind_err[512] = {};
+        bool bind_ok = bind_params_from_table(
+            L, stmt_owner->handle, 3, bind_err, sizeof(bind_err));
         if (!bind_ok)
         {
-            sqlite3_finalize(stmt);
-            // luaL_error fait un longjmp ; la std::string `bind_err`
-            // serait encore vivante sur la pile et son heap fuirait
-            // (le destructeur C++ n'est pas appelé). On copie le
-            // message dans un buffer C local, on libère explicitement
-            // le heap de bind_err via swap, puis seulement on raise.
-            char err_msg[512];
-            std::snprintf(err_msg, sizeof(err_msg),
-                          "sqlite.exec: %s", bind_err.c_str());
-            std::string().swap(bind_err); // libère le heap interne
-            luaL_error(L, "%s", err_msg);
+            sqlite3_finalize(stmt_owner->handle);
+            stmt_owner->handle = nullptr;
+            luaL_error(L, "sqlite.exec: %s", bind_err);
             // unreachable
         }
 
         // Exécuter le statement.
-        int step_rc = sqlite3_step(stmt);
+        int step_rc = sqlite3_step(stmt_owner->handle);
 
         // SQLITE_DONE : DML/DDL OK.
         // SQLITE_ROW : SELECT a renvoyé une ligne (on l'ignore en
@@ -813,17 +1059,20 @@ namespace
         //   serait incomplet sur des SELECT.
         while (step_rc == SQLITE_ROW)
         {
-            step_rc = sqlite3_step(stmt);
+            step_rc = sqlite3_step(stmt_owner->handle);
         }
 
         if (step_rc != SQLITE_DONE)
         {
-            std::string msg = sqlite3_errmsg(db->handle);
-            sqlite3_finalize(stmt);
+            std::string msg = sqlite_step_error(
+                stmt_owner->handle, step_rc);
+            sqlite3_finalize(stmt_owner->handle);
+            stmt_owner->handle = nullptr;
             return push_sqlite_fail(L, msg);
         }
 
-        sqlite3_finalize(stmt);
+        sqlite3_finalize(stmt_owner->handle);
+        stmt_owner->handle = nullptr;
         return push_ok(L);
     }
 
@@ -884,39 +1133,24 @@ namespace
     // continue à appeler `iter()`, ça marche (le handle est zombie
     // mais le stmt est encore valide). C'est le comportement SQLite
     // natif, documenté dans README.
-
-    struct Stmt
-    {
-        sqlite3_stmt *handle;
-
-        Stmt() : handle(nullptr) {}
-        ~Stmt()
-        {
-            if (handle)
-            {
-                sqlite3_finalize(handle);
-                handle = nullptr;
-            }
-        }
-    };
-
-    const char *STMT_MT = "babet.sqlite.stmt";
-
-    Stmt *check_stmt(lua_State *L, int idx)
-    {
-        return static_cast<Stmt *>(luaL_checkudata(L, idx, STMT_MT));
-    }
+    //
+    // Il ne faut donc ni stocker un Db* ni ancrer le userdata Lua parent :
+    // le Db peut être détruit alors que la connexion native zombie reste
+    // volontairement vivante, ce qui rendrait un Db* pendant ; l'ancrage
+    // retarderait au contraire cette collecte sans apporter de garantie
+    // supplémentaire au sqlite3_stmt, déjà protégé par SQLite.
 
     // Extrait la row courante (après SQLITE_ROW) en table dict.
-    // NULL → la clé n'est pas posée (pas de sentinel V1).
+    // NULL → la clé n'est pas posée (aucune sentinelle de lecture).
     //
     // **Comportement documenté** : les colonnes SQL NULL disparaissent
     // de la table Lua, car une table Lua ne peut pas stocker `nil`.
     //   - `row.col == nil` fonctionne toujours.
     //   - `pairs(row)` ne verra pas les colonnes NULL.
-    // Pour distinguer "colonne NULL" de "colonne inexistante", il
-    // faudrait un sentinel `babet.sqlite.null`. TODO V2 si besoin
-    // concret apparaît.
+    // La sentinelle babet.sqlite.NULL reste volontairement réservée au bind :
+    // la réutiliser à la lecture modifierait le contrat historique des rows.
+    // Pour distinguer "colonne NULL" de "colonne inexistante", sélectionner
+    // aussi typeof(colonne) ou un alias SQL explicite.
     //
     // Colonnes dupliquées (SELECT a, a FROM t) : la deuxième écrase
     // la première dans la table dict. SQLite ne détecte pas ça lors
@@ -1039,7 +1273,7 @@ namespace
         // Erreur runtime pendant l'itération. On récupère le handle
         // SQLite via sqlite3_db_handle (depuis le stmt), pour ne pas
         // dépendre du Db userdata (qui peut être close).
-        std::string msg = sqlite3_errmsg(sqlite3_db_handle(s->handle));
+        std::string msg = sqlite_step_error(s->handle, rc);
         sqlite3_finalize(s->handle);
         s->handle = nullptr;
 
@@ -1067,6 +1301,10 @@ namespace
     // dans une variable et qu'on veut s'assurer qu'il est libéré.
     int stmt_close(lua_State *L)
     {
+        if (!lua_arity_is(L, 1))
+        {
+            return luaL_error(L, "sqlite query close: expected only self");
+        }
         Stmt *s = check_stmt(L, 1);
         if (s->handle)
         {
@@ -1111,6 +1349,11 @@ namespace
     // dans stmt_call (pas un (nil, err)).
     int db_query(lua_State *L)
     {
+        if (!lua_arity_between(L, 2, 3))
+        {
+            return luaL_error(
+                L, "sqlite.query: expected two or three arguments");
+        }
         Db *db = check_db(L, 1);
         if (!db->handle)
         {
@@ -1136,23 +1379,37 @@ namespace
             has_params = true;
         }
 
-        sqlite3_stmt *stmt = nullptr;
+        // Construire d'abord le propriétaire vide et finalisable. Tout handle
+        // produit ensuite par sqlite3_prepare_v2 est ainsi transféré
+        // directement dans le userdata déjà muni de sa métatable.
+        Stmt *s = static_cast<Stmt *>(lua_newuserdata(L, sizeof(Stmt)));
+        new (s) Stmt();
+        luaL_getmetatable(L, STMT_MT);
+        lua_setmetatable(L, -2);
+
         const char *pzTail = nullptr;
         int rc = sqlite3_prepare_v2(db->handle, sql,
                                     static_cast<int>(sql_len),
-                                    &stmt, &pzTail);
+                                    &s->handle, &pzTail);
         if (rc != SQLITE_OK)
         {
             std::string msg = sqlite3_errmsg(db->handle);
-            if (stmt)
-                sqlite3_finalize(stmt);
+            if (s->handle)
+            {
+                sqlite3_finalize(s->handle);
+                s->handle = nullptr;
+            }
             return push_sqlite_fail(L, msg);
         }
 
         // Refuser le multi-statement (avec ou sans params).
         if (!sql_tail_is_empty(pzTail))
         {
-            sqlite3_finalize(stmt);
+            if (s->handle)
+            {
+                sqlite3_finalize(s->handle);
+                s->handle = nullptr;
+            }
             return push_sqlite_fail(L,
                                     "query supports only one statement; "
                                     "use exec(sql) for multi-statement SQL");
@@ -1162,7 +1419,7 @@ namespace
         // un statement nul : query renvoie alors un itérateur déjà épuisé.
         // Si une table params non vide a été fournie, elle ne doit pas être
         // ignorée silencieusement.
-        if (!stmt)
+        if (!s->handle)
         {
             if (has_params && !lua_table_is_empty(L, 3))
             {
@@ -1174,10 +1431,11 @@ namespace
         // renvoyer une erreur plutôt que de binder NULL implicitement.
         else if (!has_params)
         {
-            int n_placeholders = sqlite3_bind_parameter_count(stmt);
+            int n_placeholders = sqlite3_bind_parameter_count(s->handle);
             if (n_placeholders > 0)
             {
-                sqlite3_finalize(stmt);
+                sqlite3_finalize(s->handle);
+                s->handle = nullptr;
                 return push_sqlite_fail(L,
                                         "SQL contains placeholders but no params table "
                                         "provided; pass params to bind, or remove "
@@ -1185,34 +1443,19 @@ namespace
             }
         }
 
-        if (has_params && stmt)
+        if (has_params && s->handle)
         {
-            std::string bind_err;
-            bool bind_ok = bind_params_from_table(L, stmt, 3, bind_err);
+            char bind_err[512] = {};
+            bool bind_ok = bind_params_from_table(
+                L, s->handle, 3, bind_err, sizeof(bind_err));
             if (!bind_ok)
             {
-                sqlite3_finalize(stmt);
-                // Même précaution que db_exec : libérer le heap de
-                // bind_err avant le longjmp pour éviter la fuite.
-                char err_msg[512];
-                std::snprintf(err_msg, sizeof(err_msg),
-                              "sqlite.query: %s", bind_err.c_str());
-                std::string().swap(bind_err);
-                luaL_error(L, "%s", err_msg);
+                sqlite3_finalize(s->handle);
+                s->handle = nullptr;
+                luaL_error(L, "sqlite.query: %s", bind_err);
                 // unreachable
             }
         }
-
-        // Allouer le userdata Stmt et lui transférer l'ownership
-        // du sqlite3_stmt. À partir d'ici, le Stmt::~Stmt() (ou
-        // un finalize explicite dans stmt_call/stmt_close) prend
-        // en charge le cleanup.
-        Stmt *s = static_cast<Stmt *>(lua_newuserdata(L, sizeof(Stmt)));
-        new (s) Stmt();
-        s->handle = stmt;
-
-        luaL_getmetatable(L, STMT_MT);
-        lua_setmetatable(L, -2);
 
         return 1;
     }
@@ -1221,6 +1464,12 @@ namespace
     // ============================================================
     // Statements préparés réutilisables
     // ============================================================
+
+    // Comme Stmt, Prepared ne conserve ni Db* ni ancrage Lua vers la
+    // connexion parente. sqlite3_close_v2 garantit directement la durée de
+    // vie native du statement ; un Db* pourrait devenir pendant après la
+    // collecte du userdata, tandis qu'un ancrage retarderait inutilement le
+    // passage volontaire de la connexion à l'état zombie.
 
     struct Prepared
     {
@@ -1282,21 +1531,24 @@ namespace
                                                sqlite3_stmt *stmt,
                                                int params_idx,
                                                bool has_params,
-                                               std::string &error)
+                                               char *error,
+                                               size_t error_size)
     {
         if (!has_params)
         {
             if (sqlite3_bind_parameter_count(stmt) > 0)
             {
-                error =
+                std::snprintf(
+                    error, error_size,
                     "SQL contains placeholders but no params table provided; "
-                    "pass params to bind, or remove placeholders from SQL";
+                    "pass params to bind, or remove placeholders from SQL");
                 return PreparedBindStatus::OperationalError;
             }
             return PreparedBindStatus::Ok;
         }
 
-        if (!bind_params_from_table(L, stmt, params_idx, error))
+        if (!bind_params_from_table(
+                L, stmt, params_idx, error, error_size))
         {
             sqlite3_reset(stmt);
             sqlite3_clear_bindings(stmt);
@@ -1331,40 +1583,44 @@ namespace
             }
         }
 
-        sqlite3_stmt *stmt = nullptr;
+        // Le propriétaire vide est construit et rendu finalisable avant
+        // l'acquisition du handle natif.
+        Prepared *prepared = static_cast<Prepared *>(
+            lua_newuserdata(L, sizeof(Prepared)));
+        new (prepared) Prepared();
+        luaL_getmetatable(L, PREPARED_MT);
+        lua_setmetatable(L, -2);
+
         const char *tail = nullptr;
         int rc = sqlite3_prepare_v2(db->handle, sql,
                                     static_cast<int>(sql_len),
-                                    &stmt, &tail);
+                                    &prepared->handle, &tail);
         if (rc != SQLITE_OK)
         {
             std::string msg = sqlite3_errmsg(db->handle);
-            if (stmt)
+            if (prepared->handle)
             {
-                sqlite3_finalize(stmt);
+                sqlite3_finalize(prepared->handle);
+                prepared->handle = nullptr;
             }
             return push_sqlite_fail(L, msg);
         }
 
         if (!sql_tail_is_empty(tail))
         {
-            sqlite3_finalize(stmt);
+            if (prepared->handle)
+            {
+                sqlite3_finalize(prepared->handle);
+                prepared->handle = nullptr;
+            }
             return push_sqlite_fail(
                 L, "prepare supports only one statement");
         }
-        if (!stmt)
+        if (!prepared->handle)
         {
             return push_sqlite_fail(
                 L, "prepare requires one non-empty SQL statement");
         }
-
-        Prepared *prepared = static_cast<Prepared *>(
-            lua_newuserdata(L, sizeof(Prepared)));
-        new (prepared) Prepared();
-        prepared->handle = stmt;
-
-        luaL_getmetatable(L, PREPARED_MT);
-        lua_setmetatable(L, -2);
         return 1;
     }
 
@@ -1391,31 +1647,27 @@ namespace
             luaL_checktype(L, 2, LUA_TTABLE);
         }
 
-        char programmer_error[512] = {};
         {
-            std::string error;
-            if (!prepared_clear_for_reuse(prepared->handle, error))
+            std::string reuse_error;
+            if (!prepared_clear_for_reuse(
+                    prepared->handle, reuse_error))
             {
-                return push_sqlite_fail(L, error);
-            }
-
-            PreparedBindStatus status = prepared_bind_for_use(
-                L, prepared->handle, 2, has_params, error);
-            if (status == PreparedBindStatus::OperationalError)
-            {
-                return push_sqlite_fail(L, error);
-            }
-            if (status == PreparedBindStatus::ProgrammerError)
-            {
-                std::snprintf(programmer_error,
-                              sizeof(programmer_error),
-                              "sqlite prepared exec: %s",
-                              error.c_str());
+                return push_sqlite_fail(L, reuse_error);
             }
         }
-        if (programmer_error[0] != '\0')
+
+        char bind_error[512] = {};
+        PreparedBindStatus status = prepared_bind_for_use(
+            L, prepared->handle, 2, has_params,
+            bind_error, sizeof(bind_error));
+        if (status == PreparedBindStatus::OperationalError)
         {
-            return luaL_error(L, "%s", programmer_error);
+            return push_sqlite_fail(L, bind_error);
+        }
+        if (status == PreparedBindStatus::ProgrammerError)
+        {
+            return luaL_error(
+                L, "sqlite prepared exec: %s", bind_error);
         }
 
         int rc = sqlite3_step(prepared->handle);
@@ -1426,8 +1678,7 @@ namespace
 
         if (rc != SQLITE_DONE)
         {
-            std::string msg = sqlite3_errmsg(
-                sqlite3_db_handle(prepared->handle));
+            std::string msg = sqlite_step_error(prepared->handle, rc);
             sqlite3_reset(prepared->handle);
             sqlite3_clear_bindings(prepared->handle);
             return push_sqlite_fail(L, msg);
@@ -1462,31 +1713,27 @@ namespace
             luaL_checktype(L, 2, LUA_TTABLE);
         }
 
-        char programmer_error[512] = {};
         {
-            std::string error;
-            if (!prepared_clear_for_reuse(prepared->handle, error))
+            std::string reuse_error;
+            if (!prepared_clear_for_reuse(
+                    prepared->handle, reuse_error))
             {
-                return push_sqlite_fail(L, error);
-            }
-
-            PreparedBindStatus status = prepared_bind_for_use(
-                L, prepared->handle, 2, has_params, error);
-            if (status == PreparedBindStatus::OperationalError)
-            {
-                return push_sqlite_fail(L, error);
-            }
-            if (status == PreparedBindStatus::ProgrammerError)
-            {
-                std::snprintf(programmer_error,
-                              sizeof(programmer_error),
-                              "sqlite prepared query: %s",
-                              error.c_str());
+                return push_sqlite_fail(L, reuse_error);
             }
         }
-        if (programmer_error[0] != '\0')
+
+        char bind_error[512] = {};
+        PreparedBindStatus status = prepared_bind_for_use(
+            L, prepared->handle, 2, has_params,
+            bind_error, sizeof(bind_error));
+        if (status == PreparedBindStatus::OperationalError)
         {
-            return luaL_error(L, "%s", programmer_error);
+            return push_sqlite_fail(L, bind_error);
+        }
+        if (status == PreparedBindStatus::ProgrammerError)
+        {
+            return luaL_error(
+                L, "sqlite prepared query: %s", bind_error);
         }
 
         prepared->query_active = true;
@@ -1521,8 +1768,7 @@ namespace
 
         char err_msg[512];
         {
-            std::string msg = sqlite3_errmsg(
-                sqlite3_db_handle(prepared->handle));
+            std::string msg = sqlite_step_error(prepared->handle, rc);
             sqlite3_reset(prepared->handle);
             sqlite3_clear_bindings(prepared->handle);
             prepared->query_active = false;
@@ -1941,20 +2187,7 @@ namespace
 
     int db_transaction(lua_State *L)
     {
-        try
-        {
-            return db_transaction_impl(L);
-        }
-        catch (const std::bad_alloc &)
-        {
-            return push_fail(
-                L, "sqlite: transaction out of memory");
-        }
-        catch (...)
-        {
-            return push_fail(
-                L, "sqlite: internal transaction failure");
-        }
+        return db_transaction_impl(L);
     }
 
     // ============================================================
@@ -1969,6 +2202,11 @@ namespace
     // opts : { wal = bool, busy_timeout = ms } — tous optionnels.
     int sqlite_open(lua_State *L)
     {
+        if (!lua_arity_between(L, 1, 2))
+        {
+            return luaL_error(
+                L, "sqlite.open: expected one or two arguments");
+        }
         // luaL_checkstring convertit silencieusement les nombres en
         // strings (sémantique Lua par défaut). On veut rejeter
         // open(42) explicitement : c'est probablement un bug côté
@@ -1979,6 +2217,15 @@ namespace
         // Parse opts first: it may raise a Lua error. No owning C++ string is
         // alive yet, so the longjmp cannot bypass a string destructor.
         OpenOpts opts = parse_open_opts(L, 2);
+
+        // Construire le propriétaire vide et poser __gc avant d'acquérir la
+        // connexion native. sqlite3_open() écrit ensuite directement dans le
+        // handle du userdata : il n'existe aucune fenêtre où la ressource ne
+        // serait pas finalisable.
+        Db *db = static_cast<Db *>(lua_newuserdata(L, sizeof(Db)));
+        new (db) Db();
+        luaL_getmetatable(L, DB_MT);
+        lua_setmetatable(L, -2);
 
         std::string path;
         std::string path_err;
@@ -1992,14 +2239,16 @@ namespace
         //   CREATE | READWRITE.
         // sqlite3_open_v2 permettrait de durcir avec NOMUTEX par exemple,
         // mais on garde le défaut pour cohérence avec SQLITE_THREADSAFE=1.
-        sqlite3 *handle = nullptr;
-        int rc = sqlite3_open(path.c_str(), &handle);
+        int rc = sqlite3_open(path.c_str(), &db->handle);
         if (rc != SQLITE_OK)
         {
-            std::string msg = handle ? sqlite3_errmsg(handle) : sqlite3_errstr(rc);
-            if (handle)
+            std::string msg = db->handle
+                                  ? sqlite3_errmsg(db->handle)
+                                  : sqlite3_errstr(rc);
+            if (db->handle)
             {
-                sqlite3_close_v2(handle);
+                sqlite3_close_v2(db->handle);
+                db->handle = nullptr;
             }
             return push_sqlite_fail(L, msg);
         }
@@ -2008,11 +2257,12 @@ namespace
         // on veut le retry automatique.
         if (opts.busy_timeout_ms > 0)
         {
-            rc = sqlite3_busy_timeout(handle, opts.busy_timeout_ms);
+            rc = sqlite3_busy_timeout(db->handle, opts.busy_timeout_ms);
             if (rc != SQLITE_OK)
             {
-                std::string msg = sqlite3_errmsg(handle);
-                sqlite3_close_v2(handle);
+                std::string msg = sqlite3_errmsg(db->handle);
+                sqlite3_close_v2(db->handle);
+                db->handle = nullptr;
                 return push_sqlite_fail(L, "busy_timeout: " + msg);
             }
         }
@@ -2024,28 +2274,20 @@ namespace
         if (opts.wal)
         {
             char *errmsg = nullptr;
-            rc = sqlite3_exec(handle, "PRAGMA journal_mode=WAL;",
+            rc = sqlite3_exec(db->handle, "PRAGMA journal_mode=WAL;",
                               nullptr, nullptr, &errmsg);
             if (rc != SQLITE_OK)
             {
-                std::string msg = errmsg ? errmsg : sqlite3_errmsg(handle);
+                std::string msg = errmsg
+                                      ? errmsg
+                                      : sqlite3_errmsg(db->handle);
                 sqlite3_free(errmsg);
-                sqlite3_close_v2(handle);
+                sqlite3_close_v2(db->handle);
+                db->handle = nullptr;
                 return push_sqlite_fail(L, "enabling WAL: " + msg);
             }
             sqlite3_free(errmsg);
         }
-
-        // Allouer le userdata Db et y poser handle.
-        // Placement new pour initialiser correctement le struct
-        // (cohérent avec push_new_sock dans socket.cpp).
-        Db *db = static_cast<Db *>(lua_newuserdata(L, sizeof(Db)));
-        new (db) Db();
-        db->handle = handle;
-
-        // Attacher la métatable (créée à register_sqlite).
-        luaL_getmetatable(L, DB_MT);
-        lua_setmetatable(L, -2);
 
         return 1;
     }
@@ -2066,30 +2308,30 @@ namespace
         lua_setfield(L, -2, "__index");
 
         // __gc : appelé par Lua quand le userdata est collecté.
-        lua_pushcfunction(L, db_gc);
+        lua_pushcfunction(L, sqlite_gc_boundary<db_gc>);
         lua_setfield(L, -2, "__gc");
 
         // __tostring : pour print(db).
-        lua_pushcfunction(L, db_tostring);
+        lua_pushcfunction(L, sqlite_lua_boundary<db_tostring>);
         lua_setfield(L, -2, "__tostring");
 
         // Méthodes : close, exec, query, prepare et transactions.
-        lua_pushcfunction(L, db_close);
+        lua_pushcfunction(L, sqlite_lua_boundary<db_close>);
         lua_setfield(L, -2, "close");
 
-        lua_pushcfunction(L, db_exec);
+        lua_pushcfunction(L, sqlite_lua_boundary<db_exec>);
         lua_setfield(L, -2, "exec");
 
-        lua_pushcfunction(L, db_query);
+        lua_pushcfunction(L, sqlite_lua_boundary<db_query>);
         lua_setfield(L, -2, "query");
 
-        lua_pushcfunction(L, db_prepare);
+        lua_pushcfunction(L, sqlite_lua_boundary<db_prepare>);
         lua_setfield(L, -2, "prepare");
 
-        lua_pushcfunction(L, db_transaction);
+        lua_pushcfunction(L, sqlite_lua_boundary<db_transaction>);
         lua_setfield(L, -2, "transaction");
 
-        lua_pushcfunction(L, db_in_transaction);
+        lua_pushcfunction(L, sqlite_lua_boundary<db_in_transaction>);
         lua_setfield(L, -2, "in_transaction");
 
         // On dépile la métatable, elle reste en registry.
@@ -2100,10 +2342,10 @@ namespace
     {
         luaL_newmetatable(L, BLOB_MT);
 
-        lua_pushcfunction(L, blob_gc);
+        lua_pushcfunction(L, sqlite_gc_boundary<blob_gc>);
         lua_setfield(L, -2, "__gc");
 
-        lua_pushcfunction(L, blob_tostring);
+        lua_pushcfunction(L, sqlite_lua_boundary<blob_tostring>);
         lua_setfield(L, -2, "__tostring");
 
         // Opaque and immutable: no __index table and no exposed payload.
@@ -2117,28 +2359,28 @@ namespace
         lua_pushvalue(L, -1);
         lua_setfield(L, -2, "__index");
 
-        lua_pushcfunction(L, prepared_call);
+        lua_pushcfunction(L, sqlite_lua_boundary<prepared_call>);
         lua_setfield(L, -2, "__call");
 
-        lua_pushcfunction(L, prepared_gc);
+        lua_pushcfunction(L, sqlite_gc_boundary<prepared_gc>);
         lua_setfield(L, -2, "__gc");
 
-        lua_pushcfunction(L, prepared_tostring);
+        lua_pushcfunction(L, sqlite_lua_boundary<prepared_tostring>);
         lua_setfield(L, -2, "__tostring");
 
-        lua_pushcfunction(L, prepared_exec);
+        lua_pushcfunction(L, sqlite_lua_boundary<prepared_exec>);
         lua_setfield(L, -2, "exec");
 
-        lua_pushcfunction(L, prepared_query);
+        lua_pushcfunction(L, sqlite_lua_boundary<prepared_query>);
         lua_setfield(L, -2, "query");
 
-        lua_pushcfunction(L, prepared_reset);
+        lua_pushcfunction(L, sqlite_lua_boundary<prepared_reset>);
         lua_setfield(L, -2, "reset");
 
-        lua_pushcfunction(L, prepared_close);
+        lua_pushcfunction(L, sqlite_lua_boundary<prepared_close>);
         lua_setfield(L, -2, "close");
 
-        lua_pushcfunction(L, prepared_close);
+        lua_pushcfunction(L, sqlite_lua_boundary<prepared_close>);
         lua_setfield(L, -2, "finalize");
 
         lua_pop(L, 1);
@@ -2153,19 +2395,19 @@ namespace
         lua_setfield(L, -2, "__index");
 
         // __call : permet for row in stmt do ... end.
-        lua_pushcfunction(L, stmt_call);
+        lua_pushcfunction(L, sqlite_lua_boundary<stmt_call>);
         lua_setfield(L, -2, "__call");
 
         // __gc : finalize le sqlite3_stmt si pas déjà fait.
-        lua_pushcfunction(L, stmt_gc);
+        lua_pushcfunction(L, sqlite_gc_boundary<stmt_gc>);
         lua_setfield(L, -2, "__gc");
 
         // __tostring : print(iter) lisible.
-        lua_pushcfunction(L, stmt_tostring);
+        lua_pushcfunction(L, sqlite_lua_boundary<stmt_tostring>);
         lua_setfield(L, -2, "__tostring");
 
         // Méthode explicite : close.
-        lua_pushcfunction(L, stmt_close);
+        lua_pushcfunction(L, sqlite_lua_boundary<stmt_close>);
         lua_setfield(L, -2, "close");
 
         lua_pop(L, 1);
@@ -2190,11 +2432,14 @@ void register_sqlite(lua_State *L)
     // Sous-table babet.sqlite.
     lua_newtable(L);
 
-    lua_pushcfunction(L, sqlite_open);
+    lua_pushcfunction(L, sqlite_lua_boundary<sqlite_open>);
     lua_setfield(L, -2, "open");
 
-    lua_pushcfunction(L, sqlite_blob);
+    lua_pushcfunction(L, sqlite_lua_boundary<sqlite_blob>);
     lua_setfield(L, -2, "blob");
+
+    lua_pushlightuserdata(L, &SQLITE_NULL_SENTINEL_KEY);
+    lua_setfield(L, -2, "NULL");
 
     lua_setfield(L, -2, "sqlite");
 }

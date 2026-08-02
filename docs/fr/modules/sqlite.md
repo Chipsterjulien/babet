@@ -5,7 +5,7 @@
 `babet.sqlite` embarque SQLite 3.53.1 et expose une API Lua complète mais
 volontairement compacte : connexions, exécution SQL directe, itérateurs
 paresseux, statements préparés réutilisables, transactions assistées et bind
-BLOB explicite.
+BLOB et `NULL` explicites.
 
 ## Table des matières du module
 
@@ -15,6 +15,7 @@ BLOB explicite.
   - [Statements préparés réutilisables](#sqlite-prepared)
   - [Transactions assistées](#sqlite-transactions)
   - [Paramètres SQL](#sqlite-parameters)
+  - [Valeurs NULL explicites](#sqlite-nulls)
   - [BLOB explicites](#sqlite-blobs)
   - [Texte SQL et octets NUL](#sqlite-sql-text)
 - [Lecture des lignes et mapping de types](#sqlite-rows)
@@ -33,6 +34,7 @@ BLOB explicite.
 | --- | --- |
 | `babet.sqlite.open(path, opts?)` | `db` (userdata) \| `(nil, err)` |
 | `babet.sqlite.blob(data)` | wrapper BLOB opaque |
+| `babet.sqlite.NULL` | sentinelle lightuserdata exacte pour binder SQL `NULL` |
 | `db:close()` | `(true, nil)` — idempotent |
 | `db:in_transaction()` | boolean \| `(nil, err)` |
 
@@ -53,6 +55,37 @@ lorsque WAL n'est pas applicable. C'est notamment le cas de `":memory:"`.
 `busy_timeout` demande à SQLite de réessayer pendant la durée indiquée lorsque
 la base est verrouillée. La valeur `0` laisse remonter immédiatement
 `SQLITE_BUSY`.
+
+Chaque option peut être utilisée seule. Pour définir uniquement l'attente sur
+verrou :
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    busy_timeout = 2500,
+}))
+```
+
+Pour demander WAL en gardant l'attente par défaut :
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    wal = true,
+}))
+```
+
+Pour combiner les deux options :
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    wal = true,
+    busy_timeout = 2500,
+}))
+```
+
+La table `opts` est stricte : un champ inconnu, une clé d'option non chaîne,
+un mauvais type ou un délai hors limites lève une erreur Lua. Les options sont
+lues directement dans la table ; une métaméthode `__index` ne peut ni les
+fournir ni les masquer.
 
 `db:in_transaction()` renvoie `true` dès que la connexion se trouve dans une
 transaction, qu'elle ait été ouverte par `db:transaction()` ou par un
@@ -329,21 +362,91 @@ assert(db:exec(
 ```
 
 La table doit correspondre exactement aux placeholders. Un paramètre manquant,
-en trop, un index numérique sparse, un index numérique non entier ou une
-valeur non supportée lève une erreur Lua. Passer explicitement `nil` comme
-table équivaut à ne pas fournir de paramètres.
+en trop, un index numérique sparse, un index numérique non entier, un type de
+clé non supporté ou une valeur non supportée lève une erreur Lua. Passer
+explicitement `nil` comme table équivaut à ne pas fournir de paramètres ; ce
+n'est pas une valeur de bind.
 
-Les placeholders numérotés `?NNN` ne font pas partie du contrat public.
+Les paramètres nommés sont lus directement dans la table. Une valeur fournie
+par `__index` ne compte pas et une erreur de cette métaméthode ne sera jamais
+déclenchée par le bind. Les placeholders numérotés `?NNN` sont explicitement
+refusés ; utilise des `?` anonymes dans leur ordre naturel.
 
 Types acceptés au bind :
 
 | Type Lua | Valeur SQLite |
 | --- | --- |
 | boolean | INTEGER `0` ou `1` |
-| integer | INTEGER |
-| number non entier | REAL |
+| integer | INTEGER, sur toute la plage signée 64 bits |
+| number non entier fini | REAL |
 | string | TEXT, y compris avec des octets NUL |
 | `babet.sqlite.blob(data)` | BLOB binary-safe |
+| `babet.sqlite.NULL` | SQL `NULL` |
+
+NaN et les infinis positif ou négatif sont refusés au lieu d'être transmis à
+SQLite avec un résultat dépendant de la plateforme.
+
+<a id="sqlite-nulls"></a>
+### Valeurs NULL explicites
+
+Lua ne peut pas conserver `nil` dans une table de paramètres : lui affecter
+`nil` supprime la clé. Utilise l'unique sentinelle `babet.sqlite.NULL` lorsqu'un
+placeholder doit être bindé à SQL `NULL`.
+
+Valeur optionnelle nommée :
+
+```lua
+local NULL = babet.sqlite.NULL
+
+assert(db:exec([[
+    INSERT INTO users(name, nickname)
+    VALUES(:name, :nickname)
+]], {
+    name = "Ada",
+    nickname = NULL,
+}))
+```
+
+`NULL` positionnel au milieu d'une liste de paramètres :
+
+```lua
+assert(db:exec(
+    "INSERT INTO events(id, payload, created_at) VALUES(?, ?, ?)",
+    { 17, babet.sqlite.NULL, 1700000000 }
+))
+```
+
+La sentinelle fonctionne de la même manière avec les statements réutilisables
+et peut alterner entre des valeurs ordinaires et `NULL` :
+
+```lua
+local update = assert(db:prepare(
+    "UPDATE users SET nickname = ? WHERE name = ?"
+))
+
+assert(update:exec({ "Comtesse", "Ada" }))
+assert(update:exec({ babet.sqlite.NULL, "Ada" }))
+assert(update:finalize())
+```
+
+Le bind et la lecture sont volontairement asymétriques :
+
+| Valeur Lua au bind | Stockage SQLite | Valeur Lua lue |
+| --- | --- | --- |
+| `true` | INTEGER `1` | integer `1` |
+| `false` | INTEGER `0` | integer `0` |
+| `babet.sqlite.NULL` | `NULL` | `nil` / clé absente |
+
+SQLite ne possède pas de classe de stockage booléenne : les entiers sont donc
+relus comme des entiers et Babet ne déduit pas un boolean de `0` ou `1`. Un
+résultat `NULL` ne crée aucune clé dans la table ligne : `row.colonne == nil`
+et la clé est également absente de `pairs(row)`.
+
+`babet.sqlite.NULL` est accepté uniquement comme valeur de bind SQLite. Les
+autres lightuserdata sont refusés. L'encodage JSON et le transfert vers les
+workers ou les channels refusent aussi cette sentinelle avec un diagnostic
+explicite, afin qu'une valeur opaque ressemblant à un pointeur ne franchisse
+jamais silencieusement les frontières entre sous-systèmes.
 
 <a id="sqlite-blobs"></a>
 ### BLOB explicites
@@ -369,9 +472,6 @@ zéro octet, et non `NULL`.
 
 Le wrapper ne sert qu'au bind ; la lecture d'une colonne BLOB renvoie toujours
 une chaîne Lua binary-safe.
-
-Il n'existe pas encore de sentinelle pour binder explicitement `NULL`. Utilise
-le littéral SQL `NULL` lorsque nécessaire.
 
 <a id="sqlite-sql-text"></a>
 ### Texte SQL et octets NUL
@@ -405,8 +505,9 @@ un octet NUL. Pour compter ses octets lors d'un diagnostic, utilise par exemple
 <a id="sqlite-lifetime"></a>
 ## Cycle de vie
 
-`db:close()` est idempotent. Après fermeture, toute nouvelle opération sur la
-connexion renvoie `(nil, "sqlite: connection closed")`.
+`db:close()` est idempotent. Après fermeture, toute nouvelle opération comme
+`exec`, `query`, `prepare`, `transaction` et `in_transaction` renvoie
+`(nil, "sqlite: connection closed")`.
 
 Un itérateur ou un statement préparé créé **avant** `db:close()` reste
 cependant utilisable. Babet emploie `sqlite3_close_v2` : SQLite conserve une
@@ -427,6 +528,11 @@ Les itérateurs temporaires de `db:query` et les statements préparés possèden
 un `__gc` qui finalise leur handle. Une fermeture explicite reste préférable
 pour libérer immédiatement verrous et ressources.
 
+Les statements ne conservent volontairement ni référence Lua ni pointeur
+`Db*` brut vers le userdata parent. SQLite maintient lui-même la connexion
+native zombie en vie ; cela évite un pointeur C++ devenu invalide et permet au
+userdata `db` d'être collecté indépendamment.
+
 <a id="sqlite-errors"></a>
 ## Contrat d'erreur
 
@@ -436,6 +542,11 @@ Les erreurs se répartissent en deux catégories :
   connexion fermée) renvoient généralement `(nil, "sqlite: <description>")` ;
 - les mauvais types, les arités invalides et les tables `params` incorrectes
   lèvent une erreur Lua.
+
+Toutes les fonctions publiques vérifient leur arité exacte. Les erreurs de
+contrat des paramètres couvrent aussi `?NNN`, les REAL non finis, les
+lightuserdata étrangers et les tables d'options ou de paramètres contenant
+des clés non supportées.
 
 Les erreurs survenant pendant l'appel d'un itérateur (`db:query` ou
 `prepared:query`) lèvent une erreur Lua, car le protocole d'itération ne permet
@@ -450,7 +561,7 @@ erreurs Lua du callback, effectue le rollback et les convertit en `(nil, err)`.
 <a id="sqlite-examples"></a>
 ## Exemples complets
 
-### Inserts préparés et BLOB
+### Inserts préparés, NULL optionnel et BLOB
 
 ```lua
 local db = assert(babet.sqlite.open("state.db", {
@@ -461,20 +572,24 @@ local db = assert(babet.sqlite.open("state.db", {
 assert(db:exec([[
     CREATE TABLE IF NOT EXISTS files (
         path TEXT PRIMARY KEY,
-        digest BLOB NOT NULL
+        digest BLOB NOT NULL,
+        media_type TEXT
     )
 ]]))
 
 local insert = assert(db:prepare([[
-    INSERT INTO files(path, digest)
-    VALUES(?, ?)
-    ON CONFLICT(path) DO UPDATE SET digest = excluded.digest
+    INSERT INTO files(path, digest, media_type)
+    VALUES(?, ?, ?)
+    ON CONFLICT(path) DO UPDATE SET
+        digest = excluded.digest,
+        media_type = excluded.media_type
 ]]))
 
 for _, file in ipairs(files) do
     assert(insert:exec({
         file.path,
         babet.sqlite.blob(file.digest),
+        file.media_type or babet.sqlite.NULL,
     }))
 end
 
@@ -513,15 +628,17 @@ assert(db:close())
 <a id="sqlite-not-exposed"></a>
 ## Fonctions non exposées
 
-Les éléments suivants ne sont pas implémentés :
+Les éléments suivants ne sont volontairement pas implémentés :
 
-- une sentinelle `sqlite.NULL` pour binder explicitement `NULL` ;
-- `db:last_insert_rowid()` et `db:changes()` ;
-- `opts.readonly` et `opts.foreign_keys` ;
+- les modes de connexion comme `opts.readonly`, le mode URI et
+  `opts.foreign_keys` ;
+- les compteurs de commodité comme `db:last_insert_rowid()`, `db:changes()` et
+  `db:total_changes()` ;
 - un helper de savepoint imbriqué ;
+- les APIs de progress handler et d'interruption ;
 - l'API de streaming BLOB `sqlite3_blob_open` ;
 - l'API de sauvegarde `sqlite3_backup_init`.
 
-`last_insert_rowid`, `changes`, les clés étrangères, les savepoints et
-`VACUUM INTO` restent accessibles par SQL brut. FTS5 et R-Tree ne sont pas
-activés dans la compilation embarquée actuelle.
+`last_insert_rowid()`, `changes()`, les clés étrangères, les savepoints et
+`VACUUM INTO` restent accessibles par SQL brut lorsqu'une forme SQL existe.
+FTS5 et R-Tree ne sont pas activés dans la compilation embarquée actuelle.

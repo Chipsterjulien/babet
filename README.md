@@ -16,14 +16,15 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.9.2**. See the
+Current stable and audited release: **2.10.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.9.2 hardens worker serialization, process and pipeline cleanup, SQLite
-transaction recovery, and the HTTP/socket exception boundaries without changing
-the Lua API. It also expands deterministic preflights for Zstandard, inotify,
-and worker serialization budgets. The 2.9 feature line still includes
+Babet 2.10.0 completes a function-by-function audit of the SQLite module. It
+adds the explicit `babet.sqlite.NULL` bind sentinel, strict finite-number and
+parameter-table validation, reliable diagnostics after deferred connection
+closing, and exception-safe Lua boundaries and native-resource ownership. The
+2.9 feature line still includes
 configurable `babet.spawn()` redirections, the native `babet.base64` module,
 secure `babet.writeFileAtomic()` publication, a hardened worker lifecycle, and
 direct bounded shared channels between workers.

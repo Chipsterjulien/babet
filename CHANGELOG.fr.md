@@ -6,6 +6,71 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.10.0] - 2026-08-02
+
+### Résumé de la version
+
+Babet 2.10.0 achève un audit complet, de la source aux tests, de
+`babet.sqlite`. La seule nouvelle API publique est `babet.sqlite.NULL` ; le
+reste de la version rend explicites et impose mécaniquement les contrats
+existants de connexion, statements, paramètres, cycle de vie, diagnostics et
+sûreté aux exceptions.
+
+### NULL SQL explicite et contrats de bind
+
+- ajout du singleton lightuserdata `babet.sqlite.NULL` pour les binds nommés,
+  positionnels, directs et préparés, sans relâcher la règle d'exactitude de la
+  table de paramètres ;
+- conservation d'une conversion volontairement asymétrique à la lecture : SQL
+  `NULL` produit toujours une clé Lua absente, tandis que les INTEGER SQLite
+  issus de booleans sont relus comme des entiers ;
+- conservation exacte des entiers signés 64 bits et refus de NaN et des deux
+  infinis avant leur arrivée dans SQLite ;
+- lecture brute des paramètres nommés, afin que `__index` ne puisse ni fournir
+  ni perturber un bind, et refus des types de clés non supportés, indices
+  numériques sparse ou non entiers, valeurs manquantes ou en trop et
+  placeholders numérotés `?NNN` ;
+- distinction entre la sentinelle NULL exacte et tout autre lightuserdata, qui
+  reste un type de bind non supporté ;
+- refus explicite de `babet.sqlite.NULL` par JSON, les arguments/messages des
+  workers et les channels, avec vérification de l'atomicité d'un envoi refusé.
+
+### Cycle de vie, diagnostics et sûreté aux exceptions
+
+- conservation du diagnostic SQLite de `step` avant `reset` ou `finalize` et
+  utilisation du code retour lorsque `sqlite3_errcode()` est déjà devenu
+  `SQLITE_MISUSE`, ce qui corrige les erreurs de contrainte après collecte du
+  userdata `Db` parent ;
+- passage des 19 points d'entrée Lua SQLite ordinaires par une frontière
+  d'exception C++ commune et des quatre finalizers par une frontière silencieuse
+  `noexcept`, afin qu'une allocation défaillante ne traverse jamais une
+  `lua_CFunction` compilée comme du C ;
+- mise en état finalisable de chaque handle natif avant acquisition ou transfert
+  dans les chemins d'erreur de `open`, `query` direct, `prepare` et `exec`
+  paramétré ;
+- justification de l'absence volontaire de `Db*` brut ou d'ancrage Lua dans les
+  statements temporaires et préparés : `sqlite3_close_v2` possède le cycle de
+  vie de la connexion zombie jusqu'à la finalisation du dernier statement ;
+- conservation du handle de connexion lorsque `sqlite3_close_v2` signale un
+  échec, au lieu de déclarer fermé un handle encore possédé ;
+- contrôles d'arité exacte sur l'API publique et refus par `open` des options
+  inconnues, clés d'option non chaînes, mauvais types et délais hors limites.
+
+### Tests et documentation
+
+- ajout de cinq régressions après collecte du parent : deux utilisations réussies
+  de la connexion zombie et trois diagnostics de contrainte, chacune prouvant
+  par une table faible que le userdata parent a réellement été collecté ;
+- ajout de 32 assertions par mode de test fonctionnel pour NULL, les options et
+  arités strictes, la forme des tables de paramètres, les nombres non finis,
+  les limites 64 bits, la lecture brute des noms, `?NNN`, les handles fermés et
+  les refus entre sous-systèmes ;
+- enrichissement des manuels SQLite français et anglais avec exemples séparés
+  pour chaque option, usages de NULL explicite, règles de lecture, garanties de
+  cycle de vie, diagnostics, exclusions volontaires et exemples combinés ;
+- régénération des deux manuels PDF et mise à jour des métadonnées et notes de
+  version pour 2.10.0.
+
 ## [2.9.2] - 2026-08-01
 
 ### Résumé de la version

@@ -6,6 +6,65 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.10.0] - 2026-08-02
+
+### Release summary
+
+Babet 2.10.0 completes a source-to-test audit of `babet.sqlite`. The only new
+public API is `babet.sqlite.NULL`; the remainder of the release makes existing
+connection, statement, parameter, lifetime, diagnostic, and exception-safety
+contracts explicit and mechanically enforced.
+
+### Explicit SQL NULL and binding contracts
+
+- added the singleton lightuserdata `babet.sqlite.NULL` for named, positional,
+  direct, and prepared binds without weakening the exact-parameter-table rule;
+- kept row conversion intentionally asymmetric: SQL `NULL` still produces an
+  absent Lua table key, while SQLite INTEGER values produced from booleans read
+  back as integers;
+- preserved exact signed 64-bit integer binding and rejected NaN and both
+  infinities before they reach SQLite;
+- made named parameter lookup raw, so `__index` cannot supply or interfere with
+  a bind, and rejected unsupported table key types, sparse/non-integer numeric
+  keys, missing or extra values, and numbered `?NNN` placeholders;
+- distinguished the exact NULL sentinel from every other lightuserdata, which
+  remains an unsupported bind type;
+- rejected `babet.sqlite.NULL` explicitly in JSON, worker arguments/messages,
+  and channels, including atomic channel-send coverage.
+
+### Lifetime, diagnostics, and exception safety
+
+- preserved the SQLite step diagnostic before `reset` or `finalize` and used
+  the step return code when `sqlite3_errcode()` has already become
+  `SQLITE_MISUSE`, fixing constraint diagnostics after the parent `Db` userdata
+  is collected;
+- routed all 19 normal SQLite Lua entry points through a common C++ exception
+  boundary and all four finalizers through a silent `noexcept` boundary, so an
+  allocation failure cannot cross a `lua_CFunction` compiled as C;
+- made every native handle finalizable before acquisition or transfer in
+  `open`, direct `query`, `prepare`, and parameterized `exec` error paths;
+- documented why temporary and prepared statements intentionally keep neither
+  a raw `Db*` nor a Lua anchor: `sqlite3_close_v2` owns the zombie-connection
+  lifetime until the last statement is finalized;
+- retained a connection handle when `sqlite3_close_v2` reports failure instead
+  of marking a still-owned handle as closed;
+- made public arity checks exact and made `open` reject unknown options,
+  non-string option keys, wrong option types, and out-of-range timeouts.
+
+### Tests and documentation
+
+- added five parent-collection regressions: two successful zombie-connection
+  uses and three constraint diagnostics, each proving through a weak table that
+  the parent userdata was actually collected;
+- added 32 assertions per functional test mode for NULL, strict options and
+  arity, parameter-table shape, non-finite numbers, 64-bit limits, raw named
+  lookup, `?NNN`, closed handles, and cross-subsystem rejection;
+- expanded the English and French SQLite manuals with separate option examples,
+  explicit NULL patterns, readback rules, lifetime guarantees, diagnostics,
+  intentional exclusions, and complete combined examples;
+- regenerated both PDF manuals and updated release metadata and release notes
+  for 2.10.0.
+
 ## [2.9.2] - 2026-08-01
 
 ### Release summary

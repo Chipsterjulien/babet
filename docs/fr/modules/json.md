@@ -48,6 +48,7 @@ implicitement en texte. `as_array` exige exactement une table.
 | `nil` passé directement à `encode` | `null` |
 | `babet.json.null` | `null` |
 | `babet.json.empty_array` | `[]` |
+| `babet.sqlite.NULL` | refusé ; utiliser `babet.json.null` |
 | booléen | booléen |
 | entier Lua | nombre entier JSON |
 | flottant Lua fini | nombre JSON flottant |
@@ -59,6 +60,11 @@ implicitement en texte. `as_array` exige exactement une table.
 Dans une table Lua, affecter `nil` supprime la clé avant même
 l'encodage. Utilise `babet.json.null` pour conserver explicitement une
 clé dont la valeur JSON doit être `null`.
+
+`babet.sqlite.NULL` n'est volontairement pas un alias de null JSON. C'est une
+sentinelle lightuserdata réservée au bind SQLite : `encode` renvoie donc une
+erreur qui nomme explicitement `babet.sqlite.NULL`. Utilise `babet.json.null`
+à la frontière JSON.
 
 Une table mixant clés chaînes et entières, un tableau à trous, ou une
 table contenant une clé non représentable (`0`, entier négatif,
@@ -224,7 +230,7 @@ Cela comprend notamment :
 - JSON invalide, données supplémentaires après le document ou UTF-8
   invalide ;
 - table mixte, à trous ou avec des clés non représentables ;
-- fonction, userdata ou thread impossible à encoder ;
+- fonction, userdata (dont `babet.sqlite.NULL`) ou thread impossible à encoder ;
 - `NaN` ou infinité ;
 - cycle ou profondeur d'imbrication excessive.
 

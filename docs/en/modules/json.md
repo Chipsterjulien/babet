@@ -47,6 +47,7 @@ text. `as_array` requires exactly one table.
 | `nil` passed directly to `encode` | `null` |
 | `babet.json.null` | `null` |
 | `babet.json.empty_array` | `[]` |
+| `babet.sqlite.NULL` | rejected; use `babet.json.null` |
 | boolean | boolean |
 | Lua integer | JSON integer number |
 | finite Lua float | JSON floating-point number |
@@ -58,6 +59,10 @@ text. `as_array` requires exactly one table.
 Inside a Lua table, assigning `nil` removes the key before encoding
 ever starts. Use `babet.json.null` to retain a key whose JSON value must
 explicitly be `null`.
+
+`babet.sqlite.NULL` is intentionally not an alias for JSON null. It is a
+SQLite-only lightuserdata bind sentinel, so `encode` returns an error naming
+`babet.sqlite.NULL` explicitly. Use `babet.json.null` at a JSON boundary.
 
 A table mixing string and integer keys, a sparse array, or a table with
 an unrepresentable key (`0`, a negative integer, a float, a boolean, a
@@ -219,7 +224,8 @@ This includes, among other cases:
 
 - invalid JSON, trailing data after the document, or invalid UTF-8;
 - mixed tables, sparse arrays, or unrepresentable keys;
-- a function, userdata, or thread that cannot be encoded;
+- a function, userdata (including `babet.sqlite.NULL`), or thread that cannot
+  be encoded;
 - `NaN` or infinity;
 - a cycle or excessive nesting depth.
 

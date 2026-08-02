@@ -17,15 +17,16 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.9.2**. Voir le
+Version stable et auditée actuelle : **2.10.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.9.2 renforce la sérialisation des workers, le nettoyage des processus et
-pipelines, la récupération des transactions SQLite ainsi que les frontières
-d'exception HTTP et sockets, sans modifier l'API Lua. La validation déterministe
-est également enrichie pour Zstandard, inotify et les budgets de sérialisation.
-Les nouveautés fonctionnelles de la série 2.9 restent les redirections de
+Babet 2.10.0 achève un audit fonction par fonction du module SQLite. Cette
+version ajoute la sentinelle de bind explicite `babet.sqlite.NULL`, une
+validation stricte des nombres finis et des tables de paramètres, des
+diagnostics fiables après fermeture différée de la connexion et une propriété
+sûre des ressources natives aux frontières Lua. Les nouveautés fonctionnelles
+de la série 2.9 restent les redirections de
 `babet.spawn()`, le module `babet.base64`, `babet.writeFileAtomic()`, le cycle
 de vie workers renforcé et les channels directs entre workers.
 

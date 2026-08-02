@@ -1,5 +1,6 @@
 #include "workers.hpp"
 #include "lua_utils.hpp"
+#include "sqlite.hpp"
 #include "workers_serialization_budget.hpp"
 #include "../project_core/bundled_modules.hpp"
 #include "../project_core/embedded_searcher.hpp"
@@ -1227,6 +1228,13 @@ namespace
             return false;
         }
         idx = lua_absindex(L, idx);
+        if (is_sqlite_null(L, idx))
+        {
+            set_transfer_error(
+                err, context,
+                "cannot transfer babet.sqlite.NULL");
+            return false;
+        }
         int t = lua_type(L, idx);
         switch (t)
         {

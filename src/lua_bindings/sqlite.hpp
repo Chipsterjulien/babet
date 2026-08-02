@@ -23,6 +23,8 @@
 //
 // Les chaînes Lua ordinaires sont bindées comme TEXT. Le wrapper
 // babet.sqlite.blob(data) force un bind BLOB binary-safe.
+// babet.sqlite.NULL est un lightuserdata privé accepté uniquement comme
+// valeur de bind explicite pour SQL NULL.
 //
 // db:query() crée un itérateur temporaire à usage unique. db:prepare()
 // crée un statement réutilisable avec exec/query/reset/finalize.
@@ -53,5 +55,9 @@ struct lua_State;
 // Postcondition : pile inchangée (la sous-table est posée comme
 // champ "sqlite" de babet).
 void register_sqlite(lua_State *L);
+
+// Reconnaît la sentinelle par identité exacte. Ce helper permet aux autres
+// modules de la refuser avec un diagnostic stable sans exposer son adresse.
+bool is_sqlite_null(lua_State *L, int idx) noexcept;
 
 #endif // LUA_BINDINGS_SQLITE_HPP

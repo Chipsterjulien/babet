@@ -436,6 +436,7 @@ These values do not cross Lua states:
 
 - functions and closures;
 - userdata: channel, socket, SQLite statement, watcher, job, file, and so on;
+- the SQLite-only lightuserdata sentinel `babet.sqlite.NULL`;
 - Lua coroutines/threads;
 - cyclic tables;
 - sparse or mixed tables;
@@ -446,6 +447,10 @@ These values do not cross Lua states:
 
 Pass a path, URL, or serializable configuration instead of the system object
 itself. The worker then opens its own resource.
+
+The NULL sentinel is rejected with a diagnostic that explicitly names
+`babet.sqlite.NULL`. Translate it to a domain value such as
+`{ kind = "sql-null" }` if that intent must cross a worker or channel boundary.
 
 ```lua
 -- Wrong: socket is userdata.
@@ -849,9 +854,10 @@ local ok, value = channel:recv(0)
 assert(ok == true and value == nil)
 ```
 
-Channels use the same JSON transfer rules as workers. A channel or any other
-userdata cannot itself be sent as a message. For binary Selenium screenshots,
-prefer a file path, or keep Base64 text and decode it with
+Channels use the same JSON transfer rules as workers. Channel handles and other
+userdata cannot themselves be sent as messages; neither can
+`babet.sqlite.NULL`. A rejected send publishes nothing to the channel. For
+binary Selenium screenshots, prefer a file path, or keep Base64 text and decode it with
 `babet.base64.decode()` at the consumer.
 
 Inside a worker, `job:cancel()` also wakes a blocked `channel:send()` or
