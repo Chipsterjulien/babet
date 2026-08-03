@@ -21,6 +21,7 @@ extern "C"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <new>
 #include <string>
 
@@ -112,9 +113,13 @@ namespace
         {
             return push_fail(L, "sqlite: out of memory");
         }
-        catch (...)
+        catch (const std::exception &)
         {
             return push_fail(L, "sqlite: internal failure");
+        }
+        catch (...)
+        {
+            return push_fail(L, "sqlite: unknown internal failure");
         }
     }
 
@@ -247,9 +252,13 @@ namespace
     struct OpenOpts
     {
         bool wal;
+        bool readonly;
+        bool foreign_keys;
         int busy_timeout_ms;
 
-        OpenOpts() : wal(false), busy_timeout_ms(0) {}
+        OpenOpts()
+            : wal(false), readonly(false), foreign_keys(false),
+              busy_timeout_ms(0) {}
     };
 
     // Lit opts depuis la pile (table à idx, ou nil/absent → defaults).
@@ -283,6 +292,10 @@ namespace
             const char *key = lua_tolstring(L, -2, &key_len);
             const bool known =
                 (key_len == 3 && std::memcmp(key, "wal", 3) == 0) ||
+                (key_len == 8 &&
+                 std::memcmp(key, "readonly", 8) == 0) ||
+                (key_len == 12 &&
+                 std::memcmp(key, "foreign_keys", 12) == 0) ||
                 (key_len == 12 &&
                  std::memcmp(key, "busy_timeout", 12) == 0);
             if (!known)
@@ -314,6 +327,37 @@ namespace
         }
         lua_pop(L, 1);
 
+        // readonly
+        lua_pushliteral(L, "readonly");
+        lua_rawget(L, idx);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_boolean(L, -1))
+            {
+                lua_pop(L, 1);
+                luaL_error(L,
+                           "sqlite.open: opts.readonly must be a boolean");
+            }
+            opts.readonly = lua_toboolean(L, -1);
+        }
+        lua_pop(L, 1);
+
+        // foreign_keys
+        lua_pushliteral(L, "foreign_keys");
+        lua_rawget(L, idx);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_boolean(L, -1))
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.open: opts.foreign_keys must be a boolean");
+            }
+            opts.foreign_keys = lua_toboolean(L, -1);
+        }
+        lua_pop(L, 1);
+
         // busy_timeout
         lua_pushliteral(L, "busy_timeout");
         lua_rawget(L, idx);
@@ -338,6 +382,13 @@ namespace
             opts.busy_timeout_ms = static_cast<int>(v);
         }
         lua_pop(L, 1);
+
+        if (opts.readonly && opts.wal)
+        {
+            luaL_error(
+                L,
+                "sqlite.open: readonly=true cannot be combined with wal=true");
+        }
 
         return opts;
     }
@@ -836,6 +887,74 @@ namespace
             db->handle = nullptr;
         }
         return push_ok(L);
+    }
+
+    // db:last_insert_rowid() -> integer | (nil, err)
+    //
+    // Valeur propre à cette connexion, telle que définie par SQLite. Elle
+    // reste inchangée après les statements qui n'insèrent pas de rowid et
+    // après un rollback d'un INSERT réussi.
+    int db_last_insert_rowid(lua_State *L)
+    {
+        if (!lua_arity_is(L, 1))
+        {
+            return luaL_error(
+                L, "sqlite.last_insert_rowid: expected only self");
+        }
+        Db *db = check_db(L, 1);
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+
+        lua_pushinteger(
+            L,
+            static_cast<lua_Integer>(
+                sqlite3_last_insert_rowid(db->handle)));
+        return 1;
+    }
+
+    // db:changes() -> integer | (nil, err)
+    // Nombre de lignes modifiées par le dernier INSERT/UPDATE/DELETE terminé
+    // sur cette connexion. La variante 64 bits évite la saturation de
+    // sqlite3_changes() pour les opérations exceptionnellement volumineuses.
+    int db_changes(lua_State *L)
+    {
+        if (!lua_arity_is(L, 1))
+        {
+            return luaL_error(L, "sqlite.changes: expected only self");
+        }
+        Db *db = check_db(L, 1);
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+
+        lua_pushinteger(
+            L,
+            static_cast<lua_Integer>(sqlite3_changes64(db->handle)));
+        return 1;
+    }
+
+    // db:total_changes() -> integer | (nil, err)
+    // Cumul des lignes modifiées depuis l'ouverture de cette connexion.
+    int db_total_changes(lua_State *L)
+    {
+        if (!lua_arity_is(L, 1))
+        {
+            return luaL_error(
+                L, "sqlite.total_changes: expected only self");
+        }
+        Db *db = check_db(L, 1);
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+
+        lua_pushinteger(
+            L,
+            static_cast<lua_Integer>(sqlite3_total_changes64(db->handle)));
+        return 1;
     }
 
     // db:exec(sql, params?) → (true, nil) | (nil, err)
@@ -2199,7 +2318,8 @@ namespace
     // path : ":memory:" pour une DB en RAM (jetable),
     //        sinon un chemin de fichier (créé s'il n'existe pas).
     //
-    // opts : { wal = bool, busy_timeout = ms } — tous optionnels.
+    // opts : { wal = bool, readonly = bool, foreign_keys = bool,
+    //          busy_timeout = ms } — tous optionnels.
     int sqlite_open(lua_State *L)
     {
         if (!lua_arity_between(L, 1, 2))
@@ -2235,11 +2355,15 @@ namespace
             return push_fail(L, path_err);
         }
 
-        // Ouverture avec les flags par défaut équivalents à sqlite3_open :
-        //   CREATE | READWRITE.
-        // sqlite3_open_v2 permettrait de durcir avec NOMUTEX par exemple,
-        // mais on garde le défaut pour cohérence avec SQLITE_THREADSAFE=1.
-        int rc = sqlite3_open(path.c_str(), &db->handle);
+        // Sans readonly, conserver exactement la politique historique de
+        // sqlite3_open() : READWRITE | CREATE. En lecture seule, ne jamais
+        // créer le fichier et laisser SQLite refuser toute écriture.
+        const int open_flags = opts.readonly
+                                   ? SQLITE_OPEN_READONLY
+                                   : SQLITE_OPEN_READWRITE |
+                                         SQLITE_OPEN_CREATE;
+        int rc = sqlite3_open_v2(
+            path.c_str(), &db->handle, open_flags, nullptr);
         if (rc != SQLITE_OK)
         {
             std::string msg = db->handle
@@ -2265,6 +2389,20 @@ namespace
                 db->handle = nullptr;
                 return push_sqlite_fail(L, "busy_timeout: " + msg);
             }
+        }
+
+        // Fixer explicitement le contrat de la connexion au lieu de dépendre
+        // d'une éventuelle option de compilation SQLite. Ce réglage ne modifie
+        // pas le fichier et fonctionne donc également en lecture seule.
+        rc = sqlite3_db_config(
+            db->handle, SQLITE_DBCONFIG_ENABLE_FKEY,
+            opts.foreign_keys ? 1 : 0, nullptr);
+        if (rc != SQLITE_OK)
+        {
+            std::string msg = sqlite3_errstr(rc);
+            sqlite3_close_v2(db->handle);
+            db->handle = nullptr;
+            return push_sqlite_fail(L, "foreign_keys: " + msg);
         }
 
         // Activer WAL si demandé. PRAGMA journal_mode renvoie le mode
@@ -2315,7 +2453,7 @@ namespace
         lua_pushcfunction(L, sqlite_lua_boundary<db_tostring>);
         lua_setfield(L, -2, "__tostring");
 
-        // Méthodes : close, exec, query, prepare et transactions.
+        // Méthodes : fermeture, exécution, compteurs et transactions.
         lua_pushcfunction(L, sqlite_lua_boundary<db_close>);
         lua_setfield(L, -2, "close");
 
@@ -2333,6 +2471,15 @@ namespace
 
         lua_pushcfunction(L, sqlite_lua_boundary<db_in_transaction>);
         lua_setfield(L, -2, "in_transaction");
+
+        lua_pushcfunction(L, sqlite_lua_boundary<db_last_insert_rowid>);
+        lua_setfield(L, -2, "last_insert_rowid");
+
+        lua_pushcfunction(L, sqlite_lua_boundary<db_changes>);
+        lua_setfield(L, -2, "changes");
+
+        lua_pushcfunction(L, sqlite_lua_boundary<db_total_changes>);
+        lua_setfield(L, -2, "total_changes");
 
         // On dépile la métatable, elle reste en registry.
         lua_pop(L, 1);

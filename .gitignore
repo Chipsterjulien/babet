@@ -13,3 +13,4 @@ test/
 *.log
 .DS_Store
 test/luapilot
+babet-tests.txt

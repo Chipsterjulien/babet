@@ -2,12 +2,13 @@
 
 ## Scope
 
-The `babet.archive` submodule creates, inspects, and extracts **ZIP**, **TAR**,
+The `babet.archive` submodule creates, inspects, reads in memory, and extracts **ZIP**, **TAR**,
 and **gzip-, xz-, bzip2-, or zstd-compressed TAR** archives without calling an external command:
 
 ```lua
 babet.archive.create(source_or_sources, archive [, opts])
 babet.archive.list(archive [, opts])
+babet.archive.read(archive, raw_name_or_index [, opts])
 babet.archive.test(archive [, opts])
 babet.archive.extract(archive, destination [, opts])
 babet.archive.extractFile(archive, entry, destination [, opts])
@@ -26,7 +27,7 @@ TAR, and `.tar.zst`, `.tar.zstd`, or `.tzst` select zstd-compressed TAR.
 `opts.format` can override the extension. Standalone compressed streams are
 handled separately by [`babet.compression`](compression.md).
 
-All five functions use the usual result contract:
+All six functions use the usual result contract:
 
 ```lua
 local result, err = babet.archive.list("backup.zip")
@@ -45,6 +46,7 @@ nor a table raises a Lua error. Invalid source lists and option tables return
 - [`babet.archive.create`](#babetarchivecreate)
 - [Inspection/extraction options and anti-bomb limits](#inspectionextraction-options-and-anti-bomb-limits)
 - [`babet.archive.list`](#babetarchivelist)
+- [`babet.archive.read`](#babetarchiveread)
 - [`babet.archive.test`](#babetarchivetest)
 - [`babet.archive.extract`](#babetarchiveextract)
 - [`babet.archive.extractFile`](#babetarchiveextractfile)
@@ -335,9 +337,10 @@ assert(named, err)
 
 ## Inspection/extraction options and anti-bomb limits
 
-The following options are shared by `list()`, `test()`, `extract()`, and
-`extractFile()`. They apply to the **whole archive**, even when `extractFile()` requests only one
-entry: selecting a small file can never bypass global limits.
+The following options are shared by `list()`, `read()`, `test()`, `extract()`,
+and `extractFile()`. They apply to the **whole archive**, even when `read()` or
+`extractFile()` requests only one entry: selecting a small file can never
+bypass global limits.
 
 | Option | Default | Accepted maximum | Effect |
 | --- | ---: | ---: | --- |
@@ -456,7 +459,8 @@ assert(result, err)
 
 Creation or write-specific options such as `overwrite`,
 `preserve_permissions`, `format`, `dry_run`, `include`, or `exclude` are not
-accepted by `list()` or `test()`.
+accepted by `list()`, `read()`, or `test()`. `read()` additionally accepts
+`max_size`, documented in its section; the other five functions reject it.
 
 <a id="babetarchivelist"></a>
 
@@ -782,6 +786,225 @@ unreadable structure, an exceeded limit, or a truncated TAR stream returns
 `(nil, message)`.
 
 
+<a id="babetarchiveread"></a>
+
+## `babet.archive.read`
+
+```lua
+local data, err = babet.archive.read(
+    archive,
+    raw_name_or_index
+    [, opts]
+)
+```
+
+`read()` loads **one regular file** into a binary Lua string without creating a
+destination, temporary file, or directory. It content-detects the same formats
+as `list()`: ZIP, plain TAR, gzip TAR, xz TAR, bzip2 TAR, and zstd TAR.
+
+Success returns exactly `(data, nil)`. `data` may be empty and may contain NUL
+bytes or non-UTF-8 text. Failure returns exactly `(nil, message)`.
+
+### Selection by raw name or index
+
+The second argument has two strict forms:
+
+- a **string** matches the exact raw name byte for byte and case-sensitively;
+- an **integer** selects the one-based index exposed as
+  `list().entries[i].index`.
+
+A float such as `2.0`, boolean, or table is never silently converted to an
+index. A name cannot contain a NUL byte. GNU long names and TAR pax `path`
+records are the decoded raw names already exposed by `list()`.
+
+Direct lookup by name:
+
+```lua
+local manifest, err = babet.archive.read(
+    "package.tar.zst",
+    "manifest.json"
+)
+assert(manifest, err)
+```
+
+Lookup through an index without assuming archive order:
+
+```lua
+local info, err = babet.archive.list("package.zip")
+assert(info, err)
+
+local target
+for _, entry in ipairs(info.entries) do
+    if entry.name == "assets/logo.bin" then
+        target = entry.index
+        break
+    end
+end
+assert(target, "assets/logo.bin is missing")
+
+local logo
+logo, err = babet.archive.read("package.zip", target)
+assert(logo, err)
+```
+
+Name lookup is rejected when the same raw name occurs more than once: Babet
+never silently picks the first or last occurrence. After inspecting
+`duplicate` and `duplicate_of`, an explicit index can read the intended
+occurrence:
+
+```lua
+local info, err = babet.archive.list("duplicated.zip")
+assert(info, err)
+
+for _, entry in ipairs(info.entries) do
+    if entry.name == "settings.json" then
+        print(entry.index, entry.duplicate, entry.duplicate_of)
+    end
+end
+
+-- Explicitly select the second occurrence.
+local data
+data, err = babet.archive.read("duplicated.zip", 7)
+assert(data, err)
+```
+
+An index only disambiguates the entry being read. It never removes, sorts, or
+rewrites archive members.
+
+### Unsafe names and rejected types
+
+Because `read()` never uses the name as a destination path, a regular file
+named `../config`, `/absolute`, or with a non-UTF-8 name can be read by its raw
+name or index. No normalisation or silent “repair” occurs. A script must inspect
+`valid_utf8`, `safe_path`, `duplicate`, and `conflict` through `list()` before
+reusing that name in another context:
+
+```lua
+local info, err = babet.archive.list("untrusted.zip")
+assert(info, err)
+
+local entry = assert(info.entries[1])
+print(entry.name, entry.valid_utf8, entry.safe_path)
+
+local data
+data, err = babet.archive.read("untrusted.zip", entry.index)
+assert(data, err)
+```
+
+This tolerance is safe only because no write occurs. The strict confinement
+rules for `extract()` and `extractFile()` remain unchanged.
+
+Directories, symlinks, hard links, FIFOs, sockets, devices, unknown types,
+encrypted ZIP entries, unsupported ZIP methods, and sparse TAR files are
+rejected. `read()` never follows a link stored in an archive.
+
+### The `max_size` memory limit
+
+`read()` adds one dedicated option:
+
+| Option | Default | Accepted maximum | Effect |
+| --- | ---: | ---: | --- |
+| `max_size` | `8 * 1024 * 1024` | `256 * 1024 * 1024` | maximum byte count returned in the Lua string |
+
+`max_size` must be a real Lua integer from `1` through `268435456`. The limit
+is inclusive: an entry producing exactly `max_size` bytes is accepted.
+
+```lua
+local config, err = babet.archive.read(
+    "package.tar.gz",
+    "config.json",
+    { max_size = 1024 * 1024 }
+)
+assert(config, err)
+```
+
+Babet rejects an announced size above `max_size` early, then enforces the same
+limit in the callback receiving actually decompressed bytes. A dishonest ZIP
+that announces a small size but produces more is therefore stopped before the
+bounded buffer can be overrun. The count covers binary bytes, not Unicode
+characters.
+
+`max_size` does not replace `max_entry_size`:
+
+- `max_size` bounds only the requested Lua value;
+- `max_entry_size`, `max_total_size`, `max_entries`, `max_path_length`,
+  `max_total_name_bytes`, and `max_compression_ratio` still protect the whole
+  archive.
+
+Combined example for an untrusted archive:
+
+```lua
+local manifest, err = babet.archive.read(
+    "upload.tar.xz",
+    "manifest.json",
+    {
+        max_size = 512 * 1024,
+        max_entries = 2000,
+        max_entry_size = 64 * 1024 * 1024,
+        max_total_size = 512 * 1024 * 1024,
+        max_path_length = 8192,
+        max_total_name_bytes = 2 * 1024 * 1024,
+        max_compression_ratio = 200,
+    }
+)
+assert(manifest, err)
+```
+
+### Integrity and archive consumption
+
+For ZIP, Babet scans archive metadata and then fully inflates the selected
+entry through miniz. Unsupported methods, decompression failures, produced-size
+errors, and CRC failures make the read fail.
+
+For TAR, the first pass inspects and consumes the entire archive. The second
+pass compares each header against the inspected plan, forwards only the chosen
+file blocks into bounded memory, and consumes every other entry to the end.
+The additional gzip and zstd stream checks remain active. Corruption or
+truncation elsewhere in the TAR can therefore fail a request for a small file.
+
+`read()` is not an alias for `test()`: it fully validates the selected data and
+the structures needed to read it, while `test()` inflates every ZIP payload and
+also applies the aggregate safety verdict to every entry.
+
+No partial payload is ever returned. A missing or ambiguous selector, a refused
+entry type, a limit violation, or an integrity failure all return exactly
+`(nil, message)`. Retrying by index is appropriate only when a duplicate raw
+name made name lookup ambiguous; it never bypasses type, size, or integrity
+checks.
+
+### Worker use
+
+The API is available in workers. Ordinary UTF-8 text can be returned directly.
+For binary data containing NUL or non-UTF-8 bytes, process it inside the worker
+or return a transferable result such as its size and CRC:
+
+```lua
+local worker, err = babet.workers.spawn([[
+local data, read_err = babet.archive.read(
+    worker.args.archive,
+    worker.args.index,
+    { max_size = worker.args.max_size }
+)
+if not data then error(read_err) end
+return {
+    size = #data,
+    crc32 = babet.crc32(data),
+}
+]], {
+    archive = "assets.tar.bz2",
+    index = 3,
+    max_size = 4 * 1024 * 1024,
+})
+assert(worker, err)
+
+local joined, result = worker:join()
+assert(joined, result)
+print(result.size, result.crc32)
+```
+
+That return-value restriction belongs to worker serialisation, not to
+`archive.read()` itself: the read remains fully binary-safe.
+
 <a id="babetarchivetest"></a>
 
 ## `babet.archive.test`
@@ -1036,8 +1259,8 @@ Accepted options:
 Booleans must be real Lua booleans, integer limits must be strict positive Lua
 integers, and `max_compression_ratio` must be finite. Unknown keys, excess
 arguments, and creation-only options are rejected. `dry_run`, `include`, and
-`exclude` are accepted by `extract()` only, not by `list()`, `test()`, or
-`extractFile()`.
+`exclude` are accepted by `extract()` only, not by `list()`, `read()`, `test()`,
+or `extractFile()`.
 
 ### Safe-glob selection
 
@@ -1436,6 +1659,10 @@ into a Linux path and never silently “cleans” traversal: the archive is
 rejected. With `extractFile()`, the same rules apply to the selected entry name;
 unselected unsafe names do not become destination paths.
 
+`read()` is the deliberate exception: because it writes nothing, it can select
+a regular file with an unsafe name by raw name or index. It never normalises
+that name or uses it as a filesystem path.
+
 Duplicates are detected after removing the trailing `/` from directory names.
 An archive containing two identical outputs, or `node` as a file followed by
 `node/child`, is rejected before extraction.
@@ -1531,16 +1758,16 @@ UIDs, GIDs, ACLs, extended attributes, and timestamps are not restored.
 
 ## Supported entry types
 
-| Type | `create()` | `list()` | `extract()` | `extractFile()` |
-| --- | --- | --- | --- | --- |
-| regular file | supported | inspected | supported, except sparse TAR | supported, except sparse TAR |
-| directory | supported when enabled | inspected | supported | not selectable |
-| sparse TAR file | never created | identified in TAR | rejected | rejected if selected |
-| symlink | rejected if selected | identified | rejected | rejected |
-| hard link | never created | identified in TAR | rejected | rejected if selected |
-| FIFO, socket, device, unknown type | rejected if selected | identified when exposed | rejected | rejected |
-| encrypted entry | never created | identified in ZIP | rejected | rejected |
-| unknown ZIP compression method | never created | identified | rejected | rejected |
+| Type | `create()` | `list()` | `read()` | `extract()` | `extractFile()` |
+| --- | --- | --- | --- | --- | --- |
+| regular file | supported | inspected | supported, except sparse TAR | supported, except sparse TAR | supported, except sparse TAR |
+| directory | supported when enabled | inspected | not selectable | supported | not selectable |
+| sparse TAR file | never created | identified in TAR | rejected | rejected | rejected if selected |
+| symlink | rejected if selected | identified | rejected | rejected | rejected |
+| hard link | never created | identified in TAR | rejected | rejected | rejected if selected |
+| FIFO, socket, device, unknown type | rejected if selected | identified when exposed | rejected | rejected | rejected |
+| encrypted entry | never created | identified in ZIP | rejected | rejected | rejected |
+| unknown ZIP compression method | never created | identified | rejected | rejected | rejected |
 
 During creation, a symlink or special filesystem object that is removed by the
 filters is ignored rather than opened. Directory entries are emitted only when
@@ -1566,14 +1793,24 @@ Common failures include:
   a payload, or a change detected between inspection and extraction;
 - inconsistent metadata or invalid CRC;
 - exceeded anti-bomb limit;
+- `max_size` exceeded during an in-memory read;
+- an ambiguous duplicate name passed to `read()` without an explicit index;
 - absolute path, traversal, duplicate, or path conflict;
 - encrypted entry, symlink, or unsupported type;
 - existing destination without `overwrite = true`;
 - symlink or unsafe type in the destination;
 - insufficient disk space, permissions, or another I/O error.
 
-The module is synchronous: a call returns only after creation, inspection, or
-extraction has completed. It does not expose progress, cancellation, or a timeout yet.
+The module is synchronous: a call returns only after creation, inspection,
+reading, or extraction has completed. It does not expose progress,
+cancellation, or a timeout yet.
+
+All six public functions -- `create()`, `list()`, `read()`, `test()`,
+`extract()`, and `extractFile()` -- share the same C++ exception boundary. An
+internal allocation failure becomes `(nil, "archive: out of memory")`; another
+internal exception becomes `(nil, "archive: internal failure")` or
+`(nil, "archive: unknown internal failure")`. No C++ exception crosses the Lua
+boundary.
 
 The archive file must not be modified concurrently. ZIP truncation or
 modification will normally cause a read, decompression, or CRC error. TAR is

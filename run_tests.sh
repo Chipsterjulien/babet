@@ -11,6 +11,98 @@ EXAMPLES_DIR="${SCRIPT_DIR}/examples"
 ENABLE_SANITIZERS=0
 RELEASE_VALIDATION=0
 
+# Exécute la validation pré-release dans un pseudo-terminal afin que les
+# outils qui colorent uniquement leur sortie interactive conservent leurs
+# couleurs à l'écran. Le flux brut est enregistré temporairement, puis les
+# séquences ANSI et les retours chariot du pseudo-terminal sont retirés avant
+# la publication atomique du journal texte.
+run_release_with_log() {
+    local release_log=""
+    local raw_log=""
+    local clean_log=""
+    local release_command=""
+    local -a pipeline_status=()
+    local release_rc=1
+    local tee_rc=1
+    local clean_rc=0
+
+    # Le nom reste volontairement identique d'une version à l'autre afin que
+    # le journal à transmettre soit toujours évident. Chaque validation
+    # --release remplace atomiquement le journal précédent.
+    release_log="${SCRIPT_DIR}/${PROJECT_NAME}-tests.txt"
+    raw_log=$(mktemp "${TMPDIR:-/tmp}/${PROJECT_NAME}-release-log.XXXXXX") || {
+        echo "ÉCHEC : impossible de créer le journal temporaire."
+        return 1
+    }
+    clean_log=$(mktemp "${release_log}.tmp.XXXXXX") || {
+        echo "ÉCHEC : impossible de préparer ${release_log}."
+        rm -f -- "${raw_log}"
+        return 1
+    }
+    trap 'rm -f -- "${raw_log}" "${clean_log}"' EXIT
+
+    # %q protège le chemin du script et tous les arguments lors du passage par
+    # l'option --command de util-linux script.
+    printf -v release_command '%q ' bash "${BASH_SOURCE[0]}" "$@"
+
+    echo "Journal sans couleurs : ${release_log}"
+    echo
+
+    export BABET_RELEASE_LOG_ACTIVE=1
+    if command -v script >/dev/null 2>&1; then
+        script --quiet --return --flush \
+            --command "${release_command}" /dev/null \
+            | tee "${raw_log}"
+        pipeline_status=("${PIPESTATUS[@]}")
+        release_rc=${pipeline_status[0]}
+        tee_rc=${pipeline_status[1]}
+    else
+        echo "AVERTISSEMENT : commande 'script' introuvable ; " \
+             "les couleurs automatiques peuvent être désactivées."
+        bash "${BASH_SOURCE[0]}" "$@" 2>&1 | tee "${raw_log}"
+        pipeline_status=("${PIPESTATUS[@]}")
+        release_rc=${pipeline_status[0]}
+        tee_rc=${pipeline_status[1]}
+    fi
+    unset BABET_RELEASE_LOG_ACTIVE
+
+    # Retire les séquences OSC (notamment les hyperliens), les séquences CSI
+    # (dont les couleurs SGR) et les CR ajoutés par le pseudo-terminal.
+    LC_ALL=C sed -E \
+        -e $'s/\x1B\\][^\a]*(\a|\x1B\\\\)//g' \
+        -e $'s/\x1B\\[[0-?]*[ -\\/]*[@-~]//g' \
+        -e $'s/\r//g' \
+        "${raw_log}" > "${clean_log}" || clean_rc=$?
+
+    if [ ${clean_rc} -eq 0 ]; then
+        if ! mv -f -- "${clean_log}" "${release_log}"; then
+            clean_rc=1
+        fi
+    fi
+
+    rm -f -- "${raw_log}"
+    if [ -f "${clean_log}" ]; then
+        rm -f -- "${clean_log}"
+    fi
+    trap - EXIT
+
+    echo
+    if [ ${clean_rc} -eq 0 ]; then
+        echo "Journal sans couleurs enregistré : ${release_log}"
+    else
+        echo "ÉCHEC : impossible d'enregistrer le journal sans couleurs."
+    fi
+
+    if [ ${release_rc} -ne 0 ]; then
+        return "${release_rc}"
+    fi
+    if [ ${tee_rc} -ne 0 ]; then
+        echo "ÉCHEC : la copie du flux de validation a échoué."
+        return "${tee_rc}"
+    fi
+    return "${clean_rc}"
+}
+
 for arg in "$@"; do
     case "$arg" in
         --sanitizers)
@@ -23,7 +115,7 @@ for arg in "$@"; do
             echo "Usage: $0 [--sanitizers|--release]"
             echo "  (par défaut)   Build normal + tests complets"
             echo "  --sanitizers   Build ASan/UBSan + tests compatibles avec les sanitizers"
-            echo "  --release      Validation pré-release complète en une commande"
+            echo "  --release      Validation pré-release complète + journal texte sans couleurs"
             exit 0
             ;;
         *)
@@ -39,6 +131,12 @@ if [ "${RELEASE_VALIDATION}" -eq 1 ]; then
         echo "Les options --release et --sanitizers ne peuvent pas être combinées."
         exit 1
     fi
+
+    if [ "${BABET_RELEASE_LOG_ACTIVE:-0}" -ne 1 ]; then
+        run_release_with_log "$@"
+        exit $?
+    fi
+
     exec bash "${SCRIPT_DIR}/validate_release.sh"
 fi
 

@@ -6,6 +6,143 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.12.0] - 2026-08-03
+
+### Résumé de la version
+
+Babet 2.12.0 étend la surface SQLite auditée avec trois compteurs propres à la
+connexion et deux options d'ouverture strictes. L'ouverture en lecture/écriture
+reste le comportement par défaut ; un script peut maintenant demander un
+handle réellement en lecture seule et activer les clés étrangères avant la
+première instruction, sans SQL de configuration.
+
+### Options de connexion SQLite
+
+- ajout de l'option booléenne stricte `opts.readonly`, fondée sur
+  `sqlite3_open_v2(..., SQLITE_OPEN_READONLY, ...)` ; elle ne crée jamais une
+  base absente et SQLite refuse les écritures via le handle obtenu ;
+- conservation des flags historiques `READWRITE | CREATE` lorsque `readonly`
+  est absent ou vaut `false` ;
+- ajout de l'option booléenne stricte `opts.foreign_keys`, configurée
+  directement sur chaque connexion native avant WAL ou le SQL utilisateur ;
+  son défaut explicite à `false` conserve le comportement précédent ;
+- combinaison possible de `readonly` avec `busy_timeout` et `foreign_keys`,
+  mais refus de la combinaison contradictoire
+  `readonly = true, wal = true` avant l'ouverture d'un handle natif ; précision
+  que seul le changement de mode est refusé, pas la lecture d'une base déjà en
+  WAL ;
+- conservation d'une lecture brute et stricte des options : champs inconnus,
+  clés non chaîne, valeurs fournies par une métatable et valeurs non booléennes
+  restent refusés.
+
+### Compteurs de connexion
+
+- ajout de `db:last_insert_rowid()` avec la valeur ROWID signée 64 bits propre
+  à la connexion SQLite ;
+- ajout de `db:changes()` et `db:total_changes()` via leurs APIs SQLite 64 bits,
+  avec retour sous forme d'entiers Lua ;
+- documentation et test du cas où `INSERT OR IGNORE` réussit avec zéro
+  modification tandis que `last_insert_rowid()` conserve le ROWID de
+  l'insertion précédente ;
+- application de l'arité exacte et du contrat de connexion fermée aux trois
+  méthodes ;
+- exposition des mêmes méthodes et options d'ouverture dans les états Lua des
+  workers.
+
+### Durcissement hérité du module d'archives
+
+- extension de la frontière d'exception C++ de `read()` aux six points d'entrée
+  publics du module, afin qu'aucune exception d'allocation ou autre exception
+  C++ ne traverse la frontière Lua ;
+- ajout d'un état explicite de complétude pour l'entrée sélectionnée dans le
+  sink TAR en mémoire, puis contrôle final par `read()`, symétrique avec le
+  contrôle du nombre d'octets du chemin ZIP ;
+- nouvelle vérification que le journal fixe `babet-tests.txt` est ignoré par
+  Git et absent des deux archives de livraison.
+
+### Tests et documentation
+
+- ajout de 36 assertions ciblées couvrant types et combinaisons d'options,
+  lecture/écriture/création en lecture seule, clés étrangères activées ou non,
+  valeurs initiales, cumulées et supérieures à 32 bits des compteurs,
+  statements multi-lignes, handles fermés, arités strictes, insertions
+  ignorées, échec d'une clé étrangère différée au `COMMIT` et disponibilité dans
+  les workers ;
+- preuve du passage rouge vers vert : 0 PASS / 5 FAIL avant l'exposition de la
+  surface publique, puis 5 PASS / 0 FAIL avec l'implémentation ;
+- enrichissement synchronisé des chapitres SQLite français et anglais avec un
+  exemple distinct pour chaque option et compteur, puis des exemples combinés
+  pour une connexion d'écriture, un lecteur et les trois compteurs ;
+- mise à jour des métadonnées de version, README, procédure de publication,
+  notes GitHub et manuels PDF pour 2.12.0.
+
+## [2.11.0] - 2026-08-02
+
+### Résumé de la version
+
+Babet 2.11.0 ajoute la lecture bornée d’une entrée d’archive en mémoire avec
+`babet.archive.read()`. L’API conserve les noms bruts, rend les doublons
+explicitement désambiguïsables par index, borne les octets réellement produits
+et n’effectue aucune écriture. Le contrat enrichi de `archive.list()` introduit
+en 2.8.0 reste inchangé et sert directement de catalogue à cette nouvelle
+lecture.
+
+### Lecture binaire bornée
+
+- ajout de `babet.archive.read(archive, nom_ou_index [, opts])`, avec retour
+  strict `(chaîne_binaire, nil)` ou `(nil, message)` et prise en charge des
+  fichiers vides, octets NUL et données non UTF-8 ;
+- sélection sensible à la casse par nom brut exact ou par index 1-based exposé
+  par `archive.list()` ; refus d’un nom brut présent plusieurs fois et
+  possibilité de choisir explicitement chaque occurrence par index ;
+- absence de tri, déduplication, normalisation Unicode ou assainissement de
+  chemin : une entrée régulière au nom dangereux peut être lue comme donnée
+  sans jamais devenir un chemin de destination, tandis que `valid_utf8` et
+  `safe_path` restent exposés par `list()` ;
+- refus des répertoires, liens symboliques ou physiques, FIFO, sockets,
+  périphériques, types inconnus, entrées ZIP chiffrées, méthodes ZIP non prises
+  en charge et fichiers TAR sparse ;
+- ajout de l’option entière stricte `max_size`, à 8 Mio par défaut et 256 Mio
+  au maximum, indépendante des six limites globales déjà partagées par les
+  autres lecteurs d’archives ;
+- contrôle précoce de la taille annoncée, puis contrôle du nombre d’octets
+  réellement remis par le callback de décompression, y compris lorsqu’un ZIP
+  mensonger annonce une taille inférieure à sa sortie réelle ;
+- copie directe vers un tampon préalloué borné : aucun agrandissement et aucune
+  allocation sur le chemin de copie nominal du callback C de miniz ou du sink
+  TAR.
+
+### Formats, intégrité et workers
+
+- parité complète pour ZIP, TAR brut, TAR gzip, TAR xz, TAR bzip2 et TAR zstd,
+  avec détection par contenu et fonctionnement identique dans les états Lua des
+  workers ;
+- décompression complète et vérification CRC du payload ZIP sélectionné ;
+- conservation du modèle TAR en deux passes : inspection et consommation
+  intégrales, comparaison de chaque en-tête lors de la seconde passe,
+  transmission en mémoire de la seule entrée choisie et validations gzip/zstd
+  jusqu’à la fin du flux ;
+- distinction documentée avec `archive.test()`, qui reste la fonction de
+  validation exhaustive de tous les payloads ZIP et du verdict global de
+  sécurité ;
+- frontière d’exception C++ dédiée au nouveau point d’entrée Lua, distinguant
+  manque de mémoire, exception standard et exception inconnue.
+
+### Tests et documentation
+
+- ajout de 61 assertions fonctionnelles dédiées couvrant sélection par nom et
+  index, doublons ZIP/TAR, noms dangereux et non UTF-8, données binaires et
+  vides, liens refusés, limites exactes et invalides, sortie décompressée
+  mensongère, CRC corrompu, options/arités strictes, six formats, workers et
+  absence de temporaires ;
+- validation ciblée du nouveau lot à 64 PASS / 0 FAIL avec les trois contrôles
+  d’enregistrement du sous-module ;
+- enrichissement synchronisé des manuels français et anglais avec un exemple
+  distinct par mode de sélection, l’option `max_size`, les doublons, les noms
+  dangereux, les workers et un exemple combinant toutes les limites ;
+- mise à jour des README, métadonnées de version, procédure de publication,
+  notes GitHub et manuels PDF pour 2.11.0.
+
 ## [2.10.0] - 2026-08-02
 
 ### Résumé de la version

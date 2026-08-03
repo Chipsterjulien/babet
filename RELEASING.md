@@ -17,10 +17,10 @@ cd ..
 Confirm that `docs/manual-en.pdf` and `docs/manual-fr.pdf` were both regenerated
 and render them for a final visual check before validating the release tree.
 
-For 2.10.0, the expected source line is:
+For 2.12.0, the expected source line is:
 
 ```cmake
-project(babet VERSION 2.10.0 LANGUAGES CXX C)
+project(babet VERSION 2.12.0 LANGUAGES CXX C)
 ```
 
 ## 2. Validate the exact release tree
@@ -28,6 +28,10 @@ project(babet VERSION 2.10.0 LANGUAGES CXX C)
 ```sh
 ./run_tests.sh --release
 ```
+
+This command always replaces `babet-tests.txt` at the project root with the
+complete validation output stripped of terminal colors. Keep that file as the
+validation record and provide it for review when requested.
 
 The command first runs a network-free Zstandard bootstrap preflight, then the
 three full release stages. It must finish with:
@@ -50,7 +54,7 @@ Then verify the compiled version explicitly:
 
 ```sh
 ./test/babet --version
-# expected: babet 2.10.0
+# expected: babet 2.12.0
 ```
 
 ## 3. Review the Git tree
@@ -69,7 +73,7 @@ temporary archives, and test binaries must not be staged.
 
 ```sh
 git add -A
-git commit -m "Release Babet 2.10.0"
+git commit -m "Release Babet 2.12.0"
 git status --short
 ```
 
@@ -78,8 +82,8 @@ git status --short
 ## 5. Create the annotated tag
 
 ```sh
-git tag -a v2.10.0 -m "Babet 2.10.0"
-git show --stat --oneline v2.10.0
+git tag -a v2.12.0 -m "Babet 2.12.0"
+git show --stat --oneline v2.12.0
 ```
 
 ## 6. Build and verify release artifacts
@@ -87,7 +91,7 @@ git show --stat --oneline v2.10.0
 Run the release builder while `HEAD` is the tagged commit:
 
 ```sh
-./release.sh --build --version 2.10.0
+./release.sh --build --version 2.12.0
 ```
 
 The script refuses a version that does not match the compiled binary. Verify all
@@ -95,7 +99,7 @@ generated checksums:
 
 ```sh
 cd dist
-sha256sum -c babet-2.10.0-linux-*.sha256
+sha256sum -c babet-2.12.0-linux-*.sha256
 cd ..
 ```
 
@@ -104,7 +108,7 @@ cd ..
 ```sh
 branch="$(git branch --show-current)"
 git push origin "$branch"
-git push origin v2.10.0
+git push origin v2.12.0
 ```
 
 ## 8. Publish the GitHub release
@@ -112,12 +116,12 @@ git push origin v2.10.0
 With GitHub CLI:
 
 ```sh
-gh release create v2.10.0 \
-  dist/babet-2.10.0-linux-* \
-  --title "Babet 2.10.0" \
-  --notes-file GITHUB_RELEASE_2.10.0.md
+gh release create v2.12.0 \
+  dist/babet-2.12.0-linux-* \
+  --title "Babet 2.12.0" \
+  --notes-file GITHUB_RELEASE_2.12.0.md
 ```
 
-Otherwise create release `v2.10.0` in the GitHub web interface and upload the
+Otherwise create release `v2.12.0` in the GitHub web interface and upload the
 four files from `dist/`: the tarball, its checksum, the standalone binary, and
 its checksum.

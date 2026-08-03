@@ -3,14 +3,16 @@
 # `babet.sqlite` — base de données SQL embarquée
 
 `babet.sqlite` embarque SQLite 3.53.1 et expose une API Lua complète mais
-volontairement compacte : connexions, exécution SQL directe, itérateurs
-paresseux, statements préparés réutilisables, transactions assistées et bind
-BLOB et `NULL` explicites.
+volontairement compacte : connexions en lecture/écriture ou lecture seule,
+clés étrangères par connexion, compteurs de changements, exécution SQL
+directe, itérateurs paresseux, statements préparés réutilisables, transactions
+assistées et bind BLOB et `NULL` explicites.
 
 ## Table des matières du module
 
 - [API](#sqlite-api)
   - [Ouverture et fermeture](#sqlite-open-close)
+  - [Compteurs de connexion](#sqlite-counters)
   - [Exécution directe](#sqlite-direct)
   - [Statements préparés réutilisables](#sqlite-prepared)
   - [Transactions assistées](#sqlite-transactions)
@@ -37,10 +39,14 @@ BLOB et `NULL` explicites.
 | `babet.sqlite.NULL` | sentinelle lightuserdata exacte pour binder SQL `NULL` |
 | `db:close()` | `(true, nil)` — idempotent |
 | `db:in_transaction()` | boolean \| `(nil, err)` |
+| `db:last_insert_rowid()` | entier \| `(nil, err)` |
+| `db:changes()` | entier \| `(nil, err)` |
+| `db:total_changes()` | entier \| `(nil, err)` |
 
-`open` ouvre ou crée une base en lecture/écriture. Le chemin spécial
-`":memory:"` crée une base uniquement en mémoire, perdue à la fermeture.
-Le chemin doit être une chaîne sans octet NUL.
+Par défaut, `open` ouvre ou crée une base en lecture/écriture. Avec
+`readonly = true`, il ouvre une base existante sans la créer et SQLite refuse
+les écritures. Le chemin spécial `":memory:"` crée une base uniquement en
+mémoire, perdue à la fermeture. Le chemin doit être une chaîne sans octet NUL.
 
 `opts` est une table facultative :
 
@@ -48,6 +54,8 @@ Le chemin doit être une chaîne sans octet NUL.
 | --- | --- | --- |
 | `wal` | boolean — demande `PRAGMA journal_mode=WAL` | `false` |
 | `busy_timeout` | entier de `0` à `3600000` ms | `0` — aucun délai d'attente |
+| `readonly` | boolean — ouverture sans création ni écriture | `false` |
+| `foreign_keys` | boolean — impose les contraintes de clés étrangères | `false` |
 
 `wal = true` demande le mode WAL, mais SQLite peut conserver un autre mode
 lorsque WAL n'est pas applicable. C'est notamment le cas de `":memory:"`.
@@ -56,40 +64,155 @@ lorsque WAL n'est pas applicable. C'est notamment le cas de `":memory:"`.
 la base est verrouillée. La valeur `0` laisse remonter immédiatement
 `SQLITE_BUSY`.
 
+`readonly = true` utilise le mode natif `SQLITE_OPEN_READONLY`. Une base
+absente produit `(nil, err)` et aucun fichier n'est créé. Les lectures restent
+autorisées ; une instruction d'écriture produit `(nil, err)`. Cette option se
+combine avec `busy_timeout` et `foreign_keys`, mais pas avec `wal = true` : la
+combinaison contradictoire lève une erreur Lua avant l'ouverture. Ce refus
+concerne uniquement la demande de **passer** la base en mode WAL. Il n'empêche
+pas `readonly = true` d'ouvrir une base qui utilise déjà WAL, sans fournir
+`wal = true`. SQLite doit alors pouvoir utiliser les fichiers compagnons
+`-wal` et `-shm` ; un système de fichiers entièrement en lecture seule peut
+échouer si le fichier `-shm` nécessaire n'existe pas déjà ou n'est pas
+utilisable.
+
+`foreign_keys = true` active l'intégrité référentielle avant la première
+instruction de la connexion. Le réglage est propre à chaque connexion et ne
+valide pas rétroactivement les lignes déjà stockées. La valeur par défaut
+`false` conserve le comportement SQLite historique de Babet.
+
 Chaque option peut être utilisée seule. Pour définir uniquement l'attente sur
 verrou :
 
 ```lua
-local db = assert(babet.sqlite.open("state.db", {
-    busy_timeout = 2500,
-}))
+local db = assert(babet.sqlite.open("state.db", { busy_timeout = 2500 }))
 ```
 
 Pour demander WAL en gardant l'attente par défaut :
 
 ```lua
-local db = assert(babet.sqlite.open("state.db", {
-    wal = true,
-}))
+local db = assert(babet.sqlite.open("state.db", { wal = true }))
 ```
 
-Pour combiner les deux options :
+Pour ouvrir uniquement en lecture :
+
+```lua
+local db = assert(babet.sqlite.open("state.db", { readonly = true }))
+```
+
+Pour activer les clés étrangères sur une connexion d'écriture :
+
+```lua
+local db = assert(babet.sqlite.open("state.db", { foreign_keys = true }))
+```
+
+Pour combiner WAL, attente sur verrou et clés étrangères :
 
 ```lua
 local db = assert(babet.sqlite.open("state.db", {
     wal = true,
     busy_timeout = 2500,
+    foreign_keys = true,
 }))
 ```
 
 La table `opts` est stricte : un champ inconnu, une clé d'option non chaîne,
 un mauvais type ou un délai hors limites lève une erreur Lua. Les options sont
 lues directement dans la table ; une métaméthode `__index` ne peut ni les
-fournir ni les masquer.
+fournir ni les masquer. Les types et combinaisons incompatibles sont contrôlés
+avant l'acquisition du handle natif. Une erreur de contrat ne crée donc ni
+fichier ni connexion.
+
+Pour un lecteur strict combinant les options compatibles :
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    readonly = true,
+    busy_timeout = 2500,
+    foreign_keys = true,
+}))
+```
 
 `db:in_transaction()` renvoie `true` dès que la connexion se trouve dans une
 transaction, qu'elle ait été ouverte par `db:transaction()` ou par un
 `BEGIN` SQL manuel.
+
+<a id="sqlite-counters"></a>
+### Compteurs de connexion
+
+Les trois méthodes suivantes lisent directement l'état de la connexion. Elles
+n'exécutent aucun SQL, renvoient toujours un entier Lua sur une connexion
+ouverte et sont disponibles dans les workers.
+
+#### `db:last_insert_rowid()`
+
+Renvoie le ROWID du dernier `INSERT` réussi sur cette connexion, ou `0` tant
+qu'aucun ROWID n'a été inséré. La valeur reste celle du dernier `INSERT`
+concerné après un `SELECT`, un `UPDATE`, un `DELETE`, et même après le rollback
+d'un `INSERT` qui avait réussi avant l'annulation.
+
+```lua
+local db = assert(babet.sqlite.open(":memory:"))
+assert(db:exec("CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT)"))
+assert(db:exec("INSERT INTO messages(body) VALUES(?)", { "Bonjour" }))
+local id = assert(db:last_insert_rowid())
+print(id) -- 1
+```
+
+Une instruction réussie ne garantit pas qu'une ligne a été insérée. Avec
+`INSERT OR IGNORE`, une contrainte peut être ignorée et
+`last_insert_rowid()` conserve alors le ROWID précédent. Pour une insertion
+d'une ligne qui peut être ignorée, vérifier `changes() == 1` avant le ROWID :
+
+```lua
+assert(db:exec("INSERT OR IGNORE INTO messages(body) VALUES(?)",
+    { "message unique" }))
+assert(db:changes() == 1, "message non inséré")
+local id = assert(db:last_insert_rowid())
+```
+
+#### `db:changes()`
+
+Renvoie le nombre de lignes modifiées par le dernier `INSERT`, `UPDATE` ou
+`DELETE` terminé sur cette connexion. Les modifications auxiliaires de
+triggers, d'actions de clés étrangères ou de la résolution `REPLACE` ne sont
+pas incluses dans ce compteur du dernier statement.
+
+```lua
+assert(db:exec(
+    "UPDATE messages SET body = ? WHERE id IN (?, ?)",
+    { "archivé", 1, 2 }
+))
+print(assert(db:changes())) -- 0, 1 ou 2 selon les lignes présentes
+```
+
+#### `db:total_changes()`
+
+Renvoie le cumul des lignes modifiées depuis l'ouverture de la connexion. Ce
+cumul inclut les changements produits par les triggers et les actions de clés
+étrangères, mais pas les suppressions internes de `REPLACE`. Il repart de zéro
+pour chaque nouvelle connexion.
+
+```lua
+local before = assert(db:total_changes())
+assert(db:exec("INSERT INTO messages(body) VALUES ('un'), ('deux')"))
+local delta = assert(db:total_changes()) - before
+assert(delta == 2)
+```
+
+Pour utiliser les trois compteurs ensemble après une insertion :
+
+```lua
+assert(db:exec("INSERT INTO messages(body) VALUES(?)", { "nouveau" }))
+local id = assert(db:last_insert_rowid())
+local statement_rows = assert(db:changes())
+local connection_rows = assert(db:total_changes())
+print(id, statement_rows, connection_rows)
+```
+
+Ces valeurs appartiennent uniquement au handle `db` courant : une autre
+connexion, y compris dans un autre worker, possède ses propres compteurs. Après
+`db:close()`, les trois méthodes renvoient `(nil, "sqlite: connection closed")`.
 
 <a id="sqlite-direct"></a>
 ### Exécution directe
@@ -287,7 +410,8 @@ connexion est revenue en mode autocommit avant de poursuivre.
 Une contrainte différée peut n'être vérifiée qu'au `COMMIT` :
 
 ```lua
-assert(db:exec("PRAGMA foreign_keys = ON"))
+local db = assert(babet.sqlite.open(
+    ":memory:", { foreign_keys = true }))
 assert(db:exec([[
     CREATE TABLE parent(id INTEGER PRIMARY KEY);
     CREATE TABLE child(
@@ -548,6 +672,12 @@ contrat des paramètres couvrent aussi `?NNN`, les REAL non finis, les
 lightuserdata étrangers et les tables d'options ou de paramètres contenant
 des clés non supportées.
 
+`opts.readonly`, `opts.foreign_keys` et `opts.wal` exigent des booleans Lua
+stricts. La combinaison `readonly = true, wal = true` lève une erreur de
+contrat. Une base absente ouverte en lecture seule, une écriture via une
+connexion en lecture seule ou une violation de clé étrangère sont des erreurs
+opérationnelles et renvoient `(nil, err)`.
+
 Les erreurs survenant pendant l'appel d'un itérateur (`db:query` ou
 `prepared:query`) lèvent une erreur Lua, car le protocole d'itération ne permet
 pas de renvoyer proprement `(nil, err)` en plus de la fin de séquence.
@@ -630,15 +760,11 @@ assert(db:close())
 
 Les éléments suivants ne sont volontairement pas implémentés :
 
-- les modes de connexion comme `opts.readonly`, le mode URI et
-  `opts.foreign_keys` ;
-- les compteurs de commodité comme `db:last_insert_rowid()`, `db:changes()` et
-  `db:total_changes()` ;
+- le mode URI et les autres flags avancés de `sqlite3_open_v2` ;
 - un helper de savepoint imbriqué ;
 - les APIs de progress handler et d'interruption ;
 - l'API de streaming BLOB `sqlite3_blob_open` ;
 - l'API de sauvegarde `sqlite3_backup_init`.
 
-`last_insert_rowid()`, `changes()`, les clés étrangères, les savepoints et
-`VACUUM INTO` restent accessibles par SQL brut lorsqu'une forme SQL existe.
-FTS5 et R-Tree ne sont pas activés dans la compilation embarquée actuelle.
+Les savepoints et `VACUUM INTO` restent accessibles par SQL brut. FTS5 et
+R-Tree ne sont pas activés dans la compilation embarquée actuelle.

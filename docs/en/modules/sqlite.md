@@ -3,13 +3,15 @@
 # `babet.sqlite` — embedded SQL database
 
 `babet.sqlite` embeds SQLite 3.53.1 and exposes a compact but complete Lua API:
-connections, direct SQL execution, lazy iterators, reusable prepared
-statements, managed transactions, and explicit BLOB and `NULL` binding.
+read/write or read-only connections, per-connection foreign keys, change
+counters, direct SQL execution, lazy iterators, reusable prepared statements,
+managed transactions, and explicit BLOB and `NULL` binding.
 
 ## Module contents
 
 - [API](#sqlite-api)
   - [Opening and closing](#sqlite-open-close)
+  - [Connection counters](#sqlite-counters)
   - [Direct execution](#sqlite-direct)
   - [Reusable prepared statements](#sqlite-prepared)
   - [Managed transactions](#sqlite-transactions)
@@ -36,10 +38,14 @@ statements, managed transactions, and explicit BLOB and `NULL` binding.
 | `babet.sqlite.NULL` | exact lightuserdata sentinel used to bind SQL `NULL` |
 | `db:close()` | `(true, nil)` — idempotent |
 | `db:in_transaction()` | boolean \| `(nil, err)` |
+| `db:last_insert_rowid()` | integer \| `(nil, err)` |
+| `db:changes()` | integer \| `(nil, err)` |
+| `db:total_changes()` | integer \| `(nil, err)` |
 
-`open` opens or creates a read/write database. The special `":memory:"` path
-creates a temporary in-memory database. The path must be a string without a
-NUL byte.
+By default, `open` opens or creates a read/write database. With
+`readonly = true`, it opens an existing database without creating it and
+SQLite rejects writes. The special `":memory:"` path creates a temporary
+in-memory database. The path must be a string without a NUL byte.
 
 Optional `opts` fields:
 
@@ -47,6 +53,8 @@ Optional `opts` fields:
 | --- | --- | --- |
 | `wal` | boolean — requests `PRAGMA journal_mode=WAL` | `false` |
 | `busy_timeout` | integer from `0` to `3600000` ms | `0` |
+| `readonly` | boolean — opens without creation or writes | `false` |
+| `foreign_keys` | boolean — enforces foreign-key constraints | `false` |
 
 `wal = true` requests WAL mode, but SQLite may keep another journal mode when
 WAL is not applicable, notably for `":memory:"`.
@@ -54,37 +62,151 @@ WAL is not applicable, notably for `":memory:"`.
 `busy_timeout` asks SQLite to retry for the requested duration when the
 database is locked. Zero reports `SQLITE_BUSY` immediately.
 
+`readonly = true` uses native `SQLITE_OPEN_READONLY`. A missing database
+returns `(nil, err)` without creating a file. Reads remain available; a write
+statement returns `(nil, err)`. It combines with `busy_timeout` and
+`foreign_keys`, but not with `wal = true`: that contradictory combination
+raises a Lua error before opening the connection. This refusal applies only to
+a request to **switch** the database to WAL mode. It does not prevent
+`readonly = true` from opening a database that already uses WAL when
+`wal = true` is omitted. SQLite must then be able to use the companion `-wal`
+and `-shm` files; a fully read-only filesystem can fail when the required
+`-shm` file does not already exist or cannot be used.
+
+`foreign_keys = true` enables referential-integrity enforcement before the
+connection's first statement. The setting belongs to each connection and does
+not retroactively validate rows already stored. The `false` default preserves
+Babet's historical SQLite behaviour.
+
 Each option is useful independently. Set only a lock wait:
 
 ```lua
-local db = assert(babet.sqlite.open("state.db", {
-    busy_timeout = 2500,
-}))
+local db = assert(babet.sqlite.open("state.db", { busy_timeout = 2500 }))
 ```
 
 Request WAL without changing the default lock wait:
 
 ```lua
-local db = assert(babet.sqlite.open("state.db", {
-    wal = true,
-}))
+local db = assert(babet.sqlite.open("state.db", { wal = true }))
 ```
 
-Or combine both options:
+Open for reads only:
+
+```lua
+local db = assert(babet.sqlite.open("state.db", { readonly = true }))
+```
+
+Enable foreign keys on a writer connection:
+
+```lua
+local db = assert(babet.sqlite.open("state.db", { foreign_keys = true }))
+```
+
+Combine WAL, lock waiting, and foreign keys:
 
 ```lua
 local db = assert(babet.sqlite.open("state.db", {
     wal = true,
     busy_timeout = 2500,
+    foreign_keys = true,
 }))
 ```
 
 The `opts` table is strict: unknown fields, non-string option keys, wrong
 types, and out-of-range timeouts raise a Lua error. Option lookup reads raw
-table entries; an `__index` metamethod cannot supply or hide an option.
+table entries; an `__index` metamethod cannot supply or hide an option. Types
+and incompatible combinations are checked before a native handle is acquired.
+A contract error therefore creates neither a file nor a connection.
+
+Combine all compatible reader options:
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    readonly = true,
+    busy_timeout = 2500,
+    foreign_keys = true,
+}))
+```
 
 `db:in_transaction()` returns `true` whenever the connection is inside a
 transaction, whether it was opened by `db:transaction()` or by manual SQL.
+
+<a id="sqlite-counters"></a>
+### Connection counters
+
+The following methods read the connection state directly. They execute no SQL,
+always return a Lua integer while the connection is open, and are available in
+workers.
+
+#### `db:last_insert_rowid()`
+
+Returns the ROWID from the latest successful `INSERT` on this connection, or
+`0` until a ROWID has been inserted. The value remains the latest relevant
+`INSERT` value after a `SELECT`, `UPDATE`, or `DELETE`, and even after rolling
+back an `INSERT` that had succeeded before the rollback.
+
+```lua
+local db = assert(babet.sqlite.open(":memory:"))
+assert(db:exec("CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT)"))
+assert(db:exec("INSERT INTO messages(body) VALUES(?)", { "Hello" }))
+local id = assert(db:last_insert_rowid())
+print(id) -- 1
+```
+
+A successful statement did not necessarily insert a row. With
+`INSERT OR IGNORE`, a constraint can be ignored and `last_insert_rowid()` then
+retains the preceding ROWID. For a one-row insert that may be ignored, check
+`changes() == 1` before using the ROWID:
+
+```lua
+assert(db:exec("INSERT OR IGNORE INTO messages(body) VALUES(?)",
+    { "unique message" }))
+assert(db:changes() == 1, "message was not inserted")
+local id = assert(db:last_insert_rowid())
+```
+
+#### `db:changes()`
+
+Returns the number of rows changed by the most recently completed `INSERT`,
+`UPDATE`, or `DELETE` on this connection. Auxiliary changes from triggers,
+foreign-key actions, or `REPLACE` conflict resolution are not included in this
+latest-statement counter.
+
+```lua
+assert(db:exec(
+    "UPDATE messages SET body = ? WHERE id IN (?, ?)",
+    { "archived", 1, 2 }
+))
+print(assert(db:changes())) -- 0, 1, or 2 depending on existing rows
+```
+
+#### `db:total_changes()`
+
+Returns the cumulative number of changed rows since this connection opened.
+The total includes changes made by triggers and foreign-key actions, but not
+internal `REPLACE` deletions. Each new connection starts from zero.
+
+```lua
+local before = assert(db:total_changes())
+assert(db:exec("INSERT INTO messages(body) VALUES ('one'), ('two')"))
+local delta = assert(db:total_changes()) - before
+assert(delta == 2)
+```
+
+Use all three counters together after an insertion:
+
+```lua
+assert(db:exec("INSERT INTO messages(body) VALUES(?)", { "new" }))
+local id = assert(db:last_insert_rowid())
+local statement_rows = assert(db:changes())
+local connection_rows = assert(db:total_changes())
+print(id, statement_rows, connection_rows)
+```
+
+These values belong only to the current `db` handle: another connection,
+including one in a different worker, has independent counters. After
+`db:close()`, all three methods return
+`(nil, "sqlite: connection closed")`.
 
 <a id="sqlite-direct"></a>
 ### Direct execution
@@ -272,7 +394,8 @@ that the connection has returned to autocommit mode before continuing.
 A deferred constraint may be checked only by `COMMIT`:
 
 ```lua
-assert(db:exec("PRAGMA foreign_keys = ON"))
+local db = assert(babet.sqlite.open(
+    ":memory:", { foreign_keys = true }))
 assert(db:exec([[
     CREATE TABLE parent(id INTEGER PRIMARY KEY);
     CREATE TABLE child(
@@ -527,6 +650,12 @@ All public functions validate their exact arity. Parameter-contract errors
 also include numbered `?NNN`, non-finite REAL values, foreign lightuserdata,
 and option/parameter tables with unsupported keys.
 
+`opts.readonly`, `opts.foreign_keys`, and `opts.wal` require strict Lua
+booleans. Combining `readonly = true` with `wal = true` raises a contract
+error. Opening a missing database read-only, writing through a read-only
+connection, or violating a foreign key are operational failures that return
+`(nil, err)`.
+
 Errors raised while calling a query iterator (`db:query` or
 `prepared:query`) are Lua errors because the iterator protocol cannot also
 return a separate `(nil, err)` result.
@@ -609,15 +738,11 @@ assert(db:close())
 
 The following are intentionally not implemented:
 
-- connection modes such as `opts.readonly`, URI mode, and
-  `opts.foreign_keys`;
-- convenience counters such as `db:last_insert_rowid()`, `db:changes()`, and
-  `db:total_changes()`;
+- URI mode and other advanced `sqlite3_open_v2` flags;
 - a nested savepoint helper;
 - progress-handler and interrupt APIs;
 - the `sqlite3_blob_open` streaming BLOB API;
 - the `sqlite3_backup_init` backup API.
 
-`last_insert_rowid()`, `changes()`, foreign keys, savepoints, and
-`VACUUM INTO` remain available through raw SQL where SQLite provides an SQL
-form. FTS5 and R-Tree are not enabled in the current embedded build.
+Savepoints and `VACUUM INTO` remain available through raw SQL. FTS5 and R-Tree
+are not enabled in the current embedded build.

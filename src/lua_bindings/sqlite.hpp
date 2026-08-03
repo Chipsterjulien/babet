@@ -9,6 +9,9 @@
 //   ok, err = db:exec(sql, params?)
 //   for row in db:query(sql, params?) do ... end
 //   stmt, err = db:prepare(sql)
+//   rowid, err = db:last_insert_rowid()
+//   count, err = db:changes()
+//   total, err = db:total_changes()
 //   ok, err = stmt:exec(params?)
 //   for row in stmt:query(params?) do ... end
 //   ok, result = db:transaction(function(tx) ... end, mode?)
@@ -41,6 +44,8 @@
 // Options open :
 //   wal           : bool (par défaut false) — demande journal_mode=WAL
 //   busy_timeout  : int 0..3600000 ms (par défaut 0)
+//   readonly      : bool (par défaut false) — aucune création/écriture
+//   foreign_keys  : bool (par défaut false) — intégrité référentielle
 //
 // Concurrence : aucun lock Babet global. SQLite gère ses propres
 // verrous fichier. Mode WAL recommandé pour multi-readers + 1 writer.

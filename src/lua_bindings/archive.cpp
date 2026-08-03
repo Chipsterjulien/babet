@@ -17,7 +17,9 @@
 #include <ctime>
 #include <cstring>
 #include <filesystem>
+#include <exception>
 #include <limits>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -43,6 +45,7 @@ constexpr std::uint64_t DEFAULT_MAX_TOTAL_SIZE = 1024ULL * 1024ULL * 1024ULL;
 constexpr double DEFAULT_MAX_COMPRESSION_RATIO = 1000.0;
 constexpr std::uint64_t DEFAULT_MAX_PATH_LENGTH = 64ULL * 1024ULL;
 constexpr std::uint64_t DEFAULT_MAX_TOTAL_NAME_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t DEFAULT_READ_MAX_SIZE = 8ULL * 1024ULL * 1024ULL;
 constexpr std::size_t MAX_SAFE_ARCHIVE_PATH_BYTES = 4096;
 
 constexpr std::uint64_t HARD_MAX_ENTRIES = 100000;
@@ -51,6 +54,7 @@ constexpr std::uint64_t HARD_MAX_TOTAL_SIZE = 64ULL * 1024ULL * 1024ULL * 1024UL
 constexpr double HARD_MAX_COMPRESSION_RATIO = 1000000000.0;
 constexpr std::uint64_t HARD_MAX_PATH_LENGTH = 1024ULL * 1024ULL;
 constexpr std::uint64_t HARD_MAX_TOTAL_NAME_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t HARD_READ_MAX_SIZE = 256ULL * 1024ULL * 1024ULL;
 constexpr std::size_t HARD_MAX_OUTPUT_DIRECTORIES = 100000;
 constexpr std::size_t HARD_MAX_CREATE_DEPTH = 256;
 constexpr std::uint64_t HARD_MAX_SCANNED_SOURCE_NODES = 100000;
@@ -90,11 +94,20 @@ struct ArchiveOptions
     std::uint64_t max_total_size = DEFAULT_MAX_TOTAL_SIZE;
     std::uint64_t max_path_length = DEFAULT_MAX_PATH_LENGTH;
     std::uint64_t max_total_name_bytes = DEFAULT_MAX_TOTAL_NAME_BYTES;
+    std::uint64_t read_max_size = DEFAULT_READ_MAX_SIZE;
     double max_compression_ratio = DEFAULT_MAX_COMPRESSION_RATIO;
     bool overwrite = false;
     bool preserve_permissions = false;
     bool dry_run = false;
     ArchiveGlobFilter filters;
+};
+
+enum class ArchiveOptionMode
+{
+    inspect,
+    extract_file,
+    selective_extract,
+    read,
 };
 
 enum class EntryKind
@@ -991,8 +1004,8 @@ bool classify_archive_path(ArchiveGlobFilter &filters,
     return true;
 }
 
-bool validate_option_keys(lua_State *L, int idx, bool extraction,
-                          bool filtering, std::string &err)
+bool validate_option_keys(lua_State *L, int idx, ArchiveOptionMode mode,
+                          std::string &err)
 {
     if (lua_is_none_or_nil(L, idx))
     {
@@ -1017,8 +1030,15 @@ bool validate_option_keys(lua_State *L, int idx, bool extraction,
         "max_path_length", "max_total_name_bytes",
         "max_compression_ratio", "overwrite", "preserve_permissions",
         "dry_run", "include", "exclude"};
-    const auto &allowed = filtering ? selective_extract
-                                    : extraction ? extract : common;
+    static const std::unordered_set<std::string> read = {
+        "max_entries", "max_entry_size", "max_total_size",
+        "max_path_length", "max_total_name_bytes",
+        "max_compression_ratio", "max_size"};
+    const auto &allowed = mode == ArchiveOptionMode::selective_extract
+                              ? selective_extract
+                          : mode == ArchiveOptionMode::extract_file
+                              ? extract
+                          : mode == ArchiveOptionMode::read ? read : common;
 
     idx = lua_absindex(L, idx);
     lua_pushnil(L);
@@ -1092,11 +1112,11 @@ bool parse_strict_boolean(lua_State *L, int table_index, const char *field,
     return true;
 }
 
-bool collect_options(lua_State *L, int idx, bool extraction,
-                     bool filtering, ArchiveOptions &options,
+bool collect_options(lua_State *L, int idx, ArchiveOptionMode mode,
+                     ArchiveOptions &options,
                      std::string &err)
 {
-    if (!validate_option_keys(L, idx, extraction, filtering, err))
+    if (!validate_option_keys(L, idx, mode, err))
     {
         return false;
     }
@@ -1148,14 +1168,15 @@ bool collect_options(lua_State *L, int idx, bool extraction,
         lua_pop(L, 1);
     }
 
-    if (extraction &&
+    if ((mode == ArchiveOptionMode::extract_file ||
+         mode == ArchiveOptionMode::selective_extract) &&
         (!parse_strict_boolean(L, idx, "overwrite", options.overwrite, err) ||
          !parse_strict_boolean(L, idx, "preserve_permissions",
                                options.preserve_permissions, err)))
     {
         return false;
     }
-    if (filtering)
+    if (mode == ArchiveOptionMode::selective_extract)
     {
         if (!parse_strict_boolean(L, idx, "dry_run", options.dry_run, err))
         {
@@ -1172,6 +1193,12 @@ bool collect_options(lua_State *L, int idx, bool extraction,
         {
             return false;
         }
+    }
+    if (mode == ArchiveOptionMode::read &&
+        !parse_positive_integer(L, idx, "max_size", HARD_READ_MAX_SIZE,
+                                options.read_max_size, err))
+    {
+        return false;
     }
     return true;
 }
@@ -5772,7 +5799,7 @@ int lua_archive_list(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 2, false, false, options, err))
+    if (!collect_options(L, 2, ArchiveOptionMode::inspect, options, err))
     {
         return push_fail(L, err);
     }
@@ -5803,7 +5830,7 @@ int lua_archive_test(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 2, false, false, options, err))
+    if (!collect_options(L, 2, ArchiveOptionMode::inspect, options, err))
     {
         return push_fail(L, err);
     }
@@ -5861,6 +5888,411 @@ int lua_archive_test(lua_State *L)
     push_test_result(L, scan);
     lua_pushnil(L);
     return 2;
+}
+
+struct ArchiveReadSelector
+{
+    bool by_index = false;
+    std::size_t index = 0;
+    std::string name;
+};
+
+bool select_read_entry(const ArchiveScan &scan,
+                       const ArchiveReadSelector &selector,
+                       const ArchiveEntry *&selected,
+                       std::size_t &selected_index, std::string &err)
+{
+    selected = nullptr;
+    selected_index = 0;
+    if (selector.by_index)
+    {
+        if (selector.index >= scan.entries.size())
+        {
+            err = scan.entries.empty()
+                      ? "archive: entry index is out of range because the archive is empty"
+                      : "archive: entry index must be between 1 and " +
+                            std::to_string(scan.entries.size());
+            return false;
+        }
+        selected_index = selector.index;
+        selected = &scan.entries[selected_index];
+        return true;
+    }
+
+    for (std::size_t index = 0; index < scan.entries.size(); ++index)
+    {
+        const ArchiveEntry &entry = scan.entries[index];
+        if (entry.name != selector.name)
+        {
+            continue;
+        }
+        if (selected != nullptr)
+        {
+            err = "archive: requested entry is ambiguous because it appears more than once; use an entry index from archive.list()";
+            return false;
+        }
+        selected = &entry;
+        selected_index = index;
+    }
+    if (selected == nullptr)
+    {
+        err = "archive: entry not found: '" + selector.name + "'";
+        return false;
+    }
+    return true;
+}
+
+bool validate_read_entry(const ArchiveEntry &entry, std::string &err)
+{
+    if (entry.kind != EntryKind::regular)
+    {
+        err = "archive: read only accepts a regular file entry";
+        return false;
+    }
+    if (entry.encrypted)
+    {
+        err = "archive: encrypted ZIP entries cannot be read";
+        return false;
+    }
+    if (!entry.supported)
+    {
+        err = "archive: entry compression method is not supported";
+        return false;
+    }
+    if (entry.sparse)
+    {
+        err = "archive: sparse TAR entries cannot be read into memory";
+        return false;
+    }
+    return true;
+}
+
+struct ArchiveMemoryReadState
+{
+    char *data = nullptr;
+    std::uint64_t capacity = 0;
+    std::uint64_t max_size = 0;
+    std::uint64_t written = 0;
+    bool limit_exceeded = false;
+    bool invalid_layout = false;
+};
+
+size_t archive_memory_read_callback(void *opaque, mz_uint64 file_offset,
+                                    const void *buffer, size_t size)
+{
+    auto *state = static_cast<ArchiveMemoryReadState *>(opaque);
+    if (state->written > state->max_size ||
+        size > state->max_size - state->written)
+    {
+        state->limit_exceeded = true;
+        return 0;
+    }
+    if ((buffer == nullptr && size != 0) ||
+        file_offset != state->written || state->written > state->capacity ||
+        size > state->capacity - state->written)
+    {
+        state->invalid_layout = true;
+        return 0;
+    }
+    if (size != 0)
+    {
+        std::memcpy(state->data + state->written, buffer, size);
+    }
+    state->written += size;
+    return size;
+}
+
+class TarMemoryReadSink final : public babet::archive_tar::ExtractionSink
+{
+public:
+    TarMemoryReadSink(std::size_t selected_index, std::string &data,
+                      std::uint64_t max_size)
+        : selected_index_(selected_index), data_(data), max_size_(max_size)
+    {
+    }
+
+    [[nodiscard]] bool wants_file(
+        std::size_t index,
+        const babet::archive_tar::Entry &) const noexcept override
+    {
+        return index == selected_index_;
+    }
+
+    [[nodiscard]] bool begin_file(
+        std::size_t index, const babet::archive_tar::Entry &,
+        std::string &err) override
+    {
+        if (index != selected_index_)
+        {
+            err = "archive: internal TAR read selection mismatch";
+            return false;
+        }
+        written_ = 0;
+        active_ = true;
+        completed_ = false;
+        return true;
+    }
+
+    [[nodiscard]] bool write_file_block(
+        std::size_t index, const babet::archive_tar::Entry &entry,
+        std::uint64_t offset, const void *data, std::size_t size,
+        std::string &err) override
+    {
+        if (!active_ || index != selected_index_ || offset != written_)
+        {
+            err = "archive: TAR entry '" + entry.name +
+                  "' returned invalid or non-contiguous data while reading";
+            return false;
+        }
+        if (written_ > max_size_ || size > max_size_ - written_)
+        {
+            err = "archive: entry '" + entry.name +
+                  "' exceeds opts.max_size while reading";
+            return false;
+        }
+        if ((data == nullptr && size != 0) || written_ > data_.size() ||
+            size > data_.size() - static_cast<std::size_t>(written_))
+        {
+            err = "archive: TAR entry '" + entry.name +
+                  "' returned data beyond its announced size while reading";
+            return false;
+        }
+        if (size != 0)
+        {
+            std::memcpy(data_.data() + written_, data, size);
+        }
+        written_ += size;
+        return true;
+    }
+
+    [[nodiscard]] bool finish_file(
+        std::size_t index, const babet::archive_tar::Entry &entry,
+        std::string &err) override
+    {
+        if (!active_ || index != selected_index_ || written_ != entry.size)
+        {
+            err = "archive: TAR entry '" + entry.name +
+                  "' ended before its announced size while reading";
+            return false;
+        }
+        active_ = false;
+        completed_ = true;
+        return true;
+    }
+
+    void abort_file() noexcept override
+    {
+        active_ = false;
+        completed_ = false;
+    }
+
+    [[nodiscard]] bool completed() const noexcept { return completed_; }
+
+private:
+    std::size_t selected_index_ = 0;
+    std::string &data_;
+    std::uint64_t max_size_ = 0;
+    std::uint64_t written_ = 0;
+    bool active_ = false;
+    bool completed_ = false;
+};
+
+int lua_archive_read(lua_State *L)
+{
+    if (!lua_arity_between(L, 2, 3))
+    {
+        return luaL_error(L, "archive.read expects 2 or 3 arguments");
+    }
+    const std::string_view archive_path_view =
+        luaL_checkstring_view_without_nul(L, 1, "archive path");
+    const bool selector_is_name = lua_is_strict_string(L, 2);
+    const bool selector_is_index = lua_is_strict_integer(L, 2);
+    if (!selector_is_name && !selector_is_index)
+    {
+        return luaL_error(L,
+                          "archive.read entry must be a string or integer");
+    }
+    std::string_view selector_name_view;
+    lua_Integer selector_integer = 0;
+    if (selector_is_name)
+    {
+        selector_name_view =
+            luaL_checkstring_view_without_nul(L, 2, "archive entry");
+    }
+    else
+    {
+        selector_integer = lua_tointeger(L, 2);
+    }
+
+    ArchiveReadSelector selector;
+    if (selector_is_name)
+    {
+        selector.name.assign(selector_name_view.data(),
+                             selector_name_view.size());
+    }
+    else
+    {
+        selector.by_index = true;
+        if (selector_integer > 0 &&
+            static_cast<unsigned long long>(selector_integer - 1) <=
+                std::numeric_limits<std::size_t>::max())
+        {
+            selector.index = static_cast<std::size_t>(selector_integer - 1);
+        }
+        else
+        {
+            selector.index = std::numeric_limits<std::size_t>::max();
+        }
+    }
+    const std::string archive_path(archive_path_view);
+
+    ArchiveOptions options;
+    std::string err;
+    if (!collect_options(L, 3, ArchiveOptionMode::read, options, err))
+    {
+        return push_fail(L, err);
+    }
+
+    PinnedArchiveSource source;
+    if (!source.open(archive_path, err))
+    {
+        return push_fail(L, err);
+    }
+
+    ArchiveReader zip_reader;
+    ArchiveScan scan;
+    babet::archive_tar::ScanResult tar_scan;
+    bool zip_backend = false;
+    std::string zip_error;
+    {
+        const int zip_fd = source.duplicate_rewound(err);
+        if (zip_fd < 0)
+        {
+            return push_fail(L, err);
+        }
+        if (zip_reader.open_fd(zip_fd, archive_path, zip_error))
+        {
+            if (!scan_zip_archive(zip_reader, options, scan, zip_error))
+            {
+                return push_fail(L, zip_error);
+            }
+            zip_backend = true;
+        }
+    }
+    if (!zip_backend)
+    {
+        std::string tar_error;
+        if (!scan_tar_archive(source, options, scan, tar_error, &tar_scan))
+        {
+            err = "archive: unsupported or malformed archive '" +
+                  archive_path + "' (ZIP: " + zip_error + "; TAR: " +
+                  tar_error + ")";
+            return push_fail(L, err);
+        }
+    }
+
+    const ArchiveEntry *selected = nullptr;
+    std::size_t selected_index = 0;
+    if (!select_read_entry(scan, selector, selected, selected_index, err) ||
+        !validate_read_entry(*selected, err))
+    {
+        return push_fail(L, err);
+    }
+    if (selected->size > options.read_max_size)
+    {
+        err = "archive: entry '" + selected->name +
+              "' exceeds opts.max_size (" +
+              std::to_string(selected->size) + " > " +
+              std::to_string(options.read_max_size) + ")";
+        return push_fail(L, err);
+    }
+
+    std::string data(static_cast<std::size_t>(selected->size), '\0');
+    if (zip_backend)
+    {
+        ArchiveMemoryReadState state{
+            .data = data.data(),
+            .capacity = selected->size,
+            .max_size = options.read_max_size,
+        };
+        const mz_bool extracted = mz_zip_reader_extract_to_callback(
+            &zip_reader.zip(), selected->index,
+            archive_memory_read_callback, &state, 0);
+        if (!extracted || state.written != selected->size)
+        {
+            if (state.limit_exceeded)
+            {
+                err = "archive: entry '" + selected->name +
+                      "' exceeds opts.max_size while reading";
+            }
+            else if (state.invalid_layout)
+            {
+                err = "archive: ZIP entry '" + selected->name +
+                      "' returned invalid or non-contiguous data while reading";
+            }
+            else
+            {
+                err = miniz_error(zip_reader.zip(),
+                                  "cannot read ZIP entry", selected->name);
+            }
+            return push_fail(L, err);
+        }
+    }
+    else
+    {
+        const int tar_fd = source.duplicate_rewound(err);
+        if (tar_fd < 0)
+        {
+            return push_fail(L, err);
+        }
+        const babet::archive_tar::ScanLimits limits{
+            .max_entries = options.max_entries,
+            .max_entry_size = options.max_entry_size,
+            .max_total_size = options.max_total_size,
+            .max_path_length = options.max_path_length,
+            .max_total_name_bytes = options.max_total_name_bytes,
+            .max_compression_ratio = options.max_compression_ratio,
+        };
+        TarMemoryReadSink sink(selected_index, data,
+                               options.read_max_size);
+        const bool extracted = babet::archive_tar::extract_fd(
+            tar_fd, source.size(), source.path(), limits,
+            tar_scan.compression, tar_scan.entries, sink, err);
+        ::close(tar_fd);
+        if (!extracted || !sink.completed())
+        {
+            if (extracted)
+            {
+                err = "archive: selected TAR entry was not fully read";
+            }
+            return push_fail(L, err);
+        }
+    }
+
+    lua_pushlstring(L, data.data(), data.size());
+    lua_pushnil(L);
+    return 2;
+}
+
+template <int (*Fn)(lua_State *)>
+int archive_lua_boundary(lua_State *L)
+{
+    try
+    {
+        return Fn(L);
+    }
+    catch (const std::bad_alloc &)
+    {
+        return push_fail(L, "archive: out of memory");
+    }
+    catch (const std::exception &)
+    {
+        return push_fail(L, "archive: internal failure");
+    }
+    catch (...)
+    {
+        return push_fail(L, "archive: unknown internal failure");
+    }
 }
 
 struct ExtractSelection
@@ -6098,7 +6530,8 @@ int lua_archive_extract(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 3, true, true, options, err))
+    if (!collect_options(L, 3, ArchiveOptionMode::selective_extract,
+                         options, err))
     {
         return push_fail(L, err);
     }
@@ -6339,7 +6772,8 @@ int lua_archive_extract_file(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 4, true, false, options, err))
+    if (!collect_options(L, 4, ArchiveOptionMode::extract_file,
+                         options, err))
     {
         return push_fail(L, err);
     }
@@ -6492,19 +6926,22 @@ void register_archive(lua_State *L)
 {
     lua_newtable(L);
 
-    lua_pushcfunction(L, lua_archive_create);
+    lua_pushcfunction(L, archive_lua_boundary<lua_archive_create>);
     lua_setfield(L, -2, "create");
 
-    lua_pushcfunction(L, lua_archive_list);
+    lua_pushcfunction(L, archive_lua_boundary<lua_archive_list>);
     lua_setfield(L, -2, "list");
 
-    lua_pushcfunction(L, lua_archive_test);
+    lua_pushcfunction(L, archive_lua_boundary<lua_archive_read>);
+    lua_setfield(L, -2, "read");
+
+    lua_pushcfunction(L, archive_lua_boundary<lua_archive_test>);
     lua_setfield(L, -2, "test");
 
-    lua_pushcfunction(L, lua_archive_extract);
+    lua_pushcfunction(L, archive_lua_boundary<lua_archive_extract>);
     lua_setfield(L, -2, "extract");
 
-    lua_pushcfunction(L, lua_archive_extract_file);
+    lua_pushcfunction(L, archive_lua_boundary<lua_archive_extract_file>);
     lua_setfield(L, -2, "extractFile");
 
     lua_setfield(L, -2, "archive");

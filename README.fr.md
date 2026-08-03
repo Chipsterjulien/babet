@@ -17,16 +17,15 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.10.0**. Voir le
+Version stable et auditée actuelle : **2.12.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.10.0 achève un audit fonction par fonction du module SQLite. Cette
-version ajoute la sentinelle de bind explicite `babet.sqlite.NULL`, une
-validation stricte des nombres finis et des tables de paramètres, des
-diagnostics fiables après fermeture différée de la connexion et une propriété
-sûre des ressources natives aux frontières Lua. Les nouveautés fonctionnelles
-de la série 2.9 restent les redirections de
+Babet 2.12.0 ajoute les connexions SQLite en lecture seule, l’activation des
+clés étrangères par connexion et les compteurs `last_insert_rowid()`,
+`changes()` et `total_changes()`. La 2.11.0 reste la version consacrée à la
+lecture binaire et bornée des entrées ZIP/TAR avec `babet.archive.read()`.
+L’audit SQLite et `babet.sqlite.NULL` de la 2.10 restent inchangés. Les nouveautés fonctionnelles de la série 2.9 restent les redirections de
 `babet.spawn()`, le module `babet.base64`, `babet.writeFileAtomic()`, le cycle
 de vie workers renforcé et les channels directs entre workers.
 
@@ -56,6 +55,26 @@ cd babet
 
 Le premier build télécharge et compile les dépendances. Il faut un compilateur
 C++23, CMake 3.22 ou plus récent, `wget`, `unzip` et `xz`.
+
+### Ouvrir SQLite avec une politique de connexion explicite
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    wal = true,
+    busy_timeout = 2000,
+    foreign_keys = true,
+}))
+
+assert(db:exec("INSERT INTO jobs(name) VALUES(?)", { "index" }))
+print(assert(db:last_insert_rowid()))
+print(assert(db:changes()), assert(db:total_changes()))
+```
+
+Utilise `{ readonly = true }` pour une base existante qui ne doit être ni
+créée ni modifiée. La lecture seule reste compatible avec `busy_timeout` et
+`foreign_keys`, mais refuse volontairement `wal = true`. Cela empêche seulement
+de demander un changement de mode ; une base déjà en WAL reste lisible si
+SQLite peut utiliser ses fichiers compagnons.
 
 ### Télécharger une grosse réponse HTTP sans la garder en mémoire
 
@@ -244,6 +263,14 @@ local info, err = babet.archive.list("upload.zip", {
 assert(info, err)
 assert(info.duplicates == 0 and info.conflicts == 0)
 
+local manifest
+manifest, err = babet.archive.read("upload.zip", "manifest.json", {
+    max_size = 1024 * 1024,
+    max_entries = 2000,
+    max_total_size = 512 * 1024 * 1024,
+})
+assert(manifest, err)
+
 local verified
 verified, err = babet.archive.test("upload.zip", {
     max_entries = 2000,
@@ -317,6 +344,13 @@ sans création, écriture, chmod, renommage ni suppression ; le résultat indiqu
 racine. Cette prévisualisation décrit un instantané et ne remplace pas les
 contrôles refaits par l’extraction réelle. Utiliser `archive.test()` en amont
 lorsqu’il faut vérifier aussi l’intégrité des payloads ZIP ignorés.
+`archive.read()` charge un fichier régulier dans une chaîne Lua binaire avec
+une limite mémoire de 8 Mio par défaut et de 256 Mio au maximum. La sélection
+se fait par nom brut exact ou par l’index 1-based fourni par `archive.list()` ;
+un nom dupliqué est refusé tant qu’un index ne désambiguïse pas explicitement
+l’occurrence. Aucun nom n’est nettoyé et aucune écriture n’a lieu : un chemin
+dangereux peut être lu comme donnée, tout en restant signalé par
+`list().entries[i].safe_path = false` et interdit à l’extraction.
 
 ## Validation avant une release
 
@@ -326,6 +360,11 @@ normal, puis lance les smoke tests réseau :
 ```sh
 ./run_tests.sh --release
 ```
+
+La sortie complète est également enregistrée sans couleurs dans
+`babet-tests.txt`, toujours sous ce même nom et en remplaçant le journal de la
+validation précédente. C’est ce fichier qu’il faut transmettre pour faire
+contrôler un résultat de tests.
 
 Les contrôles bloquants du cadrage HTTP et de TLS utilisent des serveurs
 HTTP/HTTPS locaux générés à la volée. Les sondes HTTPS publiques sont

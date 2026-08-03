@@ -38,8 +38,46 @@ Babet 2.9.2 hardening release
     regression coverage; validate the exact release tree under ASan + UBSan and
     the final normal build.
 
+Babet 2.10.0 SQLite audit release
+---------------------------------
+
+[x] Audit every SQLite Lua entry point, native handle, bind contract and
+    deferred-close path.
+[x] Add the bind-only babet.sqlite.NULL sentinel without changing SQL NULL
+    reads.
+[x] Preserve useful step diagnostics after the parent connection userdata is
+    collected and prove the zombie-connection regressions.
+[x] Synchronise strict tests, French/English documentation and release
+    metadata.
+
+Babet 2.11.0 bounded archive-read release
+-----------------------------------------
+
+[x] Add babet.archive.read() for exact raw-name or one-based index selection.
+[x] Refuse ambiguous names while allowing explicit duplicate disambiguation by
+    index.
+[x] Bound both announced and actually produced bytes with opts.max_size.
+[x] Cover ZIP, plain/gzip/xz/bzip2/zstd TAR, raw names, workers, strict options,
+    integrity errors and zero filesystem writes.
+[x] Synchronise rich French/English documentation and release metadata.
+
+Babet 2.12.0 SQLite connection conveniences
+--------------------------------------------
+
+[x] Add db:last_insert_rowid(), db:changes() and db:total_changes() with
+    strict arity, closed-handle errors and 64-bit SQLite values.
+[x] Add opts.readonly without changing the default READWRITE | CREATE mode.
+[x] Add per-connection opts.foreign_keys with an explicit false default.
+[x] Reject readonly=true with wal=true and cover all compatible combinations.
+[x] Verify the new surface in the main Lua state and in workers.
+[x] Cover ignored INSERT rowids and deferred foreign-key COMMIT failure.
+[x] Apply the archive exception boundary to all public archive functions and
+    verify TAR in-memory read completion explicitly.
+[x] Synchronise rich French/English documentation and release metadata.
+
+Next planned release: Babet 2.13.0 nested savepoint helper.
+
 Deferred ideas retained in notes.md:
-- bounded in-memory archive.read() if a concrete use case justifies it;
 - parent-side PATH resolution followed by execve;
 - forced worker termination (pthread_cancel remains intentionally excluded);
 - macOS/BSD portability.

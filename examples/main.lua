@@ -7696,6 +7696,21 @@ do
         ok("open(opts.wal = 'yes') raises (wal not boolean)", not pok)
     end
 
+    -- opts.readonly / opts.foreign_keys mauvais types
+    ok_raises("open rejects non-boolean opts.readonly",
+        function() return DB.open(":memory:", { readonly = 1 }) end,
+        "opts.readonly must be a boolean")
+
+    ok_raises("open rejects non-boolean opts.foreign_keys",
+        function() return DB.open(":memory:", { foreign_keys = "yes" }) end,
+        "opts.foreign_keys must be a boolean")
+
+    ok_raises("open rejects readonly=true combined with wal=true",
+        function()
+            return DB.open(":memory:", { readonly = true, wal = true })
+        end,
+        "readonly=true cannot be combined with wal=true")
+
     -- opts.busy_timeout mauvais type
     do
         local pok = pcall(DB.open, ":memory:", { busy_timeout = "1000" })
@@ -7790,6 +7805,103 @@ do
         ok("db:in_transaction() after close -> (nil, err)",
             closed_state == nil and type(closed_state_err) == "string"
             and closed_state_err:find("closed", 1, true) ~= nil)
+
+        for _, method in ipairs({
+            "last_insert_rowid", "changes", "total_changes",
+        }) do
+            local value, value_err = db[method](db)
+            ok("db:" .. method .. "() after close -> (nil, err)",
+                value == nil and type(value_err) == "string"
+                and value_err:find("closed", 1, true) ~= nil)
+        end
+    end
+
+    -- ----- compteurs de connexion ----------------------------------
+    do
+        local db = assert(DB.open(":memory:"))
+
+        ok("db.last_insert_rowid is a function",
+            type(db.last_insert_rowid) == "function")
+        ok("db.changes is a function", type(db.changes) == "function")
+        ok("db.total_changes is a function",
+            type(db.total_changes) == "function")
+
+        ok_raises("db:last_insert_rowid rejects excess arguments",
+            function() return db:last_insert_rowid(true) end,
+            "expected only self")
+        ok_raises("db:changes rejects excess arguments",
+            function() return db:changes(true) end,
+            "expected only self")
+        ok_raises("db:total_changes rejects excess arguments",
+            function() return db:total_changes(true) end,
+            "expected only self")
+
+        local rowid0, changes0, total0 =
+            db:last_insert_rowid(), db:changes(), db:total_changes()
+        ok("SQLite counters start at integer zero",
+            rowid0 == 0 and changes0 == 0 and total0 == 0
+            and math.type(rowid0) == "integer"
+            and math.type(changes0) == "integer"
+            and math.type(total0) == "integer")
+
+        assert(db:exec(
+            "CREATE TABLE counters(id INTEGER PRIMARY KEY, value TEXT)"))
+        assert(db:exec(
+            "INSERT INTO counters(value) VALUES ('one')"))
+        ok("last_insert_rowid reports the latest rowid",
+            db:last_insert_rowid() == 1)
+        ok("changes reports the latest statement",
+            db:changes() == 1)
+        ok("total_changes accumulates connection changes",
+            db:total_changes() == 1)
+
+        assert(db:exec([[
+            INSERT INTO counters(value) VALUES ('two'), ('three')
+        ]]))
+        ok("last_insert_rowid follows a multi-row INSERT",
+            db:last_insert_rowid() == 3)
+        ok("changes counts every row changed by the latest statement",
+            db:changes() == 2)
+        ok("total_changes remains cumulative",
+            db:total_changes() == 3)
+
+        assert(db:exec("DELETE FROM counters WHERE id IN (1, 3)"))
+        ok("changes counts DELETE rows", db:changes() == 2)
+        ok("total_changes includes INSERT and DELETE rows",
+            db:total_changes() == 5)
+
+        assert(db:exec(
+            "INSERT INTO counters(id, value) VALUES(?, ?)",
+            { 5000000000, "wide-rowid" }))
+        ok("SQLite counters preserve a rowid above 32 bits",
+            db:last_insert_rowid() == 5000000000
+            and math.type(db:last_insert_rowid()) == "integer"
+            and db:changes() == 1 and db:total_changes() == 6)
+
+        assert(db:exec([[
+            CREATE TABLE ignored_inserts(
+                id INTEGER PRIMARY KEY,
+                value TEXT UNIQUE NOT NULL
+            )
+        ]]))
+        assert(db:exec(
+            "INSERT INTO ignored_inserts(id, value) VALUES(?, ?)",
+            { 101, "kept" }))
+        local rowid_before_ignore = db:last_insert_rowid()
+        local total_before_ignore = db:total_changes()
+        local ignored_ok, ignored_err = db:exec(
+            "INSERT OR IGNORE INTO ignored_inserts(id, value) VALUES(?, ?)",
+            { 202, "kept" })
+        ok("INSERT OR IGNORE can succeed without inserting a row",
+            ignored_ok == true and ignored_err == nil)
+        ok("ignored INSERT reports zero changes",
+            db:changes() == 0
+            and db:total_changes() == total_before_ignore)
+        ok("ignored INSERT leaves last_insert_rowid unchanged",
+            rowid_before_ignore == 101
+            and db:last_insert_rowid() == rowid_before_ignore)
+
+        assert(db:close())
     end
 
     -- ----- ouverture avec opts ---------------------------------------
@@ -7806,6 +7918,99 @@ do
         ok("open(':memory:', wal=true) -> db (silent fallback)",
             db ~= nil, "err=" .. tostring(err))
         if db then db:close() end
+    end
+
+    -- ----- clés étrangères à l'ouverture ----------------------------
+    do
+        local default_db = assert(DB.open(":memory:"))
+        local default_fk
+        for row in default_db:query("PRAGMA foreign_keys") do
+            default_fk = row.foreign_keys
+        end
+        ok("foreign_keys defaults to SQLite-compatible false",
+            default_fk == 0)
+        default_db:close()
+
+        local disabled_db = assert(DB.open(
+            ":memory:", { foreign_keys = false }))
+        local disabled_fk
+        for row in disabled_db:query("PRAGMA foreign_keys") do
+            disabled_fk = row.foreign_keys
+        end
+        ok("foreign_keys=false leaves enforcement disabled",
+            disabled_fk == 0)
+        disabled_db:close()
+
+        local db = assert(DB.open(
+            ":memory:", { foreign_keys = true }))
+        local enabled_fk
+        for row in db:query("PRAGMA foreign_keys") do
+            enabled_fk = row.foreign_keys
+        end
+        ok("foreign_keys=true enables enforcement at open",
+            enabled_fk == 1)
+
+        assert(db:exec([[
+            CREATE TABLE parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE child(
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER REFERENCES parent(id)
+            )
+        ]]))
+        local inserted, insert_err = db:exec(
+            "INSERT INTO child(id, parent_id) VALUES(1, 999)")
+        ok("foreign_keys=true rejects an orphan row",
+            inserted == nil and type(insert_err) == "string"
+            and insert_err:find("FOREIGN KEY", 1, true) ~= nil,
+            tostring(insert_err))
+        db:close()
+    end
+
+    -- ----- ouverture strictement en lecture seule -------------------
+    do
+        local path = sb("sqlite-readonly.db")
+        babet.remove(path)
+
+        local writer = assert(DB.open(path))
+        assert(writer:exec([[
+            CREATE TABLE readonly_probe(id INTEGER PRIMARY KEY, value TEXT);
+            INSERT INTO readonly_probe(value) VALUES ('persisted');
+        ]]))
+        assert(writer:close())
+
+        local reader, reader_err = DB.open(path, {
+            readonly = true,
+            busy_timeout = 250,
+            foreign_keys = true,
+        })
+        ok("readonly=true opens an existing database",
+            reader ~= nil and reader_err == nil, tostring(reader_err))
+        if reader then
+            local value
+            for row in reader:query(
+                "SELECT value FROM readonly_probe WHERE id = 1") do
+                value = row.value
+            end
+            ok("readonly connection can query", value == "persisted")
+
+            local wrote, write_err = reader:exec(
+                "INSERT INTO readonly_probe(value) VALUES ('forbidden')")
+            ok("readonly connection rejects writes",
+                wrote == nil and type(write_err) == "string"
+                and write_err:find("readonly", 1, true) ~= nil,
+                tostring(write_err))
+            reader:close()
+        end
+
+        local missing = sb("sqlite-readonly-missing.db")
+        babet.remove(missing)
+        local absent_db, absent_err = DB.open(missing, { readonly = true })
+        ok("readonly=true does not create a missing database",
+            absent_db == nil and type(absent_err) == "string")
+        ok("readonly failure leaves no file behind",
+            babet.fileExists(missing) == false)
+
+        babet.remove(path)
     end
 
     do
@@ -9281,13 +9486,21 @@ do
 
     -- ----- transaction helper ---------------------------------------
     do
-        local db = assert(DB.open(":memory:"))
+        local db = assert(DB.open(
+            ":memory:", { foreign_keys = true }))
         assert(db:exec([[
             CREATE TABLE tx_log (
                 id INTEGER PRIMARY KEY,
                 value TEXT UNIQUE NOT NULL
             )
         ]]))
+
+        local transaction_fk
+        for row in db:query("PRAGMA foreign_keys") do
+            transaction_fk = row.foreign_keys
+        end
+        ok("transaction tests use foreign_keys=true from open",
+            transaction_fk == 1)
 
         ok("in_transaction is false outside a transaction",
             db:in_transaction() == false)
@@ -9351,7 +9564,6 @@ do
         -- A deferred foreign-key violation is reported only by COMMIT. The
         -- helper must discard callback results, roll back the write, leave
         -- autocommit restored and keep the connection reusable.
-        assert(db:exec("PRAGMA foreign_keys = ON"))
         assert(db:exec([[
             CREATE TABLE tx_parent(id INTEGER PRIMARY KEY);
             CREATE TABLE tx_child(
@@ -11452,6 +11664,35 @@ do
     ok("babet.workers is a table", type(W) == "table")
     ok("workers.spawn is a function", type(W.spawn) == "function")
     ok("workers.channel is a function", type(W.channel) == "function")
+
+    do
+        local job, spawn_err = W.spawn([[
+            local db = assert(babet.sqlite.open(
+                ":memory:", { foreign_keys = true }))
+            assert(db:exec(
+                "CREATE TABLE t(id INTEGER PRIMARY KEY, value TEXT)"))
+            assert(db:exec("INSERT INTO t(value) VALUES ('worker')"))
+            local foreign_keys
+            for row in db:query("PRAGMA foreign_keys") do
+                foreign_keys = row.foreign_keys
+            end
+            return {
+                rowid = db:last_insert_rowid(),
+                changes = db:changes(),
+                total = db:total_changes(),
+                foreign_keys = foreign_keys,
+            }
+        ]])
+        local joined, result = false, spawn_err
+        if job then
+            joined, result = job:join()
+        end
+        ok("SQLite 2.12 counters and foreign_keys work in a worker",
+            joined == true and type(result) == "table"
+            and result.rowid == 1 and result.changes == 1
+            and result.total == 1 and result.foreign_keys == 1,
+            tostring(result))
+    end
 
     do
         local job, err = W.spawn("return true", {
@@ -14437,7 +14678,8 @@ do
         and type(babet.archive.list) == "function"
         and type(babet.archive.test) == "function"
         and type(babet.archive.extract) == "function"
-        and type(babet.archive.extractFile) == "function")
+        and type(babet.archive.extractFile) == "function"
+        and type(babet.archive.read) == "function")
 
     local archive_worker, archive_worker_err = babet.workers.spawn([[
         return type(babet.archive) == "table"
@@ -14446,6 +14688,7 @@ do
             and type(babet.archive.test) == "function"
             and type(babet.archive.extract) == "function"
             and type(babet.archive.extractFile) == "function"
+            and type(babet.archive.read) == "function"
     ]])
     ok_val("archive submodule registered in worker states",
         archive_worker, archive_worker_err)
@@ -14456,6 +14699,284 @@ do
             "joined=" .. tostring(joined)
             .. " available=" .. tostring(available))
     end
+
+    ;(function()
+    -- Bounded in-memory entry reads ----------------------------------
+    local read_function = babet.archive.read
+    local function archive_read(...)
+        if type(read_function) ~= "function" then
+            return nil, "archive.read is not available"
+        end
+        return read_function(...)
+    end
+
+    local manifest = '{"name":"babet"}\n'
+    local binary = "\0A\255B\0"
+    local read_zip = root .. "/read.zip"
+    assert(make_zip(read_zip, {
+        { name = "manifest.json", data = manifest },
+        { name = "binary.bin", data = binary },
+        { name = "../unsafe.txt", data = "unsafe" },
+        { name = "folder/" },
+        { name = "same.txt", data = "first" },
+        { name = "same.txt", data = "second" },
+        { name = "\255.bin", data = "raw-name" },
+        { name = "empty.bin", data = "" },
+        {
+            name = "manifest-link",
+            data = "manifest.json",
+            external_attributes = zip_mode(0xA000, tonumber("777", 8)),
+        },
+        { name = "encrypted.bin", data = "secret", flags = 1 },
+        { name = "unsupported.bin", data = "abc", method = 99 },
+    }))
+
+    local named, named_err = archive_read(read_zip, "manifest.json")
+    ok_val("archive.read reads a ZIP entry by exact raw name",
+        named, named_err, function(value) return value == manifest end)
+    local read_contract = table.pack(archive_read(read_zip, "manifest.json", nil))
+    ok("archive.read accepts explicit nil options and returns exactly two values",
+        read_contract.n == 2 and read_contract[1] == manifest
+        and read_contract[2] == nil, inspect(read_contract))
+
+    local indexed, indexed_err = archive_read(read_zip, 2)
+    ok_val("archive.read reads a ZIP entry by one-based index",
+        indexed, indexed_err, function(value) return value == binary end)
+    ok("archive.read returns binary-safe Lua strings",
+        indexed == binary and #indexed == #binary)
+
+    local unsafe, unsafe_err = archive_read(read_zip, "../unsafe.txt")
+    local read_list, read_list_err = babet.archive.list(read_zip)
+    ok_val("archive.read preserves an unsafe raw name without writing",
+        unsafe, unsafe_err, function(value) return value == "unsafe" end)
+    ok("archive.list keeps the safety indicator for an in-memory read target",
+        read_list ~= nil and read_list_err == nil
+        and read_list.entries[3].name == "../unsafe.txt"
+        and read_list.entries[3].safe_path == false)
+
+    local ambiguous, ambiguous_err = archive_read(read_zip, "same.txt")
+    ok_fail("archive.read refuses an ambiguous duplicate raw name",
+        ambiguous, ambiguous_err)
+    ok("archive.read duplicate diagnostic recommends an index",
+        type(ambiguous_err) == "string"
+        and ambiguous_err:find("appears more than once", 1, true) ~= nil
+        and ambiguous_err:find("index", 1, true) ~= nil,
+        "err=" .. tostring(ambiguous_err))
+    local first_duplicate, first_duplicate_err = archive_read(read_zip, 5)
+    local second_duplicate, second_duplicate_err = archive_read(read_zip, 6)
+    ok_val("archive.read index selects the first duplicate explicitly",
+        first_duplicate, first_duplicate_err,
+        function(value) return value == "first" end)
+    ok_val("archive.read index selects the second duplicate explicitly",
+        second_duplicate, second_duplicate_err,
+        function(value) return value == "second" end)
+
+    local directory, directory_err = archive_read(read_zip, 4)
+    ok_fail("archive.read refuses a directory entry",
+        directory, directory_err)
+    ok("archive.read directory diagnostic is explicit",
+        type(directory_err) == "string"
+        and directory_err:find("regular file", 1, true) ~= nil,
+        "err=" .. tostring(directory_err))
+    local missing, missing_err = archive_read(read_zip, "missing.txt")
+    ok_fail("archive.read reports a missing raw name", missing, missing_err)
+    local zero_index, zero_index_err = archive_read(read_zip, 0)
+    ok_fail("archive.read rejects index zero", zero_index, zero_index_err)
+    local high_index, high_index_err = archive_read(read_zip, 12)
+    ok_fail("archive.read rejects an out-of-range index",
+        high_index, high_index_err)
+    local raw_name, raw_name_err = archive_read(read_zip, "\255.bin")
+    ok_val("archive.read selects an invalid-UTF-8 ZIP name byte for byte",
+        raw_name, raw_name_err,
+        function(value) return value == "raw-name" end)
+    ok("archive.list exposes invalid UTF-8 without rewriting its raw name",
+        read_list and read_list.entries[7].name == "\255.bin"
+        and read_list.entries[7].valid_utf8 == false)
+    local empty_data, empty_data_err = archive_read(read_zip, 8)
+    ok("archive.read returns an empty regular ZIP entry",
+        empty_data == "" and empty_data_err == nil)
+    local zip_link, zip_link_err = archive_read(read_zip, 9)
+    ok_fail("archive.read refuses a ZIP symlink entry",
+        zip_link, zip_link_err)
+    local encrypted, encrypted_err = archive_read(read_zip, 10)
+    ok_fail("archive.read refuses an encrypted ZIP entry",
+        encrypted, encrypted_err)
+    ok("archive.read encrypted ZIP diagnostic is explicit",
+        type(encrypted_err) == "string"
+        and encrypted_err:find("encrypted", 1, true) ~= nil,
+        "err=" .. tostring(encrypted_err))
+    local unsupported, unsupported_err = archive_read(read_zip, 11)
+    ok_fail("archive.read refuses an unsupported ZIP method",
+        unsupported, unsupported_err)
+    ok("archive.read unsupported ZIP diagnostic is explicit",
+        type(unsupported_err) == "string"
+        and unsupported_err:find("not supported", 1, true) ~= nil,
+        "err=" .. tostring(unsupported_err))
+
+    local exact, exact_err = archive_read(
+        read_zip, "manifest.json", { max_size = #manifest })
+    ok_val("archive.read accepts max_size at the exact produced-byte boundary",
+        exact, exact_err, function(value) return value == manifest end)
+    local limited, limited_err = archive_read(
+        read_zip, "manifest.json", { max_size = #manifest - 1 })
+    ok_fail("archive.read enforces max_size", limited, limited_err)
+    ok("archive.read max_size diagnostic is explicit",
+        type(limited_err) == "string"
+        and limited_err:find("max_size", 1, true) ~= nil,
+        "err=" .. tostring(limited_err))
+
+    local actual_size_zip = root .. "/read-actual-size.zip"
+    assert(make_zip(actual_size_zip, {
+        {
+            name = "expanded.bin",
+            data = string.rep("A", 4096),
+            payload = deflated_4096_a,
+            size = 1,
+            local_size = 1,
+        },
+    }))
+    local actual_limited, actual_limited_err = archive_read(
+        actual_size_zip, 1, { max_size = 1 })
+    ok_fail("archive.read bounds bytes actually produced by ZIP inflation",
+        actual_limited, actual_limited_err)
+    ok("archive.read actual-output diagnostic names max_size",
+        type(actual_limited_err) == "string"
+        and actual_limited_err:find("max_size", 1, true) ~= nil,
+        "err=" .. tostring(actual_limited_err))
+
+    local whole_limit, whole_limit_err = archive_read(
+        read_zip, 1, { max_entries = 5 })
+    ok_fail("archive.read applies whole-archive entry limits",
+        whole_limit, whole_limit_err)
+    local bad_option, bad_option_err = archive_read(
+        read_zip, 1, { unknown = true })
+    ok_fail("archive.read rejects unknown options", bad_option, bad_option_err)
+    local leaked_option, leaked_option_err = babet.archive.list(
+        read_zip, { max_size = #manifest })
+    ok_fail("archive.list rejects the read-only max_size option",
+        leaked_option, leaked_option_err)
+    bad_option, bad_option_err = archive_read(
+        read_zip, 1, { max_size = 1.0 })
+    ok_fail("archive.read max_size must be a strict integer",
+        bad_option, bad_option_err)
+    bad_option, bad_option_err = archive_read(
+        read_zip, 1, { max_size = 0 })
+    ok_fail("archive.read rejects max_size zero", bad_option, bad_option_err)
+    bad_option, bad_option_err = archive_read(
+        read_zip, 1, { max_size = 268435457 })
+    ok_fail("archive.read enforces its 256 MiB hard max_size ceiling",
+        bad_option, bad_option_err)
+
+    if type(read_function) == "function" then
+        ok_raises("archive.read enforces arity",
+            function() return read_function(read_zip) end,
+            "expects 2 or 3 arguments")
+        ok_raises("archive.read rejects excess arguments",
+            function() return read_function(read_zip, 1, nil, true) end,
+            "expects 2 or 3 arguments")
+        ok_raises("archive.read archive path is a strict string",
+            function() return read_function(42, 1) end, "string expected")
+        ok_raises("archive.read selector must be a string or integer",
+            function() return read_function(read_zip, {}) end,
+            "string or integer")
+        ok_raises("archive.read rejects NUL in the archive path",
+            function() return read_function(read_zip .. "\0ignored", 1) end,
+            "must not contain NUL byte")
+        ok_raises("archive.read rejects NUL in a raw entry name",
+            function() return read_function(read_zip, "manifest.json\0") end,
+            "must not contain NUL byte")
+    else
+        ok("archive.read strict argument tests can run", false,
+            "archive.read is not available")
+    end
+
+    local bad_crc_zip = root .. "/read-bad-crc.zip"
+    assert(make_zip(bad_crc_zip, {
+        { name = "bad.txt", data = "bad", crc32 = 0 },
+    }))
+    local bad_crc, bad_crc_err = archive_read(bad_crc_zip, 1)
+    ok_fail("archive.read fully verifies the selected ZIP payload",
+        bad_crc, bad_crc_err)
+
+    local read_tar = root .. "/read.tar"
+    assert(make_tar(read_tar, {
+        { name = "manifest.json", data = manifest },
+        { name = "binary.bin", data = binary },
+        { name = "../unsafe.txt", data = "unsafe" },
+        { name = "folder/", typeflag = "5" },
+        { name = "same.txt", data = "first" },
+        { name = "same.txt", data = "second" },
+        { name = "\255.bin", data = "raw-name" },
+        { name = "empty.bin", data = "" },
+        { name = "manifest-link", typeflag = "2",
+          linkname = "manifest.json" },
+    }))
+    local tar_named, tar_named_err = archive_read(read_tar, "manifest.json")
+    ok_val("archive.read reads a TAR entry by exact raw name",
+        tar_named, tar_named_err, function(value) return value == manifest end)
+    local tar_binary, tar_binary_err = archive_read(read_tar, 2)
+    ok_val("archive.read returns binary-safe TAR data by index",
+        tar_binary, tar_binary_err, function(value) return value == binary end)
+    local tar_ambiguous, tar_ambiguous_err = archive_read(read_tar, "same.txt")
+    ok_fail("archive.read refuses an ambiguous TAR raw name",
+        tar_ambiguous, tar_ambiguous_err)
+    local tar_duplicate, tar_duplicate_err = archive_read(read_tar, 6)
+    ok_val("archive.read index disambiguates duplicate TAR entries",
+        tar_duplicate, tar_duplicate_err,
+        function(value) return value == "second" end)
+    local tar_unsafe, tar_unsafe_err = archive_read(read_tar, "../unsafe.txt")
+    ok_val("archive.read reads an unsafe TAR name without extracting it",
+        tar_unsafe, tar_unsafe_err,
+        function(value) return value == "unsafe" end)
+    local tar_directory, tar_directory_err = archive_read(read_tar, 4)
+    ok_fail("archive.read refuses a TAR directory entry",
+        tar_directory, tar_directory_err)
+    local tar_raw_name, tar_raw_name_err = archive_read(read_tar, "\255.bin")
+    ok_val("archive.read selects an invalid-UTF-8 TAR name byte for byte",
+        tar_raw_name, tar_raw_name_err,
+        function(value) return value == "raw-name" end)
+    local tar_empty, tar_empty_err = archive_read(read_tar, 8)
+    ok("archive.read returns an empty regular TAR entry",
+        tar_empty == "" and tar_empty_err == nil)
+    local tar_link, tar_link_err = archive_read(read_tar, 9)
+    ok_fail("archive.read refuses a TAR symlink entry",
+        tar_link, tar_link_err)
+
+    for _, format in ipairs({ "gzip", "xz", "bzip2", "zstd" }) do
+        local compressed = read_tar .. "." .. format
+        local compressed_ok, compressed_err = babet.compression.compress(
+            read_tar, compressed, format)
+        ok_act("archive.read " .. format .. " TAR fixture is created",
+            compressed_ok, compressed_err)
+        if compressed_ok then
+            local value, value_err = archive_read(compressed, "manifest.json")
+            ok_val("archive.read reads a " .. format .. "-compressed TAR",
+                value, value_err,
+                function(data) return data == manifest end)
+        end
+    end
+
+    local read_worker, read_worker_err = babet.workers.spawn([[
+local data, err = babet.archive.read(worker.args.archive, 2, {
+    max_size = worker.args.max_size,
+})
+if not data then error(err) end
+return { size = #data, crc32 = babet.crc32(data) }
+]], { archive = read_zip, max_size = #binary })
+    ok("archive.read starts safely in a worker",
+        read_worker ~= nil and read_worker_err == nil,
+        tostring(read_worker_err))
+    if read_worker then
+        local joined, value = read_worker:join()
+        ok("archive.read reads binary data inside a worker",
+            joined == true and type(value) == "table"
+            and value.size == #binary
+            and value.crc32 == babet.crc32(binary), inspect(value))
+    end
+
+    ok("archive.read never creates archive staging files",
+        no_archive_temporaries(root))
+    end)()
 
     ;(function()
     -- TAR listing and extraction --------------------------------------

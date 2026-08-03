@@ -9,6 +9,7 @@
  * Public functions:
  *   create(source_or_sources, archive [, opts])
  *   list(archive [, opts])
+ *   read(archive, entry_name_or_index [, opts])
  *   test(archive [, opts])
  *   extract(archive, destination [, opts])
  *   extractFile(archive, entry, destination [, opts])
@@ -18,9 +19,15 @@
  * compressed, through libarchive. list() preserves archive order, exposes
  * bounded metadata,
  * reports exact duplicates and normalised output-path conflicts, and never
- * writes to the filesystem. test() fully validates ZIP local headers,
- * descriptors, payload sizes and CRCs, fully consumes TAR streams, then applies
- * the same aggregate path/type/collision policy as extraction without writing.
+ * writes to the filesystem. read() returns one regular entry as a bounded
+ * binary Lua string. It selects by exact raw name or by the one-based index
+ * exposed by list(); ambiguous names are refused while an explicit index can
+ * disambiguate duplicate entries. Its max_size limit is enforced both against
+ * metadata and against bytes actually produced, and unsafe path syntax is
+ * preserved because no filesystem path is created. test() fully validates ZIP
+ * local headers, descriptors, payload sizes and CRCs, fully consumes TAR
+ * streams, then applies the same aggregate path/type/collision policy as
+ * extraction without writing.
  * create() accepts either the historical
  * source-directory string or a dense array of explicit regular-file/directory
  * paths. Creation may additionally select final archive paths through bounded

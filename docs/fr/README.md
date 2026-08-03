@@ -17,7 +17,7 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version stable et auditée **Babet 2.10.0**.
+Documentation de la version stable et auditée **Babet 2.12.0**.
 
 ## Pour démarrer
 
@@ -27,7 +27,7 @@ Documentation de la version stable et auditée **Babet 2.10.0**.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.10.0 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.12.0 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 
@@ -45,7 +45,7 @@ Documentation de la version stable et auditée **Babet 2.10.0**.
 | envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, téléchargement atomique vers fichier, redirections, TLS, timeout et limites de taille |
 | ouvrir une connexion TCP | [`Socket — TCP`](modules/socket.md) | client, serveur, acceptation, flux binaires, lignes, lecture jusqu’à EOF, timeouts, buffers et limites |
 | chiffrer une connexion TCP ou faire STARTTLS | [`TLS — sockets sécurisées`](modules/tls.md) | TLS direct, STARTTLS, vérification, CA, hostname, SNI, versions, timeout et état après échec |
-| stocker des données SQL localement | [`SQLite — base embarquée`](modules/sqlite.md) | ouverture, paramètres stricts, valeurs `NULL` et BLOB explicites, statements préparés et transactions assistées |
+| stocker des données SQL localement | [`SQLite — base embarquée`](modules/sqlite.md) | ouverture en lecture/écriture ou lecture seule, clés étrangères, compteurs de changements, paramètres stricts, valeurs `NULL` et BLOB explicites, statements préparés et transactions assistées |
 | encoder ou décoder du JSON | [`JSON — données structurées`](modules/json.md) | scalaires, tableaux, objets, `null`, tableaux vides, pretty-print et erreurs |
 | lire un fichier de configuration TOML | [`TOML — configuration`](modules/toml.md) | décodage, types TOML, tableaux, sections, dates et erreurs de parsing |
 | surveiller un dossier | [`Inotify — événements fichiers`](modules/inotify.md) | watchers, événements, lectures avec timeout, moves, cookies et fermeture |
@@ -79,7 +79,7 @@ avoir à ouvrir chaque fichier.
 | [`Logging — journalisation`](modules/logging.md) | Niveaux, filtrage, destination, couleurs et appels variadiques. |
 | [`SIGNAL — signaux POSIX et arrêt propre`](modules/signal.md) | Installer, remplacer ou retirer un callback ; ignorer/restaurer ; ordre de dispatch, coalescence, interruptions et restrictions multithread. |
 | [`Socket — TCP client et serveur`](modules/socket.md) | Connexion, écoute, acceptation, flux binaires, lectures par bloc/ligne/EOF, buffer partagé, adresses, fermeture et timeouts. |
-| [`SQLite — base de données embarquée`](modules/sqlite.md) | Connexions, WAL/timeout, SQL direct, statements préparés réutilisables, BLOB explicites, itération et transactions assistées. |
+| [`SQLite — base de données embarquée`](modules/sqlite.md) | Connexions en lecture/écriture ou lecture seule, WAL/timeout, clés étrangères, compteurs de lignes, SQL direct, statements préparés réutilisables, BLOB explicites, itération et transactions assistées. |
 | [`Strings — manipulation de chaînes`](modules/strings.md) | Découpage, mode caractères, séparateurs, limite de splits et contenu binaire. |
 | [`SYS - processus, machine, environnement et mémoire Lua`](modules/sys.md) | Constantes de version, PID, hostname, `uname`, recherche d’exécutables, lecture/modification de l’environnement, interaction avec les workers et mémoire de l’état Lua. |
 | [`Tables — manipulation de tables Lua`](modules/tables.md) | Fusion déterministe, clés listes/maps, copie profonde, cycles et partage de sous-tables. |

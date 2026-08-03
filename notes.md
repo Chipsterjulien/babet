@@ -81,24 +81,6 @@ truncation while retaining their documented error contracts.
 before conversion and should avoid `luaL_error` while non-trivial C++ objects
 that require destruction are alive.
 
-## 6. Bounded in-memory archive entry reads
-
-**Current state**: `babet.archive.extractFile()` securely selects one regular
-entry and publishes it atomically to a caller-chosen destination.
-`babet.archive.list()` and `babet.archive.test()` cover metadata inspection and
-full validation without extraction.
-
-**Possible extension**: add `babet.archive.read(archive, entry [, opts])` to
-return a small regular entry as a binary Lua string under a strict default and
-hard `max_size` ceiling. It would need duplicate-name refusal, the same whole-
-archive limits, ZIP/TAR parity, worker support, and a precisely documented
-allocation failure contract.
-
-**Why deferred**: the 2.8.0 inspection, testing, selective extraction, and
-`dry_run` goals are complete without loading archive contents into Lua memory.
-A new API should be driven by a concrete manifest/configuration use case rather
-than added speculatively at the end of an audited release.
-
 ## Validation note
 
 Valgrind is not a release requirement. Babet release candidates are validated

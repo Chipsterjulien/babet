@@ -16,15 +16,15 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.10.0**. See the
+Current stable and audited release: **2.12.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.10.0 completes a function-by-function audit of the SQLite module. It
-adds the explicit `babet.sqlite.NULL` bind sentinel, strict finite-number and
-parameter-table validation, reliable diagnostics after deferred connection
-closing, and exception-safe Lua boundaries and native-resource ownership. The
-2.9 feature line still includes
+Babet 2.12.0 adds read-only SQLite connections, per-connection foreign-key
+enforcement, and the `last_insert_rowid()`, `changes()`, and `total_changes()`
+counters. Babet 2.11.0 remains the archive-read release, with bounded,
+binary-safe `babet.archive.read()` support for ZIP and TAR entries. The 2.10
+SQLite audit and `babet.sqlite.NULL` remain unchanged. The 2.9 feature line still includes
 configurable `babet.spawn()` redirections, the native `babet.base64` module,
 secure `babet.writeFileAtomic()` publication, a hardened worker lifecycle, and
 direct bounded shared channels between workers.
@@ -58,6 +58,26 @@ cd babet
 The build script vendors and compiles all its dependencies. The only
 prerequisites on your system are a C++23 compiler, CMake 3.22 or newer, `wget`, `unzip`,
 and `xz`.
+
+### Open SQLite with explicit connection policy
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    wal = true,
+    busy_timeout = 2000,
+    foreign_keys = true,
+}))
+
+assert(db:exec("INSERT INTO jobs(name) VALUES(?)", { "index" }))
+print(assert(db:last_insert_rowid()))
+print(assert(db:changes()), assert(db:total_changes()))
+```
+
+Use `{ readonly = true }` for an existing database that must not be created or
+written. Read-only handles remain compatible with `busy_timeout` and
+`foreign_keys`, but deliberately reject `wal = true`. This only prevents a
+journal-mode change request; an existing WAL database can still be opened
+read-only when SQLite can use its companion files.
 
 ### Download a large HTTP response without buffering it
 
@@ -240,6 +260,14 @@ local info, err = babet.archive.list("upload.zip", {
 assert(info, err)
 assert(info.duplicates == 0 and info.conflicts == 0)
 
+local manifest
+manifest, err = babet.archive.read("upload.zip", "manifest.json", {
+    max_size = 1024 * 1024,
+    max_entries = 2000,
+    max_total_size = 512 * 1024 * 1024,
+})
+assert(manifest, err)
+
 local verified
 verified, err = babet.archive.test("upload.zip", {
     max_entries = 2000,
@@ -311,6 +339,12 @@ without creation, writes, chmod, renames, or removals; the result reports
 root would be created. This preview is a snapshot and does not replace the
 checks repeated by real extraction. Run `archive.test()` first when skipped ZIP
 payload integrity must also be verified.
+`archive.read()` loads one regular file into a binary Lua string with an 8 MiB
+default memory limit and a 256 MiB hard ceiling. Selection uses either an exact
+raw name or the one-based index exposed by `archive.list()`; a duplicated name
+is rejected until an index explicitly disambiguates the occurrence. No name is
+cleaned and no write occurs: an unsafe path may be read as data while remaining
+reported as `list().entries[i].safe_path = false` and forbidden for extraction.
 
 ## Pre-release validation
 
@@ -319,6 +353,10 @@ Before tagging a release, run the complete validation with one command:
 ```sh
 ./run_tests.sh --release
 ```
+
+The complete output is also saved without colors to `babet-tests.txt`. The
+filename never changes between releases, and each run replaces the previous
+log. This is the file to provide when a validation result must be reviewed.
 
 Babet's blocking HTTP-framing and TLS checks use local HTTP/HTTPS fixtures
 generated at runtime. Public HTTPS probes are advisory by default, so a
