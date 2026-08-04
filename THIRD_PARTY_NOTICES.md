@@ -1,6 +1,6 @@
 # Third-party notices — statically linked dependencies
 
-Babet 2.12.0 links libarchive 3.8.8, zlib 1.3.2, XZ Utils/liblzma
+Babet 2.14.0 links libarchive 3.8.8, zlib 1.3.2, XZ Utils/liblzma
 5.8.3, bzip2/libbz2 1.0.8, Zstandard/libzstd 1.5.7, RE2 2025-11-05,
 and Abseil 20250814.2 statically. The notices below accompany binary
 distributions of Babet. Notices in the individual upstream source files remain

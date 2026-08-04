@@ -255,27 +255,35 @@ int lua_sys_pid(lua_State *L)
     return 1;
 }
 
+template <int (*Fn)(lua_State *)>
+int sys_lua_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "sys: out of memory", "sys: internal failure",
+        "sys: unknown internal failure");
+}
+
 void register_sys(lua_State *L)
 {
     // Précondition : table babet au sommet (-1), comme
     // register_http / register_json. Ici on POSE les fonctions
     // DIRECTEMENT sur cette table (nommage plat, pas de sous-table) ;
     // la pile reste donc identique après l'appel.
-    lua_pushcfunction(L, lua_sys_which);
+    lua_pushcfunction(L, sys_lua_boundary<lua_sys_which>);
     lua_setfield(L, -2, "which");
 
-    lua_pushcfunction(L, lua_sys_env);
+    lua_pushcfunction(L, sys_lua_boundary<lua_sys_env>);
     lua_setfield(L, -2, "env");
 
-    lua_pushcfunction(L, lua_sys_setenv);
+    lua_pushcfunction(L, sys_lua_boundary<lua_sys_setenv>);
     lua_setfield(L, -2, "setenv");
 
-    lua_pushcfunction(L, lua_sys_hostname);
+    lua_pushcfunction(L, sys_lua_boundary<lua_sys_hostname>);
     lua_setfield(L, -2, "hostname");
 
-    lua_pushcfunction(L, lua_sys_uname);
+    lua_pushcfunction(L, sys_lua_boundary<lua_sys_uname>);
     lua_setfield(L, -2, "uname");
 
-    lua_pushcfunction(L, lua_sys_pid);
+    lua_pushcfunction(L, sys_lua_boundary<lua_sys_pid>);
     lua_setfield(L, -2, "pid");
 }

@@ -27,6 +27,11 @@ extern "C"
 
 namespace
 {
+
+    constexpr const char *SAVEPOINT_TRANSACTION_ENDED_ERROR =
+        "savepoint callback ended the transaction explicitly; "
+        "managed savepoint no longer exists";
+
     // L'adresse seule porte l'identité publique de babet.sqlite.NULL.
     // L'objet n'est jamais lu ni exposé autrement.
     char SQLITE_NULL_SENTINEL_KEY = 0;
@@ -60,8 +65,12 @@ namespace
     {
         sqlite3 *handle;
         bool transaction_helper_active;
+        unsigned int savepoint_depth;
+        unsigned long long savepoint_sequence;
 
-        Db() : handle(nullptr), transaction_helper_active(false) {}
+        Db()
+            : handle(nullptr), transaction_helper_active(false),
+              savepoint_depth(0), savepoint_sequence(0) {}
         ~Db()
         {
             if (handle)
@@ -873,6 +882,11 @@ namespace
         {
             return push_sqlite_fail(
                 L, "cannot close connection during transaction callback");
+        }
+        if (db->savepoint_depth > 0)
+        {
+            return push_sqlite_fail(
+                L, "cannot close connection during savepoint callback");
         }
         if (db->handle)
         {
@@ -2075,6 +2089,130 @@ namespace
         bool armed_ = true;
     };
 
+    // Owns one Babet-generated savepoint after SAVEPOINT succeeds. Nested
+    // helpers each have their own guard and increment the per-connection
+    // depth. The destructor performs an allocation-free best-effort
+    // ROLLBACK TO + RELEASE so a C++ exception cannot strand the savepoint.
+    //
+    // As with TransactionGuard, all Lua calls made while this guard is armed
+    // must be protected by lua_pcall or have their stack capacity reserved
+    // before SAVEPOINT.
+    class SavepointGuard
+    {
+    public:
+        SavepointGuard(Db *owner, const char *rollback_sql,
+                       const char *release_sql) noexcept
+            : owner_(owner), handle_(owner ? owner->handle : nullptr)
+        {
+            std::snprintf(rollback_sql_, sizeof(rollback_sql_), "%s",
+                          rollback_sql);
+            std::snprintf(release_sql_, sizeof(release_sql_), "%s",
+                          release_sql);
+            if (owner_)
+            {
+                ++owner_->savepoint_depth;
+            }
+        }
+
+        SavepointGuard(const SavepointGuard &) = delete;
+        SavepointGuard &operator=(const SavepointGuard &) = delete;
+
+        ~SavepointGuard() noexcept
+        {
+            emergency_cleanup();
+        }
+
+        void release() noexcept
+        {
+            disarm();
+        }
+
+        void emergency_cleanup() noexcept
+        {
+            if (!armed_)
+            {
+                return;
+            }
+
+            // A full COMMIT or ROLLBACK performed by the callback destroys
+            // every savepoint and restores autocommit. Do not issue two
+            // guaranteed-to-fail statements in that already-clean state.
+            if (handle_ && sqlite3_get_autocommit(handle_) == 0)
+            {
+                char *sqlite_error = nullptr;
+                sqlite3_exec(handle_, rollback_sql_, nullptr, nullptr,
+                             &sqlite_error);
+                sqlite3_free(sqlite_error);
+
+                sqlite_error = nullptr;
+                sqlite3_exec(handle_, release_sql_, nullptr, nullptr,
+                             &sqlite_error);
+                sqlite3_free(sqlite_error);
+            }
+            disarm();
+        }
+
+    private:
+        void disarm() noexcept
+        {
+            if (!armed_)
+            {
+                return;
+            }
+            if (owner_ && owner_->savepoint_depth > 0)
+            {
+                --owner_->savepoint_depth;
+            }
+            armed_ = false;
+        }
+
+        Db *owner_ = nullptr;
+        sqlite3 *handle_ = nullptr;
+        char rollback_sql_[160] = {};
+        char release_sql_[160] = {};
+        bool armed_ = true;
+    };
+
+    // Roll back the work performed since a savepoint, then remove its marker.
+    // RELEASE is attempted even when ROLLBACK TO fails so a partially damaged
+    // callback cannot leave an otherwise removable savepoint on the stack.
+    bool rollback_and_release_savepoint(sqlite3 *db,
+                                        const char *rollback_sql,
+                                        const char *release_sql,
+                                        std::string &error)
+    {
+        // The transaction may already have been ended explicitly inside the
+        // callback. In that case the savepoint is gone and there is nothing
+        // left to clean up. The caller is responsible for reporting the
+        // contract violation when it observes this state after lua_pcall.
+        if (!db || sqlite3_get_autocommit(db) != 0)
+        {
+            return true;
+        }
+
+        std::string rollback_error;
+        const bool rollback_ok = exec_transaction_control(
+            db, rollback_sql, "rollback to savepoint", rollback_error);
+
+        std::string release_error;
+        const bool release_ok = exec_transaction_control(
+            db, release_sql, "release after rollback", release_error);
+
+        if (!rollback_ok)
+        {
+            error = rollback_error;
+        }
+        if (!release_ok)
+        {
+            if (!error.empty())
+            {
+                error += "; ";
+            }
+            error += release_error;
+        }
+        return rollback_ok && release_ok;
+    }
+
     // db:in_transaction() -> boolean | (nil, err)
     int db_in_transaction(lua_State *L)
     {
@@ -2309,6 +2447,220 @@ namespace
         return db_transaction_impl(L);
     }
 
+    // db:savepoint(fn) -> true, ...callback_results | (nil, err)
+    //
+    // Babet generates the SQL identifier. A normal callback return RELEASEs
+    // the savepoint and forwards all values, including nil/false. A Lua error
+    // or a failed outermost RELEASE rolls back to the marker and then removes
+    // it. Nested helpers are intentionally supported.
+    int db_savepoint_impl(lua_State *L)
+    {
+        if (!lua_arity_is(L, 2))
+        {
+            return luaL_error(
+                L, "sqlite.savepoint: expected db and callback");
+        }
+
+        Db *db = check_db(L, 1);
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+        luaL_checktype(L, 2, LUA_TFUNCTION);
+
+        if (db->savepoint_depth == UINT_MAX)
+        {
+            return push_sqlite_fail(L, "savepoint nesting limit reached");
+        }
+        if (db->savepoint_sequence == ULLONG_MAX)
+        {
+            return push_sqlite_fail(L, "savepoint identifier space exhausted");
+        }
+
+        // Reserve the callback function, its db argument and the leading
+        // success boolean before opening the savepoint. No unprotected Lua
+        // stack growth is then needed while the guard is armed.
+        if (!lua_checkstack(L, 3))
+        {
+            return push_fail(
+                L, "sqlite: savepoint could not reserve Lua stack");
+        }
+
+        const unsigned long long sequence = ++db->savepoint_sequence;
+        char savepoint_name[48];
+        const int savepoint_name_len = std::snprintf(
+            savepoint_name, sizeof(savepoint_name), "babet_sp_%llu",
+            sequence);
+        if (savepoint_name_len < 0 ||
+            static_cast<size_t>(savepoint_name_len) >=
+                sizeof(savepoint_name))
+        {
+            return push_sqlite_fail(
+                L, "could not create internal savepoint identifier");
+        }
+
+        char begin_sql[160];
+        char rollback_sql[160];
+        char release_sql[160];
+        const int begin_sql_len = std::snprintf(
+            begin_sql, sizeof(begin_sql), "SAVEPOINT \"%s\"",
+            savepoint_name);
+        const int rollback_sql_len = std::snprintf(
+            rollback_sql, sizeof(rollback_sql), "ROLLBACK TO \"%s\"",
+            savepoint_name);
+        const int release_sql_len = std::snprintf(
+            release_sql, sizeof(release_sql), "RELEASE \"%s\"",
+            savepoint_name);
+        if (begin_sql_len < 0 || rollback_sql_len < 0 ||
+            release_sql_len < 0 ||
+            static_cast<size_t>(begin_sql_len) >= sizeof(begin_sql) ||
+            static_cast<size_t>(rollback_sql_len) >=
+                sizeof(rollback_sql) ||
+            static_cast<size_t>(release_sql_len) >= sizeof(release_sql))
+        {
+            return push_sqlite_fail(
+                L, "could not create internal savepoint statement");
+        }
+
+        {
+            std::string begin_error;
+            if (!exec_transaction_control(db->handle, begin_sql, "savepoint",
+                                          begin_error))
+            {
+                return push_sqlite_fail(L, begin_error);
+            }
+        }
+
+        SavepointGuard savepoint_guard(db, rollback_sql, release_sql);
+
+        lua_settop(L, 2);
+        lua_pushvalue(L, 2);
+        lua_pushvalue(L, 1);
+
+        const int call_status = lua_pcall(L, 1, LUA_MULTRET, 0);
+        if (call_status != LUA_OK)
+        {
+            const bool transaction_ended =
+                sqlite3_get_autocommit(db->handle) != 0;
+            std::string cleanup_error;
+            bool cleanup_ok = true;
+            if (transaction_ended)
+            {
+                savepoint_guard.release();
+            }
+            else
+            {
+                cleanup_ok = rollback_and_release_savepoint(
+                    db->handle, rollback_sql, release_sql, cleanup_error);
+                if (cleanup_ok)
+                {
+                    savepoint_guard.release();
+                }
+                else
+                {
+                    savepoint_guard.emergency_cleanup();
+                }
+            }
+
+            std::string callback_error =
+                lua_value_to_display_string(L, -1);
+            std::string message = "savepoint callback failed: ";
+            message += callback_error;
+            if (transaction_ended)
+            {
+                message += "; ";
+                message += SAVEPOINT_TRANSACTION_ENDED_ERROR;
+            }
+            else if (!cleanup_ok)
+            {
+                message += "; ";
+                message += cleanup_error;
+            }
+            lua_settop(L, 0);
+            return push_sqlite_fail(L, message);
+        }
+
+        // COMMIT and ROLLBACK both destroy an outermost managed savepoint.
+        // Detect that contract violation before RELEASE so the user receives
+        // one stable Babet diagnostic rather than repeated SQLite failures
+        // containing the generated identifier.
+        if (sqlite3_get_autocommit(db->handle) != 0)
+        {
+            savepoint_guard.release();
+            lua_settop(L, 0);
+            return push_sqlite_fail(
+                L, SAVEPOINT_TRANSACTION_ENDED_ERROR);
+        }
+
+        const int callback_results = lua_gettop(L) - 2;
+
+        // Capacity was already reserved before SAVEPOINT. Keep this explicit
+        // check symmetrical with db:transaction and defensive against future
+        // changes to the callback setup.
+        if (!lua_checkstack(L, 1))
+        {
+            std::string cleanup_error;
+            const bool cleanup_ok = rollback_and_release_savepoint(
+                db->handle, rollback_sql, release_sql, cleanup_error);
+            if (cleanup_ok)
+            {
+                savepoint_guard.release();
+            }
+            else
+            {
+                savepoint_guard.emergency_cleanup();
+            }
+
+            std::string message =
+                "savepoint could not reserve result stack";
+            if (!cleanup_ok)
+            {
+                message += "; ";
+                message += cleanup_error;
+            }
+            lua_settop(L, 0);
+            return push_sqlite_fail(L, message);
+        }
+
+        std::string release_error;
+        if (!exec_transaction_control(db->handle, release_sql, "release",
+                                      release_error))
+        {
+            std::string cleanup_error;
+            const bool cleanup_ok = rollback_and_release_savepoint(
+                db->handle, rollback_sql, release_sql, cleanup_error);
+            if (cleanup_ok)
+            {
+                savepoint_guard.release();
+            }
+            else
+            {
+                savepoint_guard.emergency_cleanup();
+            }
+
+            if (!cleanup_ok)
+            {
+                release_error += "; ";
+                release_error += cleanup_error;
+            }
+            lua_settop(L, 0);
+            return push_sqlite_fail(L, release_error);
+        }
+
+        savepoint_guard.release();
+
+        lua_pushboolean(L, 1);
+        lua_insert(L, 3);
+        lua_remove(L, 1);
+        lua_remove(L, 1);
+        return callback_results + 1;
+    }
+
+    int db_savepoint(lua_State *L)
+    {
+        return db_savepoint_impl(L);
+    }
+
     // ============================================================
     // API du module : babet.sqlite.open
     // ============================================================
@@ -2468,6 +2820,9 @@ namespace
 
         lua_pushcfunction(L, sqlite_lua_boundary<db_transaction>);
         lua_setfield(L, -2, "transaction");
+
+        lua_pushcfunction(L, sqlite_lua_boundary<db_savepoint>);
+        lua_setfield(L, -2, "savepoint");
 
         lua_pushcfunction(L, sqlite_lua_boundary<db_in_transaction>);
         lua_setfield(L, -2, "in_transaction");

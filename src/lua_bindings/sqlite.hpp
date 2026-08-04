@@ -15,6 +15,7 @@
 //   ok, err = stmt:exec(params?)
 //   for row in stmt:query(params?) do ... end
 //   ok, result = db:transaction(function(tx) ... end, mode?)
+//   ok, result = db:savepoint(function(tx) ... end)
 //   ok, err = db:close()
 //
 // Le userdata "db" est un handle vers une connexion SQLite. Il est
@@ -34,6 +35,8 @@
 //
 // db:transaction(callback, mode?) exécute BEGIN/COMMIT et rollback sur
 // erreur Lua du callback. Un retour normal nil/false reste un succès.
+// db:savepoint(callback) utilise un nom interne, accepte l'imbrication et
+// exécute ROLLBACK TO puis RELEASE sur erreur Lua du callback.
 //
 // Types en lecture :
 //          NULL → clé absente de la table Lua

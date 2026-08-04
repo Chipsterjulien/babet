@@ -16,15 +16,25 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.12.0**. See the
+Current stable and audited release: **2.14.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.12.0 adds read-only SQLite connections, per-connection foreign-key
-enforcement, and the `last_insert_rowid()`, `changes()`, and `total_changes()`
-counters. Babet 2.11.0 remains the archive-read release, with bounded,
-binary-safe `babet.archive.read()` support for ZIP and TAR entries. The 2.10
-SQLite audit and `babet.sqlite.NULL` remain unchanged. The 2.9 feature line still includes
+Babet 2.14.0 closes the remaining C++ exception gaps in `babet.compression`,
+the flat SYS functions, `babet.user`, and `babet.inotify`. All 17 registered
+Lua C functions now enter through an audited exception boundary; unexpected
+C++ failures become stable Lua diagnostics instead of crossing C frames. This
+release also fixes interactive processes launched by `babet.spawn` with
+inherited streams: the child group receives the foreground terminal, and Babet
+reclaims it with its attributes after the process exits or is terminated. There
+is no new public function and ordinary return values are unchanged. Babet 2.13.0
+added nested `db:savepoint(callback)` scopes with automatic
+`ROLLBACK TO` and `RELEASE` on callback failure. It works on its own, inside a
+managed or manual transaction, and recursively inside another savepoint.
+Babet 2.12.0 remains the connection-options and counters release, while the
+unpublished 2.11.0 work provides bounded, binary-safe
+`babet.archive.read()` support for ZIP and TAR entries. The 2.10 SQLite audit
+and `babet.sqlite.NULL` remain unchanged. The 2.9 feature line still includes
 configurable `babet.spawn()` redirections, the native `babet.base64` module,
 secure `babet.writeFileAtomic()` publication, a hardened worker lifecycle, and
 direct bounded shared channels between workers.
@@ -78,6 +88,29 @@ written. Read-only handles remain compatible with `busy_timeout` and
 `foreign_keys`, but deliberately reject `wal = true`. This only prevents a
 journal-mode change request; an existing WAL database can still be opened
 read-only when SQLite can use its companion files.
+
+### Isolate a recoverable SQLite step with a savepoint
+
+```lua
+local ok, err = db:transaction(function(tx)
+    assert(tx:exec("INSERT INTO jobs(name) VALUES(?)", { "required" }))
+
+    local optional_ok = tx:savepoint(function(inner)
+        assert(inner:exec(
+            "INSERT INTO jobs(name) VALUES(?)", { "optional" }))
+    end)
+
+    if not optional_ok then
+        -- Only the optional work was rolled back. The transaction continues.
+    end
+end, "immediate")
+
+assert(ok, err)
+```
+
+A successful inner `RELEASE` never commits an outer transaction. A Lua error
+in the callback rolls back only to the generated savepoint, removes it, and
+returns `(nil, err)`.
 
 ### Download a large HTTP response without buffering it
 

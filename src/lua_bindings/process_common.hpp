@@ -10,6 +10,7 @@
 
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <termios.h>
 
 namespace babet_process
 {
@@ -53,6 +54,18 @@ struct LaunchSpec
     const char *error_prefix = "process";
 };
 
+// État conservé par un spawn interactif dont stdin hérite du terminal de
+// contrôle. Le parent reste propriétaire de ce descripteur jusqu'à la récolte
+// de l'enfant afin de reprendre le premier plan et les attributs termios.
+struct TerminalHandoff
+{
+    int fd = -1;
+    pid_t restore_pgid = -1;
+    struct termios restore_attributes{};
+    bool attributes_valid = false;
+    bool active = false;
+};
+
 struct LaunchedProcess
 {
     pid_t pid = -1;
@@ -62,6 +75,7 @@ struct LaunchedProcess
     bool stdin_piped = false;
     bool stdout_piped = false;
     bool stderr_piped = false;
+    TerminalHandoff terminal;
 };
 
 struct LaunchResult
@@ -144,6 +158,7 @@ bool set_nonblocking(int fd, const char *prefix, const char *label,
 
 void close_fd(int &fd) noexcept;
 void close_process_fds(LaunchedProcess &process) noexcept;
+void restore_terminal(TerminalHandoff &terminal) noexcept;
 
 // Nettoyage d'urgence sans allocation C++ : ferme les flux, envoie SIGKILL
 // au groupe puis tente de récolter l'enfant pendant une fenêtre courte.
@@ -153,8 +168,11 @@ bool emergency_kill_and_reap(LaunchedProcess &process,
                              long long reap_timeout_ms = 500) noexcept;
 
 // Prépare les redirections, fork, configure le groupe de processus et attend
-// le résultat de chdir/exec via un pipe CLOEXEC. En succès, seuls les flux
-// configurés avec `pipe` possèdent un fd parent non bloquant.
+// le résultat de chdir/exec via un pipe CLOEXEC. Si stdin hérite d'un terminal
+// dont Babet possède le premier plan, le groupe enfant reçoit ce terminal de
+// manière synchronisée ; LaunchedProcess conserve de quoi le restaurer après
+// la récolte. En succès, seuls les flux configurés avec `pipe` possèdent un fd
+// parent non bloquant.
 LaunchResult launch(const LaunchSpec &spec);
 
 // Variante multi-processus : stdout d'une étape est relié directement au stdin

@@ -673,6 +673,29 @@ namespace
         return 1;
     }
 
+    template <int (*Fn)(lua_State *)>
+    int inotify_lua_boundary(lua_State *L)
+    {
+        return lua_cfunction_exception_boundary<Fn>(
+            L, "inotify: out of memory", "inotify: internal failure",
+            "inotify: unknown internal failure");
+    }
+
+    int inotify_gc_boundary(lua_State *L) noexcept
+    {
+        try
+        {
+            return inot_gc(L);
+        }
+        catch (...)
+        {
+            // A __gc metamethod cannot report a useful result. Its only
+            // responsibility on an exceptional path is to avoid unwinding a
+            // C++ exception through Lua's C frames.
+            return 0;
+        }
+    }
+
 } // namespace
 
 void register_inotify(lua_State *L)
@@ -685,19 +708,19 @@ void register_inotify(lua_State *L)
         lua_setfield(L, -2, "__index");
 
         // __gc : filet anti-fuite de FD (cf. INOT-C/F).
-        lua_pushcfunction(L, inot_gc);
+        lua_pushcfunction(L, inotify_gc_boundary);
         lua_setfield(L, -2, "__gc");
 
-        lua_pushcfunction(L, inot_tostring);
+        lua_pushcfunction(L, inotify_lua_boundary<inot_tostring>);
         lua_setfield(L, -2, "__tostring");
 
-        lua_pushcfunction(L, inot_add);
+        lua_pushcfunction(L, inotify_lua_boundary<inot_add>);
         lua_setfield(L, -2, "add");
-        lua_pushcfunction(L, inot_read);
+        lua_pushcfunction(L, inotify_lua_boundary<inot_read>);
         lua_setfield(L, -2, "read");
-        lua_pushcfunction(L, inot_remove);
+        lua_pushcfunction(L, inotify_lua_boundary<inot_remove>);
         lua_setfield(L, -2, "remove");
-        lua_pushcfunction(L, inot_close);
+        lua_pushcfunction(L, inotify_lua_boundary<inot_close>);
         lua_setfield(L, -2, "close");
     }
     lua_pop(L, 1); // dépile la métatable ; table babet au sommet
@@ -705,7 +728,7 @@ void register_inotify(lua_State *L)
     // 2. Sous-table babet.inotify.
     //    Précondition : table babet au sommet (-1).
     lua_newtable(L);
-    lua_pushcfunction(L, lua_inotify_new);
+    lua_pushcfunction(L, inotify_lua_boundary<lua_inotify_new>);
     lua_setfield(L, -2, "new");
     lua_setfield(L, -2, "inotify");
 }

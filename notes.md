@@ -81,6 +81,35 @@ truncation while retaining their documented error contracts.
 before conversion and should avoid `luaL_error` while non-trivial C++ objects
 that require destruction are alive.
 
+## 6. Interactive process job control and asynchronous terminal reclamation
+
+**Current state**: `babet.spawn()` transfers the controlling terminal only when
+inherited stdin is that terminal and Babet already owns the foreground. The
+child remains in a separate process group, and Babet restores the foreground
+group and saved `termios` state when `wait()`, `is_running()`, explicit cleanup,
+or automatic cleanup observes or ends the child. `pipeline()` and
+`spawnPipeline()` remain pipe-oriented and do not transfer the terminal.
+
+**Known boundary**: Babet does not currently request stopped or continued child
+states with `WUNTRACED` / `WCONTINUED`. A child suspended with `Ctrl+Z` can
+therefore keep the terminal while an unbounded `wait()` waits for final exit.
+Also, if a child exits and the Lua script never interrogates or closes its
+process object before reading stdin itself, terminal ownership has not yet been
+reclaimed asynchronously.
+
+**Supported mitigation in 2.14.0**: use bounded waits for interactive commands
+that may be suspended, then call `terminate()`, `kill()`, or `close()`; and
+always reap, query, or close the interactive process before the parent resumes
+its own terminal input. PTY regression coverage verifies the bounded `Ctrl+Z`
+recovery path and restoration after `is_running()` observes a completed child.
+
+**Planned audit**: after the 2.15.0 Lua longjmp / C++ RAII work, evaluate an
+explicit stopped/continued state model, possible resume/foreground operations,
+and a safe way to reclaim terminal ownership promptly after child exit. No
+signal handler may call Lua or perform non-async-signal-safe terminal cleanup.
+A full shell-style job-control API must be justified and tested rather than
+introduced as an incidental change to `wait()`.
+
 ## Validation note
 
 Valgrind is not a release requirement. Babet release candidates are validated

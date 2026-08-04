@@ -9737,6 +9737,348 @@ do
             closed_state == nil and type(closed_state_err) == "string"
             and closed_state_err:find("closed"))
     end
+
+    -- ----- nested savepoint helper ---------------------------------
+    do
+        local db = assert(DB.open(
+            ":memory:", { foreign_keys = true }))
+        ok("db.savepoint is a function", type(db.savepoint) == "function")
+
+        assert(db:exec([[
+            CREATE TABLE savepoint_log (
+                id INTEGER PRIMARY KEY,
+                value TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE savepoint_parent(id INTEGER PRIMARY KEY);
+            CREATE TABLE savepoint_child(
+                id INTEGER PRIMARY KEY,
+                parent_id INTEGER NOT NULL,
+                FOREIGN KEY(parent_id) REFERENCES savepoint_parent(id)
+                    DEFERRABLE INITIALLY DEFERRED
+            );
+        ]]))
+
+        local save_ok, a, b, c = db:savepoint(function(tx)
+            ok("in_transaction is true inside outermost savepoint",
+                tx:in_transaction() == true)
+            assert(tx:exec(
+                "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                { 1, "committed" }))
+            return "result", nil, false
+        end)
+        ok("savepoint releases and forwards callback values",
+            save_ok == true and a == "result" and b == nil and c == false)
+        ok("outermost savepoint restores autocommit after release",
+            db:in_transaction() == false)
+
+        local nil_ok, nil_value, false_value = db:savepoint(function()
+            return nil, false
+        end)
+        ok("normal nil and false callback values still release savepoint",
+            nil_ok == true and nil_value == nil and false_value == false)
+
+        local rollback_ok, rollback_err = db:savepoint(function(tx)
+            assert(tx:exec(
+                "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                { 2, "rolled-back" }))
+            error({ code = 99 })
+        end)
+        ok("savepoint callback error returns (nil, err)",
+            rollback_ok == nil and type(rollback_err) == "string"
+            and rollback_err:find("callback failed", 1, true) ~= nil)
+
+        local row2
+        for row in db:query(
+            "SELECT id FROM savepoint_log WHERE id = 2") do
+            row2 = row
+        end
+        ok("savepoint callback error rolls back its writes", row2 == nil)
+        ok("outermost savepoint rollback restores autocommit",
+            db:in_transaction() == false)
+
+        local reuse_ok, reuse_err = db:savepoint(function(tx)
+            assert(tx:exec(
+                "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                { 3, "reused" }))
+        end)
+        ok("connection is reusable after savepoint rollback",
+            reuse_ok == true and reuse_err == nil)
+
+        local outer_ok, inner_ok, inner_err = db:savepoint(function(tx)
+            assert(tx:exec(
+                "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                { 4, "outer-before" }))
+            local nested_ok, nested_err = tx:savepoint(function(inner)
+                assert(inner:exec(
+                    "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                    { 5, "inner-rolled-back" }))
+                error("inner failure")
+            end)
+            assert(tx:exec(
+                "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                { 6, "outer-after" }))
+            return nested_ok, nested_err
+        end)
+        ok("failed inner savepoint does not abort outer savepoint",
+            outer_ok == true and inner_ok == nil
+            and type(inner_err) == "string"
+            and inner_err:find("callback failed", 1, true) ~= nil)
+
+        local nested_rows = {}
+        for row in db:query([[
+            SELECT id FROM savepoint_log WHERE id BETWEEN 4 AND 6 ORDER BY id
+        ]]) do
+            nested_rows[#nested_rows + 1] = row.id
+        end
+        ok("inner rollback preserves surrounding savepoint writes",
+            #nested_rows == 2
+            and nested_rows[1] == 4 and nested_rows[2] == 6)
+
+        local outer_fail_ok, outer_fail_err = db:savepoint(function(tx)
+            assert(tx:savepoint(function(inner)
+                assert(inner:exec(
+                    "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                    { 7, "inner-released" }))
+            end))
+            error("outer failure")
+        end)
+        ok("outer savepoint error is reported after inner release",
+            outer_fail_ok == nil and type(outer_fail_err) == "string"
+            and outer_fail_err:find("outer failure", 1, true) ~= nil)
+
+        local row7
+        for row in db:query(
+            "SELECT id FROM savepoint_log WHERE id = 7") do
+            row7 = row
+        end
+        ok("outer rollback undoes a released inner savepoint", row7 == nil)
+
+        local three_ok, level2_ok, level3_ok, three_value =
+            db:savepoint(function(level1)
+            return level1:savepoint(function(level2)
+                return level2:savepoint(function(level3)
+                    assert(level3:exec(
+                        "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                        { 8, "three-levels" }))
+                    return "deep"
+                end)
+            end)
+        end)
+        ok("three nested savepoints succeed",
+            three_ok == true and level2_ok == true
+            and level3_ok == true and three_value == "deep")
+
+        local row8
+        for row in db:query(
+            "SELECT value FROM savepoint_log WHERE id = 8") do
+            row8 = row
+        end
+        ok("three nested savepoints persist the deepest write",
+            row8 and row8.value == "three-levels")
+
+        local transaction_ok, transaction_err = db:transaction(function(tx)
+            local nested_ok, nested_value = tx:savepoint(function(inner)
+                assert(inner:exec(
+                    "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                    { 9, "inside-transaction" }))
+                return "nested"
+            end)
+            assert(nested_ok == true and nested_value == "nested")
+            ok("savepoint release keeps outer transaction active",
+                tx:in_transaction() == true)
+            error("rollback outer transaction")
+        end)
+        ok("outer transaction reports failure after savepoint release",
+            transaction_ok == nil and type(transaction_err) == "string")
+
+        local row9
+        for row in db:query(
+            "SELECT id FROM savepoint_log WHERE id = 9") do
+            row9 = row
+        end
+        ok("outer transaction rollback undoes released savepoint", row9 == nil)
+
+        assert(db:exec("BEGIN"))
+        local manual_ok, manual_value = db:savepoint(function(tx)
+            assert(tx:exec(
+                "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                { 10, "inside-manual" }))
+            return "manual"
+        end)
+        ok("savepoint works inside a manual transaction",
+            manual_ok == true and manual_value == "manual"
+            and db:in_transaction() == true)
+        assert(db:exec("ROLLBACK"))
+
+        local row10
+        for row in db:query(
+            "SELECT id FROM savepoint_log WHERE id = 10") do
+            row10 = row
+        end
+        ok("manual rollback undoes released savepoint", row10 == nil)
+
+        local explicit_rollback_ok, explicit_rollback_err, leaked_value =
+            db:savepoint(function(tx)
+                assert(tx:exec(
+                    "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                    { 12, "explicit-rollback" }))
+                assert(tx:exec("ROLLBACK"))
+                return "must-not-be-forwarded"
+            end)
+        local ended_cause_count = 0
+        if type(explicit_rollback_err) == "string" then
+            local _
+            _, ended_cause_count = explicit_rollback_err:gsub(
+                "managed savepoint no longer exists", "")
+        end
+        ok("explicit rollback returns one clear managed-savepoint error",
+            explicit_rollback_ok == nil
+            and type(explicit_rollback_err) == "string"
+            and explicit_rollback_err:find(
+                "ended the transaction explicitly", 1, true) ~= nil
+            and explicit_rollback_err:find(
+                "no such savepoint", 1, true) == nil
+            and explicit_rollback_err:find("babet_sp_", 1, true) == nil
+            and ended_cause_count == 1 and leaked_value == nil)
+        ok("explicit rollback restores autocommit without extra cleanup",
+            db:in_transaction() == false)
+
+        local row12
+        for row in db:query(
+            "SELECT id FROM savepoint_log WHERE id = 12") do
+            row12 = row
+        end
+        ok("explicit rollback undoes managed-savepoint writes", row12 == nil)
+
+        local after_rollback_ok, after_rollback_value =
+            db:savepoint(function(tx)
+                assert(tx:exec(
+                    "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                    { 13, "after-explicit-rollback" }))
+                return "reusable"
+            end)
+        ok("connection is reusable after explicit callback rollback",
+            after_rollback_ok == true
+            and after_rollback_value == "reusable")
+
+        local rollback_error_ok, rollback_error_err, rollback_error_extra =
+            db:savepoint(function(tx)
+                assert(tx:exec(
+                    "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                    { 14, "explicit-rollback-then-error" }))
+                assert(tx:exec("ROLLBACK"))
+                error("boom")
+            end)
+        local rollback_error_cause_count = 0
+        if type(rollback_error_err) == "string" then
+            local _
+            _, rollback_error_cause_count = rollback_error_err:gsub(
+                "managed savepoint no longer exists", "")
+        end
+        local row14
+        for row in db:query(
+            "SELECT id FROM savepoint_log WHERE id = 14") do
+            row14 = row
+        end
+        ok("explicit rollback followed by Lua error composes one clear diagnostic",
+            rollback_error_ok == nil
+            and type(rollback_error_err) == "string"
+            and rollback_error_err:find(
+                "sqlite: savepoint callback failed:", 1, true) == 1
+            and rollback_error_err:find(
+                "boom; savepoint callback ended the transaction explicitly; "
+                .. "managed savepoint no longer exists", 1, true) ~= nil
+            and rollback_error_err:find(
+                "no such savepoint", 1, true) == nil
+            and rollback_error_err:find("babet_sp_", 1, true) == nil
+            and rollback_error_cause_count == 1
+            and rollback_error_extra == nil
+            and db:in_transaction() == false
+            and row14 == nil)
+
+        local release_fail_ok, release_fail_err, leaked_result =
+            db:savepoint(function(tx)
+                assert(tx:exec([[
+                    INSERT INTO savepoint_child(id, parent_id)
+                    VALUES(1, 999)
+                ]]))
+                return "must-not-be-forwarded"
+            end)
+        ok("outermost savepoint release failure returns (nil, err)",
+            release_fail_ok == nil
+            and type(release_fail_err) == "string"
+            and release_fail_err:find("release", 1, true) ~= nil
+            and leaked_result == nil)
+        ok("failed outermost release restores autocommit",
+            db:in_transaction() == false)
+
+        local child_count = -1
+        for row in db:query(
+            "SELECT COUNT(*) AS n FROM savepoint_child") do
+            child_count = row.n
+        end
+        ok("failed outermost release rolls back deferred writes",
+            child_count == 0)
+
+        local deferred_tx_ok, deferred_tx_err = db:transaction(function(tx)
+            local nested_ok, nested_err = tx:savepoint(function(inner)
+                assert(inner:exec([[
+                    INSERT INTO savepoint_child(id, parent_id)
+                    VALUES(2, 999)
+                ]]))
+            end)
+            assert(nested_ok == true, nested_err)
+        end)
+        ok("inner release defers foreign-key failure to outer commit",
+            deferred_tx_ok == nil and type(deferred_tx_err) == "string"
+            and deferred_tx_err:find("commit", 1, true) ~= nil)
+
+        child_count = -1
+        for row in db:query(
+            "SELECT COUNT(*) AS n FROM savepoint_child") do
+            child_count = row.n
+        end
+        ok("failed outer commit rolls back released savepoint writes",
+            child_count == 0 and db:in_transaction() == false)
+
+        local close_result, close_error
+        local close_savepoint_ok = db:savepoint(function(tx)
+            close_result, close_error = tx:close()
+            assert(tx:exec(
+                "INSERT INTO savepoint_log(id, value) VALUES(?, ?)",
+                { 11, "close-refused" }))
+        end)
+        ok("db:close is refused inside savepoint callback",
+            close_savepoint_ok == true and close_result == nil
+            and type(close_error) == "string"
+            and close_error:find("savepoint callback", 1, true) ~= nil)
+
+        local nested_tx_outer_ok, nested_tx_ok, nested_tx_err =
+            db:savepoint(function(tx)
+                return tx:transaction(function() end)
+            end)
+        ok("transaction helper is refused inside savepoint callback",
+            nested_tx_outer_ok == true and nested_tx_ok == nil
+            and type(nested_tx_err) == "string"
+            and nested_tx_err:find("already", 1, true) ~= nil)
+
+        local pok_missing = pcall(db.savepoint, db)
+        ok("savepoint requires a callback", not pok_missing)
+
+        local pok_callback = pcall(db.savepoint, db, "not a function")
+        ok("savepoint callback must be a function", not pok_callback)
+
+        local pok_extra = pcall(db.savepoint, db, function() end, "extra")
+        ok("savepoint rejects extra arguments", not pok_extra)
+
+        assert(db:close())
+        local closed_savepoint, closed_savepoint_err =
+            db:savepoint(function() end)
+        ok("savepoint after db close -> (nil, err)",
+            closed_savepoint == nil
+            and type(closed_savepoint_err) == "string"
+            and closed_savepoint_err:find("closed", 1, true) ~= nil)
+    end
 end
 
 do
@@ -11676,11 +12018,22 @@ do
             for row in db:query("PRAGMA foreign_keys") do
                 foreign_keys = row.foreign_keys
             end
+            local rowid = db:last_insert_rowid()
+            local changes = db:changes()
+            local total = db:total_changes()
+            local savepoint_ok, savepoint_value = db:savepoint(function(tx)
+                assert(tx:exec(
+                    "INSERT INTO t(value) VALUES ('savepoint-worker')"))
+                return tx:changes()
+            end)
             return {
-                rowid = db:last_insert_rowid(),
-                changes = db:changes(),
-                total = db:total_changes(),
+                rowid = rowid,
+                changes = changes,
+                total = total,
                 foreign_keys = foreign_keys,
+                savepoint_ok = savepoint_ok,
+                savepoint_value = savepoint_value,
+                total_after_savepoint = db:total_changes(),
             }
         ]])
         local joined, result = false, spawn_err
@@ -11691,6 +12044,12 @@ do
             joined == true and type(result) == "table"
             and result.rowid == 1 and result.changes == 1
             and result.total == 1 and result.foreign_keys == 1,
+            tostring(result))
+        ok("SQLite 2.13 savepoints work in a worker",
+            joined == true and type(result) == "table"
+            and result.savepoint_ok == true
+            and result.savepoint_value == 1
+            and result.total_after_savepoint == 2,
             tostring(result))
     end
 

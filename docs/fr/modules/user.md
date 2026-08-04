@@ -77,7 +77,7 @@ documentés. Les champs texte peuvent être la chaîne vide, mais jamais `nil`.
 | Fonction | Résultat |
 | --- | --- |
 | `babet.user.get(name_or_uid)` | table, `(nil, "user not found")` ou `(nil, "user: ...")` |
-| `babet.user.exists(name_or_uid)` | booléen strict |
+| `babet.user.exists(name_or_uid)` | booléen strict pour les résultats NSS ; `(nil, err)` uniquement sur échec inattendu de la frontière C++ |
 
 <a id="user-result-table"></a>
 ## Table utilisateur renvoyée
@@ -380,6 +380,8 @@ De même, la présence d'un compte ne prouve pas qu'il est autorisé à se
 connecter, qu'un mot de passe est valide ou qu'il possède un groupe secondaire
 particulier.
 
+<!-- pdf-page-break -->
+
 <a id="user-errors"></a>
 ## Contrat d'erreur
 
@@ -389,6 +391,12 @@ particulier.
 | compte absent | `(nil, "user not found")` | `false` |
 | erreur NSS | `(nil, "user: ...")` | `false` |
 | argument invalide | erreur Lua | erreur Lua |
+| exception C++ inattendue | `(nil, "user: out of memory")`, `(nil, "user: internal failure")` ou `(nil, "user: unknown internal failure")` | même retour de frontière `(nil, err)` |
+
+La dernière ligne est distincte d’une erreur NSS. Elle sert uniquement à
+empêcher une exception C++ inattendue de traverser les frames C de Lua. Pour
+tous les résultats NSS ordinaires, `exists` renvoie toujours exactement un
+booléen strict comme indiqué plus haut.
 
 Exemple générique :
 
@@ -417,7 +425,8 @@ end
 - Le buffer NSS est agrandi dynamiquement jusqu'à une limite interne de 64 Kio ;
   au-delà, `get` renvoie une erreur NSS.
 - `exists` privilégie une interface booléenne simple et masque les erreurs NSS ;
-  utilise `get` lorsqu'un diagnostic est nécessaire.
+  utilise `get` lorsqu'un diagnostic est nécessaire. Seule la frontière de
+  sûreté C++ interne peut produire son diagnostic exceptionnel `(nil, err)`.
 - Le module n'expose pas les groupes secondaires.
 - Il n'expose ni `/etc/shadow`, ni mots de passe, ni expiration de compte.
 - Il ne crée, ne supprime et ne modifie aucun utilisateur.

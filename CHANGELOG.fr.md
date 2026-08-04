@@ -6,6 +6,145 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.14.0] - 2026-08-03
+
+### Résumé
+
+Babet 2.14.0 termine le chantier audité des frontières d’exception C++ pour les
+quatre derniers modules de bindings publics et corrige la prise de contrôle du
+terminal par les enfants interactifs de `babet.spawn`. Aucune fonction Lua,
+option ou contrat de retour ordinaire n’est ajouté ni supprimé.
+
+### Frontières d’exception Lua/C++
+
+- ajout d’un cœur commun de classification distinguant `std::bad_alloc`, une
+  autre `std::exception` et une exception C++ inconnue, sans jamais les laisser
+  traverser les frames C de Lua, et détruisant l’exception interceptée avant de
+  demander à Lua d’empiler le diagnostic ;
+- protection des deux fonctions `babet.compression`, en conservant le nettoyage
+  RAII des descripteurs source et des sorties temporaires non publiées ;
+- protection des six fonctions SYS plates : `which`, `env`, `setenv`,
+  `hostname`, `uname` et `pid` ;
+- protection de `babet.user.get` et `babet.user.exists` autour de leurs buffers
+  NSS dynamiques et chaînes de diagnostic ;
+- protection de la fabrique inotify, de `add`, `read`, `remove`, `close` et
+  `__tostring`, avec une frontière `catch (...)` dédiée à `__gc`, sans
+  allocation ni retour d’erreur ;
+- traduction d’un échec d’allocation inattendu en `(nil, "<module>: out of
+  memory")`, des autres exceptions standard en `(nil, "<module>: internal
+  failure")` et des exceptions non standard en `(nil, "<module>: unknown
+  internal failure")` ;
+- conservation des erreurs de programmation sur leur chemin d’erreur Lua et de
+  tous les retours ordinaires de succès, d’erreur runtime, de timeout,
+  d’interruption et de NSS.
+
+### Processus interactifs avec `babet.spawn`
+
+- conservation du groupe de processus séparé de l’enfant, afin que
+  `terminate()`, `kill()` et `close()` continuent de cibler aussi ses
+  descendants ;
+- lorsqu’un `stdin = "inherit"` désigne le terminal de contrôle dont Babet
+  possède le premier plan, transfert synchronisé de ce terminal au groupe
+  enfant seulement après la création effective de son groupe ;
+- ajout d’un pipe de synchronisation `CLOEXEC` empêchant l’enfant de lire avant
+  le `tcsetpgrp()` du parent et donc d’être suspendu par `SIGTTIN` ;
+- restitution du premier plan et des attributs `termios` initiaux après
+  `wait()`, `terminate()`, `kill()`, `close()`, le ramasse-miettes ou un échec
+  de lancement ;
+- blocage local de `SIGTTOU` autour des changements de groupe de premier plan,
+  sans modifier le masque de signaux durable du processus ;
+- absence de changement pour les flux capturés, les redirections vers fichier
+  ou `/dev/null`, et un `stdin` hérité qui n’est pas un terminal ;
+- les signaux générés par le terminal, notamment `Ctrl+C`, atteignent le groupe
+  enfant de premier plan et conservent la convention de résultat
+  `128 + signal`.
+
+### Tests et documentation
+
+- ajout d’un test de non-régression sous véritable pseudo-terminal : première
+  lecture par le parent Lua, seconde lecture par l’enfant avec les trois flux
+  hérités, contrôle d’un `wait(timeout)` suivi d’une reprise normale, livraison
+  de `Ctrl+C`, vérification du code 130, suspension réelle par `Ctrl+Z`,
+  récupération bornée par `kill()`, restauration après interrogation
+  `is_running()`, modification puis restauration des attributs du terminal, et
+  délai maximal anti-blocage ;
+- documentation explicite de l’absence de job control complet, de la nécessité
+  d’observer ou fermer un enfant terminé avant une nouvelle lecture du parent,
+  et du caractère non interactif de `pipeline()` / `spawnPipeline()` ;
+- intégration de ce test PTY aux validations normales et ASan/UBSan ;
+- ajout d’un autotest autonome compilé couvrant le succès, `std::bad_alloc`,
+  `std::exception` et une exception inconnue, tout en vérifiant que chaque
+  rapporteur de diagnostic s’exécute après la sortie du `catch` C++ actif ;
+- ajout d’un préflight de release exigeant une frontière pour chacune des 17
+  fonctions auditées et refusant les anciens enregistrements directs ;
+- aucune injection dans le binaire de production : l’autotest exerce le cœur
+  commun dans son propre exécutable temporaire ;
+- mise à jour des README anglais et français, références de modules, procédure
+  de release, `todo`, en-tête des notices tierces et notes de release 2.14.0.
+
+## [2.13.0] - 2026-08-03
+
+### Résumé de la version
+
+Babet 2.13.0 ajoute un helper SQLite de savepoint assisté et imbriquable. Les
+scripts peuvent maintenant isoler une unité de travail récupérable sans
+inventer d'identifiant SQL ni associer manuellement `ROLLBACK TO` et `RELEASE`,
+y compris dans une transaction assistée ou manuelle déjà ouverte.
+
+### Helper de savepoint imbriqué
+
+- ajout de `db:savepoint(callback)`, qui renvoie `true` puis toutes les valeurs
+  d'un callback terminé normalement, y compris `nil` et `false` explicites ;
+- génération intégrale des identifiants de savepoint dans Babet, à partir d'une
+  séquence monotone propre à la connexion et sans identifiant SQL contrôlé par
+  l'utilisateur ;
+- prise en charge des savepoints autonomes, dans `db:transaction()`, dans une
+  transaction SQL manuelle et récursivement dans d'autres helpers ;
+- maintien de `db:in_transaction()` à `true` pendant un savepoint autonome et
+  conservation de la transaction externe après le `RELEASE` interne ;
+- conversion des erreurs Lua du callback en `(nil, err)` après `ROLLBACK TO`
+  puis `RELEASE`, afin qu'un helper interne en échec n'annule que son travail ;
+- abandon des résultats du callback lorsque le `RELEASE` du savepoint le plus
+  externe échoue, puis tentative du même nettoyage avant de renvoyer l'erreur
+  SQLite ;
+- refus de `db:close()` pendant tout callback de savepoint, sans modifier les
+  règles du helper de transaction de la 2.12.0.
+
+### Sûreté aux exceptions et récupération de l'état
+
+- suivi de la profondeur active et de la séquence de noms sur chaque connexion
+  native, sans état global ;
+- ajout d'une garde RAII d'urgence sans allocation, qui tente `ROLLBACK TO` puis
+  `RELEASE` si une exception C++ s'échappe après `SAVEPOINT` ;
+- détection des callbacks qui terminent explicitement la transaction avant
+  toute tentative de nettoyage, avec une erreur stable unique, sans identifiant
+  généré ni répétition de `no such savepoint` ;
+- réduction des noms générés à la forme locale `babet_sp_<séquence>`, sans
+  adresse native, et contrôle explicite de chaque résultat de formatage ;
+- réservation de la pile Lua avant la prise de possession du savepoint et appel
+  du callback avec `lua_pcall`, afin qu'un longjmp Lua ne contourne pas le
+  nettoyage natif ;
+- maintien de tous les points d'entrée publics sous la frontière d'exception
+  SQLite commune et vérification de la réutilisation après erreurs du callback,
+  du `RELEASE` et d'une contrainte différée.
+
+### Tests et documentation
+
+- ajout de 37 assertions couvrant valeurs normales, `nil`/`false` explicites,
+  rollback du callback, réutilisation, trois niveaux imbriqués, échecs intérieur
+  et extérieur, transactions assistées et manuelles, contraintes différées au
+  `RELEASE` et au `COMMIT` externe, `ROLLBACK` explicite dans le callback sur
+  les chemins de retour normal et d'erreur Lua, arité stricte, connexion
+  fermée, refus de fermeture et workers ;
+- enregistrement d'une sonde rouge avant implémentation, puis compilation du
+  `sqlite.cpp` final en C++23 avec `-Wall -Wextra -Werror` et exécution de la
+  campagne Lua complète avec un binaire entièrement lié ;
+- enrichissement synchronisé des chapitres SQLite français et anglais avec des
+  exemples distincts : autonome, rollback, imbrication, transaction et
+  contrainte différée ;
+- mise à jour des métadonnées de version, README, procédure de publication,
+  notes GitHub et manuels PDF pour 2.13.0.
+
 ## [2.12.0] - 2026-08-03
 
 ### Résumé de la version

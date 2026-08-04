@@ -80,6 +80,8 @@
 //   - Action réussie (remove/close)    -> (true, nil).
 //   - Nom d'événement inconnu dans add() -> (nil, err) (miroir de la
 //     « méthode HTTP inconnue » de http, qui renvoie (nil, err)).
+//   - Exception C++ inattendue -> (nil, err) via la frontière commune.
+//     __gc utilise sa propre frontière catch-all sans allocation ni retour.
 //
 // ---------------------------------------------------------------------
 // Interruption par signal

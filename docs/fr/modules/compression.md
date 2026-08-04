@@ -184,6 +184,21 @@ une chaîne C++ unique. `max_output_size` borne en plus l’expansion lors de la
 décompression. Le décodeur xz possède un plafond mémoire interne de 256 Mio et
 le décodeur zstd refuse les fenêtres supérieures à 128 Mio.
 
+## Frontière d’exception C++
+
+Les deux fonctions publiques passent par la frontière commune Lua/C++. Cela ne
+modifie aucun retour ordinaire et empêche une exception C++ inattendue de
+traverser les frames C de Lua :
+
+- échec d’allocation : `(nil, "compression: out of memory")` ;
+- autre exception standard : `(nil, "compression: internal failure")` ;
+- exception inconnue : `(nil, "compression: unknown internal failure")`.
+
+Le descripteur source et la sortie non publiée restent possédés par des gardes
+RAII pendant l’opération. Sur l’un de ces échecs, les descripteurs sont fermés
+et le temporaire du dossier destination est supprimé avant le retour du
+diagnostic.
+
 ## Workers
 
 `babet.compression` est enregistré dans chaque état Lua worker. Plusieurs

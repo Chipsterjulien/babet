@@ -75,7 +75,59 @@ Babet 2.12.0 SQLite connection conveniences
     verify TAR in-memory read completion explicitly.
 [x] Synchronise rich French/English documentation and release metadata.
 
-Next planned release: Babet 2.13.0 nested savepoint helper.
+Babet 2.13.0 nested savepoint helper
+------------------------------------
+
+[x] Add db:savepoint(callback) with generated internal identifiers.
+[x] Support standalone, managed-transaction, manual-transaction and nested
+    savepoint scopes.
+[x] Roll back callback failures with ROLLBACK TO followed by RELEASE.
+[x] Clean up failed outermost RELEASE operations without forwarding callback
+    results.
+[x] Refuse db:close() while any savepoint callback is active.
+[x] Cover strict arity, closed handles, nested recovery, deferred constraints,
+    connection reuse and worker availability.
+[x] Synchronise rich French/English documentation and release metadata.
+
+Babet 2.14.0 remaining Lua/C++ exception boundaries
+---------------------------------------------------
+
+[x] Add one allocation-free exception-classification core shared by public
+    Lua C function boundaries.
+[x] Protect both compression functions and preserve atomic-output cleanup.
+[x] Protect the six flat SYS functions without changing ordinary returns.
+[x] Protect user.get and user.exists around their C++/NSS allocations.
+[x] Protect the inotify factory and methods, with a non-throwing __gc wrapper.
+[x] Add a compiled four-path self-test, verify reporting after catch cleanup,
+    and reject all 17 direct registrations.
+[x] Add PTY coverage for Ctrl+Z cleanup and terminal restoration after an
+    is_running() status refresh.
+[x] Document the current job-control boundary and the non-interactive pipeline
+    contract in French and English.
+[x] Synchronise French/English documentation and release metadata.
+
+Next planned release: 2.15.0 Lua longjmp / C++ RAII audit.
+
+[ ] Inventory allocating Lua API calls made while binding-owned C++ RAII
+    objects are alive.
+[ ] Audit local exception handling in socket, SQLite, archive and the remaining
+    public modules before deciding whether any common-boundary migration is
+    appropriate.
+[ ] Add focused tests before changing cleanup or boundary structure.
+
+Following planned release: 2.16.0 process terminal lifecycle and job-control audit.
+
+[ ] Inventory stopped/continued child states and the consequences of adding
+    WUNTRACED/WCONTINUED without changing the existing result contract blindly.
+[ ] Decide whether Babet needs an explicit stopped/resume/foreground API or
+    should continue to document bounded termination as its supported policy.
+[ ] Investigate safe terminal reclamation when an interactive child exits
+    before Lua next interrogates its process object, without doing Lua work or
+    non-async-signal-safe cleanup in a SIGCHLD handler.
+[ ] Add red tests for every accepted design before changing process state or
+    terminal ownership code.
+[ ] Keep pipeline()/spawnPipeline() non-interactive unless a separate audited
+    terminal model is deliberately designed for them.
 
 Deferred ideas retained in notes.md:
 - parent-side PATH resolution followed by execve;

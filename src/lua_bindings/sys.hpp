@@ -21,6 +21,9 @@
  *     (sans message d'erreur), permet l'idiome `or default`.
  *   - setenv : (true, nil) en succès, (nil, err) en échec — cohérent
  *     avec les autres setters du codebase.
+ *   - Les six fonctions sont enregistrées via la frontière d'exception
+ *     C++ commune. Seule une exception C++ inattendue ajoute un diagnostic
+ *     interne (nil, err) aux contrats ordinaires de env/pid.
  *
  * v1 : which, env, setenv, hostname, uname, pid.
  * Hors v1 (additif plus tard) : getuid, getgid, getenv-tout-renvoyer,
@@ -43,7 +46,8 @@ int lua_sys_pid(lua_State *L);
  *
  * À la différence de register_http qui crée une sous-table 'http',
  * register_sys POSE les fonctions DIRECTEMENT sur babet (nommage
- * plat décidé).
+ * plat décidé). Les fonctions exposées sont les wrappers de frontière, jamais
+ * les implémentations C++ enregistrées directement.
  */
 void register_sys(lua_State *L);
 

@@ -17,15 +17,27 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.12.0**. Voir le
+Version stable et auditée actuelle : **2.14.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.12.0 ajoute les connexions SQLite en lecture seule, l’activation des
-clés étrangères par connexion et les compteurs `last_insert_rowid()`,
-`changes()` et `total_changes()`. La 2.11.0 reste la version consacrée à la
-lecture binaire et bornée des entrées ZIP/TAR avec `babet.archive.read()`.
-L’audit SQLite et `babet.sqlite.NULL` de la 2.10 restent inchangés. Les nouveautés fonctionnelles de la série 2.9 restent les redirections de
+Babet 2.14.0 ferme les dernières frontières d’exception C++ de
+`babet.compression`, des fonctions SYS plates, de `babet.user` et de
+`babet.inotify`. Les 17 fonctions C enregistrées dans Lua passent désormais
+par une frontière auditée ; une exception C++ inattendue devient un diagnostic
+Lua stable au lieu de traverser des frames C. Cette version corrige aussi les
+processus interactifs lancés par `babet.spawn` avec les flux hérités : le groupe
+enfant reçoit réellement le terminal au premier plan, puis Babet le récupère
+avec ses attributs après la fin ou la terminaison du processus. Aucune fonction
+publique n’est ajoutée et les retours ordinaires restent inchangés. Babet
+2.13.0 a ajouté
+`db:savepoint(callback)`, avec savepoints imbriqués et
+`ROLLBACK TO` puis `RELEASE` automatiques lorsque le callback échoue. Le helper
+fonctionne seul, dans une transaction assistée ou manuelle et récursivement
+dans un autre savepoint. La 2.12.0 reste la version des options de connexion et
+des compteurs ; le travail 2.11.0 non publié fournit la lecture binaire et
+bornée des entrées ZIP/TAR avec `babet.archive.read()`. L’audit SQLite et
+`babet.sqlite.NULL` de la 2.10 restent inchangés. Les nouveautés fonctionnelles de la série 2.9 restent les redirections de
 `babet.spawn()`, le module `babet.base64`, `babet.writeFileAtomic()`, le cycle
 de vie workers renforcé et les channels directs entre workers.
 
@@ -75,6 +87,29 @@ créée ni modifiée. La lecture seule reste compatible avec `busy_timeout` et
 `foreign_keys`, mais refuse volontairement `wal = true`. Cela empêche seulement
 de demander un changement de mode ; une base déjà en WAL reste lisible si
 SQLite peut utiliser ses fichiers compagnons.
+
+### Isoler une étape SQLite récupérable avec un savepoint
+
+```lua
+local ok, err = db:transaction(function(tx)
+    assert(tx:exec("INSERT INTO jobs(name) VALUES(?)", { "obligatoire" }))
+
+    local optional_ok = tx:savepoint(function(inner)
+        assert(inner:exec(
+            "INSERT INTO jobs(name) VALUES(?)", { "facultatif" }))
+    end)
+
+    if not optional_ok then
+        -- Seule l'étape facultative a été annulée. La transaction continue.
+    end
+end, "immediate")
+
+assert(ok, err)
+```
+
+Le `RELEASE` réussi d'un savepoint interne ne valide jamais la transaction
+externe. Une erreur Lua du callback revient au savepoint généré, le retire et
+renvoie `(nil, err)`.
 
 ### Télécharger une grosse réponse HTTP sans la garder en mémoire
 

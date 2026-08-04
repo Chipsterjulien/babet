@@ -75,7 +75,7 @@ fields. Text fields may be empty strings, but never `nil`.
 | Function | Result |
 | --- | --- |
 | `babet.user.get(name_or_uid)` | table, `(nil, "user not found")`, or `(nil, "user: ...")` |
-| `babet.user.exists(name_or_uid)` | strict boolean |
+| `babet.user.exists(name_or_uid)` | strict boolean for NSS results; `(nil, err)` only for an unexpected C++ boundary failure |
 
 <a id="user-result-table"></a>
 ## Returned user table
@@ -382,6 +382,11 @@ password is valid, or that it belongs to a particular supplementary group.
 | account missing | `(nil, "user not found")` | `false` |
 | NSS error | `(nil, "user: ...")` | `false` |
 | invalid argument | Lua error | Lua error |
+| unexpected C++ exception | `(nil, "user: out of memory")`, `(nil, "user: internal failure")`, or `(nil, "user: unknown internal failure")` | same `(nil, err)` boundary result |
+
+The final row is distinct from an NSS error. It exists only to prevent an
+unexpected C++ exception from crossing Lua's C frames. Under every ordinary NSS
+outcome, `exists` still returns exactly one strict boolean as documented above.
 
 Generic handling:
 
@@ -409,7 +414,8 @@ end
 - The NSS buffer grows dynamically up to an internal 64 KiB limit; beyond that,
   `get` returns an NSS error.
 - `exists` favors a simple boolean API and hides NSS errors; use `get` when a
-  diagnosis is required.
+  diagnosis is required. Only the internal C++ safety boundary can return its
+  exceptional `(nil, err)` diagnostic.
 - The module does not expose supplementary groups.
 - It exposes neither `/etc/shadow`, passwords, nor account expiration data.
 - It does not create, remove, or modify users.

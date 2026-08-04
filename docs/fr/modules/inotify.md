@@ -230,10 +230,18 @@ watcher:close()
 - valeur invalide, erreur système ou watcher fermé : `(nil, err)` ;
 - `read` sans événement avant l'échéance : `(nil, "timeout")` ;
 - signal géré pendant `read` : `(nil, "interrupted")` ;
-- `remove` et `close` réussis : `(true, nil)`.
+- `remove` et `close` réussis : `(true, nil)` ;
+- exception C++ inattendue : `(nil, "inotify: out of memory")`,
+  `(nil, "inotify: internal failure")` ou
+  `(nil, "inotify: unknown internal failure")`.
 
 Les erreurs système sont préfixées par `"inotify: "` et conservent la
 description fournie par le système.
+
+La fabrique et toutes les méthodes du userdata passent par cette frontière.
+`__gc` utilise un chemin `catch (...)` dédié et non levant : le nettoyage du
+ramasse-miettes ne tente jamais d’allouer ni de renvoyer une erreur pendant le
+traitement d’une exception.
 
 <a id="inotify-limits"></a>
 ## Limites

@@ -1,6 +1,8 @@
 #ifndef LUA_UTILS_HPP
 #define LUA_UTILS_HPP
 
+#include "lua_exception_boundary.hpp"
+
 #include <lua.hpp>
 #include <cstring>
 #include <optional>
@@ -102,6 +104,50 @@ inline int push_fail(lua_State *L, std::string_view message)
     lua_pushnil(L);
     lua_pushlstring(L, message.data(), message.size());
     return 2;
+}
+
+/**
+ * @brief Prevents a C++ exception from crossing a lua_CFunction boundary.
+ *
+ * Lua is compiled as C in Babet. Letting a C++ exception escape through its C
+ * frames is undefined behaviour, so every public binding that can allocate or
+ * call throwing C++ code must enter Lua through this helper. The diagnostic
+ * strings are supplied as non-owning views and the handlers perform no C++
+ * allocation of their own.
+ *
+ * Programmer errors raised by luaL_error still follow Lua's protected-call
+ * path; they are not C++ exceptions and are deliberately not translated here.
+ */
+struct LuaCfunctionExceptionReporter
+{
+    std::string_view out_of_memory;
+    std::string_view internal_failure;
+    std::string_view unknown_internal_failure;
+
+    int operator()(lua_State *L, LuaCxxExceptionKind kind) const
+    {
+        switch (kind)
+        {
+        case LuaCxxExceptionKind::out_of_memory:
+            return push_fail(L, out_of_memory);
+        case LuaCxxExceptionKind::standard:
+            return push_fail(L, internal_failure);
+        case LuaCxxExceptionKind::unknown:
+            return push_fail(L, unknown_internal_failure);
+        }
+        return push_fail(L, unknown_internal_failure);
+    }
+};
+
+template <int (*Fn)(lua_State *)>
+inline int lua_cfunction_exception_boundary(
+    lua_State *L, std::string_view out_of_memory,
+    std::string_view internal_failure,
+    std::string_view unknown_internal_failure)
+{
+    return invoke_lua_cfunction_with_exception_boundary<Fn>(
+        L, LuaCfunctionExceptionReporter{out_of_memory, internal_failure,
+                                        unknown_internal_failure});
 }
 
 /**

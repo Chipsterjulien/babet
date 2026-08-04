@@ -117,9 +117,9 @@ This restriction prevents data races between threads.
 The four constants describe the Babet binary running the script.
 
 ```lua
-print(babet.VERSION)       -- for example "2.12.0"
+print(babet.VERSION)       -- for example "2.14.0"
 print(babet.VERSION_MAJOR) -- for example 2
-print(babet.VERSION_MINOR) -- for example 10
+print(babet.VERSION_MINOR) -- for example 14
 print(babet.VERSION_PATCH) -- for example 0
 ```
 
@@ -569,6 +569,15 @@ To measure the whole process, use a system facility such as `/proc`, `ps`,
 | invalid `setenv` or mutation after a worker | `(nil, err)` |
 | `pid` | always an integer |
 | memory functions | always one or two integers after a full GC |
+
+An unexpected C++ exception in `which`, `env`, `setenv`, `hostname`, `uname`,
+or `pid` is stopped by the shared boundary and becomes
+`(nil, "sys: out of memory")`, `(nil, "sys: internal failure")`, or
+`(nil, "sys: unknown internal failure")`.
+
+This is an internal safety boundary, not a new expected runtime state. The
+ordinary `env` missing-variable result remains one `nil`, and `pid` remains one
+integer.
 
 Handling a runtime failure:
 

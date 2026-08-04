@@ -6,6 +6,137 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.14.0] - 2026-08-03
+
+### Summary
+
+Babet 2.14.0 completes the audited C++ exception boundary work for the four
+remaining public binding modules and fixes terminal ownership for interactive
+`babet.spawn` children. No Lua function, option, or ordinary return contract is
+added or removed.
+
+### Lua/C++ exception boundaries
+
+- added one shared exception-classification core that distinguishes
+  `std::bad_alloc`, another `std::exception`, and an unknown C++ exception
+  without allowing any of them to cross Lua's C frames, and destroys the
+  caught exception before asking Lua to push the diagnostic;
+- protected the two `babet.compression` functions, preserving the existing
+  RAII cleanup of source descriptors and unpublished temporary outputs;
+- protected all six flat SYS functions: `which`, `env`, `setenv`, `hostname`,
+  `uname`, and `pid`;
+- protected `babet.user.get` and `babet.user.exists` around their dynamic NSS
+  buffers and diagnostic strings;
+- protected the inotify factory plus `add`, `read`, `remove`, `close`, and
+  `__tostring`, while giving `__gc` a dedicated catch-all boundary that never
+  attempts to allocate or return an error;
+- translated an unexpected allocation failure to `(nil, "<module>: out of
+  memory")`, other standard exceptions to `(nil, "<module>: internal
+  failure")`, and non-standard exceptions to `(nil, "<module>: unknown
+  internal failure")`;
+- kept programmer errors on their established Lua-error path and preserved all
+  ordinary success, runtime-error, timeout, interruption, and NSS results.
+
+### Interactive `babet.spawn` processes
+
+- kept every child in its separate process group, so `terminate()`, `kill()`,
+  and `close()` continue to target its descendants as well;
+- when `stdin = "inherit"` refers to Babet's controlling terminal and Babet owns
+  the foreground, synchronously transferred that terminal to the child group
+  only after the group was established;
+- added a `CLOEXEC` synchronization pipe that prevents the child from reading
+  before the parent's `tcsetpgrp()`, avoiding a background-group `SIGTTIN` stop;
+- restored the original foreground group and `termios` attributes after
+  `wait()`, `terminate()`, `kill()`, `close()`, garbage collection, or a launch
+  failure;
+- locally blocked `SIGTTOU` around foreground-group changes without changing
+  the process's lasting signal mask;
+- left captured streams, file and `/dev/null` redirections, and inherited
+  non-terminal stdin unchanged;
+- terminal-generated signals such as `Ctrl+C` now reach the foreground child
+  group while preserving the `128 + signal` result convention.
+
+### Tests and documentation
+
+- added a real pseudo-terminal regression test: one parent-side Lua read, a
+  second read by a child with all three streams inherited, a `wait(timeout)`
+  followed by normal continuation, `Ctrl+C` delivery, code-130 validation, a
+  real `Ctrl+Z` stop followed by bounded `kill()` recovery, restoration after
+  an `is_running()` status refresh, deliberate terminal-mode modification and
+  restoration, plus a hard anti-hang deadline;
+- explicitly documented the lack of full job control, the requirement to
+  observe or close an exited child before the parent reads again, and the
+  non-interactive scope of `pipeline()` / `spawnPipeline()`;
+- integrated the PTY test into both normal and ASan/UBSan validation paths;
+- added a compiled standalone self-test covering normal completion,
+  `std::bad_alloc`, `std::exception`, and an unknown exception, while verifying
+  that every diagnostic reporter runs after the active C++ catch is cleared;
+- added a release preflight that requires every one of the 17 audited
+  registrations to use its boundary and rejects the old direct registrations;
+- kept fault injection out of the production binary: the self-test exercises
+  the shared classification core in its own temporary executable;
+- updated the English and French README files, module references, release
+  procedure, `todo`, third-party notice header, and release notes for 2.14.0.
+
+## [2.13.0] - 2026-08-03
+
+### Release summary
+
+Babet 2.13.0 adds a managed, nestable SQLite savepoint helper. Scripts can now
+isolate a recoverable unit of work without inventing SQL identifiers or
+manually pairing `ROLLBACK TO` with `RELEASE`, including inside an existing
+managed or manual transaction.
+
+### Nested savepoint helper
+
+- added `db:savepoint(callback)`, returning `true` followed by every normal
+  callback result, including explicit `nil` and `false` values;
+- generated savepoint identifiers entirely inside Babet, with a monotonic
+  per-connection sequence and no user-controlled SQL identifier;
+- supported standalone savepoints, savepoints inside `db:transaction()`,
+  savepoints inside a manual SQL transaction, and recursively nested helpers;
+- kept `db:in_transaction()` true while a standalone savepoint is active and
+  preserved the outer transaction after an inner `RELEASE`;
+- converted callback Lua errors to `(nil, err)` after `ROLLBACK TO` followed by
+  `RELEASE`, so a failed inner helper rolls back only its own work;
+- discarded callback results when an outermost `RELEASE` fails, then attempted
+  the same rollback-and-release cleanup before returning the SQLite error;
+- rejected `db:close()` while any savepoint callback is active, while leaving
+  the 2.12.0 transaction-helper rules unchanged.
+
+### Exception safety and state recovery
+
+- tracked active savepoint depth and generated-name sequence on each native
+  connection without global state;
+- added an allocation-free RAII emergency guard that performs a best-effort
+  `ROLLBACK TO` and `RELEASE` if a C++ exception escapes after `SAVEPOINT`;
+- detected callbacks that explicitly end the transaction before attempting
+  cleanup, returning one stable diagnostic without a generated identifier or
+  repeated `no such savepoint` errors;
+- shortened generated names to a connection-local `babet_sp_<sequence>` form,
+  removed the native address, and checked every formatting result explicitly;
+- reserved Lua stack capacity before taking ownership of the savepoint and ran
+  the callback through `lua_pcall`, preventing a Lua longjmp from bypassing the
+  native cleanup path;
+- kept all public entry points under the common SQLite C++ exception boundary
+  and verified that connections remain reusable after callback, release, and
+  deferred-constraint failures.
+
+### Tests and documentation
+
+- added 37 assertions covering normal values, explicit `nil`/`false`, callback
+  rollback, connection reuse, three nested levels, inner and outer failure,
+  managed and manual transactions, failed deferred checks at `RELEASE` and
+  outer `COMMIT`, explicit callback `ROLLBACK` on both normal-return and Lua-
+  error paths, strict arity, closed handles, close refusal, and workers;
+- recorded a red probe before implementation, then compiled the final
+  `sqlite.cpp` in C++23 with `-Wall -Wextra -Werror` and exercised the complete
+  Lua campaign against a fully linked binary;
+- expanded the French and English SQLite chapters in lockstep with separate
+  standalone, rollback, nested, transaction, and deferred-constraint examples;
+- updated version metadata, README files, release procedure, GitHub notes, and
+  PDF manuals for 2.13.0.
+
 ## [2.12.0] - 2026-08-03
 
 ### Release summary

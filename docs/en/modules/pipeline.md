@@ -163,6 +163,14 @@ script streams data and applies its own limits. Success returns a userdata and
 `nil`; validation or launch failure returns `nil, err` after cleaning up any
 stage that was already created.
 
+This API is intended for commands connected by pipes, not interactive
+programs. The first stage's standard input is always Babet's managed pipe, and
+no foreground-terminal handoff occurs. A stage that explicitly opens
+`/dev/tty` and tries to read from it may therefore be stopped by POSIX
+background-process-group rules. Use `babet.spawn()` with `stdin`, `stdout`, and
+`stderr` set to `"inherit"` for a tool that must interact directly with the
+user.
+
 ```lua
 local pipeline, err = babet.spawnPipeline({
     { "cat" },

@@ -6,7 +6,7 @@
 volontairement compacte : connexions en lecture/écriture ou lecture seule,
 clés étrangères par connexion, compteurs de changements, exécution SQL
 directe, itérateurs paresseux, statements préparés réutilisables, transactions
-assistées et bind BLOB et `NULL` explicites.
+assistées, savepoints imbriqués et bind BLOB et `NULL` explicites.
 
 ## Table des matières du module
 
@@ -16,6 +16,7 @@ assistées et bind BLOB et `NULL` explicites.
   - [Exécution directe](#sqlite-direct)
   - [Statements préparés réutilisables](#sqlite-prepared)
   - [Transactions assistées](#sqlite-transactions)
+  - [Savepoints imbriqués](#sqlite-savepoints)
   - [Paramètres SQL](#sqlite-parameters)
   - [Valeurs NULL explicites](#sqlite-nulls)
   - [BLOB explicites](#sqlite-blobs)
@@ -39,6 +40,8 @@ assistées et bind BLOB et `NULL` explicites.
 | `babet.sqlite.NULL` | sentinelle lightuserdata exacte pour binder SQL `NULL` |
 | `db:close()` | `(true, nil)` — idempotent |
 | `db:in_transaction()` | boolean \| `(nil, err)` |
+| `db:transaction(callback, mode?)` | `true, ...résultats_callback` \| `(nil, err)` |
+| `db:savepoint(callback)` | `true, ...résultats_callback` \| `(nil, err)` |
 | `db:last_insert_rowid()` | entier \| `(nil, err)` |
 | `db:changes()` | entier \| `(nil, err)` |
 | `db:total_changes()` | entier \| `(nil, err)` |
@@ -134,8 +137,8 @@ local db = assert(babet.sqlite.open("state.db", {
 ```
 
 `db:in_transaction()` renvoie `true` dès que la connexion se trouve dans une
-transaction, qu'elle ait été ouverte par `db:transaction()` ou par un
-`BEGIN` SQL manuel.
+transaction, qu'elle ait été ouverte par `db:transaction()`, par un
+`db:savepoint()` externe ou par un `BEGIN` SQL manuel.
 
 <a id="sqlite-counters"></a>
 ### Compteurs de connexion
@@ -463,7 +466,188 @@ Limitations volontaires :
 - `db:close()` est refusé pendant le callback ;
 - le callback ne doit pas exécuter lui-même `BEGIN`, `COMMIT` ou `ROLLBACK`.
 
-Les savepoints restent accessibles par SQL brut.
+Utilise `db:savepoint()` pour des portées imbriquées assistées. Les savepoints
+SQL bruts restent accessibles lorsqu'un identifiant explicite ou un contrôle
+manuel est nécessaire.
+
+<!-- pdf-page-break -->
+
+<a id="sqlite-savepoints"></a>
+### Savepoints imbriqués
+
+Signature :
+
+```lua
+true, ...résultats_callback = db:savepoint(callback)
+-- ou
+nil, err = db:savepoint(callback)
+```
+
+Le callback reçoit la même connexion ouverte comme unique argument. Babet
+génère l'identifiant SQL en interne ; l'API n'accepte aucun nom et ne peut donc
+pas injecter de texte fourni par l'appelant dans `SAVEPOINT`, `ROLLBACK TO` ou
+`RELEASE`.
+
+Si le callback se termine normalement, Babet exécute `RELEASE` et renvoie
+`true`, suivi de toutes les valeurs du callback. `nil` et `false` explicites
+sont des résultats normaux et ne demandent pas de rollback. Sur erreur Lua,
+Babet exécute `ROLLBACK TO` puis `RELEASE`, intercepte l'erreur et renvoie
+`(nil, "sqlite: savepoint callback failed: ...")`.
+
+#### Exemple : savepoint autonome
+
+Hors transaction, le savepoint le plus externe démarre une transaction. Son
+`RELEASE` valide le travail isolé et rétablit le mode autocommit :
+
+```lua
+local ok, id = db:savepoint(function(tx)
+    assert(tx:exec(
+        "INSERT INTO jobs(name) VALUES(?)",
+        { "index" }))
+    return assert(tx:last_insert_rowid())
+end)
+
+assert(ok, id)
+assert(db:in_transaction() == false)
+```
+
+#### Exemple : rollback sur erreur du callback
+
+Utilise `assert` sur les opérations SQLite dont l'échec doit annuler la portée :
+
+```lua
+local ok, err = db:savepoint(function(tx)
+    assert(tx:exec(
+        "INSERT INTO unique_names(name) VALUES(?)",
+        { "alice" }))
+    assert(tx:exec(
+        "INSERT INTO unique_names(name) VALUES(?)",
+        { "alice" }))
+end)
+
+assert(ok == nil)
+assert(type(err) == "string")
+-- Aucun INSERT ne reste et la connexion peut être réutilisée.
+```
+
+<!-- pdf-page-break -->
+
+#### Exemple : récupérer l'échec d'une portée interne
+
+Les helpers peuvent être imbriqués. Une portée interne en échec revient à son
+propre marqueur ; le callback externe peut examiner l'erreur et continuer :
+
+```lua
+local ok, inner_err = db:savepoint(function(tx)
+    assert(tx:exec("INSERT INTO audit(message) VALUES('avant')"))
+
+    local inner_ok, err = tx:savepoint(function(inner)
+        assert(inner:exec("INSERT INTO audit(message) VALUES('facultatif')"))
+        error("annuler le travail facultatif")
+    end)
+    assert(inner_ok == nil)
+
+    assert(tx:exec("INSERT INTO audit(message) VALUES('après')"))
+    return err
+end)
+
+assert(ok, inner_err)
+-- « avant » et « après » restent ; « facultatif » a été annulé.
+```
+
+Une erreur ultérieure du callback externe annule également tout savepoint
+interne déjà libéré. `RELEASE` fusionne le travail interne avec la portée
+englobante ; il ne rend jamais ce travail indépendant de la transaction
+externe.
+
+#### Exemple : dans une transaction assistée
+
+`db:savepoint()` est autorisé dans `db:transaction()`, contrairement à un
+second helper de transaction :
+
+```lua
+local ok, err = db:transaction(function(tx)
+    assert(tx:exec("INSERT INTO audit(message) VALUES('obligatoire')"))
+
+    local optional_ok = tx:savepoint(function(inner)
+        assert(inner:exec("INSERT INTO audit(message) VALUES('facultatif')"))
+    end)
+    if not optional_ok then
+        assert(tx:exec("INSERT INTO audit(message) VALUES('échec facultatif')"))
+    end
+
+    assert(tx:in_transaction() == true)
+end, "immediate")
+
+assert(ok, err)
+```
+
+Le `RELEASE` interne ne valide **pas** la transaction assistée. Si le callback
+externe échoue ensuite, `db:transaction()` annule l'écriture obligatoire et
+toutes les écritures internes déjà libérées.
+
+#### Exemple : dans une transaction manuelle
+
+```lua
+assert(db:exec("BEGIN"))
+
+local ok, err = db:savepoint(function(tx)
+    assert(tx:exec("UPDATE accounts SET balance = balance - 10 WHERE id = 1"))
+end)
+assert(ok, err)
+assert(db:in_transaction() == true)
+
+assert(db:exec("ROLLBACK")) -- annule aussi le travail du savepoint libéré
+```
+
+<!-- pdf-page-break -->
+
+#### Exemple : échec du `RELEASE` du savepoint externe
+
+Une contrainte différée peut n'être contrôlée que lorsque le `RELEASE` externe
+tente de valider. Les résultats du callback sont abandonnés, Babet revient au
+savepoint, le retire et renvoie l'erreur du `RELEASE` :
+
+```lua
+local db = assert(babet.sqlite.open(
+    ":memory:", { foreign_keys = true }))
+assert(db:exec([[
+    CREATE TABLE parent(id INTEGER PRIMARY KEY);
+    CREATE TABLE child(
+        id INTEGER PRIMARY KEY,
+        parent_id INTEGER REFERENCES parent(id)
+            DEFERRABLE INITIALLY DEFERRED
+    )
+]]))
+
+local ok, err, leaked = db:savepoint(function(tx)
+    assert(tx:exec("INSERT INTO child VALUES(1, 999)"))
+    return "ne doit pas être renvoyé"
+end)
+
+assert(ok == nil and type(err) == "string")
+assert(leaked == nil)
+assert(db:in_transaction() == false)
+```
+
+Dans une transaction existante, libérer un savepoint interne n'exécute pas le
+commit externe : l'éventuelle erreur différée reste donc du ressort du futur
+`COMMIT` de cette transaction.
+
+Le helper suit la profondeur sur chaque connexion et fonctionne dans les
+workers. `db:close()` est refusé pendant tout callback de savepoint. La pile Lua
+est réservée avant l'ouverture ; une garde C++ sans allocation tente un
+`ROLLBACK TO` puis un `RELEASE` d'urgence si une exception interne survient.
+
+Ne mélange pas de commandes manuelles de transaction ou de savepoint dans le
+callback. En particulier, un `ROLLBACK` ou `COMMIT` complet détruit le
+savepoint assisté. Babet détecte le retour en autocommit, abandonne les
+résultats du callback, évite les commandes de nettoyage redondantes et renvoie
+une seule erreur stable sans exposer l'identifiant généré. Un `ROLLBACK` laisse
+la connexion réutilisable après avoir annulé les écritures du callback ; un
+`COMMIT` peut déjà les avoir validées avant que Babet ne diagnostique la
+violation du contrat. Utilise des appels `db:savepoint()` imbriqués pour les
+portées internes récupérables.
 
 <a id="sqlite-parameters"></a>
 ### Paramètres SQL
@@ -630,7 +814,7 @@ un octet NUL. Pour compter ses octets lors d'un diagnostic, utilise par exemple
 ## Cycle de vie
 
 `db:close()` est idempotent. Après fermeture, toute nouvelle opération comme
-`exec`, `query`, `prepare`, `transaction` et `in_transaction` renvoie
+`exec`, `query`, `prepare`, `transaction`, `savepoint` et `in_transaction` renvoient
 `(nil, "sqlite: connection closed")`.
 
 Un itérateur ou un statement préparé créé **avant** `db:close()` reste
@@ -685,8 +869,9 @@ pas de renvoyer proprement `(nil, err)` en plus de la fin de séquence.
 Sans table `params`, la présence d'un placeholder est détectée avant
 l'exécution. Babet refuse de laisser SQLite binder silencieusement `NULL`.
 
-`db:transaction()` constitue une exception contrôlée : il intercepte les
-erreurs Lua du callback, effectue le rollback et les convertit en `(nil, err)`.
+`db:transaction()` et `db:savepoint()` constituent des exceptions contrôlées :
+ils interceptent les erreurs Lua du callback, annulent la portée qu'ils
+possèdent et convertissent l'erreur en `(nil, err)`.
 
 <a id="sqlite-examples"></a>
 ## Exemples complets
@@ -761,10 +946,9 @@ assert(db:close())
 Les éléments suivants ne sont volontairement pas implémentés :
 
 - le mode URI et les autres flags avancés de `sqlite3_open_v2` ;
-- un helper de savepoint imbriqué ;
 - les APIs de progress handler et d'interruption ;
 - l'API de streaming BLOB `sqlite3_blob_open` ;
 - l'API de sauvegarde `sqlite3_backup_init`.
 
-Les savepoints et `VACUUM INTO` restent accessibles par SQL brut. FTS5 et
-R-Tree ne sont pas activés dans la compilation embarquée actuelle.
+Les savepoints SQL bruts et `VACUUM INTO` restent accessibles. FTS5 et R-Tree
+ne sont pas activés dans la compilation embarquée actuelle.

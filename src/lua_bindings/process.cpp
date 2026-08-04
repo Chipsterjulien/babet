@@ -38,6 +38,7 @@ struct Process
     bool stdin_piped;
     bool stdout_piped;
     bool stderr_piped;
+    babet_process::TerminalHandoff terminal;
     int status;
     bool status_valid;
     bool closed;
@@ -59,6 +60,7 @@ Process *push_empty_process(lua_State *L)
     process->stdin_piped = false;
     process->stdout_piped = false;
     process->stderr_piped = false;
+    process->terminal = babet_process::TerminalHandoff{};
     process->status = 0;
     process->status_valid = false;
     process->closed = true;
@@ -77,6 +79,7 @@ void initialize_process(Process *process,
     process->stdin_piped = launched.stdin_piped;
     process->stdout_piped = launched.stdout_piped;
     process->stderr_piped = launched.stderr_piped;
+    process->terminal = launched.terminal;
     process->status = 0;
     process->status_valid = false;
     process->closed = false;
@@ -416,6 +419,14 @@ int push_process_result(lua_State *L, const Process *process)
     return 2;
 }
 
+void restore_process_terminal(Process *process) noexcept
+{
+    if (process)
+    {
+        babet_process::restore_terminal(process->terminal);
+    }
+}
+
 bool refresh_status(Process *process, std::string &err)
 {
     if (process->status_valid || process->pid <= 0)
@@ -430,6 +441,7 @@ bool refresh_status(Process *process, std::string &err)
         {
             process->status_valid = true;
             babet_process::close_fd(process->stdin_fd);
+            restore_process_terminal(process);
             return true;
         }
         if (r == 0)
@@ -798,6 +810,7 @@ int wait_for_process(lua_State *L, Process *process,
         {
             process->status_valid = true;
             babet_process::close_fd(process->stdin_fd);
+            restore_process_terminal(process);
             return push_process_result(L, process);
         }
         if (r < 0)
@@ -903,6 +916,7 @@ int terminate_process(lua_State *L, Process *process, int signal,
 
     process->status_valid = true;
     babet_process::close_fd(process->stdin_fd);
+    restore_process_terminal(process);
     return push_process_result(L, process);
 }
 
@@ -957,6 +971,7 @@ void cleanup_process(Process *process)
             babet_process::terminate_and_reap(process->pid, process->status);
     }
 
+    restore_process_terminal(process);
     babet_process::close_fd(process->stdin_fd);
     babet_process::close_fd(process->stdout_fd);
     babet_process::close_fd(process->stderr_fd);

@@ -798,6 +798,59 @@ assert(process:wait())
 Cette forme convient lorsqu'un programme doit interagir avec le terminal ou
 respecter une redirection appliquée extérieurement au processus Babet.
 
+Lorsque `stdin = "inherit"` désigne le terminal de contrôle et que Babet en
+possède le premier plan, l'enfant conserve son groupe de processus séparé mais
+Babet lui transfère le terminal avant de le laisser exécuter le programme. Le
+transfert est synchronisé : l'enfant ne peut donc pas tenter sa première
+lecture en arrière-plan et être suspendu par `SIGTTIN`. Les outils interactifs
+comme `pacman`, `makepkg` ou un éditeur peuvent lire normalement ; `Ctrl+C` est
+envoyé au groupe enfant de premier plan.
+
+Après la récolte de l'enfant — sortie normale, `terminate()`, `kill()`,
+`close()` ou nettoyage automatique — Babet reprend le premier plan et restaure
+les attributs `termios` sauvegardés. Si le `stdin` hérité est un pipe, un
+fichier ou un autre descripteur non terminal, aucun transfert de groupe n'est
+effectué et le comportement historique reste inchangé. `stdout` et `stderr`
+peuvent rester capturés ou redirigés : c'est l'héritage du terminal sur
+`stdin` qui active cette gestion interactive.
+
+Un `wait(timeout)` qui renvoie `"timeout"` ne tue pas l'enfant et ne lui retire
+pas le terminal : utilise ensuite `wait()`, `terminate()`, `kill()` ou `close()`
+pour terminer proprement son cycle de vie.
+
+Babet ne fournit pas encore un contrôle de jobs de shell complet. Si
+l'utilisateur suspend l'enfant interactif avec `Ctrl+Z`, le groupe enfant reste
+arrêté au premier plan. Les méthodes d'attente ne demandent pas les états
+intermédiaires avec `WUNTRACED` : un `wait()` sans délai peut donc rester bloqué
+tant que l'enfant n'est ni repris ni terminé. Pour une commande susceptible
+d'être suspendue, utilise une attente bornée puis `terminate()`, `kill()` ou
+`close()` afin de récupérer le terminal. `wait(timeout)` seul ne le restitue
+pas.
+
+La restitution n'est pas déclenchée de façon asynchrone au seul instant où
+l'enfant se termine. Elle intervient lorsque Babet observe cette fin avec
+`wait()` ou `is_running()`, ou lors de `terminate()`, `kill()`, `close()` et du
+nettoyage automatique. Avant que le script parent recommence à lire lui-même
+le terminal avec `io.read()`, il doit donc récolter, interroger ou fermer
+l'enfant interactif :
+
+```lua
+local process <close> = assert(babet.spawn("outil-interactif", {}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+}))
+
+local result, err = process:wait(30)
+if not result and err == "timeout" then
+    result = assert(process:terminate(0.5))
+end
+assert(result, err)
+
+-- Le groupe parent possède de nouveau le terminal à cet endroit.
+local answer = io.read("*l")
+```
+
 #### `"null"`
 
 Le flux est raccordé à `/dev/null` :

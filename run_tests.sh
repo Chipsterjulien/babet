@@ -165,6 +165,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_workers_serialization_budget.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — frontières d'exception C++/Lua"
+if ! bash "${SCRIPT_DIR}/tools/test_exception_boundaries.sh"; then
+    echo "ÉCHEC : le préflight des frontières d'exception a échoué."
+    exit 1
+fi
+
 BUILD_ARGS=()
 if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
     BUILD_ARGS+=(--sanitizers)
@@ -188,6 +194,12 @@ echo ""
 BINARY="${TEST_DIR}/${PROJECT_NAME}"
 if [ ! -f "${BINARY}" ]; then
     echo "ÉCHEC : binaire introuvable après compilation (${BINARY})."
+    exit 1
+fi
+
+print_preflight_stage "Régression — spawn interactif sous pseudo-terminal"
+if ! bash "${SCRIPT_DIR}/tools/test_spawn_pty.sh" "${BINARY}"; then
+    echo "ÉCHEC : le test PTY de babet.spawn a échoué."
     exit 1
 fi
 

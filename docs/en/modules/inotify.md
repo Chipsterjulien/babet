@@ -224,10 +224,17 @@ watcher:close()
 - invalid value, system error, or closed watcher: `(nil, err)`;
 - no event before the deadline: `(nil, "timeout")`;
 - handled signal during `read`: `(nil, "interrupted")`;
-- successful `remove` and `close`: `(true, nil)`.
+- successful `remove` and `close`: `(true, nil)`;
+- unexpected C++ exception: `(nil, "inotify: out of memory")`,
+  `(nil, "inotify: internal failure")`, or
+  `(nil, "inotify: unknown internal failure")`.
 
 System errors are prefixed with `"inotify: "` and retain the description
 provided by the operating system.
+
+The factory and every userdata method enter through this boundary. `__gc` uses
+a dedicated non-throwing catch-all path: garbage-collector cleanup never tries
+to allocate or return an error while handling an exception.
 
 <a id="inotify-limits"></a>
 ## Limits

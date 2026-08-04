@@ -167,6 +167,14 @@ script écrit et lit progressivement et choisit lui-même ses limites. Un succè
 renvoie un userdata et `nil` ; une erreur de validation ou de lancement renvoie
 `nil, err` après nettoyage des étapes déjà créées.
 
+Cette API est destinée aux commandes reliées par des pipes, pas aux programmes
+interactifs. L'entrée standard de la première étape est toujours le pipe piloté
+par Babet ; aucun transfert du terminal de premier plan n'est effectué. Une
+étape qui ouvre explicitement `/dev/tty` et tente d'y lire peut donc être
+suspendue par les règles POSIX des groupes d'arrière-plan. Pour un outil qui
+doit dialoguer directement avec l'utilisateur, utilise `babet.spawn()` avec
+`stdin`, `stdout` et `stderr` en mode `"inherit"`.
+
 ```lua
 local pipeline, err = babet.spawnPipeline({
     { "cat" },

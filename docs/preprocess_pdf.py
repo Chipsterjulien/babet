@@ -240,6 +240,21 @@ def fix_manual_order_reference(content):
     return content
 
 
+def convert_pdf_page_breaks(content):
+    """Convert hidden source markers into LaTeX page breaks.
+
+    The HTML comment stays invisible in GitHub-rendered Markdown. Only the
+    transient PDF copy receives ``\\newpage``, which keeps long code examples
+    together without leaking PDF-specific syntax into the public sources.
+    """
+    return re.sub(
+        r'^[ \t]*<!-- pdf-page-break -->[ \t]*$',
+        r'\\newpage',
+        content,
+        flags=re.MULTILINE,
+    )
+
+
 # ----------------------------------------------------------------------
 # Orchestration
 # ----------------------------------------------------------------------
@@ -270,6 +285,9 @@ def process_file(src_path, dst_path):
 
     # Étape 5 : reformuler références à manual_order_*.txt
     content = fix_manual_order_reference(content)
+
+    # Étape 6 : convertir les marqueurs invisibles de saut de page
+    content = convert_pdf_page_breaks(content)
 
     # Écrire le résultat
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)

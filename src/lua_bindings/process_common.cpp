@@ -115,6 +115,60 @@ void close_pair(int p[2])
     }
 }
 
+bool set_terminal_foreground_group(int fd, pid_t pgid) noexcept
+{
+    sigset_t block_set;
+    ::sigemptyset(&block_set);
+    ::sigaddset(&block_set, SIGTTOU);
+
+    sigset_t old_mask;
+    const int mask_rc = ::pthread_sigmask(SIG_BLOCK, &block_set, &old_mask);
+    if (mask_rc != 0)
+    {
+        errno = mask_rc;
+        return false;
+    }
+
+    int rc = -1;
+    do
+    {
+        rc = ::tcsetpgrp(fd, pgid);
+    } while (rc != 0 && errno == EINTR);
+    const int saved_errno = errno;
+
+    const int restore_rc =
+        ::pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
+    if (rc == 0 && restore_rc != 0)
+    {
+        errno = restore_rc;
+        return false;
+    }
+
+    errno = saved_errno;
+    return rc == 0;
+}
+
+bool duplicate_terminal_fd(int &fd) noexcept
+{
+#ifdef F_DUPFD_CLOEXEC
+    fd = ::fcntl(STDIN_FILENO, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+#else
+    fd = ::fcntl(STDIN_FILENO, F_DUPFD, STDERR_FILENO + 1);
+    if (fd >= 0)
+    {
+        const int flags = ::fcntl(fd, F_GETFD);
+        if (flags < 0 || ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0)
+        {
+            const int saved = errno;
+            ::close(fd);
+            fd = -1;
+            errno = saved;
+        }
+    }
+#endif
+    return fd >= 0;
+}
+
 bool clear_nonblocking(int fd, const char *prefix, const char *label,
                        std::string &err)
 {
@@ -653,6 +707,32 @@ void close_process_fds(LaunchedProcess &process) noexcept
     close_fd(process.stderr_fd);
 }
 
+void restore_terminal(TerminalHandoff &terminal) noexcept
+{
+    if (terminal.fd >= 0)
+    {
+        bool foreground_restored = true;
+        if (terminal.active && terminal.restore_pgid > 0)
+        {
+            foreground_restored = set_terminal_foreground_group(
+                terminal.fd, terminal.restore_pgid);
+        }
+        if (foreground_restored && terminal.attributes_valid)
+        {
+            int rc = -1;
+            do
+            {
+                rc = ::tcsetattr(terminal.fd, TCSANOW,
+                                 &terminal.restore_attributes);
+            } while (rc != 0 && errno == EINTR);
+        }
+        close_fd(terminal.fd);
+    }
+    terminal.restore_pgid = -1;
+    terminal.attributes_valid = false;
+    terminal.active = false;
+}
+
 LaunchResult launch(const LaunchSpec &spec)
 {
     LaunchResult result;
@@ -683,6 +763,12 @@ LaunchResult launch(const LaunchSpec &spec)
     int pipe_out[2] = {-1, -1};
     int pipe_err[2] = {-1, -1};
     int pipe_exec[2] = {-1, -1};
+    int pipe_terminal[2] = {-1, -1};
+    int terminal_fd = -1;
+    pid_t terminal_restore_pgid = -1;
+    struct termios terminal_restore_attributes{};
+    bool terminal_attributes_valid = false;
+    bool use_terminal_handoff = false;
     int stdin_target = -1;
     int stdout_target = -1;
     int stderr_target = -1;
@@ -693,6 +779,8 @@ LaunchResult launch(const LaunchSpec &spec)
         close_pair(pipe_out);
         close_pair(pipe_err);
         close_pair(pipe_exec);
+        close_pair(pipe_terminal);
+        close_fd(terminal_fd);
         close_fd(stdin_target);
         close_fd(stdout_target);
         close_fd(stderr_target);
@@ -771,6 +859,73 @@ LaunchResult launch(const LaunchSpec &spec)
             close_prepared();
             return result;
         }
+        if (spec.stdin_redirection.kind ==
+                StreamRedirectionKind::inherit &&
+            ::isatty(STDIN_FILENO) == 1)
+        {
+            if (!duplicate_terminal_fd(terminal_fd))
+            {
+                result.error = prefixed(
+                    spec.error_prefix,
+                    std::string("cannot duplicate inherited terminal: ") +
+                        std::strerror(errno));
+                close_prepared();
+                return result;
+            }
+
+            pid_t foreground_pgid = -1;
+            do
+            {
+                foreground_pgid = ::tcgetpgrp(terminal_fd);
+            } while (foreground_pgid < 0 && errno == EINTR);
+
+            if (foreground_pgid < 0)
+            {
+                if (errno != ENOTTY)
+                {
+                    result.error = prefixed(
+                        spec.error_prefix,
+                        std::string("cannot inspect inherited terminal: ") +
+                            std::strerror(errno));
+                    close_prepared();
+                    return result;
+                }
+                close_fd(terminal_fd);
+            }
+            else if (foreground_pgid == ::getpgrp())
+            {
+                int attr_rc = -1;
+                do
+                {
+                    attr_rc = ::tcgetattr(terminal_fd,
+                                          &terminal_restore_attributes);
+                } while (attr_rc != 0 && errno == EINTR);
+                if (attr_rc != 0)
+                {
+                    result.error = prefixed(
+                        spec.error_prefix,
+                        std::string("cannot save inherited terminal state: ") +
+                            std::strerror(errno));
+                    close_prepared();
+                    return result;
+                }
+                terminal_attributes_valid = true;
+                terminal_restore_pgid = foreground_pgid;
+                use_terminal_handoff = true;
+                if (!make_stream_pipe(pipe_terminal, "terminal-handoff"))
+                {
+                    close_prepared();
+                    return result;
+                }
+            }
+            else
+            {
+                // Le lanceur est lui-même en arrière-plan : il ne doit pas
+                // voler le terminal au groupe de premier plan actuel.
+                close_fd(terminal_fd);
+            }
+        }
+
         if (!make_stream_pipe(pipe_exec, "launch-status"))
         {
             close_prepared();
@@ -789,7 +944,27 @@ LaunchResult launch(const LaunchSpec &spec)
 
         if (pid == 0)
         {
-            ::setpgid(0, 0);
+            if (::setpgid(0, 0) != 0)
+            {
+                report_launch_failure_and_exit(pipe_exec[1], errno);
+            }
+
+            if (use_terminal_handoff)
+            {
+                close_fd(pipe_terminal[1]);
+                char release = 0;
+                ssize_t received = -1;
+                do
+                {
+                    received = ::read(pipe_terminal[0], &release, 1);
+                } while (received < 0 && errno == EINTR);
+                close_fd(pipe_terminal[0]);
+                close_fd(terminal_fd);
+                if (received != 1)
+                {
+                    report_launch_failure_and_exit(pipe_exec[1], ECANCELED);
+                }
+            }
 
             auto duplicate_stream = [&](StreamRedirectionKind kind,
                                         int pipe_child_fd, int target_fd,
@@ -830,6 +1005,8 @@ LaunchResult launch(const LaunchSpec &spec)
             close_pair(pipe_in);
             close_pair(pipe_out);
             close_pair(pipe_err);
+            close_pair(pipe_terminal);
+            close_fd(terminal_fd);
             close_fd(stdin_target);
             close_fd(stdout_target);
             close_fd(stderr_target);
@@ -854,7 +1031,36 @@ LaunchResult launch(const LaunchSpec &spec)
         // remonter vers la frontière Lua. Aucun appel lua_* n'est autorisé
         // dans cette région : un longjmp contournerait le catch ci-dessous.
         process.pid = pid;
-        ::setpgid(pid, pid);
+        int setpgid_rc = -1;
+        do
+        {
+            setpgid_rc = ::setpgid(pid, pid);
+        } while (setpgid_rc != 0 && errno == EINTR);
+        if (setpgid_rc != 0)
+        {
+            const int setpgid_errno = errno;
+            pid_t actual_pgid = -1;
+            do
+            {
+                actual_pgid = ::getpgid(pid);
+            } while (actual_pgid < 0 && errno == EINTR);
+            if (actual_pgid != pid)
+            {
+                result.error = prefixed(
+                    spec.error_prefix,
+                    std::string("cannot isolate child process group: ") +
+                        std::strerror(setpgid_errno));
+                close_fd(pipe_terminal[1]);
+                close_process_fds(process);
+                close_prepared();
+                int ignored_status = 0;
+                if (terminate_and_reap(pid, ignored_status))
+                {
+                    process.pid = -1;
+                }
+                return result;
+            }
+        }
 
         close_fd(pipe_in[0]);
         close_fd(pipe_out[1]);
@@ -874,6 +1080,55 @@ LaunchResult launch(const LaunchSpec &spec)
         process.stderr_piped =
             spec.stderr_redirection.kind == StreamRedirectionKind::pipe;
 
+        if (use_terminal_handoff)
+        {
+            close_fd(pipe_terminal[0]);
+            process.terminal.fd = std::exchange(terminal_fd, -1);
+            process.terminal.restore_pgid = terminal_restore_pgid;
+            process.terminal.restore_attributes = terminal_restore_attributes;
+            process.terminal.attributes_valid = terminal_attributes_valid;
+            process.terminal.active = true;
+            if (!set_terminal_foreground_group(process.terminal.fd, pid))
+            {
+                result.error = prefixed(
+                    spec.error_prefix,
+                    std::string("cannot give terminal to child: ") +
+                        std::strerror(errno));
+                close_fd(pipe_terminal[1]);
+                close_process_fds(process);
+                int ignored_status = 0;
+                if (terminate_and_reap(pid, ignored_status))
+                {
+                    process.pid = -1;
+                }
+                restore_terminal(process.terminal);
+                close_fd(pipe_exec[0]);
+                return result;
+            }
+
+            const char release = 1;
+            const ssize_t released =
+                write_without_sigpipe(pipe_terminal[1], &release, 1);
+            const int release_errno = errno;
+            close_fd(pipe_terminal[1]);
+            if (released != 1)
+            {
+                result.error = prefixed(
+                    spec.error_prefix,
+                    std::string("cannot release interactive child: ") +
+                        std::strerror(release_errno));
+                close_process_fds(process);
+                int ignored_status = 0;
+                if (terminate_and_reap(pid, ignored_status))
+                {
+                    process.pid = -1;
+                }
+                restore_terminal(process.terminal);
+                close_fd(pipe_exec[0]);
+                return result;
+            }
+        }
+
         std::string nonblock_error;
         if (!set_nonblocking(pipe_exec[0], spec.error_prefix, "launch pipe",
                              nonblock_error))
@@ -886,6 +1141,7 @@ LaunchResult launch(const LaunchSpec &spec)
             {
                 process.pid = -1;
             }
+            restore_terminal(process.terminal);
             return result;
         }
 
@@ -968,6 +1224,7 @@ LaunchResult launch(const LaunchSpec &spec)
                 result.error +=
                     " (child could not be reaped within cleanup deadline)";
             }
+            restore_terminal(process.terminal);
             return result;
         }
 
@@ -991,6 +1248,7 @@ LaunchResult launch(const LaunchSpec &spec)
                 spec.error_prefix,
                 std::string("cannot launch '") + spec.command + "': " +
                     std::strerror(launch_errno));
+            restore_terminal(process.terminal);
             return result;
         }
 
@@ -1011,6 +1269,7 @@ LaunchResult launch(const LaunchSpec &spec)
             {
                 process.pid = -1;
             }
+            restore_terminal(process.terminal);
             return result;
         }
 
@@ -1020,6 +1279,10 @@ LaunchResult launch(const LaunchSpec &spec)
         process.stdin_fd = -1;
         process.stdout_fd = -1;
         process.stderr_fd = -1;
+        process.terminal.fd = -1;
+        process.terminal.restore_pgid = -1;
+        process.terminal.attributes_valid = false;
+        process.terminal.active = false;
         return result;
     }
     catch (...)
@@ -1047,6 +1310,7 @@ bool emergency_kill_and_reap(LaunchedProcess &process,
     close_process_fds(process);
     if (process.pid <= 0)
     {
+        restore_terminal(process.terminal);
         return true;
     }
 
@@ -1059,14 +1323,17 @@ bool emergency_kill_and_reap(LaunchedProcess &process,
         if (waited == process.pid || (waited < 0 && errno == ECHILD))
         {
             process.pid = -1;
+            restore_terminal(process.terminal);
             return true;
         }
         if (waited < 0 && errno != EINTR)
         {
+            restore_terminal(process.terminal);
             return false;
         }
         if (now_ms() >= deadline)
         {
+            restore_terminal(process.terminal);
             return false;
         }
         struct timespec pause{0, 10 * 1000 * 1000};

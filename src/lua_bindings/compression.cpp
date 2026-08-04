@@ -715,16 +715,24 @@ int lua_decompress(lua_State *L)
     return push_ok(L);
 }
 
+template <int (*Fn)(lua_State *)>
+int compression_lua_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "compression: out of memory", "compression: internal failure",
+        "compression: unknown internal failure");
+}
+
 } // namespace
 
 void register_compression(lua_State *L)
 {
     lua_newtable(L);
 
-    lua_pushcfunction(L, lua_compress);
+    lua_pushcfunction(L, compression_lua_boundary<lua_compress>);
     lua_setfield(L, -2, "compress");
 
-    lua_pushcfunction(L, lua_decompress);
+    lua_pushcfunction(L, compression_lua_boundary<lua_decompress>);
     lua_setfield(L, -2, "decompress");
 
     lua_setfield(L, -2, "compression");

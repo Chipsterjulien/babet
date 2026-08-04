@@ -2,7 +2,8 @@
 //
 // API exposée :
 //   babet.user.get(name_or_uid) -> table | (nil, err)
-//   babet.user.exists(name_or_uid) -> boolean
+//   babet.user.exists(name_or_uid) -> boolean pour les résultats NSS
+//                                  | (nil, err) sur exception C++ interne
 //
 // Détails de design :
 //
@@ -34,9 +35,11 @@
 //    Absent → (nil, "user not found")
 //    Erreur NSS → (nil, "user: <description>")
 //
-// 5. Retour de exists() : booléen strict.
+// 5. Retour ordinaire de exists() : booléen strict.
 //    Trouvé → true. Absent OU erreur NSS → false.
 //    Pour distinguer absent et erreur, utiliser get().
+//    La frontière C++ commune renvoie seulement (nil, err) si une exception
+//    C++ inattendue devait autrement traverser les frames C de Lua.
 //
 // 6. Hors scope :
 //      - /etc/shadow et mots de passe (pas dans le périmètre, et

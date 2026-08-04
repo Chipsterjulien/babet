@@ -180,6 +180,21 @@ input or output is not loaded into the Lua state or into one C++ string.
 has a 256 MiB internal memory ceiling and the zstd decoder refuses windows
 above 128 MiB.
 
+## C++ exception boundary
+
+Both public functions enter through the common Lua/C++ exception boundary.
+This does not change any ordinary result. It prevents an unexpected C++
+exception from crossing Lua's C frames:
+
+- allocation failure: `(nil, "compression: out of memory")`;
+- another standard exception: `(nil, "compression: internal failure")`;
+- unknown exception: `(nil, "compression: unknown internal failure")`.
+
+The source descriptor and unpublished output remain owned by RAII guards while
+the operation runs. If such an exception occurs, those descriptors are closed
+and the same-directory temporary output is removed before the diagnostic is
+returned.
+
 ## Workers
 
 `babet.compression` is registered in every worker Lua state. Different workers

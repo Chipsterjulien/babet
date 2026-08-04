@@ -388,6 +388,14 @@ namespace
         return 1;
     }
 
+    template <int (*Fn)(lua_State *)>
+    int user_lua_boundary(lua_State *L)
+    {
+        return lua_cfunction_exception_boundary<Fn>(
+            L, "user: out of memory", "user: internal failure",
+            "user: unknown internal failure");
+    }
+
 } // namespace
 
 void register_user(lua_State *L)
@@ -395,10 +403,10 @@ void register_user(lua_State *L)
     // Précondition : la table babet est au sommet.
     lua_newtable(L);
 
-    lua_pushcfunction(L, lua_user_get);
+    lua_pushcfunction(L, user_lua_boundary<lua_user_get>);
     lua_setfield(L, -2, "get");
 
-    lua_pushcfunction(L, lua_user_exists);
+    lua_pushcfunction(L, user_lua_boundary<lua_user_exists>);
     lua_setfield(L, -2, "exists");
 
     lua_setfield(L, -2, "user");

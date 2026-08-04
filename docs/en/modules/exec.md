@@ -777,6 +777,56 @@ assert(process:wait())
 Use this when a program should interact with the terminal or respect an
 external redirection applied to Babet itself.
 
+When `stdin = "inherit"` refers to the controlling terminal and Babet owns its
+foreground, the child keeps its separate process group but Babet transfers the
+terminal before allowing it to execute the program. The handoff is
+synchronized, so the child cannot attempt its first read as a background group
+and be stopped by `SIGTTIN`. Interactive tools such as `pacman`, `makepkg`, or
+an editor can read normally, and `Ctrl+C` is delivered to the foreground child
+group.
+
+After the child is reaped—normal exit, `terminate()`, `kill()`, `close()`, or
+automatic cleanup—Babet reclaims the foreground and restores the saved
+`termios` attributes. If inherited stdin is a pipe, file, or another
+non-terminal descriptor, no foreground-group transfer occurs and the previous
+behavior is unchanged. stdout and stderr may still be captured or redirected:
+inheriting the terminal on stdin is what enables this interactive handling.
+
+A `wait(timeout)` result of `"timeout"` does not kill the child or take the
+terminal away from it; follow with `wait()`, `terminate()`, `kill()`, or
+`close()` to complete its lifecycle cleanly.
+
+Babet does not yet provide full shell job control. If the user suspends an
+interactive child with `Ctrl+Z`, the child group remains stopped in the
+foreground. Wait methods do not request intermediate states with `WUNTRACED`,
+so an unbounded `wait()` may remain blocked until the child is resumed or
+terminated. For a command that may be suspended, use a bounded wait followed
+by `terminate()`, `kill()`, or `close()` to reclaim the terminal.
+`wait(timeout)` alone does not reclaim it.
+
+Reclamation is not triggered asynchronously at the instant the child exits. It
+happens when Babet observes that exit through `wait()` or `is_running()`, or
+during `terminate()`, `kill()`, `close()`, and automatic cleanup. Before the
+parent script reads the terminal itself again with `io.read()`, it must
+therefore reap, query, or close the interactive child:
+
+```lua
+local process <close> = assert(babet.spawn("interactive-tool", {}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+}))
+
+local result, err = process:wait(30)
+if not result and err == "timeout" then
+    result = assert(process:terminate(0.5))
+end
+assert(result, err)
+
+-- The parent group owns the terminal again here.
+local answer = io.read("*l")
+```
+
 #### `"null"`
 
 The stream is connected to `/dev/null`:

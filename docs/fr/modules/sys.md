@@ -117,9 +117,9 @@ Cette restriction évite des courses de données entre threads.
 Les quatre constantes décrivent le binaire Babet qui exécute le script.
 
 ```lua
-print(babet.VERSION)       -- par exemple "2.12.0"
+print(babet.VERSION)       -- par exemple "2.14.0"
 print(babet.VERSION_MAJOR) -- par exemple 2
-print(babet.VERSION_MINOR) -- par exemple 10
+print(babet.VERSION_MINOR) -- par exemple 14
 print(babet.VERSION_PATCH) -- par exemple 0
 ```
 
@@ -571,6 +571,15 @@ Pour mesurer la mémoire globale du processus, utilise un outil système comme
 | `setenv` invalide ou refusé après un worker | `(nil, err)` |
 | `pid` | toujours un integer |
 | fonctions mémoire | toujours un ou deux integers après un GC complet |
+
+Une exception C++ inattendue dans `which`, `env`, `setenv`, `hostname`, `uname`
+ou `pid` est arrêtée par la frontière commune et devient
+`(nil, "sys: out of memory")`, `(nil, "sys: internal failure")` ou
+`(nil, "sys: unknown internal failure")`.
+
+Il s’agit d’une frontière de sûreté interne, pas d’un nouvel état runtime
+attendu. Le retour ordinaire d’une variable `env` absente reste un seul `nil`,
+et `pid` reste un seul integer.
 
 Exemple de traitement d'un échec runtime :
 
