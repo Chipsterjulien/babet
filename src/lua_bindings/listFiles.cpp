@@ -1,22 +1,20 @@
 #include "listFiles.hpp"
 #include "lua_utils.hpp"
-#include <iostream>
-#include <system_error>
-#include <optional>
+
+#include <climits>
 #include <filesystem>
+#include <new>
+#include <optional>
+#include <string>
+#include <system_error>
+#include <vector>
 
-namespace fs = std::filesystem; // Alias pour std::filesystem
+namespace fs = std::filesystem;
 
+namespace
+{
 using optional_string = std::optional<std::string>;
 
-/**
- * @brief Check if the directory path is valid.
- *
- * This function checks if the provided path exists and is a directory.
- *
- * @param path The directory path to check.
- * @return std::optional<std::string> An error message if the path is invalid, or std::nullopt if valid.
- */
 optional_string validate_directory_path(const fs::path &path)
 {
     std::error_code ec;
@@ -27,16 +25,10 @@ optional_string validate_directory_path(const fs::path &path)
     return std::nullopt;
 }
 
-/**
- * Auxiliary function to list files.
- * @param L The Lua state.
- * @param basePath The base directory path.
- * @param path The current directory path.
- * @param index The index for the Lua table.
- * @param recursive Whether to list files recursively.
- * @return std::optional<std::string> An error message if an error occurs, or std::nullopt if successful.
- */
-optional_string listFilesHelper(lua_State *L, const fs::path &basePath, const fs::path &path, int &index, bool recursive)
+optional_string list_files_helper(const fs::path &base_path,
+                                  const fs::path &path,
+                                  std::vector<std::string> &results,
+                                  bool recursive)
 {
     try
     {
@@ -44,38 +36,27 @@ optional_string listFilesHelper(lua_State *L, const fs::path &basePath, const fs
         {
             if (fs::is_regular_file(entry))
             {
-                lua_pushnumber(L, index++);
-                // CORRECTIF (audit v21) : PURE lexical, pas fs::relative —
-                // même famille de bug que copyTree/moveTree/zip_utils.
-                // fs::relative canonicalise les deux chemins et RÉSOUT
-                // donc les symlinks : un lien lst/link.txt -> ../out.txt
-                // était listé "../out.txt" (chemin de la CIBLE, sortant
-                // du dossier listé) au lieu de "link.txt" (sa position).
-                // L'itérateur fournit path = basePath/... littéral :
-                // lexically_relative rend la structure exacte.
-                lua_pushstring(L, entry.path().lexically_relative(basePath).string().c_str());
-                lua_settable(L, -3);
+                // Purement lexical : ne résout pas les symlinks et conserve
+                // leur position dans l'arbre parcouru.
+                results.push_back(
+                    entry.path().lexically_relative(base_path).string());
             }
-            // CORRECTIF (revue ChatGPT post-audit v21, vérifié) : ne
-            // JAMAIS récurser dans un symlink de dossier.
-            // fs::is_directory(entry) SUIT les liens : un lien vers un
-            // dossier extérieur faisait sortir la récursion de l'arbre
-            // listé, et une boucle de liens (a/loop -> a) récursait
-            // jusqu'à ENAMETOOLONG (erreur absconse) au lieu d'un
-            // listing normal. Aligné sur find et sur le défaut de
-            // recursive_directory_iterator : les symlinks de dossiers
-            // ne sont pas suivis (le lien lui-même n'est pas un
-            // fichier régulier, il n'apparaît donc pas non plus dans
-            // le listing — comportement inchangé sur ce point).
-            if (recursive && fs::is_directory(entry) &&
-                !entry.is_symlink())
+
+            // Ne jamais suivre un symlink de dossier : cela empêcherait les
+            // sorties d'arbre et les boucles de liens.
+            if (recursive && fs::is_directory(entry) && !entry.is_symlink())
             {
-                if (auto error = listFilesHelper(L, basePath, entry.path(), index, recursive); error)
+                if (auto error = list_files_helper(base_path, entry.path(),
+                                                   results, recursive))
                 {
                     return error;
                 }
             }
         }
+    }
+    catch (const std::bad_alloc &)
+    {
+        throw;
     }
     catch (const fs::filesystem_error &e)
     {
@@ -84,15 +65,7 @@ optional_string listFilesHelper(lua_State *L, const fs::path &basePath, const fs
     return std::nullopt;
 }
 
-/**
- * Lua binding for listing files in a directory.
- * @param L The Lua state.
- * @return Number of return values (2: table of files and error message or nil).
- * Lua usage: files, err = lua_listFiles(path, recursive)
- *   - path: The directory path to list files from.
- *   - recursive (optional): Whether to list files recursively. Defaults to false.
- */
-int lua_listFiles(lua_State *L)
+int lua_listFiles_impl(lua_State *L)
 {
     if (!lua_arity_between(L, 1, 2))
     {
@@ -111,25 +84,44 @@ int lua_listFiles(lua_State *L)
     const bool recursive = lua_is_strict_boolean(L, 2) &&
                            lua_toboolean(L, 2);
 
-    // Validate the directory path
-    fs::path canonical_path(path);
-    if (auto error = validate_directory_path(canonical_path); error)
+    const fs::path base_path(path);
+    if (auto error = validate_directory_path(base_path))
     {
-        lua_pushnil(L);
-        lua_pushstring(L, error->c_str());
-        return 2; // Return nil and error message
+        return push_fail_protected(L, *error);
     }
 
-    lua_newtable(L); // Create a new table on the Lua stack
-
-    int index = 1; // Initialize the index for the Lua table
-    if (auto error = listFilesHelper(L, canonical_path, canonical_path, index, recursive); error)
+    // Le parcours et tous ses itérateurs sont détruits avant la première
+    // allocation Lua. Un LUA_ERRMEM pendant la construction de la table ne
+    // peut donc plus sauter par-dessus un directory_iterator ou un string.
+    std::vector<std::string> results;
+    if (auto error = list_files_helper(base_path, base_path, results,
+                                       recursive))
     {
-        lua_pushnil(L);
-        lua_pushstring(L, error->c_str());
-        return 2; // Return nil and the error message
+        return push_fail_protected(L, *error);
     }
 
-    lua_pushnil(L); // No error
-    return 2;       // Return the table of files and nil (no error)
+    auto builder = [&results](lua_State *Ls) noexcept -> int
+    {
+        const int array_hint = results.size() <= static_cast<std::size_t>(INT_MAX)
+                                   ? static_cast<int>(results.size())
+                                   : 0;
+        lua_createtable(Ls, array_hint, 0);
+        lua_Integer index = 1;
+        for (const std::string &relative_path : results)
+        {
+            lua_pushlstring(Ls, relative_path.data(), relative_path.size());
+            lua_rawseti(Ls, -2, index++);
+        }
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, builder, 2);
+}
+} // namespace
+
+int lua_listFiles(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<lua_listFiles_impl>(
+        L, "listFiles: out of memory", "listFiles: internal failure",
+        "listFiles: unknown internal failure");
 }

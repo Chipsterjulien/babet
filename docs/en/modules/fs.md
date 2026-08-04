@@ -672,10 +672,15 @@ accepts exactly one or two arguments.
 <a id="createfileiterator"></a>
 ### `babet.createFileIterator(path, recursive?)`
 
-Creates a userdata with two methods:
+Creates a genuinely lazy userdata with two methods:
 
-- `iterator:next()` — next path, or `nil` at end;
-- `iterator:close()` — explicitly releases the iterator.
+- `iterator:next()` — `(path, nil)`, `(nil, err)`, or `(nil, nil)` at end;
+- `iterator:close()` — explicitly releases the native iterator.
+
+Only the directory iterator itself is created initially. The tree is advanced
+one entry at a time by `next()`, so a large hierarchy is not copied into a
+`std::vector` before the first result and memory use no longer grows with the
+complete number of files.
 
 #### Non-recursive
 
@@ -684,7 +689,8 @@ local iterator, err = babet.createFileIterator("assets")
 assert(iterator, err)
 
 while true do
-    local path = iterator:next()
+    local path, next_err = iterator:next()
+    assert(not next_err, next_err)
     if path == nil then
         break
     end
@@ -699,29 +705,32 @@ iterator:close()
 ```lua
 local iterator = assert(babet.createFileIterator("assets", true))
 while true do
-    local path = iterator:next()
+    local path, next_err = iterator:next()
+    assert(not next_err, next_err)
     if not path then break end
     print(path)
 end
 iterator:close()
 ```
 
-Despite its name, the current implementation builds the complete list during
-`createFileIterator`. Access and traversal failures are therefore returned at
-creation time, before the first `next()` call.
+Opening the root can still fail immediately and returns `(nil, err)`. Errors
+encountered later while inspecting or advancing the directory are deferred to
+the corresponding `next()` call as `(nil, err)`. End of iteration is the
+distinct result `(nil, nil)`.
 
 Symlink behavior:
 
 - valid link to a regular file: included under the link path;
 - dangling link, loop, or inaccessible target: skipped;
 - link to a directory: not traversed;
-- genuine entry-inspection or traversal-increment error: creation fails with
-  `(nil, err)`.
+- genuine entry-inspection or traversal-increment error: reported by `next()`.
 
-Calling `next()` after `close()` raises a Lua error. Omitting `close()` is not
-fatal: the garbage collector eventually releases the object. The optional
-`recursive` argument must be a strict Lua boolean, and the constructor accepts
-exactly one or two arguments.
+Existing code that reads only the first return value remains compatible, but it
+cannot distinguish end of iteration from a deferred traversal error; new code
+should always inspect the second result. Calling `next()` after `close()` raises
+a Lua error. Omitting `close()` is not fatal: the garbage collector eventually
+releases the object. The optional `recursive` argument must be a strict Lua
+boolean, and the constructor accepts exactly one or two arguments.
 
 <a id="find"></a>
 ### `babet.find(path, opts?)`

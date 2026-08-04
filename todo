@@ -106,16 +106,19 @@ Babet 2.14.0 remaining Lua/C++ exception boundaries
     contract in French and English.
 [x] Synchronise French/English documentation and release metadata.
 
-Next planned release: 2.15.0 Lua longjmp / C++ RAII audit.
+Babet 2.15.0 Lua longjmp / C++ RAII audit
 
-[ ] Inventory allocating Lua API calls made while binding-owned C++ RAII
+[x] Inventory allocating Lua API calls made while binding-owned C++ RAII
     objects are alive.
-[ ] Audit local exception handling in socket, SQLite, archive and the remaining
+[x] Audit local exception handling in socket, SQLite, archive and the remaining
     public modules before deciding whether any common-boundary migration is
     appropriate.
-[ ] Add focused tests before changing cleanup or boundary structure.
+[x] Add focused tests before changing cleanup or boundary structure.
+[x] Close the remaining process/pipeline registrations, structured userdata
+    construction, and resource-owning finalizers identified by the final
+    external audit.
 
-Following planned release: 2.16.0 process terminal lifecycle and job-control audit.
+Next planned release: 2.16.0 process terminal lifecycle and job-control audit.
 
 [ ] Inventory stopped/continued child states and the consequences of adding
     WUNTRACED/WCONTINUED without changing the existing result contract blindly.

@@ -1440,7 +1440,7 @@ bool validate_entry_path(const std::string &name, EntryKind kind,
     return true;
 }
 
-std::string entry_kind_name(EntryKind kind)
+std::string_view entry_kind_name(EntryKind kind) noexcept
 {
     switch (kind)
     {
@@ -1466,7 +1466,7 @@ std::string entry_kind_name(EntryKind kind)
     return "unsupported";
 }
 
-std::string extraction_rejection_reason(const ArchiveEntry &entry)
+std::string_view extraction_rejection_reason(const ArchiveEntry &entry) noexcept
 {
     if (!entry.safe_path)
     {
@@ -1940,11 +1940,11 @@ bool validate_selected_entries(const std::vector<const ArchiveEntry *> &entries,
 
     for (const ArchiveEntry *entry : entries)
     {
-        const std::string rejection = extraction_rejection_reason(*entry);
+        const std::string_view rejection = extraction_rejection_reason(*entry);
         if (!rejection.empty())
         {
-            err = "archive: entry '" + entry->name + "' cannot be extracted: " +
-                  rejection;
+            err = "archive: entry '" + entry->name + "' cannot be extracted: ";
+            err.append(rejection.data(), rejection.size());
             return false;
         }
 
@@ -5021,29 +5021,45 @@ int lua_archive_create(lua_State *L)
     {
         if (legacy_source_view.empty())
         {
-            return push_fail(L, "archive: source directory must not be empty");
+            return push_fail_protected(L, "archive: source directory must not be empty");
         }
         source_paths.emplace_back(std::string(legacy_source_view));
     }
-    else if (!collect_explicit_create_sources(L, 1, source_paths, err))
+    else
     {
-        return push_fail(L, err);
+        bool sources_ok = false;
+        auto source_parser = [&](lua_State *Ls)
+        {
+            sources_ok = collect_explicit_create_sources(
+                Ls, 1, source_paths, err);
+        };
+        lua_run_protected(L, source_parser);
+        if (!sources_ok)
+        {
+            return push_fail_protected(L, err);
+        }
     }
 
     ArchiveCreateOptions options;
-    if (!collect_create_options(L, 3, options, err))
+    bool create_options_ok = false;
+    auto create_options_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        create_options_ok = collect_create_options(Ls, 3, options, err);
+    };
+    lua_run_protected(L, create_options_parser);
+    if (!create_options_ok)
+    {
+        return push_fail_protected(L, err);
     }
     if (destination_view.empty())
     {
-        return push_fail(L, "archive: archive destination must not be empty");
+        return push_fail_protected(L, "archive: archive destination must not be empty");
     }
 
     const fs::path destination{std::string(destination_view)};
     if (!resolve_create_format(destination, options, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     std::vector<ScopedFd> source_roots;
@@ -5059,11 +5075,11 @@ int lua_archive_create(lua_State *L)
         if (!path_is_within(destination, source_paths[0],
                             destination_inside_source, err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         if (destination_inside_source)
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "archive: archive destination must not be inside the source directory");
         }
 
@@ -5071,7 +5087,7 @@ int lua_archive_create(lua_State *L)
         if (!open_directory_without_symlinks(source_paths[0], source_fd,
                                              "source directory", err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         source_roots.push_back(std::move(source_fd));
         bool selected_any = false;
@@ -5080,7 +5096,7 @@ int lua_archive_create(lua_State *L)
                                    total_size, total_name_bytes, scanned_nodes,
                                    selected_any, err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
     else
@@ -5092,7 +5108,7 @@ int lua_archive_create(lua_State *L)
         {
             if (scanned_nodes >= HARD_MAX_SCANNED_SOURCE_NODES)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: source list exceeds the internal 100000-node scan limit");
             }
             ++scanned_nodes;
@@ -5103,11 +5119,11 @@ int lua_archive_create(lua_State *L)
                                                 normalized_source,
                                                 archive_root, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             if (!top_level_names.insert(archive_root).second)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: explicit sources have a colliding top-level name: '" +
                            archive_root + "'");
             }
@@ -5116,11 +5132,11 @@ int lua_archive_create(lua_State *L)
             if (!path_is_within(destination, normalized_source,
                                 destination_inside_source, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             if (destination_inside_source)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: archive destination must not be inside an explicit source");
             }
 
@@ -5134,20 +5150,20 @@ int lua_archive_create(lua_State *L)
             if (!open_directory_without_symlinks(parent, parent_fd,
                                                  "explicit source parent", err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             struct stat st{};
             if (::fstatat(parent_fd.get(), leaf.c_str(), &st,
                           AT_SYMLINK_NOFOLLOW) != 0)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: cannot inspect explicit source '" +
                            normalized_source.string() + "': " +
                            std::strerror(errno));
             }
             if (S_ISLNK(st.st_mode))
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: explicit source must not be a symlink: '" +
                            normalized_source.string() + "'");
             }
@@ -5160,7 +5176,7 @@ int lua_archive_create(lua_State *L)
                 if (!classify_create_path(options, fs::path(archive_root),
                                           false, filter_decision, err))
                 {
-                    return push_fail(L, err);
+                    return push_fail_protected(L, err);
                 }
                 if (filter_decision == ArchiveFilterDecision::included &&
                     !append_create_entry(fs::path(archive_root),
@@ -5169,13 +5185,13 @@ int lua_archive_create(lua_State *L)
                                          entries, total_size,
                                          total_name_bytes, err))
                 {
-                    return push_fail(L, err);
+                    return push_fail_protected(L, err);
                 }
                 continue;
             }
             if (!S_ISDIR(st.st_mode))
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: unsupported explicit source type: '" +
                            normalized_source.string() + "'");
             }
@@ -5185,7 +5201,7 @@ int lua_archive_create(lua_State *L)
                 O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
             if (directory_fd.get() < 0)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: cannot securely open explicit source directory '" +
                            normalized_source.string() + "': " +
                            std::strerror(errno));
@@ -5196,7 +5212,7 @@ int lua_archive_create(lua_State *L)
                 opened_directory.st_dev != st.st_dev ||
                 opened_directory.st_ino != st.st_ino)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: explicit source directory changed while being opened: '" +
                            normalized_source.string() + "'");
             }
@@ -5206,7 +5222,7 @@ int lua_archive_create(lua_State *L)
             if (!classify_create_path(options, fs::path(archive_root), true,
                                       root_filter, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             if (root_filter == ArchiveFilterDecision::excluded)
             {
@@ -5220,7 +5236,7 @@ int lua_archive_create(lua_State *L)
                     total_name_bytes, scanned_nodes, descendants_selected,
                     err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             if (options.include_directories &&
                 (root_filter == ArchiveFilterDecision::included ||
@@ -5230,7 +5246,7 @@ int lua_archive_create(lua_State *L)
                                      st, options, entries, total_size,
                                      total_name_bytes, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
         }
     }
@@ -5243,7 +5259,7 @@ int lua_archive_create(lua_State *L)
               });
     if (!create_entries_have_unique_names(entries, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     MZ_TIME_T fixed_time{};
@@ -5254,7 +5270,7 @@ int lua_archive_create(lua_State *L)
         {
             if (!fixed_deterministic_time(fixed_time, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
         }
         else
@@ -5263,7 +5279,7 @@ int lua_archive_create(lua_State *L)
             {
                 if (!validate_source_zip_timestamp(entry, err))
                 {
-                    return push_fail(L, err);
+                    return push_fail_protected(L, err);
                 }
             }
         }
@@ -5273,7 +5289,7 @@ int lua_archive_create(lua_State *L)
     AtomicArchiveOutput output;
     if (!output.open(destination, options.overwrite, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     std::uint64_t files = 0;
@@ -5302,7 +5318,7 @@ int lua_archive_create(lua_State *L)
                 tar_compression, options.compression_level,
                 options.deterministic, tar_source, err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         for (const CreateEntry &entry : entries)
         {
@@ -5321,7 +5337,7 @@ int lua_archive_create(lua_State *L)
         const int stream_fd = ::dup(output.fd());
         if (stream_fd < 0)
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "archive: cannot duplicate temporary archive descriptor: " +
                        std::string(std::strerror(errno)));
         }
@@ -5330,7 +5346,7 @@ int lua_archive_create(lua_State *L)
         {
             const int e = errno;
             ::close(stream_fd);
-            return push_fail(
+            return push_fail_protected(
                 L, "archive: cannot open temporary archive stream: " +
                        std::string(std::strerror(e)));
         }
@@ -5338,7 +5354,7 @@ int lua_archive_create(lua_State *L)
         ArchiveWriter writer;
         if (!writer.init(output_file.get(), write_zip64, err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         for (const CreateEntry &entry : entries)
         {
@@ -5352,7 +5368,7 @@ int lua_archive_create(lua_State *L)
                         : static_cast<MZ_TIME_T>(entry.modified.tv_sec);
                 if (!writer.add_directory(archive_name, &timestamp, err))
                 {
-                    return push_fail(L, err);
+                    return push_fail_protected(L, err);
                 }
                 ++directories;
                 continue;
@@ -5361,12 +5377,12 @@ int lua_archive_create(lua_State *L)
             ScopedFd input_fd;
             if (!open_source_entry(source_roots, entry, input_fd, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             const int file_stream_fd = ::dup(input_fd.get());
             if (file_stream_fd < 0)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: cannot duplicate source file descriptor: " +
                            std::string(std::strerror(errno)));
             }
@@ -5375,7 +5391,7 @@ int lua_archive_create(lua_State *L)
             {
                 const int e = errno;
                 ::close(file_stream_fd);
-                return push_fail(
+                return push_fail_protected(
                     L, "archive: cannot open source file stream: " +
                            std::string(std::strerror(e)));
             }
@@ -5387,17 +5403,17 @@ int lua_archive_create(lua_State *L)
                                  &timestamp, options.compression_level, err) ||
                 !source_file_unchanged(input_fd.get(), entry, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             ++files;
         }
         if (!writer.finalize_and_end(err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         if (std::fflush(output_file.get()) != 0)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "archive: cannot flush temporary archive: " +
                                  std::string(std::strerror(errno)));
         }
@@ -5405,56 +5421,56 @@ int lua_archive_create(lua_State *L)
 
     if (!output.publish(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
-    lua_newtable(L);
-    push_u64(L, files);
-    lua_setfield(L, -2, "files");
-    push_u64(L, directories);
-    lua_setfield(L, -2, "directories");
-    push_u64(L, total_size);
-    lua_setfield(L, -2, "bytes");
-    push_u64(L, source_paths.size());
-    lua_setfield(L, -2, "sources");
-    lua_pushlstring(L, destination_view.data(), destination_view.size());
-    lua_setfield(L, -2, "path");
-    lua_pushstring(L, options.format == CreateArchiveFormat::zip ? "zip"
-                                                                  : "tar");
-    lua_setfield(L, -2, "format");
-    lua_pushstring(L, options.format == CreateArchiveFormat::tar_gzip
-                          ? "gzip"
-                          : options.format == CreateArchiveFormat::tar_xz
-                                ? "xz"
-                                : options.format ==
-                                          CreateArchiveFormat::tar_bzip2
-                                      ? "bzip2"
-                                      : options.format ==
-                                                CreateArchiveFormat::tar_zstd
-                                            ? "zstd"
-                                            : "none");
-    lua_setfield(L, -2, "compression");
-    if (options.format == CreateArchiveFormat::zip ||
-        options.format == CreateArchiveFormat::tar_gzip ||
-        options.format == CreateArchiveFormat::tar_xz ||
-        options.format == CreateArchiveFormat::tar_bzip2 ||
-        options.format == CreateArchiveFormat::tar_zstd)
+    auto result_builder = [&](lua_State *Ls) noexcept -> int
     {
-        lua_pushinteger(L, options.compression_level);
-    }
-    else
-    {
-        lua_pushnil(L);
-    }
-    lua_setfield(L, -2, "compression_level");
-    lua_pushboolean(L, options.deterministic);
-    lua_setfield(L, -2, "deterministic");
-    push_u64(L, options.filters.include_patterns.size());
-    lua_setfield(L, -2, "include_patterns");
-    push_u64(L, options.filters.exclude_patterns.size());
-    lua_setfield(L, -2, "exclude_patterns");
-    lua_pushnil(L);
-    return 2;
+        lua_newtable(Ls);
+        push_u64(Ls, files);
+        lua_setfield(Ls, -2, "files");
+        push_u64(Ls, directories);
+        lua_setfield(Ls, -2, "directories");
+        push_u64(Ls, total_size);
+        lua_setfield(Ls, -2, "bytes");
+        push_u64(Ls, source_paths.size());
+        lua_setfield(Ls, -2, "sources");
+        lua_pushlstring(Ls, destination_view.data(), destination_view.size());
+        lua_setfield(Ls, -2, "path");
+        lua_pushstring(Ls, options.format == CreateArchiveFormat::zip ? "zip"
+                                                                       : "tar");
+        lua_setfield(Ls, -2, "format");
+        lua_pushstring(Ls, options.format == CreateArchiveFormat::tar_gzip
+                               ? "gzip"
+                               : options.format == CreateArchiveFormat::tar_xz
+                                     ? "xz"
+                                     : options.format ==
+                                               CreateArchiveFormat::tar_bzip2
+                                           ? "bzip2"
+                                           : options.format ==
+                                                     CreateArchiveFormat::tar_zstd
+                                                 ? "zstd"
+                                                 : "none");
+        lua_setfield(Ls, -2, "compression");
+        if (options.format == CreateArchiveFormat::zip ||
+            options.format == CreateArchiveFormat::tar_gzip ||
+            options.format == CreateArchiveFormat::tar_xz ||
+            options.format == CreateArchiveFormat::tar_bzip2 ||
+            options.format == CreateArchiveFormat::tar_zstd)
+            lua_pushinteger(Ls, options.compression_level);
+        else
+            lua_pushnil(Ls);
+        lua_setfield(Ls, -2, "compression_level");
+        lua_pushboolean(Ls, options.deterministic);
+        lua_setfield(Ls, -2, "deterministic");
+        push_u64(Ls, options.filters.include_patterns.size());
+        lua_setfield(Ls, -2, "include_patterns");
+        push_u64(Ls, options.filters.exclude_patterns.size());
+        lua_setfield(Ls, -2, "exclude_patterns");
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, result_builder, 2);
 }
 
 mode_t file_mode_for_entry(const ArchiveEntry &entry,
@@ -5513,7 +5529,7 @@ void push_list_result(lua_State *L, const ArchiveScan &scan)
         lua_setfield(L, -2, "path");
         lua_pushboolean(L, entry.valid_utf8);
         lua_setfield(L, -2, "valid_utf8");
-        const std::string type = entry_kind_name(entry.kind);
+        const std::string_view type = entry_kind_name(entry.kind);
         lua_pushlstring(L, type.data(), type.size());
         lua_setfield(L, -2, "type");
         push_u64(L, entry.size);
@@ -5551,7 +5567,7 @@ void push_list_result(lua_State *L, const ArchiveScan &scan)
         lua_setfield(L, -2, "supported");
         lua_pushboolean(L, entry.safe_path);
         lua_setfield(L, -2, "safe_path");
-        const std::string rejection = extraction_rejection_reason(entry);
+        const std::string_view rejection = extraction_rejection_reason(entry);
         lua_pushboolean(L, rejection.empty());
         lua_setfield(L, -2, "extractable");
         if (rejection.empty())
@@ -5799,24 +5815,35 @@ int lua_archive_list(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 2, ArchiveOptionMode::inspect, options, err))
+    bool options_ok = false;
+    auto options_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        options_ok = collect_options(
+            Ls, 2, ArchiveOptionMode::inspect, options, err);
+    };
+    lua_run_protected(L, options_parser);
+    if (!options_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     ArchiveScan scan;
     if (!scan_archive_for_list(archive_path, options, scan, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     if (!annotate_list_conflicts(scan, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
-    push_list_result(L, scan);
-    lua_pushnil(L);
-    return 2;
+    auto result_builder = [&scan](lua_State *Ls) noexcept -> int
+    {
+        push_list_result(Ls, scan);
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, result_builder, 2);
 }
 
 int lua_archive_test(lua_State *L)
@@ -5830,15 +5857,22 @@ int lua_archive_test(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 2, ArchiveOptionMode::inspect, options, err))
+    bool options_ok = false;
+    auto options_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        options_ok = collect_options(
+            Ls, 2, ArchiveOptionMode::inspect, options, err);
+    };
+    lua_run_protected(L, options_parser);
+    if (!options_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     PinnedArchiveSource source;
     if (!source.open(archive_path, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     ArchiveReader zip_reader;
@@ -5849,13 +5883,13 @@ int lua_archive_test(lua_State *L)
         const int zip_fd = source.duplicate_rewound(err);
         if (zip_fd < 0)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         if (zip_reader.open_fd(zip_fd, archive_path, zip_error))
         {
             if (!scan_zip_archive(zip_reader, options, scan, zip_error))
             {
-                return push_fail(L, zip_error);
+                return push_fail_protected(L, zip_error);
             }
             zip_backend = true;
         }
@@ -5865,7 +5899,7 @@ int lua_archive_test(lua_State *L)
     {
         if (!verify_zip_payloads(zip_reader, scan, err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
     else
@@ -5876,18 +5910,22 @@ int lua_archive_test(lua_State *L)
             err = "archive: unsupported or malformed archive '" +
                   archive_path + "' (ZIP: " + zip_error + "; TAR: " +
                   tar_error + ")";
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
     if (!validate_test_safety(scan, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
-    push_test_result(L, scan);
-    lua_pushnil(L);
-    return 2;
+    auto result_builder = [&scan](lua_State *Ls) noexcept -> int
+    {
+        push_test_result(Ls, scan);
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, result_builder, 2);
 }
 
 struct ArchiveReadSelector
@@ -6148,15 +6186,22 @@ int lua_archive_read(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 3, ArchiveOptionMode::read, options, err))
+    bool options_ok = false;
+    auto options_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        options_ok = collect_options(
+            Ls, 3, ArchiveOptionMode::read, options, err);
+    };
+    lua_run_protected(L, options_parser);
+    if (!options_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     PinnedArchiveSource source;
     if (!source.open(archive_path, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     ArchiveReader zip_reader;
@@ -6168,13 +6213,13 @@ int lua_archive_read(lua_State *L)
         const int zip_fd = source.duplicate_rewound(err);
         if (zip_fd < 0)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         if (zip_reader.open_fd(zip_fd, archive_path, zip_error))
         {
             if (!scan_zip_archive(zip_reader, options, scan, zip_error))
             {
-                return push_fail(L, zip_error);
+                return push_fail_protected(L, zip_error);
             }
             zip_backend = true;
         }
@@ -6187,7 +6232,7 @@ int lua_archive_read(lua_State *L)
             err = "archive: unsupported or malformed archive '" +
                   archive_path + "' (ZIP: " + zip_error + "; TAR: " +
                   tar_error + ")";
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
@@ -6196,7 +6241,7 @@ int lua_archive_read(lua_State *L)
     if (!select_read_entry(scan, selector, selected, selected_index, err) ||
         !validate_read_entry(*selected, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     if (selected->size > options.read_max_size)
     {
@@ -6204,7 +6249,7 @@ int lua_archive_read(lua_State *L)
               "' exceeds opts.max_size (" +
               std::to_string(selected->size) + " > " +
               std::to_string(options.read_max_size) + ")";
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     std::string data(static_cast<std::size_t>(selected->size), '\0');
@@ -6235,7 +6280,7 @@ int lua_archive_read(lua_State *L)
                 err = miniz_error(zip_reader.zip(),
                                   "cannot read ZIP entry", selected->name);
             }
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
     else
@@ -6243,7 +6288,7 @@ int lua_archive_read(lua_State *L)
         const int tar_fd = source.duplicate_rewound(err);
         if (tar_fd < 0)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         const babet::archive_tar::ScanLimits limits{
             .max_entries = options.max_entries,
@@ -6265,34 +6310,19 @@ int lua_archive_read(lua_State *L)
             {
                 err = "archive: selected TAR entry was not fully read";
             }
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
-    lua_pushlstring(L, data.data(), data.size());
-    lua_pushnil(L);
-    return 2;
+    return push_string_result_protected(L, data);
 }
 
 template <int (*Fn)(lua_State *)>
 int archive_lua_boundary(lua_State *L)
 {
-    try
-    {
-        return Fn(L);
-    }
-    catch (const std::bad_alloc &)
-    {
-        return push_fail(L, "archive: out of memory");
-    }
-    catch (const std::exception &)
-    {
-        return push_fail(L, "archive: internal failure");
-    }
-    catch (...)
-    {
-        return push_fail(L, "archive: unknown internal failure");
-    }
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "archive: out of memory", "archive: internal C++ failure",
+        "archive: unknown internal C++ failure");
 }
 
 struct ExtractSelection
@@ -6522,7 +6552,7 @@ int lua_archive_extract(lua_State *L)
         luaL_checkstring_view_without_nul(L, 2, "destination");
     if (destination_view.empty())
     {
-        return push_fail(L, "archive: destination must not be empty");
+        return push_fail_protected(L, "archive: destination must not be empty");
     }
 
     const std::string archive_path(archive_path_view);
@@ -6530,16 +6560,22 @@ int lua_archive_extract(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 3, ArchiveOptionMode::selective_extract,
-                         options, err))
+    bool options_ok = false;
+    auto options_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        options_ok = collect_options(
+            Ls, 3, ArchiveOptionMode::selective_extract, options, err);
+    };
+    lua_run_protected(L, options_parser);
+    if (!options_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     PinnedArchiveSource source;
     if (!source.open(archive_path, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     ArchiveReader zip_reader;
@@ -6551,13 +6587,13 @@ int lua_archive_extract(lua_State *L)
         const int zip_fd = source.duplicate_rewound(err);
         if (zip_fd < 0)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         if (zip_reader.open_fd(zip_fd, archive_path, zip_error))
         {
             if (!scan_zip_archive(zip_reader, options, scan, zip_error))
             {
-                return push_fail(L, zip_error);
+                return push_fail_protected(L, zip_error);
             }
             zip_backend = true;
         }
@@ -6571,7 +6607,7 @@ int lua_archive_extract(lua_State *L)
             err = "archive: unsupported or malformed archive '" +
                   archive_path + "' (ZIP: " + zip_error + "; TAR: " +
                   tar_error + ")";
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
@@ -6579,16 +6615,20 @@ int lua_archive_extract(lua_State *L)
     if (!build_extract_selection(scan, options, selection, err) ||
         !validate_selected_entries(selection.entries, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     if (options.filters.active() && selection.entries.empty())
     {
         ExtractPreview preview;
-        push_extract_result(L, destination, 0, 0, 0, selection.skipped, 0,
-                            options.dry_run ? &preview : nullptr);
-        lua_pushnil(L);
-        return 2;
+        auto result_builder = [&](lua_State *Ls) noexcept -> int
+        {
+            push_extract_result(Ls, destination, 0, 0, 0, selection.skipped, 0,
+                                options.dry_run ? &preview : nullptr);
+            lua_pushnil(Ls);
+            return 2;
+        };
+        return lua_build_results_protected(L, result_builder, 2);
     }
 
     const std::vector<const ArchiveEntry *> &selected = selection.entries;
@@ -6611,7 +6651,7 @@ int lua_archive_extract(lua_State *L)
     SecureArchiveDestination output;
     if (!output.open_root(destination, !options.dry_run, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     ExtractPreview preview;
@@ -6624,7 +6664,7 @@ int lua_archive_extract(lua_State *L)
                               options.overwrite, err,
                               options.dry_run ? &action : nullptr))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         if (options.dry_run)
         {
@@ -6649,7 +6689,7 @@ int lua_archive_extract(lua_State *L)
         {
             if (!verify_selected_zip_payloads(zip_reader, selected, err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
         }
         else
@@ -6657,7 +6697,7 @@ int lua_archive_extract(lua_State *L)
             const int tar_fd = source.duplicate_rewound(err);
             if (tar_fd < 0)
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
             const babet::archive_tar::ScanLimits limits{
                 .max_entries = options.max_entries,
@@ -6674,14 +6714,18 @@ int lua_archive_extract(lua_State *L)
             ::close(tar_fd);
             if (!verified)
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
         }
 
-        push_extract_result(L, destination, selected.size(), files,
-                            directories, selection.skipped, bytes, &preview);
-        lua_pushnil(L);
-        return 2;
+        auto result_builder = [&](lua_State *Ls) noexcept -> int
+        {
+            push_extract_result(Ls, destination, selected.size(), files,
+                                directories, selection.skipped, bytes, &preview);
+            lua_pushnil(Ls);
+            return 2;
+        };
+        return lua_build_results_protected(L, result_builder, 2);
     }
 
     for (const ArchiveEntry *entry : selected)
@@ -6694,7 +6738,7 @@ int lua_archive_extract(lua_State *L)
                 fs::path(entry->normalized),
                 directory_mode_for_entry(*entry, options), err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
@@ -6709,7 +6753,7 @@ int lua_archive_extract(lua_State *L)
             if (!output.stage_file(zip_reader.zip(), *entry,
                                    file_mode_for_entry(*entry, options), err))
             {
-                return push_fail(L, err);
+                return push_fail_protected(L, err);
             }
         }
     }
@@ -6718,7 +6762,7 @@ int lua_archive_extract(lua_State *L)
         const int tar_fd = source.duplicate_rewound(err);
         if (tar_fd < 0)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         const babet::archive_tar::ScanLimits limits{
             .max_entries = options.max_entries,
@@ -6736,21 +6780,25 @@ int lua_archive_extract(lua_State *L)
         ::close(tar_fd);
         if (!extracted)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
     if (!output.publish(options.overwrite, err) ||
         !output.finalize_directory_modes(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     output.commit();
 
-    push_extract_result(L, destination, selected.size(), files, directories,
-                        selection.skipped, bytes);
-    lua_pushnil(L);
-    return 2;
+    auto result_builder = [&](lua_State *Ls) noexcept -> int
+    {
+        push_extract_result(Ls, destination, selected.size(), files, directories,
+                            selection.skipped, bytes);
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, result_builder, 2);
 }
 
 int lua_archive_extract_file(lua_State *L)
@@ -6772,16 +6820,22 @@ int lua_archive_extract_file(lua_State *L)
 
     ArchiveOptions options;
     std::string err;
-    if (!collect_options(L, 4, ArchiveOptionMode::extract_file,
-                         options, err))
+    bool options_ok = false;
+    auto options_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        options_ok = collect_options(
+            Ls, 4, ArchiveOptionMode::extract_file, options, err);
+    };
+    lua_run_protected(L, options_parser);
+    if (!options_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     PinnedArchiveSource source;
     if (!source.open(archive_path, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     ArchiveReader zip_reader;
@@ -6793,13 +6847,13 @@ int lua_archive_extract_file(lua_State *L)
         const int zip_fd = source.duplicate_rewound(err);
         if (zip_fd < 0)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         if (zip_reader.open_fd(zip_fd, archive_path, zip_error))
         {
             if (!scan_zip_archive(zip_reader, options, scan, zip_error))
             {
-                return push_fail(L, zip_error);
+                return push_fail_protected(L, zip_error);
             }
             zip_backend = true;
         }
@@ -6813,7 +6867,7 @@ int lua_archive_extract_file(lua_State *L)
             err = "archive: unsupported or malformed archive '" +
                   archive_path + "' (ZIP: " + zip_error + "; TAR: " +
                   tar_error + ")";
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
@@ -6826,7 +6880,7 @@ int lua_archive_extract_file(lua_State *L)
         {
             if (selected != nullptr)
             {
-                return push_fail(L, "archive: requested entry is ambiguous because it appears more than once");
+                return push_fail_protected(L, "archive: requested entry is ambiguous because it appears more than once");
             }
             selected = &entry;
             selected_index = index;
@@ -6834,16 +6888,16 @@ int lua_archive_extract_file(lua_State *L)
     }
     if (selected == nullptr)
     {
-        return push_fail(L, "archive: entry not found: '" + requested + "'");
+        return push_fail_protected(L, "archive: entry not found: '" + requested + "'");
     }
     std::vector<const ArchiveEntry *> selected_entries = {selected};
     if (!validate_selected_entries(selected_entries, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     if (selected->kind != EntryKind::regular)
     {
-        return push_fail(L, "archive: extractFile only accepts a regular file entry");
+        return push_fail_protected(L, "archive: extractFile only accepts a regular file entry");
     }
 
     const fs::path destination_path(destination);
@@ -6851,7 +6905,7 @@ int lua_archive_extract_file(lua_State *L)
     if (destination_path.empty() || leaf.empty() || leaf == "." ||
         leaf == "..")
     {
-        return push_fail(L, "archive: destination must name a regular file");
+        return push_fail_protected(L, "archive: destination must name a regular file");
     }
     fs::path parent = destination_path.parent_path();
     if (parent.empty())
@@ -6863,7 +6917,7 @@ int lua_archive_extract_file(lua_State *L)
     if (!output.open_root(parent, err) ||
         !output.preflight(leaf, EntryKind::regular, options.overwrite, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     if (zip_backend)
@@ -6873,7 +6927,7 @@ int lua_archive_extract_file(lua_State *L)
         if (!output.stage_file(zip_reader.zip(), mapped,
                                file_mode_for_entry(*selected, options), err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
     else
@@ -6881,7 +6935,7 @@ int lua_archive_extract_file(lua_State *L)
         const int tar_fd = source.duplicate_rewound(err);
         if (tar_fd < 0)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         const babet::archive_tar::ScanLimits limits{
             .max_entries = options.max_entries,
@@ -6898,26 +6952,30 @@ int lua_archive_extract_file(lua_State *L)
         ::close(tar_fd);
         if (!extracted)
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
     }
 
     if (!output.publish(options.overwrite, err) ||
         !output.finalize_directory_modes(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     output.commit();
 
-    lua_newtable(L);
-    push_u64(L, selected->size);
-    lua_setfield(L, -2, "bytes");
-    lua_pushlstring(L, destination.data(), destination.size());
-    lua_setfield(L, -2, "path");
-    lua_pushlstring(L, selected->name.data(), selected->name.size());
-    lua_setfield(L, -2, "entry");
-    lua_pushnil(L);
-    return 2;
+    auto result_builder = [&](lua_State *Ls) noexcept -> int
+    {
+        lua_newtable(Ls);
+        push_u64(Ls, selected->size);
+        lua_setfield(Ls, -2, "bytes");
+        lua_pushlstring(Ls, destination.data(), destination.size());
+        lua_setfield(Ls, -2, "path");
+        lua_pushlstring(Ls, selected->name.data(), selected->name.size());
+        lua_setfield(Ls, -2, "entry");
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, result_builder, 2);
 }
 
 } // namespace

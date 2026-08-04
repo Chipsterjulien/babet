@@ -144,16 +144,16 @@ int lua_writeFileAtomic(lua_State *L)
         if (!babet_atomic_file::write_file_atomic(
                 path, std::string_view(data, data_size), options, error))
         {
-            return push_fail(L, error);
+            return push_fail_protected(L, error);
         }
         return push_ok(L);
     }
     catch (const std::bad_alloc &)
     {
-        return push_fail(L, "writeFileAtomic: out of memory");
+        return push_fail_protected(L, "writeFileAtomic: out of memory");
     }
     catch (...)
     {
-        return push_fail(L, "writeFileAtomic: unexpected internal error");
+        return push_fail_protected(L, "writeFileAtomic: unexpected internal error");
     }
 }

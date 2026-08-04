@@ -656,6 +656,16 @@ int push_status_result(lua_State *L, const int *statuses,
     return 2;
 }
 
+int push_status_result_protected(lua_State *L, const int *statuses,
+                                 const bool *status_valid, size_t count)
+{
+    auto builder = [statuses, status_valid, count](lua_State *Ls) noexcept -> int
+    {
+        return push_status_result(Ls, statuses, status_valid, count);
+    };
+    return lua_build_results_protected(L, builder, 2);
+}
+
 int push_sync_result(lua_State *L, const std::string &stdout_data,
                      const std::vector<std::string> &stderr_data,
                      const std::vector<unsigned char> &stderr_truncated,
@@ -726,6 +736,22 @@ int push_sync_result(lua_State *L, const std::string &stdout_data,
     lua_setfield(L, -2, "stderr_truncated");
     lua_pushnil(L);
     return 2;
+}
+
+int push_sync_result_protected(
+    lua_State *L, const std::string &stdout_data,
+    const std::vector<std::string> &stderr_data,
+    const std::vector<unsigned char> &stderr_truncated,
+    const std::vector<ChildState> &children,
+    bool timed_out, bool stdout_truncated)
+{
+    auto builder = [&](lua_State *Ls) noexcept -> int
+    {
+        return push_sync_result(Ls, stdout_data, stderr_data,
+                                stderr_truncated, children, timed_out,
+                                stdout_truncated);
+    };
+    return lua_build_results_protected(L, builder, 2);
 }
 
 PipelineProcess *check_pipeline_process(lua_State *L, int idx)
@@ -993,22 +1019,22 @@ int read_pipeline_fd(lua_State *L, int &fd, size_t max_bytes,
 {
     if (fd < 0)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     const int ready = wait_fd(L, fd, POLLIN, timeout);
     if (ready == -2)
     {
-        return push_fail(L, "interrupted");
+        return push_fail_protected(L, "interrupted");
     }
     if (ready < 0)
     {
-        return push_fail(L, std::string("pipeline process: poll failed: ") +
+        return push_fail_protected(L, std::string("pipeline process: poll failed: ") +
                                 std::strerror(errno));
     }
     if (ready == 0)
     {
-        return push_fail(L, "timeout");
+        return push_fail_protected(L, "timeout");
     }
 
     void *raw_buffer = lua_newuserdatauv(L, max_bytes, 0);
@@ -1027,7 +1053,7 @@ int read_pipeline_fd(lua_State *L, int &fd, size_t max_bytes,
         {
             babet_process::close_fd(fd);
             lua_pop(L, 1);
-            return push_fail(L, "closed");
+            return push_fail_protected(L, "closed");
         }
         if (errno == EINTR)
         {
@@ -1035,20 +1061,20 @@ int read_pipeline_fd(lua_State *L, int &fd, size_t max_bytes,
             {
                 signal_dispatch_pending(L);
                 lua_pop(L, 1);
-                return push_fail(L, "interrupted");
+                return push_fail_protected(L, "interrupted");
             }
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
             lua_pop(L, 1);
-            return push_fail(L, "timeout");
+            return push_fail_protected(L, "timeout");
         }
         const std::string error = std::string(method_name) +
                                   ": read failed: " +
                                   std::strerror(errno);
         lua_pop(L, 1);
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 }
 
@@ -1083,12 +1109,14 @@ int pipeline_process_read_stdout(lua_State *L)
 
     double timeout = 0.0;
     bool present = false;
-    std::string error;
-    if (argc >= 3 &&
-        !parse_timeout_value(L, 3, "timeout", false,
-                             timeout, present, error))
     {
-        return push_fail(L, "pipeline.read_stdout: " + error);
+        std::string error;
+        if (argc >= 3 &&
+            !parse_timeout_value(L, 3, "timeout", false,
+                                 timeout, present, error))
+        {
+            return push_fail_protected(L, "pipeline.read_stdout: " + error);
+        }
     }
     return read_pipeline_fd(L, pipeline->stdout_fd, max_bytes, timeout,
                             "pipeline.read_stdout");
@@ -1135,12 +1163,14 @@ int pipeline_process_read_stderr(lua_State *L)
 
     double timeout = 0.0;
     bool present = false;
-    std::string error;
-    if (argc >= 4 &&
-        !parse_timeout_value(L, 4, "timeout", false,
-                             timeout, present, error))
     {
-        return push_fail(L, "pipeline.read_stderr: " + error);
+        std::string error;
+        if (argc >= 4 &&
+            !parse_timeout_value(L, 4, "timeout", false,
+                                 timeout, present, error))
+        {
+            return push_fail_protected(L, "pipeline.read_stderr: " + error);
+        }
     }
     return read_pipeline_fd(
         L, pipeline->stderr_fds[static_cast<size_t>(stage - 1)],
@@ -1160,16 +1190,18 @@ int pipeline_process_write(lua_State *L)
 
     double timeout = 0.0;
     bool present = false;
-    std::string error;
-    if (argc == 3 &&
-        !parse_timeout_value(L, 3, "timeout", false,
-                             timeout, present, error))
     {
-        return push_fail(L, "pipeline.write: " + error);
+        std::string error;
+        if (argc == 3 &&
+            !parse_timeout_value(L, 3, "timeout", false,
+                                 timeout, present, error))
+        {
+            return push_fail_protected(L, "pipeline.write: " + error);
+        }
     }
     if (pipeline->stdin_fd < 0)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     size_t length = 0;
@@ -1184,16 +1216,16 @@ int pipeline_process_write(lua_State *L)
     const int ready = wait_fd(L, pipeline->stdin_fd, POLLOUT, timeout);
     if (ready == -2)
     {
-        return push_fail(L, "interrupted");
+        return push_fail_protected(L, "interrupted");
     }
     if (ready < 0)
     {
-        return push_fail(L, std::string("pipeline process: poll failed: ") +
+        return push_fail_protected(L, std::string("pipeline process: poll failed: ") +
                                 std::strerror(errno));
     }
     if (ready == 0)
     {
-        return push_fail(L, "timeout");
+        return push_fail_protected(L, "timeout");
     }
 
     for (;;)
@@ -1214,20 +1246,20 @@ int pipeline_process_write(lua_State *L)
             if (signal_any_handled_pending())
             {
                 signal_dispatch_pending(L);
-                return push_fail(L, "interrupted");
+                return push_fail_protected(L, "interrupted");
             }
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
-            return push_fail(L, "timeout");
+            return push_fail_protected(L, "timeout");
         }
         if (errno == EPIPE || errno == EBADF)
         {
             babet_process::close_fd(pipeline->stdin_fd);
-            return push_fail(L, "closed");
+            return push_fail_protected(L, "closed");
         }
-        return push_fail(L, std::string("pipeline process: write failed: ") +
+        return push_fail_protected(L, std::string("pipeline process: write failed: ") +
                                 std::strerror(errno));
     }
 }
@@ -1240,7 +1272,7 @@ int pipeline_process_close_stdin(lua_State *L)
     }
     PipelineProcess *pipeline = check_pipeline_process(L, 1);
     babet_process::close_fd(pipeline->stdin_fd);
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 int pipeline_process_pids(lua_State *L)
@@ -1293,7 +1325,7 @@ int pipeline_process_is_running(lua_State *L)
     std::string error;
     if (!refresh_pipeline_status(pipeline, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     if (selected < pipeline->count)
     {
@@ -1320,21 +1352,21 @@ int pipeline_process_wait(lua_State *L)
         !parse_timeout_value(L, 2, "timeout", false,
                              timeout, has_timeout, error))
     {
-        return push_fail(L, "pipeline.wait: " + error);
+        return push_fail_protected(L, "pipeline.wait: " + error);
     }
 
     if (!refresh_pipeline_status(pipeline, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     if (all_pipeline_stages_reaped(pipeline))
     {
-        return push_status_result(L, pipeline->statuses,
-                                  pipeline->status_valid, pipeline->count);
+        return push_status_result_protected(
+            L, pipeline->statuses, pipeline->status_valid, pipeline->count);
     }
     if (pipeline->closed)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     const long long deadline = has_timeout
@@ -1346,18 +1378,18 @@ int pipeline_process_wait(lua_State *L)
         L, pipeline, deadline, true, error);
     if (result == ReapResult::complete)
     {
-        return push_status_result(L, pipeline->statuses,
-                                  pipeline->status_valid, pipeline->count);
+        return push_status_result_protected(
+            L, pipeline->statuses, pipeline->status_valid, pipeline->count);
     }
     if (result == ReapResult::timed_out)
     {
-        return push_fail(L, "timeout");
+        return push_fail_protected(L, "timeout");
     }
     if (result == ReapResult::interrupted)
     {
-        return push_fail(L, "interrupted");
+        return push_fail_protected(L, "interrupted");
     }
-    return push_fail(L, error);
+    return push_fail_protected(L, error);
 }
 
 int terminate_pipeline_process(lua_State *L, PipelineProcess *pipeline,
@@ -1366,12 +1398,12 @@ int terminate_pipeline_process(lua_State *L, PipelineProcess *pipeline,
     std::string error;
     if (all_pipeline_stages_reaped(pipeline))
     {
-        return push_status_result(L, pipeline->statuses,
-                                  pipeline->status_valid, pipeline->count);
+        return push_status_result_protected(
+            L, pipeline->statuses, pipeline->status_valid, pipeline->count);
     }
     if (pipeline->closed)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     // Signaler avant toute récupération : un leader déjà terminé reste zombie
@@ -1405,17 +1437,17 @@ int terminate_pipeline_process(lua_State *L, PipelineProcess *pipeline,
         false, error);
     if (result == ReapResult::error)
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     if (result != ReapResult::complete)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "pipeline process: children could not be reaped");
     }
 
     babet_process::close_fd(pipeline->stdin_fd);
-    return push_status_result(L, pipeline->statuses,
-                              pipeline->status_valid, pipeline->count);
+    return push_status_result_protected(
+        L, pipeline->statuses, pipeline->status_valid, pipeline->count);
 }
 
 int pipeline_process_terminate(lua_State *L)
@@ -1435,7 +1467,7 @@ int pipeline_process_terminate(lua_State *L)
         !parse_timeout_value(L, 2, "grace_period", false,
                              grace, present, error))
     {
-        return push_fail(L, "pipeline.terminate: " + error);
+        return push_fail_protected(L, "pipeline.terminate: " + error);
     }
     return terminate_pipeline_process(L, pipeline, SIGTERM, grace);
 }
@@ -1450,29 +1482,45 @@ int pipeline_process_kill(lua_State *L)
     return terminate_pipeline_process(L, pipeline, SIGKILL, 2.0);
 }
 
-void cleanup_pipeline_process(PipelineProcess *pipeline)
+void cleanup_pipeline_process(PipelineProcess *pipeline) noexcept
 {
     if (pipeline == nullptr || pipeline->closed)
     {
         return;
     }
 
-    std::string ignored;
     babet_process::close_fd(pipeline->stdin_fd);
 
     // Signaler avant le premier waitpid() de ce nettoyage : tant que l'enfant
     // direct n'est pas récupéré, son identifiant de groupe ne peut pas être
     // confondu avec un PID réutilisé. Les étapes déjà récupérées sont ignorées.
     signal_pipeline_groups(pipeline, SIGTERM);
-    ReapResult result = reap_pipeline_until(
-        nullptr, pipeline, babet_process::now_ms() + 500,
-        false, ignored);
-    if (result != ReapResult::complete)
+
+    const long long term_deadline = babet_process::now_ms() + 500;
+    while (babet_process::now_ms() < term_deadline)
     {
-        signal_pipeline_groups(pipeline, SIGKILL);
-        reap_pipeline_until(nullptr, pipeline,
-                            babet_process::now_ms() + TERM_GRACE_MS,
-                            false, ignored);
+        const long long remaining = term_deadline - babet_process::now_ms();
+        struct timespec pause{
+            static_cast<time_t>(remaining / 1000),
+            static_cast<long>((remaining % 1000) * 1000000LL)};
+        while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
+        {
+        }
+    }
+
+    signal_pipeline_groups(pipeline, SIGKILL);
+    const long long reap_deadline =
+        babet_process::now_ms() + TERM_GRACE_MS;
+    for (size_t i = 0; i < pipeline->count; ++i)
+    {
+        if (pipeline->status_valid[i] || pipeline->pids[i] <= 0)
+        {
+            continue;
+        }
+        const auto result = babet_process::wait_child_until(
+            pipeline->pids[i], pipeline->statuses[i], reap_deadline);
+        pipeline->status_valid[i] =
+            result == babet_process::ChildWaitResult::reaped;
     }
     babet_process::close_fd(pipeline->stdout_fd);
     for (size_t i = 0; i < pipeline->count; ++i)
@@ -1490,7 +1538,7 @@ int pipeline_process_close(lua_State *L)
     }
     PipelineProcess *pipeline = check_pipeline_process(L, 1);
     cleanup_pipeline_process(pipeline);
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 int pipeline_process_gc(lua_State *L)
@@ -1499,6 +1547,18 @@ int pipeline_process_gc(lua_State *L)
         luaL_testudata(L, 1, PIPELINE_META));
     cleanup_pipeline_process(pipeline);
     return 0;
+}
+
+int pipeline_process_gc_boundary(lua_State *L) noexcept
+{
+    try
+    {
+        return pipeline_process_gc(L);
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 int pipeline_process_tostring(lua_State *L)
@@ -1514,37 +1574,50 @@ int pipeline_process_tostring(lua_State *L)
     return 1;
 }
 
+template <int (*Fn)(lua_State *)>
+int pipeline_lua_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "pipeline: out of memory", "pipeline: internal C++ failure",
+        "pipeline: unknown internal C++ failure");
+}
+
 void register_pipeline_process_metatable(lua_State *L)
 {
     if (luaL_newmetatable(L, PIPELINE_META))
     {
-        lua_pushcfunction(L, pipeline_process_gc);
+        lua_pushcfunction(L, pipeline_process_gc_boundary);
         lua_setfield(L, -2, "__gc");
-        lua_pushcfunction(L, pipeline_process_gc);
+        lua_pushcfunction(L, pipeline_process_gc_boundary);
         lua_setfield(L, -2, "__close");
-        lua_pushcfunction(L, pipeline_process_tostring);
+        lua_pushcfunction(L, pipeline_lua_boundary<pipeline_process_tostring>);
         lua_setfield(L, -2, "__tostring");
 
         lua_newtable(L);
-        lua_pushcfunction(L, pipeline_process_read_stdout);
+        lua_pushcfunction(
+            L, pipeline_lua_boundary<pipeline_process_read_stdout>);
         lua_setfield(L, -2, "read_stdout");
-        lua_pushcfunction(L, pipeline_process_read_stderr);
+        lua_pushcfunction(
+            L, pipeline_lua_boundary<pipeline_process_read_stderr>);
         lua_setfield(L, -2, "read_stderr");
-        lua_pushcfunction(L, pipeline_process_write);
+        lua_pushcfunction(L, pipeline_lua_boundary<pipeline_process_write>);
         lua_setfield(L, -2, "write");
-        lua_pushcfunction(L, pipeline_process_close_stdin);
+        lua_pushcfunction(
+            L, pipeline_lua_boundary<pipeline_process_close_stdin>);
         lua_setfield(L, -2, "close_stdin");
-        lua_pushcfunction(L, pipeline_process_is_running);
+        lua_pushcfunction(
+            L, pipeline_lua_boundary<pipeline_process_is_running>);
         lua_setfield(L, -2, "is_running");
-        lua_pushcfunction(L, pipeline_process_pids);
+        lua_pushcfunction(L, pipeline_lua_boundary<pipeline_process_pids>);
         lua_setfield(L, -2, "pids");
-        lua_pushcfunction(L, pipeline_process_wait);
+        lua_pushcfunction(L, pipeline_lua_boundary<pipeline_process_wait>);
         lua_setfield(L, -2, "wait");
-        lua_pushcfunction(L, pipeline_process_terminate);
+        lua_pushcfunction(
+            L, pipeline_lua_boundary<pipeline_process_terminate>);
         lua_setfield(L, -2, "terminate");
-        lua_pushcfunction(L, pipeline_process_kill);
+        lua_pushcfunction(L, pipeline_lua_boundary<pipeline_process_kill>);
         lua_setfield(L, -2, "kill");
-        lua_pushcfunction(L, pipeline_process_close);
+        lua_pushcfunction(L, pipeline_lua_boundary<pipeline_process_close>);
         lua_setfield(L, -2, "close");
         lua_setfield(L, -2, "__index");
     }
@@ -1581,10 +1654,8 @@ babet_process::ChildWaitResult wait_pipeline_stage_until(
 
 } // namespace
 
-int lua_pipeline(lua_State *L)
+int lua_pipeline_impl(lua_State *L)
 {
-    try
-    {
     if (!lua_arity_between(L, 1, 2) || lua_type(L, 1) != LUA_TTABLE)
     {
         return luaL_error(L,
@@ -1595,13 +1666,13 @@ int lua_pipeline(lua_State *L)
     PipelineOptions options;
     if (!collect_pipeline_options(L, 2, options, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     std::vector<babet_process::PipelineStageSpec> stages;
     if (!collect_stages(L, 1, options, stages, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     const long long deadline = options.has_timeout
@@ -1621,9 +1692,9 @@ int lua_pipeline(lua_State *L)
     {
         if (launched.timed_out)
         {
-            return push_fail(L, "pipeline: launch timed out");
+            return push_fail_protected(L, "pipeline: launch timed out");
         }
-        return push_fail(L, launched.error);
+        return push_fail_protected(L, launched.error);
     }
 
     // La garde est armée immédiatement après le lancement, avant toute
@@ -1853,7 +1924,7 @@ int lua_pipeline(lua_State *L)
         kill_all(children, SIGKILL);
         reap_all(children, babet_process::now_ms() + TERM_GRACE_MS);
         emergency_guard.cleanup_now();
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     if (timed_out)
@@ -1917,28 +1988,17 @@ int lua_pipeline(lua_State *L)
     if (!error.empty())
     {
         emergency_guard.cleanup_now();
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     emergency_guard.cleanup_now();
-    return push_sync_result(L, stdout_buffer, stderr_buffers,
-                            stderr_truncated, children, timed_out,
-                            stdout_truncated);
-    }
-    catch (const std::bad_alloc &)
-    {
-        return push_fail(L, "pipeline: out of memory during execution");
-    }
-    catch (...)
-    {
-        return push_fail(L, "pipeline: internal execution failure");
-    }
+    return push_sync_result_protected(
+        L, stdout_buffer, stderr_buffers, stderr_truncated, children,
+        timed_out, stdout_truncated);
+
 }
 
-int lua_spawn_pipeline(lua_State *L)
+int lua_spawn_pipeline_impl(lua_State *L)
 {
-    bool empty_userdata_pushed = false;
-    try
-    {
     if (!lua_arity_between(L, 1, 2) || lua_type(L, 1) != LUA_TTABLE)
     {
         return luaL_error(
@@ -1949,17 +2009,23 @@ int lua_spawn_pipeline(lua_State *L)
     SpawnPipelineOptions options;
     if (!collect_spawn_pipeline_options(L, 2, options, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     std::vector<babet_process::PipelineStageSpec> stages;
     if (!collect_stages(L, 1, options, stages, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
-    PipelineProcess *pipeline = push_empty_pipeline_process(L);
-    empty_userdata_pushed = true;
+    auto builder = [](lua_State *Ls) noexcept -> int
+    {
+        push_empty_pipeline_process(Ls);
+        return 1;
+    };
+    lua_build_results_protected(L, builder, 1);
+    PipelineProcess *pipeline = static_cast<PipelineProcess *>(
+        lua_touserdata(L, -1));
 
     babet_process::PipelineLaunchSpec spec;
     spec.stages = std::move(stages);
@@ -1972,41 +2038,31 @@ int lua_spawn_pipeline(lua_State *L)
     if (!launched.success)
     {
         lua_pop(L, 1);
-        empty_userdata_pushed = false;
         if (launched.timed_out)
         {
-            return push_fail(L, "spawnPipeline: launch timed out");
+            return push_fail_protected(L, "spawnPipeline: launch timed out");
         }
-        return push_fail(L, launched.error);
+        return push_fail_protected(L, launched.error);
     }
 
     if (!initialize_pipeline_process(pipeline, launched.pipeline))
     {
         babet_process::emergency_kill_and_reap(launched.pipeline);
         lua_pop(L, 1);
-        empty_userdata_pushed = false;
-        return push_fail(L, "spawnPipeline: too many launched stages");
+        return push_fail_protected(L, "spawnPipeline: too many launched stages");
     }
-    empty_userdata_pushed = false; // le userdata possède désormais les ressources
     lua_pushnil(L);
     return 2;
-    }
-    catch (const std::bad_alloc &)
-    {
-        if (empty_userdata_pushed)
-        {
-            lua_pop(L, 1);
-        }
-        return push_fail(L, "spawnPipeline: out of memory during launch");
-    }
-    catch (...)
-    {
-        if (empty_userdata_pushed)
-        {
-            lua_pop(L, 1);
-        }
-        return push_fail(L, "spawnPipeline: internal launch failure");
-    }
+}
+
+int lua_pipeline(lua_State *L)
+{
+    return pipeline_lua_boundary<lua_pipeline_impl>(L);
+}
+
+int lua_spawn_pipeline(lua_State *L)
+{
+    return pipeline_lua_boundary<lua_spawn_pipeline_impl>(L);
 }
 
 void register_pipeline(lua_State *L)

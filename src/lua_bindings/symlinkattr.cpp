@@ -30,7 +30,7 @@ int lua_symlinkattr(lua_State *L)
 
     if (owner_raw < 0 || group_raw < 0)
     {
-        return push_fail(L, "UID and GID must be non-negative");
+        return push_fail_protected(L, "UID and GID must be non-negative");
     }
 
     // Borne haute : uid_t / gid_t sont typiquement uint32_t sous Linux,
@@ -43,7 +43,7 @@ int lua_symlinkattr(lua_State *L)
     if (static_cast<unsigned long long>(owner_raw) > uid_limits::max() ||
         static_cast<unsigned long long>(group_raw) > gid_limits::max())
     {
-        return push_fail(L, "UID or GID out of range");
+        return push_fail_protected(L, "UID or GID out of range");
     }
 
     uid_t owner = static_cast<uid_t>(owner_raw);
@@ -53,7 +53,7 @@ int lua_symlinkattr(lua_State *L)
     // (chown, lui, agirait sur la cible du lien).
     if (lchown(path.c_str(), owner, group) != 0)
     {
-        return push_fail(L, std::generic_category().message(errno));
+        return push_fail_protected(L, std::generic_category().message(errno));
     }
 
     return push_ok(L);

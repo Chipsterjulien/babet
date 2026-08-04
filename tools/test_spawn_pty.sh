@@ -16,6 +16,15 @@ if [ ! -x "${BINARY}" ]; then
     exit 1
 fi
 BINARY="$(cd "$(dirname "${BINARY}")" && pwd)/$(basename "${BINARY}")"
+printf 'Binaire PTY : %s\n' "${BINARY}"
+if command -v sha256sum >/dev/null 2>&1; then
+    printf 'SHA-256     : %s\n' "$(sha256sum "${BINARY}" | awk '{print $1}')"
+fi
+
+SUDO_PTY_TEST=0
+if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    SUDO_PTY_TEST=1
+fi
 
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/babet-spawn-pty.XXXXXX") || exit 1
 trap 'rm -rf -- "${ROOT}"' EXIT
@@ -259,6 +268,41 @@ end
 status_process:close()
 print("STATUS_REFRESH_OK")
 
+if os.getenv("BABET_TEST_SUDO_PTY") == "1" then
+    local sudo_process, sudo_spawn_err = babet.spawn("sudo", {
+        "-n", "sh", "-c",
+        "printf 'SUDO_CHILD_PROMPT\\n'; "
+            .. "IFS= read -r answer; "
+            .. "if [ \"$answer\" = sudo-child ]; then "
+            .. "printf 'SUDO_CHILD_ACCEPTED\\n'; exit 0; "
+            .. "else exit 34; fi",
+    }, {
+        stdin = "inherit",
+        stdout = "inherit",
+        stderr = "inherit",
+    })
+    if not sudo_process then
+        io.stderr:write("sudo PTY spawn failed: "
+            .. tostring(sudo_spawn_err) .. "\n")
+        os.exit(34)
+    end
+    local sudo_result, sudo_wait_err = sudo_process:wait(2.0)
+    if not sudo_result then
+        sudo_process:kill()
+        sudo_process:close()
+        io.stderr:write("sudo PTY child did not finish: "
+            .. tostring(sudo_wait_err) .. "\n")
+        os.exit(35)
+    end
+    sudo_process:close()
+    if sudo_result.code ~= 0 then
+        io.stderr:write("sudo PTY child exit code: "
+            .. tostring(sudo_result.code) .. "\n")
+        os.exit(36)
+    end
+    print("SUDO_PTY_OK")
+end
+
 io.write("STATUS_RESTORED_PROMPT\n")
 io.flush()
 local status_restored = io.read("*l")
@@ -271,7 +315,7 @@ end
 print("PTY_SPAWN_OK")
 LUA
 
-python3 - "${BINARY}" "${ROOT}" <<'PY'
+python3 - "${BINARY}" "${ROOT}" "${SUDO_PTY_TEST}" <<'PY'
 import errno
 import os
 import pty
@@ -280,10 +324,12 @@ import signal
 import sys
 import time
 
-binary, project = sys.argv[1:3]
+binary, project, sudo_enabled = sys.argv[1:4]
+environment = os.environ.copy()
+environment["BABET_TEST_SUDO_PTY"] = sudo_enabled
 pid, master = pty.fork()
 if pid == 0:
-    os.execv(binary, [binary, project])
+    os.execve(binary, [binary, project], environment)
 
 os.set_blocking(master, False)
 deadline = time.monotonic() + 8.0
@@ -296,6 +342,7 @@ sent_restored = False
 sent_stop = False
 sent_stop_restored = False
 sent_status_restored = False
+sent_sudo_child = False
 status = None
 
 try:
@@ -336,6 +383,10 @@ try:
                 and b"STOP_RESTORED_PROMPT" in output):
             os.write(master, b"stop-restored\n")
             sent_stop_restored = True
+        if (sudo_enabled == "1" and not sent_sudo_child
+                and b"SUDO_CHILD_PROMPT" in output):
+            os.write(master, b"sudo-child\n")
+            sent_sudo_child = True
         if (sent_stop_restored and not sent_status_restored
                 and b"STATUS_RESTORED_PROMPT" in output):
             os.write(master, b"status-restored\n")
@@ -397,11 +448,17 @@ required = (
     "status-restored",
     "PTY_SPAWN_OK",
 )
+if sudo_enabled == "1":
+    required += ("SUDO_CHILD_PROMPT", "SUDO_CHILD_ACCEPTED", "SUDO_PTY_OK")
+
 missing = [marker for marker in required if marker not in text]
 if missing:
     sys.stderr.write(text)
     sys.stderr.write("Missing PTY markers: " + ", ".join(missing) + "\n")
     sys.exit(1)
 
-print("spawn inherited-terminal PTY regression: 1 PASS / 0 FAIL")
+if sudo_enabled == "1":
+    print("spawn inherited-terminal PTY regression: 2 PASS / 0 FAIL")
+else:
+    print("spawn inherited-terminal PTY regression: 1 PASS / 0 FAIL / 1 SKIP (sudo -n unavailable)")
 PY

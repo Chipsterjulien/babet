@@ -3,7 +3,9 @@
 #include "project_core/safe_glob.hpp"
 #include <re2/re2.h>
 #include <memory>
+#include <new>
 #include <cstdint>
+#include <climits>
 #include <limits>
 #include <system_error>
 #include <algorithm>
@@ -386,6 +388,10 @@ namespace
                 }
             }
         }
+        catch (const std::bad_alloc &)
+        {
+            throw;
+        }
         catch (const std::exception &e)
         {
             return std::string(e.what());
@@ -400,7 +406,7 @@ namespace
 
 } // namespace
 
-int lua_find(lua_State *L)
+static int lua_find_impl(lua_State *L)
 {
     const int argc = lua_gettop(L);
     if (!lua_arity_between(L, 1, 2))
@@ -426,35 +432,54 @@ int lua_find(lua_State *L)
     FindOptions options;
     if (argc >= 2 && lua_istable(L, 2))
     {
-        // CORRECTIF Gemini (longjmp/C++) : parse_options ne fait plus de
-        // luaL_error. On reçoit (ok, err_msg) et on remonte l'erreur via
-        // push_fail() qui ne fait PAS de longjmp — donc FindOptions se
-        // détruira proprement à la sortie de cette fonction.
+        // Le parseur remplit des std::string tout en consultant une table Lua.
+        // Il s'exécute donc sous pcall : un OOM ou un __index fautif ne peut
+        // pas longjmp par-dessus FindOptions ou parse_err.
         std::string parse_err;
-        if (!parse_options(L, 2, options, parse_err))
+        bool options_ok = false;
+        auto parser = [&](lua_State *Ls)
         {
-            return push_fail(L, parse_err);
+            options_ok = parse_options(Ls, 2, options, parse_err);
+        };
+        lua_run_protected(L, parser);
+        if (!options_ok)
+        {
+            return push_fail_protected(L, parse_err);
         }
     }
 
-    lua_newtable(L);
-    int result_index = lua_gettop(L);
-
-    int file_index = 1;
-
-    auto callback = [L, result_index, &file_index](const fs::path &path)
+    std::vector<std::string> results;
+    auto callback = [&results](const fs::path &path)
     {
-        lua_pushstring(L, path.string().c_str());
-        lua_rawseti(L, result_index, file_index++);
+        results.push_back(path.string());
     };
 
     if (auto error_message = find(root, options, callback))
     {
-        lua_pushnil(L);
-        lua_pushstring(L, error_message->c_str());
-        return 2;
+        return push_fail_protected(L, *error_message);
     }
 
-    lua_pushnil(L);
-    return 2;
+    auto builder = [&results](lua_State *Ls) noexcept -> int
+    {
+        const int array_hint = results.size() <= static_cast<std::size_t>(INT_MAX)
+                                   ? static_cast<int>(results.size())
+                                   : 0;
+        lua_createtable(Ls, array_hint, 0);
+        lua_Integer index = 1;
+        for (const std::string &path : results)
+        {
+            lua_pushlstring(Ls, path.data(), path.size());
+            lua_rawseti(Ls, -2, index++);
+        }
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, builder, 2);
+}
+
+int lua_find(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<lua_find_impl>(
+        L, "find: out of memory", "find: internal failure",
+        "find: unknown internal failure");
 }

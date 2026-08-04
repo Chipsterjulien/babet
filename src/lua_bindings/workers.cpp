@@ -10,6 +10,7 @@
 
 #include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -20,6 +21,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -200,10 +202,22 @@ namespace
             }
         }
 
+        enum class PushCancellationPolicy
+        {
+            immediate,
+            only_if_waiting,
+        };
+
         // push : insère un message. Retourne (true, "") ou (false, reason).
+        // `only_if_waiting` est réservé à l'outbox d'un worker : après une
+        // annulation, un dernier diagnostic peut encore être publié si une
+        // place est déjà disponible, mais une écriture qui devrait attendre
+        // est interrompue avec "cancelled".
         std::pair<bool, const char *> push(
             std::string msg, int64_t timeout_ms,
-            const std::atomic<bool> *cancel_requested = nullptr)
+            const std::atomic<bool> *cancel_requested = nullptr,
+            PushCancellationPolicy cancellation_policy =
+                PushCancellationPolicy::immediate)
         {
             PthreadMutexGuard lock(&mu);
             if (!lock.locked)
@@ -215,7 +229,9 @@ namespace
                 return cancel_requested != nullptr &&
                        cancel_requested->load(std::memory_order_acquire);
             };
-            if (cancelled())
+            bool waited_for_space = false;
+            if (cancelled() &&
+                cancellation_policy == PushCancellationPolicy::immediate)
             {
                 return {false, "cancelled"};
             }
@@ -229,7 +245,7 @@ namespace
             {
                 if (q.size() >= capacity)
                 {
-                    return {false, "full"};
+                    return {false, cancelled() ? "cancelled" : "full"};
                 }
             }
             else if (timeout_ms < 0)
@@ -237,19 +253,21 @@ namespace
                 // Bloquant infini : attend tant que pleine ET non-closed.
                 while (q.size() >= capacity && !closed && !cancelled())
                 {
+                    waited_for_space = true;
                     const int rc = pthread_cond_wait(&not_full, &mu);
                     if (rc != 0)
                     {
                         return {false, "internal condition error"};
                     }
                 }
-                if (cancelled())
-                {
-                    return {false, "cancelled"};
-                }
                 if (closed)
                 {
                     return {false, "closed"};
+                }
+                if (cancelled() &&
+                    (q.size() >= capacity || waited_for_space))
+                {
+                    return {false, "cancelled"};
                 }
             }
             else
@@ -261,10 +279,11 @@ namespace
                 compute_deadline(timeout_ms, deadline);
                 while (q.size() >= capacity && !closed && !cancelled())
                 {
+                    waited_for_space = true;
                     int rc = pthread_cond_timedwait(&not_full, &mu, &deadline);
                     if (rc == ETIMEDOUT)
                     {
-                        if (cancelled())
+                        if (q.size() >= capacity && cancelled())
                         {
                             return {false, "cancelled"};
                         }
@@ -279,13 +298,14 @@ namespace
                         return {false, "internal condition error"};
                     }
                 }
-                if (cancelled())
-                {
-                    return {false, "cancelled"};
-                }
                 if (closed)
                 {
                     return {false, "closed"};
+                }
+                if (cancelled() &&
+                    (q.size() >= capacity || waited_for_space))
+                {
+                    return {false, "cancelled"};
                 }
             }
 
@@ -486,6 +506,30 @@ namespace
         std::shared_ptr<SharedChannel> shared;
     };
 
+    struct ChannelHandleUserdata
+    {
+        // lua_newuserdata() returns raw storage: this structure is never
+        // C++-constructed. The flag must therefore be initialized explicitly
+        // before the metatable arms __gc.
+        bool constructed;
+        alignas(ChannelHandle) std::byte storage[sizeof(ChannelHandle)];
+
+        ChannelHandle *get() noexcept
+        {
+            return std::launder(
+                reinterpret_cast<ChannelHandle *>(storage));
+        }
+    };
+
+    static_assert(std::is_nothrow_destructible_v<ChannelHandle>,
+                  "worker channel userdata finalization must remain non-throwing");
+    static_assert(std::is_nothrow_default_constructible_v<ChannelHandle>,
+                  "empty worker channel userdata construction must remain non-throwing");
+    static_assert(
+        std::is_nothrow_copy_assignable_v<
+            std::shared_ptr<SharedChannel>>,
+        "copying a shared worker channel into userdata must remain non-throwing");
+
     struct NamedChannel
     {
         std::string name;
@@ -685,6 +729,20 @@ namespace
         MessageQueue outbox;
     };
 
+    struct WorkerUserdata
+    {
+        // lua_newuserdata() returns raw storage: this structure is never
+        // C++-constructed, so workers.spawn must initialize the flag
+        // explicitly before arming __gc through the metatable.
+        bool constructed;
+        alignas(Worker) std::byte storage[sizeof(Worker)];
+
+        Worker *get() noexcept
+        {
+            return std::launder(reinterpret_cast<Worker *>(storage));
+        }
+    };
+
     thread_local Worker *g_current_worker = nullptr;
 
     class CurrentWorkerScope
@@ -742,6 +800,10 @@ namespace
     {
         worker->cancel_requested.store(true, std::memory_order_release);
         worker->inbox.close();
+        // A worker may be blocked in worker.send() on a full outbox. Keep the
+        // outbox open for one last diagnostic when room already exists, but
+        // wake blocked producers so cancellation can abort their wait.
+        worker->outbox.notify_waiters();
 
         std::shared_ptr<SharedChannel> waiting;
         {
@@ -901,23 +963,48 @@ namespace
 
     Worker *check_worker(lua_State *L, int idx)
     {
-        return static_cast<Worker *>(luaL_checkudata(L, idx, WORKER_META));
+        auto *userdata = static_cast<WorkerUserdata *>(
+            luaL_checkudata(L, idx, WORKER_META));
+        if (!userdata->constructed)
+        {
+            luaL_error(L, "worker is not initialized");
+        }
+        return userdata->get();
     }
 
     ChannelHandle *check_channel(lua_State *L, int idx)
     {
-        return static_cast<ChannelHandle *>(
+        auto *userdata = static_cast<ChannelHandleUserdata *>(
             luaL_checkudata(L, idx, CHANNEL_META));
+        if (!userdata->constructed)
+        {
+            luaL_error(L, "worker channel is not initialized");
+        }
+        return userdata->get();
+    }
+
+    ChannelHandle *test_channel(lua_State *L, int idx) noexcept
+    {
+        auto *userdata = static_cast<ChannelHandleUserdata *>(
+            luaL_testudata(L, idx, CHANNEL_META));
+        if (!userdata || !userdata->constructed)
+        {
+            return nullptr;
+        }
+        return userdata->get();
     }
 
     void push_channel_handle(lua_State *L,
                              const std::shared_ptr<SharedChannel> &shared)
     {
-        ChannelHandle *handle = static_cast<ChannelHandle *>(
-            lua_newuserdata(L, sizeof(ChannelHandle)));
-        new (handle) ChannelHandle{shared};
+        auto *userdata = static_cast<ChannelHandleUserdata *>(
+            lua_newuserdata(L, sizeof(ChannelHandleUserdata)));
+        userdata->constructed = false;
         luaL_getmetatable(L, CHANNEL_META);
         lua_setmetatable(L, -2);
+        new (userdata->storage) ChannelHandle{};
+        userdata->constructed = true;
+        userdata->get()->shared = shared;
     }
 
     // ==================================================================
@@ -1432,6 +1519,117 @@ namespace
         return false;
     }
 
+
+    int push_worker_false_protected(lua_State *L,
+                                    std::string_view reason)
+    {
+        auto builder = [reason](lua_State *state) noexcept -> int
+        {
+            lua_pushboolean(state, 0);
+            lua_pushlstring(state, reason.data(), reason.size());
+            return 2;
+        };
+        return lua_build_results_protected(L, builder, 2);
+    }
+
+    int push_worker_true_nil_protected(lua_State *L)
+    {
+        auto builder = [](lua_State *state) noexcept -> int
+        {
+            lua_pushboolean(state, 1);
+            lua_pushnil(state);
+            return 2;
+        };
+        return lua_build_results_protected(L, builder, 2);
+    }
+
+    int push_worker_json_success_protected(
+        lua_State *L, const json &value, std::string_view context)
+    {
+        std::string conversion_error;
+        SerializationBudget budget;
+        auto builder = [&](lua_State *state) -> int
+        {
+            if (!json_to_lua(
+                    state, value, conversion_error, 0, budget, context))
+            {
+                throw LuaProtectedBuilderFailure(
+                    conversion_error.c_str());
+            }
+            lua_pushboolean(state, 1);
+            lua_insert(state, -2);
+            return 2;
+        };
+        return lua_build_results_protected(L, builder, 2);
+    }
+
+    int push_worker_json_value_protected(
+        lua_State *L, const json &value, std::string_view context)
+    {
+        std::string conversion_error;
+        SerializationBudget budget;
+        auto builder = [&](lua_State *state) -> int
+        {
+            if (!json_to_lua(
+                    state, value, conversion_error, 0, budget, context))
+            {
+                throw LuaProtectedBuilderFailure(
+                    conversion_error.c_str());
+            }
+            return 1;
+        };
+        return lua_build_results_protected(L, builder, 1);
+    }
+
+    template <int (*Fn)(lua_State *)>
+    int workers_lua_boundary(lua_State *L)
+    {
+        return lua_cfunction_exception_boundary<Fn>(
+            L,
+            "workers: out of memory",
+            "workers: internal C++ failure",
+            "workers: unknown internal C++ failure");
+    }
+
+    struct WorkerSideExceptionReporter
+    {
+        int operator()(lua_State *L, LuaCxxExceptionKind kind,
+                       const char *detail) const
+        {
+            switch (kind)
+            {
+            case LuaCxxExceptionKind::lua_error_pending:
+                return lua_error(L);
+            case LuaCxxExceptionKind::protected_builder_failure:
+                lua_pushboolean(L, 0);
+                lua_pushstring(L, detail);
+                return 2;
+            case LuaCxxExceptionKind::out_of_memory:
+                lua_pushboolean(L, 0);
+                lua_pushliteral(L, "worker: out of memory");
+                return 2;
+            case LuaCxxExceptionKind::standard:
+                lua_pushboolean(L, 0);
+                lua_pushliteral(L, "worker: internal C++ failure");
+                return 2;
+            case LuaCxxExceptionKind::unknown:
+                lua_pushboolean(L, 0);
+                lua_pushliteral(L, "worker: unknown internal C++ failure");
+                return 2;
+            }
+            lua_pushboolean(L, 0);
+            lua_pushliteral(L, "worker: unknown internal C++ failure");
+            return 2;
+        }
+    };
+
+    template <int (*Fn)(lua_State *)>
+    int worker_side_lua_boundary(lua_State *L)
+    {
+        return invoke_lua_cfunction_with_exception_boundary<Fn>(
+            L, WorkerSideExceptionReporter{});
+    }
+
     // ==================================================================
     // Thread worker
     // ==================================================================
@@ -1468,71 +1666,53 @@ namespace
     //   - lua_pushcclosure(L, worker_side_*, 1)
     // La fonction le récupère avec lua_touserdata(L, lua_upvalueindex(1)).
 
+
     int worker_side_send(lua_State *L)
     {
         Worker *w = static_cast<Worker *>(
             lua_touserdata(L, lua_upvalueindex(1)));
+        const int64_t timeout_ms = parse_timeout_arg(L, 2);
 
-        // CORRECTIF Gemini : parse_timeout_arg peut faire un longjmp via
-        // luaL_error si l'utilisateur passe un timeout invalide. Or
-        // longjmp ne déroule PAS les destructeurs C++. Donc on parse
-        // le timeout AVANT toute allocation C++ (json, std::string, set).
-        int64_t timeout_ms = parse_timeout_arg(L, 2);
-
-        // Sérialiser la valeur (arg 1) -> JSON string. La construction
-        // du DOM et dump() peuvent tous deux allouer : aucune exception
-        // C++ ne doit traverser la lua_CFunction.
-        std::string msg_str;
+        std::string serialized;
+        std::string failure;
         try
         {
-            json msg_j;
-            std::string err;
+            json message;
             std::unordered_set<const void *> visited;
             SerializationBudget budget;
             if (!lua_to_json(
-                    L, 1, msg_j, err, 0, visited, budget,
+                    L, 1, message, failure, 0, visited, budget,
                     "worker.send"))
             {
-                // Convention pcall-style côté worker : (false, err).
-                lua_pushboolean(L, 0);
-                lua_pushlstring(L, err.data(), err.size());
-                return 2;
+                // failure is already populated.
             }
-            msg_str = msg_j.dump();
+            else
+            {
+                serialized = message.dump();
+            }
         }
         catch (const std::bad_alloc &)
         {
-            lua_pushboolean(L, 0);
-            lua_pushliteral(
-                L, "worker.send: out of memory during serialization");
-            return 2;
+            failure = "worker.send: out of memory during serialization";
         }
         catch (const std::exception &)
         {
-            lua_pushboolean(L, 0);
-            lua_pushliteral(
-                L, "worker.send: internal serialization failure");
-            return 2;
+            failure = "worker.send: internal serialization failure";
         }
         catch (...)
         {
-            lua_pushboolean(L, 0);
-            lua_pushliteral(
-                L, "worker.send: unknown serialization failure");
-            return 2;
+            failure = "worker.send: unknown serialization failure";
         }
 
-        // Push dans l'OUTBOX (worker -> parent).
-        auto r = w->outbox.push(std::move(msg_str), timeout_ms);
-        if (r.first)
-        {
-            lua_pushboolean(L, 1);
-            lua_pushnil(L);
-            return 2;
-        }
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, r.second);
-        return 2;
+        if (!failure.empty())
+            return push_worker_false_protected(L, failure);
+
+        const auto result = w->outbox.push(
+            std::move(serialized), timeout_ms, &w->cancel_requested,
+            MessageQueue::PushCancellationPolicy::only_if_waiting);
+        if (result.first)
+            return push_worker_true_nil_protected(L);
+        return push_worker_false_protected(L, result.second);
     }
 
     int worker_side_cancelled(lua_State *L)
@@ -1549,6 +1729,7 @@ namespace
         return 1;
     }
 
+
     int worker_side_recv(lua_State *L)
     {
         Worker *w = static_cast<Worker *>(
@@ -1559,60 +1740,53 @@ namespace
             return luaL_error(
                 L, "worker.recv: expected zero or one timeout argument");
         }
+        const int64_t timeout_ms = parse_timeout_arg(L, 1);
 
-        // Parse timeout (peut lever via luaL_error).
-        int64_t timeout_ms = parse_timeout_arg(L, 1);
-
-        // Une annulation abandonne immédiatement les commandes encore
-        // en file : le worker ne doit pas poursuivre un protocole que le
-        // parent vient d'annuler.
         if (w->cancel_requested.load(std::memory_order_acquire))
-        {
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, "cancelled");
-            return 2;
-        }
+            return push_worker_false_protected(L, "cancelled");
 
-        // Pop depuis l'INBOX (parent -> worker).
-        std::string msg_str;
-        auto r = w->inbox.pop(msg_str, timeout_ms);
-        if (!r.first ||
+        std::string serialized;
+        const auto result = w->inbox.pop(serialized, timeout_ms);
+        // Cancellation is a protocol boundary. If it becomes visible just
+        // after a successful pop, the already extracted command is
+        // intentionally discarded instead of being executed after cancel().
+        if (!result.first ||
             w->cancel_requested.load(std::memory_order_acquire))
         {
-            lua_pushboolean(L, 0);
-            lua_pushstring(
+            return push_worker_false_protected(
                 L, w->cancel_requested.load(std::memory_order_acquire)
                        ? "cancelled"
-                       : r.second);
-            return 2;
+                       : result.second);
         }
 
-        // Déserialiser le JSON -> valeur Lua.
-        try
+        char failure[LuaProtectedBuilderFailure::capacity]{};
+        bool failed = false;
         {
-            json j = json::parse(msg_str);
-            std::string err;
-            SerializationBudget budget;
-            if (!json_to_lua(
-                    L, j, err, 0, budget, "worker.recv"))
+            try
             {
-                lua_pushboolean(L, 0);
-                lua_pushstring(L, err.c_str());
-                return 2;
+                const json message = json::parse(serialized);
+                try
+                {
+                    return push_worker_json_success_protected(
+                        L, message, "worker.recv");
+                }
+                catch (const LuaProtectedBuilderFailure &error)
+                {
+                    lua_copy_protected_builder_message(
+                        failure, sizeof(failure), error.message);
+                    failed = true;
+                }
+            }
+            catch (const std::exception &error)
+            {
+                lua_copy_protected_builder_message(
+                    failure, sizeof(failure), error.what());
+                failed = true;
             }
         }
-        catch (const std::exception &e)
-        {
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, e.what());
-            return 2;
-        }
-
-        // pile : ..., value
-        // On veut renvoyer (true, value).
-        lua_pushboolean(L, 1);
-        lua_insert(L, -2);
-        return 2;
+        return push_worker_false_protected(
+            L, failed ? std::string_view(failure)
+                      : std::string_view("worker.recv: decode failure"));
     }
 
     void *worker_thread_run(Worker *w, lua_State *&L)
@@ -1653,82 +1827,115 @@ namespace
             publish_worker_status(w, WORKER_ERROR);
             return nullptr;
         }
-        luaL_openlibs(L);
-
-        // Charger babet.* + modules bundlés (inspect, argparse, logging).
-        // L'ORDRE COMPTE : register_bundled_modules pose package.preload
-        // pour les modules bundlés, et doit être appelé AVANT toute
-        // exécution de require() — donc avant register_babet ne
-        // l'utilise et avant le code utilisateur.
-        register_bundled_modules(L);
-        register_babet(L);
-
-        // CORRECTIF (post-revue ChatGPT) : appliquer la même config de
-        // require() que le parent, pour que require("mymod") trouve les
-        // modules utilisateur depuis un worker. Sans ça, seuls les
-        // modules bundlés (via package.preload) marchaient.
-        if (g_init_ctx.initialized)
+        std::string setup_error;
+        auto setup_libraries = [](lua_State *state)
         {
+            luaL_openlibs(state);
+
+            // L'ORDRE COMPTE : register_bundled_modules pose
+            // package.preload avant que babet ou le code utilisateur ne
+            // puisse exécuter require(). Toute cette phase est appelée sous
+            // lua_pcall : un LUA_ERRMEM devient un échec du worker, jamais
+            // un panic du processus ni un longjmp par-dessus la pthread C++.
+            register_bundled_modules(state);
+            register_babet(state);
+        };
+        if (!lua_run_setup_protected(
+                L, setup_libraries,
+                "workers: failed to initialize Lua libraries",
+                setup_error))
+        {
+            w->err_msg = std::move(setup_error);
+            w->inbox.close();
+            w->outbox.close();
+            lua_close(L);
+            publish_worker_status(w, WORKER_ERROR);
+            return nullptr;
+        }
+
+        // Préparer côté C++ le seul fragment dynamique nécessaire au mode
+        // dossier. Le builder Lua ne construit ensuite aucun propriétaire
+        // C++ autour de lua_concat/lua_setfield.
+        std::string package_prefix;
+        if (g_init_ctx.initialized && !g_init_ctx.embedded &&
+            !g_init_ctx.projectDir.empty())
+        {
+            const std::string &directory = g_init_ctx.projectDir;
+            package_prefix = directory + "/?.lua;" + directory +
+                             "/?/init.lua;";
+        }
+
+        auto setup_require_path = [&](lua_State *state)
+        {
+            if (!g_init_ctx.initialized)
+            {
+                return;
+            }
             if (g_init_ctx.embedded && !g_init_ctx.exePath.empty())
             {
-                // Mode embarqué : pose un searcher qui lit depuis le ZIP
-                // appendu au binaire. Même fonction publique que le
-                // parent utilise.
-                register_embedded_searcher(L, g_init_ctx.exePath.c_str());
+                register_embedded_searcher(
+                    state, g_init_ctx.exePath.c_str());
+                return;
             }
-            else if (!g_init_ctx.projectDir.empty())
+            if (package_prefix.empty())
             {
-                // Mode dossier : préfixe ?.lua et ?/init.lua à
-                // package.path. Pure manipulation de pile Lua, pas
-                // d'évaluation de string utilisateur (sûr si projectDir
-                // contient des caractères spéciaux).
-                const std::string &d = g_init_ctx.projectDir;
-                lua_getglobal(L, "package"); // pile: package
-                lua_getfield(L, -1, "path"); // pile: package, oldpath
-                const char *oldpath = lua_tostring(L, -1);
-                std::string newpath = d + "/?.lua;" + d + "/?/init.lua;" + (oldpath ? oldpath : "");
-                lua_pop(L, 1);                      // pile: package
-                lua_pushstring(L, newpath.c_str()); // pile: package, newpath
-                lua_setfield(L, -2, "path");        // pile: package
-                lua_pop(L, 1);                      // pile: <vide>
+                return;
             }
+
+            lua_getglobal(state, "package");
+            lua_getfield(state, -1, "path");
+            if (lua_type(state, -1) == LUA_TSTRING)
+            {
+                lua_pushlstring(state, package_prefix.data(),
+                                package_prefix.size());
+                lua_insert(state, -2); // package, prefix, oldpath
+                lua_concat(state, 2);  // package, prefix .. oldpath
+            }
+            else
+            {
+                lua_pop(state, 1);
+                lua_pushlstring(state, package_prefix.data(),
+                                package_prefix.size());
+            }
+            lua_setfield(state, -2, "path");
+            lua_pop(state, 1);
+        };
+        setup_error.clear();
+        if (!lua_run_setup_protected(
+                L, setup_require_path,
+                "workers: failed to configure require()",
+                setup_error))
+        {
+            w->err_msg = std::move(setup_error);
+            w->inbox.close();
+            w->outbox.close();
+            lua_close(L);
+            publish_worker_status(w, WORKER_ERROR);
+            return nullptr;
         }
 
-        // Préparer worker.args via le namespace "worker" (décision W-7).
-        // worker = { args = <args_json désérialisé> }
-        lua_newtable(L); // worker = {}
-        std::string err;
-        if (w->args_json.empty() || w->args_json == "null")
-        {
-            lua_pushnil(L);
-        }
-        else
+        // Désérialiser d'abord le JSON côté C++, avant de commencer la
+        // construction de la table worker. La valeur JSON, le budget et le
+        // diagnostic restent ensuite détenus par la portée extérieure au
+        // builder protégé.
+        const bool has_args =
+            !w->args_json.empty() && w->args_json != "null";
+        json args_value;
+        if (has_args)
         {
             try
             {
-                json args_j = json::parse(w->args_json);
-                SerializationBudget budget;
-                if (!json_to_lua(
-                        L, args_j, err, 0, budget,
-                        "workers.spawn"))
-                {
-                    w->err_msg = err;
-                    // Fermer et détruire l'état enfant avant de publier
-                    // l'état terminal ; voir le même invariant ci-dessus.
-                    w->inbox.close();
-                    w->outbox.close();
-                    lua_close(L);
-                    publish_worker_status(w, WORKER_ERROR);
-                    return nullptr;
-                }
+                args_value = json::parse(w->args_json);
             }
-            catch (const std::exception &e)
+            catch (const std::bad_alloc &)
             {
-                w->err_msg = std::string(
-                                 "workers: internal: failed to parse args_json: ") +
-                             e.what();
-                // Fermer et détruire l'état enfant avant de publier
-                // l'état terminal ; voir le même invariant ci-dessus.
+                throw;
+            }
+            catch (const std::exception &error)
+            {
+                w->err_msg =
+                    "workers: internal: failed to parse args_json: ";
+                w->err_msg += error.what();
                 w->inbox.close();
                 w->outbox.close();
                 lua_close(L);
@@ -1736,42 +1943,73 @@ namespace
                 return nullptr;
             }
         }
-        lua_setfield(L, -2, "args"); // worker.args = ...
 
-        // Channels partagés explicitement via opts.channels. Chaque état
-        // Lua reçoit ses propres userdata, mais tous les handles pointent
-        // vers la même SharedChannel. Le vecteur du job est vidé après la
-        // publication dans l'état enfant afin que sa durée de vie dépende
-        // uniquement des handles Lua encore accessibles.
-        lua_createtable(
-            L, 0, static_cast<int>(w->channels.size()));
-        for (const NamedChannel &named : w->channels)
+        std::string conversion_error;
+        SerializationBudget args_budget;
+        auto setup_worker_namespace = [&](lua_State *state)
         {
-            push_channel_handle(L, named.shared);
-            lua_setfield(L, -2, named.name.c_str());
+            lua_newtable(state); // worker = {}
+            if (has_args)
+            {
+                if (!json_to_lua(
+                        state, args_value, conversion_error, 0,
+                        args_budget, "workers.spawn"))
+                {
+                    throw LuaProtectedBuilderFailure(
+                        conversion_error.c_str());
+                }
+            }
+            else
+            {
+                lua_pushnil(state);
+            }
+            lua_setfield(state, -2, "args");
+
+            lua_createtable(
+                state, 0, static_cast<int>(w->channels.size()));
+            for (const NamedChannel &named : w->channels)
+            {
+                push_channel_handle(state, named.shared);
+                lua_setfield(state, -2, named.name.c_str());
+            }
+            lua_setfield(state, -2, "channels");
+
+            lua_pushlightuserdata(state, w);
+            lua_pushcclosure(
+                state, worker_side_lua_boundary<worker_side_send>, 1);
+            lua_setfield(state, -2, "send");
+
+            lua_pushlightuserdata(state, w);
+            lua_pushcclosure(
+                state, worker_side_lua_boundary<worker_side_recv>, 1);
+            lua_setfield(state, -2, "recv");
+
+            lua_pushlightuserdata(state, w);
+            lua_pushcclosure(
+                state, worker_side_lua_boundary<worker_side_cancelled>, 1);
+            lua_setfield(state, -2, "cancelled");
+
+            lua_setglobal(state, "worker");
+            lua_pushnil(state);
+            lua_setglobal(state, "arg");
+        };
+        setup_error.clear();
+        if (!lua_run_setup_protected(
+                L, setup_worker_namespace,
+                "workers: failed to initialize worker namespace",
+                setup_error))
+        {
+            w->err_msg = std::move(setup_error);
+            w->inbox.close();
+            w->outbox.close();
+            lua_close(L);
+            publish_worker_status(w, WORKER_ERROR);
+            return nullptr;
         }
-        lua_setfield(L, -2, "channels");
+        // The Lua handles now own the shared channels. Clearing the job-side
+        // copies is non-throwing and happens only after the protected setup
+        // has committed the global worker table.
         w->channels.clear();
-
-        // Chantier 9-3 : worker.send / worker.recv exposés au lua_State
-        // enfant via lightuserdata du Worker* en upvalue (W2-C1).
-        lua_pushlightuserdata(L, w);
-        lua_pushcclosure(L, worker_side_send, 1);
-        lua_setfield(L, -2, "send");
-
-        lua_pushlightuserdata(L, w);
-        lua_pushcclosure(L, worker_side_recv, 1);
-        lua_setfield(L, -2, "recv");
-
-        lua_pushlightuserdata(L, w);
-        lua_pushcclosure(L, worker_side_cancelled, 1);
-        lua_setfield(L, -2, "cancelled");
-
-        lua_setglobal(L, "worker"); // _G.worker = ...
-
-        // arg = nil dans le worker (décision W-7).
-        lua_pushnil(L);
-        lua_setglobal(L, "arg");
 
         // Charger et exécuter le code de l'utilisateur en pcall.
         // CORRECTIF (post-revue ChatGPT) : luaL_loadbuffer avec size
@@ -1818,16 +2056,17 @@ namespace
 
         // Sérialiser le résultat.
         json result_j;
+        std::string result_error;
         std::unordered_set<const void *> result_visited;
         SerializationBudget result_budget;
         if (!lua_to_json(
-                L, -1, result_j, err, 0, result_visited,
+                L, -1, result_j, result_error, 0, result_visited,
                 result_budget, "worker return"))
         {
             // L'utilisateur a retourné un truc non sérialisable.
             w->err_msg = std::string(
                              "workers: worker return value is not transferable: ") +
-                         err;
+                         result_error;
             // Fermer et détruire l'état enfant avant de publier
             // l'état terminal ; voir le même invariant ci-dessus.
             w->inbox.close();
@@ -2035,8 +2274,7 @@ namespace
                             L,
                             "workers.spawn: channel names must be non-empty UTF-8 strings without NUL");
                     }
-                    ChannelHandle *handle = static_cast<ChannelHandle *>(
-                        luaL_testudata(L, -1, CHANNEL_META));
+                    ChannelHandle *handle = test_channel(L, -1);
                     if (!handle || !handle->shared)
                     {
                         return luaL_error(
@@ -2062,8 +2300,43 @@ namespace
             g_worker_ever_spawned = true;
         }
 
+        // From this point on, every C++ owner belongs to a Lua userdata.
+        // If a later Lua allocation raises LUA_ERRMEM, __gc can still run
+        // the complete Worker destructor instead of leaking local owners.
+        auto *worker_userdata = static_cast<WorkerUserdata *>(
+            lua_newuserdata(L, sizeof(WorkerUserdata)));
+        worker_userdata->constructed = false;
+        luaL_getmetatable(L, WORKER_META);
+        lua_setmetatable(L, -2);
+
+        // Worker default construction may allocate through its strings,
+        // vectors and message queues. This placement new is therefore
+        // intentionally outside any noexcept builder: workers_lua_boundary
+        // converts a thrown bad_alloc to a Lua error, while __gc sees
+        // constructed == false until construction has fully completed.
+        static_assert(
+            std::is_nothrow_destructible_v<Worker>,
+            "Worker userdata finalization must remain non-throwing");
+        Worker *w = new (worker_userdata->storage) Worker();
+        worker_userdata->constructed = true;
+        w->tid_valid = false;
+        w->status.store(WORKER_RUNNING, std::memory_order_relaxed);
+        w->joined.store(false, std::memory_order_relaxed);
+        w->cancel_requested.store(false, std::memory_order_relaxed);
+        w->emergency_error[0] = '\0';
+
+        try
+        {
+            w->code.assign(code, code_len);
+            w->args_json = "null";
+        }
+        catch (...)
+        {
+            lua_pop(L, 1);
+            throw;
+        }
+
         // Sérialiser args -> JSON.
-        std::string args_json_str = "null";
         if (lua_istable(L, 2))
         {
             try
@@ -2076,25 +2349,25 @@ namespace
                         L, 2, args_j, err, 0, args_visited,
                         budget, "workers: spawn"))
                 {
-                    return push_fail(L, err);
+                    return push_fail_protected(L, err);
                 }
-                args_json_str = args_j.dump();
+                w->args_json = args_j.dump();
             }
             catch (const std::bad_alloc &)
             {
-                return push_fail(
+                return push_fail_protected(
                     L,
                     "workers.spawn: out of memory during serialization");
             }
             catch (const std::exception &)
             {
-                return push_fail(
+                return push_fail_protected(
                     L,
                     "workers.spawn: internal serialization failure");
             }
             catch (...)
             {
-                return push_fail(
+                return push_fail_protected(
                     L,
                     "workers.spawn: unknown serialization failure");
             }
@@ -2103,7 +2376,6 @@ namespace
         // Copier les références partagées des channels après toutes les
         // validations susceptibles de lever une erreur Lua. Une erreur
         // d'allocation reste un échec runtime propre (nil, err).
-        std::vector<NamedChannel> named_channels;
         if (lua_istable(L, 3))
         {
             lua_getfield(L, 3, "channels");
@@ -2118,10 +2390,8 @@ namespace
                         size_t channel_name_len = 0;
                         const char *channel_name =
                             lua_tolstring(L, -2, &channel_name_len);
-                        ChannelHandle *handle =
-                            static_cast<ChannelHandle *>(
-                                luaL_testudata(L, -1, CHANNEL_META));
-                        named_channels.push_back(NamedChannel{
+                        ChannelHandle *handle = test_channel(L, -1);
+                        w->channels.push_back(NamedChannel{
                             std::string(channel_name, channel_name_len),
                             handle->shared,
                         });
@@ -2131,13 +2401,13 @@ namespace
                 catch (const std::bad_alloc &)
                 {
                     lua_settop(L, 3);
-                    return push_fail(
+                    return push_fail_protected(
                         L, "workers.spawn: out of memory while copying channels");
                 }
                 catch (const std::exception &e)
                 {
                     lua_settop(L, 3);
-                    return push_fail(
+                    return push_fail_protected(
                         L,
                         std::string("workers.spawn: failed to copy channels: ") +
                             e.what());
@@ -2146,26 +2416,10 @@ namespace
             lua_pop(L, 1);
         }
 
-        // Créer le userdata Worker AVANT pthread_create : si pthread
-        // échoue, on libère en utilisant le __gc normal (pas de leak).
-        Worker *w = static_cast<Worker *>(
-            lua_newuserdata(L, sizeof(Worker)));
-        new (w) Worker();
-        w->tid_valid = false;
-        w->status.store(WORKER_RUNNING, std::memory_order_relaxed);
-        w->joined.store(false, std::memory_order_relaxed);
-        w->cancel_requested.store(false, std::memory_order_relaxed);
-        w->emergency_error[0] = '\0';
-        w->code.assign(code, code_len);
-        w->args_json = std::move(args_json_str);
-        w->channels = std::move(named_channels);
-        luaL_getmetatable(L, WORKER_META);
-        lua_setmetatable(L, -2);
-
         if (!w->completion.init())
         {
             lua_pop(L, 1);
-            return push_fail(
+            return push_fail_protected(
                 L, "workers: failed to initialize completion signal");
         }
 
@@ -2177,13 +2431,13 @@ namespace
         if (!w->inbox.init((size_t)inbox_cap))
         {
             lua_pop(L, 1);
-            return push_fail(L,
+            return push_fail_protected(L,
                              "workers: failed to initialize inbox queue");
         }
         if (!w->outbox.init((size_t)outbox_cap))
         {
             lua_pop(L, 1);
-            return push_fail(L,
+            return push_fail_protected(L,
                              "workers: failed to initialize outbox queue");
         }
 
@@ -2193,7 +2447,7 @@ namespace
             // userdata sera __gc'd par Lua (rien à joindre puisque
             // tid_valid reste false).
             lua_pop(L, 1);
-            return push_fail(L,
+            return push_fail_protected(L,
                              std::string("workers: pthread_create failed: ") + std::strerror(rc));
         }
         w->tid_valid = true;
@@ -2205,37 +2459,39 @@ namespace
     // En cas d'échec, restaure exactement la pile et fournit un message
     // explicite dans errbuf. Cette situation indique une corruption ou un
     // bug interne : elle ne doit jamais être transformée en succès + nil.
+
     bool push_deserialized_worker_result(lua_State *L,
                                          const std::string &result_json,
                                          char *errbuf,
-                                         size_t errbuf_size) noexcept
+                                         size_t errbuf_size)
     {
         const int initial_top = lua_gettop(L);
         try
         {
-            json r = json::parse(result_json);
-            std::string conversion_error;
-            SerializationBudget budget;
-            if (!json_to_lua(
-                    L, r, conversion_error, 0, budget,
-                    "workers.join"))
+            const json result = json::parse(result_json);
+            try
+            {
+                push_worker_json_value_protected(
+                    L, result, "workers.join");
+                return true;
+            }
+            catch (const LuaProtectedBuilderFailure &error)
             {
                 lua_settop(L, initial_top);
                 std::snprintf(
                     errbuf, errbuf_size,
                     "workers: internal: failed to deserialize result: %.380s",
-                    conversion_error.c_str());
+                    error.message);
                 return false;
             }
-            return true;
         }
-        catch (const std::exception &e)
+        catch (const std::exception &error)
         {
             lua_settop(L, initial_top);
             std::snprintf(
                 errbuf, errbuf_size,
                 "workers: internal: failed to parse serialized result: %.380s",
-                e.what());
+                error.what());
             return false;
         }
         catch (...)
@@ -2539,13 +2795,18 @@ namespace
             lua_pop(L, 1);
         }
 
-        // Créer d'abord un userdata vide afin qu'aucune ressource C++ ne
-        // soit détenue si lua_newuserdata déclenche une erreur mémoire Lua.
-        ChannelHandle *handle = static_cast<ChannelHandle *>(
-            lua_newuserdata(L, sizeof(ChannelHandle)));
-        new (handle) ChannelHandle{};
+        // lua_newuserdata() ne construit pas ChannelHandleUserdata : le
+        // drapeau est initialisé avant d'armer __gc, puis le shared_ptr vide
+        // est construit seulement après les dernières allocations Lua liées
+        // à la métatable.
+        auto *channel_userdata = static_cast<ChannelHandleUserdata *>(
+            lua_newuserdata(L, sizeof(ChannelHandleUserdata)));
+        channel_userdata->constructed = false;
         luaL_getmetatable(L, CHANNEL_META);
         lua_setmetatable(L, -2);
+        ChannelHandle *handle =
+            new (channel_userdata->storage) ChannelHandle{};
+        channel_userdata->constructed = true;
 
         try
         {
@@ -2554,12 +2815,12 @@ namespace
         catch (const std::bad_alloc &)
         {
             lua_pop(L, 1);
-            return push_fail(L, "workers.channel: out of memory");
+            return push_fail_protected(L, "workers.channel: out of memory");
         }
         catch (const std::exception &e)
         {
             lua_pop(L, 1);
-            return push_fail(
+            return push_fail_protected(
                 L,
                 std::string("workers.channel: failed to allocate channel: ") +
                     e.what());
@@ -2569,12 +2830,13 @@ namespace
         {
             handle->shared.reset();
             lua_pop(L, 1);
-            return push_fail(
+            return push_fail_protected(
                 L, "workers.channel: failed to initialize queue");
         }
 
         return 1;
     }
+
 
     int channel_send(lua_State *L)
     {
@@ -2585,70 +2847,69 @@ namespace
                 L,
                 "workers.channel.send: expected self, value, and optional timeout");
         }
-
-        // Peut longjmp : doit précéder toute construction C++ locale.
         const int64_t timeout_ms = parse_timeout_arg(L, 3);
         if (!handle->shared)
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "workers.channel.send: invalid channel handle");
         }
 
+        std::string serialized;
+        std::string failure;
         try
         {
             json message;
-            std::string error;
             std::unordered_set<const void *> visited;
             SerializationBudget budget;
             if (!lua_to_json(
-                    L, 2, message, error, 0, visited,
-                    budget, "workers.channel.send"))
+                    L, 2, message, failure, 0, visited, budget,
+                    "workers.channel.send"))
             {
-                return push_fail(L, error);
+                // failure is already populated.
             }
+            else
+            {
+                serialized = message.dump();
+            }
+        }
+        catch (const std::bad_alloc &)
+        {
+            failure =
+                "workers.channel.send: out of memory during serialization";
+        }
+        catch (const std::exception &)
+        {
+            failure =
+                "workers.channel.send: internal serialization failure";
+        }
+        catch (...)
+        {
+            failure =
+                "workers.channel.send: unknown serialization failure";
+        }
+        if (!failure.empty())
+            return push_fail_protected(L, failure);
 
-            std::string serialized = message.dump();
+        std::pair<bool, const char *> result;
+        {
             ChannelWaitScope wait_scope(g_current_worker, handle->shared);
             const std::atomic<bool> *cancel_requested =
                 g_current_worker ? &g_current_worker->cancel_requested
                                  : nullptr;
-            auto result = handle->shared->queue.push(
+            result = handle->shared->queue.push(
                 std::move(serialized), timeout_ms, cancel_requested);
-            if (result.first)
-            {
-                lua_pushboolean(L, 1);
-                lua_pushnil(L);
-                return 2;
-            }
-            if (is_queue_flow_reason(result.second))
-            {
-                lua_pushboolean(L, 0);
-                lua_pushstring(L, result.second);
-                return 2;
-            }
-            return push_fail(
-                L,
-                std::string("workers.channel.send: ") + result.second);
         }
-        catch (const std::bad_alloc &)
-        {
-            return push_fail(
-                L,
-                "workers.channel.send: out of memory during serialization");
-        }
-        catch (const std::exception &)
-        {
-            return push_fail(
-                L,
-                "workers.channel.send: internal serialization failure");
-        }
-        catch (...)
-        {
-            return push_fail(
-                L,
-                "workers.channel.send: unknown serialization failure");
-        }
+
+        if (result.first)
+            return push_worker_true_nil_protected(L);
+        if (is_queue_flow_reason(result.second))
+            return push_worker_false_protected(L, result.second);
+
+        std::string detail = "workers.channel.send: ";
+        detail += result.second;
+        return push_fail_protected(L, detail);
     }
+
 
     int channel_recv(lua_State *L)
     {
@@ -2659,57 +2920,63 @@ namespace
                 L,
                 "workers.channel.recv: expected self and optional timeout");
         }
-
         const int64_t timeout_ms = parse_timeout_arg(L, 2);
         if (!handle->shared)
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "workers.channel.recv: invalid channel handle");
         }
 
         std::string serialized;
-        ChannelWaitScope wait_scope(g_current_worker, handle->shared);
-        const std::atomic<bool> *cancel_requested =
-            g_current_worker ? &g_current_worker->cancel_requested
-                             : nullptr;
-        auto result = handle->shared->queue.pop(
-            serialized, timeout_ms, cancel_requested);
+        std::pair<bool, const char *> result;
+        {
+            ChannelWaitScope wait_scope(g_current_worker, handle->shared);
+            const std::atomic<bool> *cancel_requested =
+                g_current_worker ? &g_current_worker->cancel_requested
+                                 : nullptr;
+            result = handle->shared->queue.pop(
+                serialized, timeout_ms, cancel_requested);
+        }
         if (!result.first)
         {
             if (is_queue_flow_reason(result.second))
-            {
-                lua_pushboolean(L, 0);
-                lua_pushstring(L, result.second);
-                return 2;
-            }
-            return push_fail(
-                L,
-                std::string("workers.channel.recv: ") + result.second);
+                return push_worker_false_protected(L, result.second);
+            std::string detail = "workers.channel.recv: ";
+            detail += result.second;
+            return push_fail_protected(L, detail);
         }
 
-        try
+        char failure[LuaProtectedBuilderFailure::capacity]{};
+        bool failed = false;
         {
-            json message = json::parse(serialized);
-            std::string error;
-            SerializationBudget budget;
-            if (!json_to_lua(
-                    L, message, error, 0, budget,
-                    "workers.channel.recv"))
+            try
             {
-                return push_fail(L, error);
+                const json message = json::parse(serialized);
+                try
+                {
+                    return push_worker_json_success_protected(
+                        L, message, "workers.channel.recv");
+                }
+                catch (const LuaProtectedBuilderFailure &error)
+                {
+                    lua_copy_protected_builder_message(
+                        failure, sizeof(failure), error.message);
+                    failed = true;
+                }
+            }
+            catch (const std::exception &error)
+            {
+                std::snprintf(
+                    failure, sizeof(failure),
+                    "workers.channel.recv: failed to parse message: %.380s",
+                    error.what());
+                failed = true;
             }
         }
-        catch (const std::exception &e)
-        {
-            return push_fail(
-                L,
-                std::string("workers.channel.recv: failed to parse message: ") +
-                    e.what());
-        }
-
-        lua_pushboolean(L, 1);
-        lua_insert(L, -2);
-        return 2;
+        return push_fail_protected(
+            L, failed ? std::string_view(failure)
+                      : std::string_view(
+                            "workers.channel.recv: decode failure"));
     }
 
     int channel_close(lua_State *L)
@@ -2722,7 +2989,7 @@ namespace
         }
         if (!handle->shared)
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "workers.channel.close: invalid channel handle");
         }
         handle->shared->queue.close();
@@ -2747,9 +3014,9 @@ namespace
 
     int channel_gc(lua_State *L)
     {
-        ChannelHandle *handle = static_cast<ChannelHandle *>(
+        auto *userdata = static_cast<ChannelHandleUserdata *>(
             luaL_testudata(L, 1, CHANNEL_META));
-        if (handle)
+        if (userdata)
         {
             // Retirer d'abord la métatable rend un appel manuel à __gc
             // idempotent : le finaliseur Lua ultérieur ne reconnaîtra plus
@@ -2757,11 +3024,15 @@ namespace
             lua_pushnil(L);
             lua_setmetatable(L, 1);
 
-            // Le userdata contient un vrai std::shared_ptr construit par
-            // placement-new. reset() seul libérerait la ressource partagée,
-            // mais ne terminerait pas correctement la durée de vie de
-            // l'objet C++ avant que Lua recycle sa mémoire.
-            handle->~ChannelHandle();
+            if (userdata->constructed)
+            {
+                // Le userdata contient un vrai std::shared_ptr construit par
+                // placement-new. reset() seul libérerait la ressource
+                // partagée, mais ne terminerait pas correctement la durée de
+                // vie de l'objet C++ avant que Lua recycle sa mémoire.
+                userdata->get()->~ChannelHandle();
+                userdata->constructed = false;
+            }
         }
         return 0;
     }
@@ -2799,123 +3070,99 @@ namespace
     // "empty"/"timeout"/"closed" car le worker ne push rien. L'usage
     // réel arrivera en 9-3 quand le worker exposera worker.send/recv.
 
+
     int worker_send(lua_State *L)
     {
         Worker *w = check_worker(L, 1);
-
-        // CORRECTIF Gemini : parse_timeout_arg peut faire un longjmp via
-        // luaL_error si l'utilisateur passe un timeout invalide. Or
-        // longjmp ne déroule PAS les destructeurs C++. Donc on parse
-        // le timeout AVANT toute allocation C++ (json, std::string, set).
-        int64_t timeout_ms = parse_timeout_arg(L, 3);
+        const int64_t timeout_ms = parse_timeout_arg(L, 3);
 
         if (w->cancel_requested.load(std::memory_order_acquire))
-        {
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, "cancelled");
-            return 2;
-        }
+            return push_worker_false_protected(L, "cancelled");
 
-        // Sérialiser la valeur (arg 2) -> JSON string.
-        // Toute valeur Lua passe : nil, boolean, number, string,
-        // table sérialisable. Refus si function/userdata/coroutine/cycle.
-        // lua_to_json() construit aussi le DOM et doit rester dans le try.
-        std::string msg_str;
+        std::string serialized;
+        std::string failure;
         try
         {
-            json msg_j;
-            std::string err;
+            json message;
             std::unordered_set<const void *> visited;
             SerializationBudget budget;
             if (!lua_to_json(
-                    L, 2, msg_j, err, 0, visited, budget,
+                    L, 2, message, failure, 0, visited, budget,
                     "workers.send"))
             {
-                return push_fail(L, err);
+                // failure is already populated.
             }
-            msg_str = msg_j.dump();
+            else
+            {
+                serialized = message.dump();
+            }
         }
         catch (const std::bad_alloc &)
         {
-            return push_fail(
-                L, "workers.send: out of memory during serialization");
+            failure = "workers.send: out of memory during serialization";
         }
         catch (const std::exception &)
         {
-            return push_fail(
-                L, "workers.send: internal serialization failure");
+            failure = "workers.send: internal serialization failure";
         }
         catch (...)
         {
-            return push_fail(
-                L, "workers.send: unknown serialization failure");
+            failure = "workers.send: unknown serialization failure";
         }
+        if (!failure.empty())
+            return push_fail_protected(L, failure);
 
-        // Push dans l'inbox.
-        auto r = w->inbox.push(std::move(msg_str), timeout_ms);
-        if (!r.first &&
+        const auto result = w->inbox.push(
+            std::move(serialized), timeout_ms);
+        if (!result.first &&
             w->cancel_requested.load(std::memory_order_acquire))
         {
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, "cancelled");
-            return 2;
+            return push_worker_false_protected(L, "cancelled");
         }
-        if (r.first)
-        {
-            lua_pushboolean(L, 1);
-            lua_pushnil(L);
-            return 2;
-        }
-        lua_pushboolean(L, 0);
-        lua_pushstring(L, r.second);
-        return 2;
+        if (result.first)
+            return push_worker_true_nil_protected(L);
+        return push_worker_false_protected(L, result.second);
     }
+
 
     int worker_recv(lua_State *L)
     {
         Worker *w = check_worker(L, 1);
+        const int64_t timeout_ms = parse_timeout_arg(L, 2);
 
-        // Parse timeout (peut lever).
-        int64_t timeout_ms = parse_timeout_arg(L, 2);
+        std::string serialized;
+        const auto result = w->outbox.pop(serialized, timeout_ms);
+        if (!result.first)
+            return push_worker_false_protected(L, result.second);
 
-        // Pop depuis l'outbox.
-        std::string msg_str;
-        auto r = w->outbox.pop(msg_str, timeout_ms);
-        if (!r.first)
+        char failure[LuaProtectedBuilderFailure::capacity]{};
+        bool failed = false;
         {
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, r.second);
-            return 2;
-        }
-
-        // Déserialiser le JSON -> valeur Lua.
-        try
-        {
-            json j = json::parse(msg_str);
-            std::string err;
-            SerializationBudget budget;
-            if (!json_to_lua(
-                    L, j, err, 0, budget, "workers.recv"))
+            try
             {
-                // Cas extrêmement rare : message qui a été sérialisé mais
-                // ne se deserialise pas. Remontée propre.
-                lua_pushboolean(L, 0);
-                lua_pushstring(L, err.c_str());
-                return 2;
+                const json message = json::parse(serialized);
+                try
+                {
+                    return push_worker_json_success_protected(
+                        L, message, "workers.recv");
+                }
+                catch (const LuaProtectedBuilderFailure &error)
+                {
+                    lua_copy_protected_builder_message(
+                        failure, sizeof(failure), error.message);
+                    failed = true;
+                }
+            }
+            catch (const std::exception &error)
+            {
+                lua_copy_protected_builder_message(
+                    failure, sizeof(failure), error.what());
+                failed = true;
             }
         }
-        catch (const std::exception &e)
-        {
-            lua_pushboolean(L, 0);
-            lua_pushstring(L, e.what());
-            return 2;
-        }
-
-        // pile actuelle : ..., value_désérialisée
-        // On veut renvoyer (true, value).
-        lua_pushboolean(L, 1);
-        lua_insert(L, -2); // permute : ..., true, value
-        return 2;
+        return push_worker_false_protected(
+            L, failed ? std::string_view(failure)
+                      : std::string_view("workers.recv: decode failure"));
     }
 
     int worker_close(lua_State *L)
@@ -2937,10 +3184,11 @@ namespace
 
     int worker_gc(lua_State *L)
     {
-        Worker *w = static_cast<Worker *>(
+        auto *userdata = static_cast<WorkerUserdata *>(
             luaL_testudata(L, 1, WORKER_META));
-        if (!w)
+        if (!userdata || !userdata->constructed)
             return 0;
+        Worker *w = userdata->get();
 
         // Filet de sécurité : si l'utilisateur n'a jamais join/poll,
         // on attend la thread ici. Bloque potentiellement le GC, mais
@@ -2968,7 +3216,32 @@ namespace
 
         // Appel explicite du destructeur (libère strings, vectors, mutex et atomics).
         w->~Worker();
+        userdata->constructed = false;
         return 0;
+    }
+
+    int channel_gc_boundary(lua_State *L) noexcept
+    {
+        try
+        {
+            return channel_gc(L);
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    int worker_gc_boundary(lua_State *L) noexcept
+    {
+        try
+        {
+            return worker_gc(L);
+        }
+        catch (...)
+        {
+            return 0;
+        }
     }
 
     int worker_tostring(lua_State *L)
@@ -3005,17 +3278,17 @@ void register_workers(lua_State *L)
     {
         lua_pushvalue(L, -1);
         lua_setfield(L, -2, "__index");
-        lua_pushcfunction(L, channel_gc);
+        lua_pushcfunction(L, channel_gc_boundary);
         lua_setfield(L, -2, "__gc");
-        lua_pushcfunction(L, channel_tostring);
+        lua_pushcfunction(L, workers_lua_boundary<channel_tostring>);
         lua_setfield(L, -2, "__tostring");
-        lua_pushcfunction(L, channel_send);
+        lua_pushcfunction(L, workers_lua_boundary<channel_send>);
         lua_setfield(L, -2, "send");
-        lua_pushcfunction(L, channel_recv);
+        lua_pushcfunction(L, workers_lua_boundary<channel_recv>);
         lua_setfield(L, -2, "recv");
-        lua_pushcfunction(L, channel_close);
+        lua_pushcfunction(L, workers_lua_boundary<channel_close>);
         lua_setfield(L, -2, "close");
-        lua_pushcfunction(L, channel_is_closed);
+        lua_pushcfunction(L, workers_lua_boundary<channel_is_closed>);
         lua_setfield(L, -2, "is_closed");
     }
     lua_pop(L, 1);
@@ -3024,32 +3297,32 @@ void register_workers(lua_State *L)
     {
         lua_pushvalue(L, -1);
         lua_setfield(L, -2, "__index");
-        lua_pushcfunction(L, worker_gc);
+        lua_pushcfunction(L, worker_gc_boundary);
         lua_setfield(L, -2, "__gc");
-        lua_pushcfunction(L, worker_tostring);
+        lua_pushcfunction(L, workers_lua_boundary<worker_tostring>);
         lua_setfield(L, -2, "__tostring");
-        lua_pushcfunction(L, worker_join);
+        lua_pushcfunction(L, workers_lua_boundary<worker_join>);
         lua_setfield(L, -2, "join");
-        lua_pushcfunction(L, worker_status);
+        lua_pushcfunction(L, workers_lua_boundary<worker_status>);
         lua_setfield(L, -2, "status");
-        lua_pushcfunction(L, worker_cancel);
+        lua_pushcfunction(L, workers_lua_boundary<worker_cancel>);
         lua_setfield(L, -2, "cancel");
-        lua_pushcfunction(L, worker_poll);
+        lua_pushcfunction(L, workers_lua_boundary<worker_poll>);
         lua_setfield(L, -2, "poll");
         // Chantier 9-2 : send / recv / close
-        lua_pushcfunction(L, worker_send);
+        lua_pushcfunction(L, workers_lua_boundary<worker_send>);
         lua_setfield(L, -2, "send");
-        lua_pushcfunction(L, worker_recv);
+        lua_pushcfunction(L, workers_lua_boundary<worker_recv>);
         lua_setfield(L, -2, "recv");
-        lua_pushcfunction(L, worker_close);
+        lua_pushcfunction(L, workers_lua_boundary<worker_close>);
         lua_setfield(L, -2, "close");
     }
     lua_pop(L, 1);
 
     lua_newtable(L);
-    lua_pushcfunction(L, lua_workers_spawn);
+    lua_pushcfunction(L, workers_lua_boundary<lua_workers_spawn>);
     lua_setfield(L, -2, "spawn");
-    lua_pushcfunction(L, lua_workers_channel);
+    lua_pushcfunction(L, workers_lua_boundary<lua_workers_channel>);
     lua_setfield(L, -2, "channel");
     lua_setfield(L, -2, "workers");
 }

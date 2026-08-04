@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(babet VERSION 2.14.0 LANGUAGES CXX C)
+project(babet VERSION 2.15.0 LANGUAGES CXX C)
 
 # Génère src/generated/version.hpp depuis src/version.hpp.in,
 # en injectant les composants de version définis dans project().
@@ -264,10 +264,18 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${LIBARCHIVE_INCLUDE}
     ${JSON_INCLUDE}
     ${HTTPLIB_INCLUDE}
-    ${TOMLPP_INCLUDE}
     ${SQLITE_INCLUDE}
     ${GENERATED_INCLUDE}
     ${PROJECT_SOURCE_DIR}/src
+)
+
+# toml++ est une dépendance externe header-only. GCC 16 signale dans sa
+# release épinglée 3.4.0 les anciens opérateurs littéraux `operator"" _toml`
+# et `operator"" _tpath` comme dépréciés en C++23. Le chemin SYSTEM produit
+# un include `-isystem` : les diagnostics du code tiers sont masqués, tandis
+# que les avertissements provenant du code Babet restent pleinement actifs.
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE
+    ${TOMLPP_INCLUDE}
 )
 
 target_compile_definitions(${PROJECT_NAME} PRIVATE

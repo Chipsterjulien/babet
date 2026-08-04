@@ -101,20 +101,20 @@ int lua_setmode(lua_State *L)
     auto mode_opt = resolve_mode(L, 2, mode_error);
     if (!mode_opt)
     {
-        return push_fail(L, mode_error);
+        return push_fail_protected(L, mode_error);
     }
 
     long mode = *mode_opt;
     if (mode < 0 || mode > 07777)
     {
-        return push_fail(L, "mode out of range (must be between 0 and 0o7777)");
+        return push_fail_protected(L, "mode out of range (must be between 0 and 0o7777)");
     }
 
     std::error_code ec;
     fs::permissions(path, static_cast<fs::perms>(mode), ec);
     if (ec)
     {
-        return push_fail(L, ec.message());
+        return push_fail_protected(L, ec.message());
     }
     return push_ok(L);
 }
@@ -145,9 +145,8 @@ int lua_getmode(lua_State *L)
     auto perms = fs::status(path, ec).permissions();
     if (ec)
     {
-        lua_pushnil(L);
-        lua_pushstring(L, ec.message().c_str());
-        return 2;
+        const std::string message = ec.message();
+        return push_fail_protected(L, message);
     }
 
     lua_pushinteger(L, static_cast<int>(perms) & 07777);

@@ -2647,18 +2647,32 @@ do
 
         local bad_it, bad_it_err = babet.createFileIterator(
             iter_err_dir, true)
+        ok_val("FileIterator creation is lazy despite a locked subtree",
+            bad_it, bad_it_err, function(x) return x ~= nil end)
 
-        -- Restauration avant les assertions pour garantir le nettoyage.
+        local traversal_err
+        if bad_it then
+            while true do
+                local path, next_err = bad_it:next()
+                if next_err then
+                    traversal_err = next_err
+                    break
+                end
+                if not path then
+                    break
+                end
+            end
+        end
+
+        -- Restauration inconditionnelle avant les assertions/nettoyage.
         babet.setMode(locked_dir, "755")
         babet.rmdirAll(iter_err_dir)
 
-        ok_fail("LOT 5B FileIterator preserves traversal errors",
-            bad_it, bad_it_err)
-        ok("  iterator error identifies a traversal failure",
-            type(bad_it_err) == "string"
-            and (bad_it_err:find("cannot continue", 1, true) ~= nil
-                or bad_it_err:find("Permission denied", 1, true) ~= nil),
-            "err=" .. tostring(bad_it_err))
+        ok("FileIterator reports traversal errors from next()",
+            type(traversal_err) == "string"
+            and (traversal_err:find("cannot continue", 1, true) ~= nil
+                or traversal_err:find("Permission denied", 1, true) ~= nil),
+            "err=" .. tostring(traversal_err))
     end
 
     -- :close() puis :next() doit lever une erreur Lua propre
@@ -13966,6 +13980,50 @@ do
             and summary.timeouts >= 3,
             "summary=" .. tostring(summary and summary.timeouts))
         w:join()
+    end
+
+    -- ----- annulation réveille une outbox pleine ----------------
+    -- Régression Gemini 2.15.0 : worker.send() bloqué ne doit pas
+    -- empêcher cancel() puis join(timeout) de terminer.
+    do
+        local ready = assert(W.channel({ capacity = 1 }))
+        local w = W.spawn([[
+            local first_ok, first_err = worker.send("first")
+            assert(worker.channels.ready:send(true, 2))
+            local second_ok, second_err = worker.send("second")
+            return {
+                first_ok = first_ok,
+                first_err = first_err,
+                second_ok = second_ok,
+                second_err = second_err,
+            }
+        ]], nil, {
+            outbox_capacity = 1,
+            channels = { ready = ready },
+        })
+
+        local ready_ok, ready_value = ready:recv(2)
+        ok("worker atteint l'envoi bloquant sur outbox pleine",
+            ready_ok == true and ready_value == true)
+        local cancelled, cancel_err = w:cancel()
+        ok("cancel réveille worker.send sur outbox pleine",
+            cancelled == true and cancel_err == nil,
+            tostring(cancel_err))
+
+        local joined, result = w:join(2)
+        ok("cancel + join(timeout) ne deadlock plus",
+            joined == true and type(result) == "table",
+            tostring(result))
+        ok("envoi déjà placé conservé, envoi bloqué annulé",
+            result and result.first_ok == true
+            and result.second_ok == false
+            and result.second_err == "cancelled",
+            tostring(result and result.second_err))
+
+        local recv_ok, recv_value = w:recv(0)
+        ok("diagnostic déjà présent dans l'outbox reste drainable",
+            recv_ok == true and recv_value == "first",
+            tostring(recv_value))
     end
 
     -- ----- worker meurt -> parent draine puis voit 'closed' -----

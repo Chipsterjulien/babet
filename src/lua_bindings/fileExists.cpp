@@ -24,7 +24,7 @@ int lua_fileExists(lua_State *L)
     // pas un simple "fichier introuvable".
     if (ec && ec != std::errc::no_such_file_or_directory)
     {
-        return push_fail(L, "cannot check '" + path.string() + "': " + ec.message());
+        return push_fail_protected(L, "cannot check '" + path.string() + "': " + ec.message());
     }
 
     // À ce stade : soit le fichier existe (status valide), soit il n'existe pas

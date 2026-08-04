@@ -184,5 +184,5 @@ int lua_touch(lua_State *L)
     {
         return push_ok(L);
     }
-    return push_fail(L, error_message);
+    return push_fail_protected(L, error_message);
 }

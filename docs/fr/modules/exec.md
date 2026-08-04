@@ -802,9 +802,12 @@ Lorsque `stdin = "inherit"` désigne le terminal de contrôle et que Babet en
 possède le premier plan, l'enfant conserve son groupe de processus séparé mais
 Babet lui transfère le terminal avant de le laisser exécuter le programme. Le
 transfert est synchronisé : l'enfant ne peut donc pas tenter sa première
-lecture en arrière-plan et être suspendu par `SIGTTIN`. Les outils interactifs
-comme `pacman`, `makepkg` ou un éditeur peuvent lire normalement ; `Ctrl+C` est
-envoyé au groupe enfant de premier plan.
+lecture en arrière-plan et être suspendu par `SIGTTIN`. Les enfants
+interactifs directs couverts par la régression PTY peuvent lire normalement ;
+`Ctrl+C` est envoyé au groupe enfant de premier plan. Une chaîne réelle yaourt
+vers pacman signalée séparément bloque encore : la 2.15.0 journalise le chemin
+et le SHA-256 du binaire testé et ajoute une couche `sudo` facultative au test,
+mais n'annonce pas ce cas imbriqué non résolu comme corrigé.
 
 Après la récolte de l'enfant — sortie normale, `terminate()`, `kill()`,
 `close()` ou nettoyage automatique — Babet reprend le premier plan et restaure

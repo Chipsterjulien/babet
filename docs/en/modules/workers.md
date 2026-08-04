@@ -764,10 +764,13 @@ After cancellation:
 
 - `worker.cancelled()` returns `true`;
 - the next `worker.recv()` returns `(false, "cancelled")` and no longer
-  delivers commands still waiting in the inbox; a command already removed by
-  the worker before cancellation may naturally still be processing;
+  delivers commands still waiting in the inbox; when cancellation becomes
+  visible immediately after a successful queue pop, that extracted command is
+  deliberately discarded rather than delivered after the protocol boundary;
+  a command already returned to Lua may naturally still be processing;
 - `worker.send()` remains available for a final result, diagnostic, or stop
-  acknowledgement;
+  acknowledgement when the outbox already has space; a send blocked on a full
+  outbox is awakened and returns `(false, "cancelled")`;
 - the chunk decides when and how to finish.
 
 FIFO ordering, capacities, timeouts, and closing remain symmetric outside this
@@ -983,7 +986,9 @@ local ok, err = job:cancel()
 - also wakes the channel `send` or `recv` currently blocked in that worker,
   without closing the global channel;
 - makes future `job:send()` calls return `(false, "cancelled")`;
-- leaves the outbox open so the worker can publish a final message;
+- leaves the outbox open, allows a final message when space is immediately
+  available, and wakes a `worker.send()` blocked on a full outbox with
+  `(false, "cancelled")`;
 - does not join the thread;
 - does not consume the final result;
 - is idempotent and always returns `(true, nil)` for a valid job.
@@ -1007,11 +1012,11 @@ This mechanism never uses `pthread_cancel()` and never abruptly interrupts Lua,
 SQLite, a C++ lock, or a transaction. A worker must therefore check
 `worker.cancelled()` or regularly return to `worker.recv()`.
 
-A worker blocked in a non-interruptible system call, in `worker.send()` without
-a timeout on a full outbox, or in a loop that never checks the flag can remain
-active. Babet channel waits, however, are awakened by cancellation.
-`join(timeout)` keeps the parent from blocking in every other case, but Babet
-does not force termination.
+A worker blocked in a non-interruptible system call or in a loop that never
+checks the flag can remain active. Babet channel waits and a `worker.send()`
+waiting for space in the outbox are awakened by cancellation. `join(timeout)`
+keeps the parent bounded in every other case, but Babet does not force
+termination.
 
 `close()` and `cancel()` differ:
 
@@ -1463,7 +1468,10 @@ Solutions:
 - parent regularly calls `job:recv()`;
 - worker uses a finite timeout;
 - outbox capacity matches the protocol;
-- message and join phases are clearly separated.
+- message and join phases are clearly separated;
+- during cancellation, call `job:cancel()` before the bounded `join()`:
+  cancellation now wakes the blocked outbox send without discarding messages
+  that were already queued.
 
 ### Producers blocked on a full channel
 

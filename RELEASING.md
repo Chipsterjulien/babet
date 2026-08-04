@@ -17,10 +17,10 @@ cd ..
 Confirm that `docs/manual-en.pdf` and `docs/manual-fr.pdf` were both regenerated
 and render them for a final visual check before validating the release tree.
 
-For 2.14.0, the expected source line is:
+For 2.15.0, the expected source line is:
 
 ```cmake
-project(babet VERSION 2.14.0 LANGUAGES CXX C)
+project(babet VERSION 2.15.0 LANGUAGES CXX C)
 ```
 
 ## 2. Validate the exact release tree
@@ -57,7 +57,7 @@ Then verify the compiled version explicitly:
 
 ```sh
 ./test/babet --version
-# expected: babet 2.14.0
+# expected: babet 2.15.0
 ```
 
 ## 3. Review the Git tree
@@ -76,7 +76,7 @@ temporary archives, and test binaries must not be staged.
 
 ```sh
 git add -A
-git commit -m "Release Babet 2.14.0"
+git commit -m "Release Babet 2.15.0"
 git status --short
 ```
 
@@ -85,8 +85,8 @@ git status --short
 ## 5. Create the annotated tag
 
 ```sh
-git tag -a v2.14.0 -m "Babet 2.14.0"
-git show --stat --oneline v2.14.0
+git tag -a v2.15.0 -m "Babet 2.15.0"
+git show --stat --oneline v2.15.0
 ```
 
 ## 6. Build and verify release artifacts
@@ -94,7 +94,7 @@ git show --stat --oneline v2.14.0
 Run the release builder while `HEAD` is the tagged commit:
 
 ```sh
-./release.sh --build --version 2.14.0
+./release.sh --build --version 2.15.0
 ```
 
 The script refuses a version that does not match the compiled binary. Verify all
@@ -102,7 +102,7 @@ generated checksums:
 
 ```sh
 cd dist
-sha256sum -c babet-2.14.0-linux-*.sha256
+sha256sum -c babet-2.15.0-linux-*.sha256
 cd ..
 ```
 
@@ -111,7 +111,7 @@ cd ..
 ```sh
 branch="$(git branch --show-current)"
 git push origin "$branch"
-git push origin v2.14.0
+git push origin v2.15.0
 ```
 
 ## 8. Publish the GitHub release
@@ -119,12 +119,12 @@ git push origin v2.14.0
 With GitHub CLI:
 
 ```sh
-gh release create v2.14.0 \
-  dist/babet-2.14.0-linux-* \
-  --title "Babet 2.14.0" \
-  --notes-file GITHUB_RELEASE_2.14.0.md
+gh release create v2.15.0 \
+  dist/babet-2.15.0-linux-* \
+  --title "Babet 2.15.0" \
+  --notes-file GITHUB_RELEASE_2.15.0.md
 ```
 
-Otherwise create release `v2.14.0` in the GitHub web interface and upload the
+Otherwise create release `v2.15.0` in the GitHub web interface and upload the
 four files from `dist/`: the tarball, its checksum, the standalone binary, and
 its checksum.

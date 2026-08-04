@@ -72,10 +72,10 @@ int lua_chdir(lua_State *L)
     if (!with_process_env_lock([&]()
                                { res = chdir(path); }))
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "chdir: forbidden after workers.spawn (the working "
                          "directory is shared across threads; change it "
                          "before spawning workers)");
     }
-    return push_action_result(L, res);
+    return push_action_result_protected(L, res);
 }

@@ -27,6 +27,7 @@ bool deepCopyTable(lua_State *L, int srcIndex, int depth, int maxDepth, VisitedM
     auto it = visited.find(srcPointer);
     if (it != visited.end())
     {
+        assert(it->second != LUA_NOREF);
         if (!lua_checkstack(L, 1))
         {
             return false;
@@ -53,6 +54,13 @@ bool deepCopyTable(lua_State *L, int srcIndex, int depth, int maxDepth, VisitedM
         return false;
     }
 
+    // Réserve d'abord l'entrée C++ SANS référence Lua. Si l'allocation de
+    // l'unordered_map échoue, aucune référence du registre n'existe encore.
+    // Si une allocation Lua échoue ensuite, le nettoyage extérieur voit
+    // LUA_NOREF et n'a rien à libérer pour cette entrée incomplète.
+    auto [visited_it, inserted] = visited.emplace(srcPointer, LUA_NOREF);
+    assert(inserted);
+
     // Nouvelle table de destination.
     lua_newtable(L);
     int copyIndex = lua_absindex(L, -1);
@@ -61,7 +69,7 @@ bool deepCopyTable(lua_State *L, int srcIndex, int depth, int maxDepth, VisitedM
     // pour que les références cycliques retrouvent cette copie-ci.
     lua_pushvalue(L, copyIndex);              // duplique la copie
     int ref = luaL_ref(L, LUA_REGISTRYINDEX); // luaL_ref dépile le doublon
-    visited[srcPointer] = ref;
+    visited_it->second = ref;                 // affectation non allouante
 
     // Parcours de toutes les paires (clé, valeur) de la source.
     lua_pushnil(L);
@@ -110,7 +118,21 @@ bool deepCopyTable(lua_State *L, int srcIndex, int depth, int maxDepth, VisitedM
     return true;
 }
 
-int lua_deepCopyTable(lua_State *L)
+namespace
+{
+void release_visited_references(lua_State *L,
+                                const VisitedMap &visited) noexcept
+{
+    for (const auto &entry : visited)
+    {
+        if (entry.second != LUA_NOREF && entry.second != LUA_REFNIL)
+        {
+            luaL_unref(L, LUA_REGISTRYINDEX, entry.second);
+        }
+    }
+}
+
+int lua_deepCopyTable_impl(lua_State *L)
 {
     if (!lua_arity_is(L, 1))
     {
@@ -121,31 +143,43 @@ int lua_deepCopyTable(lua_State *L)
         return luaL_error(L, "Argument must be a table");
     }
 
-    // Scope explicite pour la VisitedMap : sur Lua compilé en C
-    // (cas par défaut), luaL_error utilise longjmp() qui ne déroule
-    // PAS les destructeurs C++. Sans ce scope, en cas de profondeur
-    // dépassée, le longjmp dans le luaL_error final fuierait les
-    // buckets de la unordered_map. On force ici sa destruction
-    // AVANT toute possibilité de longjmp.
-    bool ok;
+    VisitedMap visited;
+    auto builder = [&visited](lua_State *Ls) -> int
     {
-        VisitedMap visited;
-        ok = deepCopyTable(L, 1, 0, MAX_DEPTH, visited);
-
-        // Libère toutes les références registre créées pour la
-        // détection de cycles, qu'on ait réussi ou échoué : sinon
-        // fuite dans le registre Lua.
-        for (const auto &entry : visited)
+        // Argument 1 belongs to lua_build_results_protected's internal
+        // context. The original source table is forwarded explicitly as
+        // argument 2 of this protected frame.
+        if (!deepCopyTable(Ls, 2, 0, MAX_DEPTH, visited))
         {
-            luaL_unref(L, LUA_REGISTRYINDEX, entry.second);
+            return luaL_error(
+                Ls, "Table is too deep to copy (max depth %d exceeded)",
+                MAX_DEPTH);
         }
-    } // ← 'visited' détruit proprement ici (avant longjmp éventuel).
+        return 1;
+    };
 
-    if (!ok)
+    try
     {
-        return luaL_error(L, "Table is too deep to copy (max depth %d exceeded)", MAX_DEPTH);
+        const int result = lua_build_results_protected_with_stack_value(
+            L, builder, 1, 1);
+        release_visited_references(L, visited);
+        return result;
     }
+    catch (...)
+    {
+        // Le pcall intérieur a déjà transformé tout longjmp Lua en exception
+        // C++. Les références sont donc libérées et la map détruite avant que
+        // la frontière publique ne relance l'erreur Lua d'origine.
+        release_visited_references(L, visited);
+        throw;
+    }
+}
+} // namespace
 
-    // deepCopyTable a poussé la copie au sommet de la pile.
-    return 1;
+int lua_deepCopyTable(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<lua_deepCopyTable_impl>(
+        L, "deepCopyTable: out of memory",
+        "deepCopyTable: internal failure",
+        "deepCopyTable: unknown internal failure");
 }

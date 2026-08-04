@@ -37,7 +37,8 @@ struct Reporter
     LuaCxxExceptionKind *observed;
     bool *exception_inactive;
 
-    int operator()(lua_State *, LuaCxxExceptionKind kind) const noexcept
+    int operator()(lua_State *, LuaCxxExceptionKind kind,
+                   const char *) const noexcept
     {
         *observed = kind;
         *exception_inactive = std::current_exception() == nullptr;

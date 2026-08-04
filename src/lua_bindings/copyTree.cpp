@@ -326,6 +326,6 @@ int lua_copyTree(lua_State *L)
         continue_on_error = lua_toboolean(L, 3);
     }
 
-    return push_action_result(
+    return push_action_result_protected(
         L, copy_directory(src_path, dest_path, continue_on_error));
 }

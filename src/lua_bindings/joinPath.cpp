@@ -138,23 +138,23 @@ std::optional<std::string> join(const std::vector<std::string> &segments)
 int lua_joinPath(lua_State *L)
 {
     std::vector<std::string> segments;
-    auto error = get_segments(L, segments);
+    std::optional<std::string> error;
+    auto parser = [&](lua_State *Ls)
+    {
+        error = get_segments(Ls, segments);
+    };
+    lua_run_protected(L, parser);
 
     if (error)
     {
-        lua_pushnil(L);
-        lua_pushstring(L, error->c_str());
-        return 2;
+        return push_fail_protected(L, *error);
     }
 
     auto result = join(segments);
     if (!result)
     {
-        lua_pushnil(L);
-        lua_pushstring(L, result.value_or("Unknown error").c_str());
-        return 2;
+        return push_fail_protected(L, "Unknown error");
     }
 
-    lua_pushstring(L, result->c_str());
-    return 1;
+    return push_string_protected(L, *result);
 }

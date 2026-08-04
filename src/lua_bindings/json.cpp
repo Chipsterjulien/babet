@@ -414,21 +414,18 @@ namespace
 
 } // namespace
 
-int lua_json_encode(lua_State *L)
+int lua_json_encode_impl(lua_State *L)
 {
-    int argc = lua_gettop(L);
+    const int argc = lua_gettop(L);
     if (!lua_arity_between(L, 1, 2))
-    {
         return luaL_error(L, "Expected one or two arguments");
-    }
 
     int indent = -1; // -1 = compact
     if (argc >= 2 && !lua_isnil(L, 2))
     {
         if (!lua_istable(L, 2))
-        {
-            return luaL_error(L, "Expected an options table as second argument");
-        }
+            return luaL_error(L,
+                              "Expected an options table as second argument");
         lua_getfield(L, 2, "indent");
         if (!lua_isnil(L, -1))
         {
@@ -437,11 +434,9 @@ int lua_json_encode(lua_State *L)
                 lua_pop(L, 1);
                 return luaL_error(L, "opts.indent must be an integer");
             }
-            lua_Integer requested_indent = lua_tointeger(L, -1);
+            const lua_Integer requested_indent = lua_tointeger(L, -1);
             if (requested_indent < 0)
-            {
-                indent = -1; // négatif traité comme compact
-            }
+                indent = -1;
             else if (requested_indent > MAX_JSON_INDENT)
             {
                 lua_pop(L, 1);
@@ -449,70 +444,91 @@ int lua_json_encode(lua_State *L)
                     L, "opts.indent too large (maximum is 256)");
             }
             else
-            {
                 indent = static_cast<int>(requested_indent);
-            }
         }
         lua_pop(L, 1);
     }
 
     try
     {
-        json j = lua_to_json(L, 1, 0);
-        std::string s = (indent < 0)
-                            ? j.dump()
-                            : j.dump(indent);
-        lua_pushlstring(L, s.data(), s.size());
-        lua_pushnil(L);
-        return 2;
+        json value = lua_to_json(L, 1, 0);
+        std::string encoded =
+            indent < 0 ? value.dump() : value.dump(indent);
+        auto builder = [&encoded](lua_State *Ls) noexcept -> int
+        {
+            lua_pushlstring(Ls, encoded.data(), encoded.size());
+            lua_pushnil(Ls);
+            return 2;
+        };
+        return lua_build_results_protected(L, builder, 2);
+    }
+    catch (const std::bad_alloc &)
+    {
+        throw;
     }
     catch (const std::exception &e)
     {
-        lua_settop(L, argc); // nettoie tout résidu de pile
-        lua_pushnil(L);
-        std::string msg = normalize_err(e.what());
-        lua_pushlstring(L, msg.data(), msg.size());
-        return 2;
+        lua_settop(L, argc);
+        const std::string message = normalize_err(e.what());
+        return push_fail_protected(L, message);
     }
+}
+
+int lua_json_decode_impl(lua_State *L)
+{
+    const int argc = lua_gettop(L);
+    if (!lua_arity_is(L, 1))
+        return luaL_error(L, "Expected one argument");
+    if (!lua_is_strict_string(L, 1))
+        return luaL_error(L, "Expected a string as argument");
+
+    size_t size = 0;
+    const char *text = lua_tolstring(L, 1, &size);
+
+    try
+    {
+        json value = json::parse(text, text + size);
+        auto builder = [&value](lua_State *Ls) -> int
+        {
+            json_to_lua(Ls, value, 0);
+            lua_pushnil(Ls);
+            return 2;
+        };
+        return lua_build_results_protected(L, builder, 2);
+    }
+    catch (const std::bad_alloc &)
+    {
+        throw;
+    }
+    catch (const std::exception &e)
+    {
+        lua_settop(L, argc);
+        const std::string message = normalize_err(e.what());
+        return push_fail_protected(L, message);
+    }
+}
+
+template <int (*Fn)(lua_State *)>
+int json_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "json: out of memory", "json: internal C++ failure",
+        "json: unknown internal C++ failure");
+}
+
+int lua_json_encode(lua_State *L)
+{
+    return json_boundary<lua_json_encode_impl>(L);
 }
 
 int lua_json_decode(lua_State *L)
 {
-    int argc = lua_gettop(L);
-    if (!lua_arity_is(L, 1))
-    {
-        return luaL_error(L, "Expected one argument");
-    }
-    // lua_isstring() accepte aussi les nombres et les convertirait
-    // implicitement en texte. decode() exige volontairement une vraie
-    // chaîne Lua afin que les erreurs de type ne soient pas masquées.
-    if (!lua_is_strict_string(L, 1))
-    {
-        return luaL_error(L, "Expected a string as argument");
-    }
-
-    size_t n = 0;
-    const char *s = lua_tolstring(L, 1, &n);
-
-    try
-    {
-        // parse(first, last) : gère la longueur (y compris d'éventuels
-        // octets NUL) sans dépendre d'un terminateur.
-        json j = json::parse(s, s + n);
-        json_to_lua(L, j, 0);
-        lua_pushnil(L);
-        return 2;
-    }
-    catch (const std::exception &e)
-    {
-        lua_settop(L, argc); // efface ce que json_to_lua aurait empilé
-        lua_pushnil(L);
-        std::string msg = normalize_err(e.what());
-        lua_pushlstring(L, msg.data(), msg.size());
-        return 2;
-    }
+    return json_boundary<lua_json_decode_impl>(L);
 }
 
+// Intentionally registered directly: this function creates no C++ owner
+// (no std::string, std::vector, nlohmann::json or RAII guard). A Lua error or
+// allocation longjmp therefore cannot bypass a live C++ destructor here.
 int lua_json_as_array(lua_State *L)
 {
     if (!lua_arity_is(L, 1))

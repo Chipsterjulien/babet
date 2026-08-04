@@ -561,8 +561,7 @@ int lua_time_iso(lua_State *L)
     }
 
     std::string formatted = format_iso_utc(ts);
-    lua_pushstring(L, formatted.c_str());
-    return 1;
+    return push_string_protected(L, formatted);
 }
 
 int lua_time_parse_iso(lua_State *L)
@@ -591,8 +590,7 @@ int lua_time_parse_iso(lua_State *L)
     }
     else
     {
-        lua_pushnil(L);
-        lua_pushstring(L, err.c_str());
+        return push_fail_protected(L, err);
     }
     return 2;
 }
@@ -623,8 +621,7 @@ int lua_time_parse_duration(lua_State *L)
     }
     else
     {
-        lua_pushnil(L);
-        lua_pushstring(L, err.c_str());
+        return push_fail_protected(L, err);
     }
     return 2;
 }
@@ -647,6 +644,5 @@ int lua_time_format_duration(lua_State *L)
     }
 
     std::string formatted = format_duration_string(n);
-    lua_pushstring(L, formatted.c_str());
-    return 1;
+    return push_string_protected(L, formatted);
 }

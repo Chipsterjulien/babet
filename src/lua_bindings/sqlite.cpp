@@ -104,7 +104,7 @@ namespace
     {
         std::string full = "sqlite: ";
         full += msg;
-        return push_fail(L, full);
+        return push_fail_protected(L, full);
     }
 
     // Toute fonction SQLite normale exposée à Lua passe par cette
@@ -114,22 +114,9 @@ namespace
     template <int (*Fn)(lua_State *)>
     int sqlite_lua_boundary(lua_State *L)
     {
-        try
-        {
-            return Fn(L);
-        }
-        catch (const std::bad_alloc &)
-        {
-            return push_fail(L, "sqlite: out of memory");
-        }
-        catch (const std::exception &)
-        {
-            return push_fail(L, "sqlite: internal failure");
-        }
-        catch (...)
-        {
-            return push_fail(L, "sqlite: unknown internal failure");
-        }
+        return lua_cfunction_exception_boundary<Fn>(
+            L, "sqlite: out of memory", "sqlite: internal C++ failure",
+            "sqlite: unknown internal C++ failure");
     }
 
     // Les finalizers ne doivent jamais propager d'exception ni tenter de
@@ -2265,7 +2252,7 @@ namespace
         // no transaction can be left open by a stack-growth failure here.
         if (!lua_checkstack(L, 2))
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "sqlite: transaction could not reserve Lua stack");
         }
 
@@ -2279,7 +2266,7 @@ namespace
                                         "sqlite.transaction: mode",
                                         mode_error))
             {
-                return push_fail(L, mode_error);
+                return push_fail_protected(L, mode_error);
             }
 
             if (mode == "deferred")
@@ -2482,7 +2469,7 @@ namespace
         // stack growth is then needed while the guard is armed.
         if (!lua_checkstack(L, 3))
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "sqlite: savepoint could not reserve Lua stack");
         }
 
@@ -2704,7 +2691,7 @@ namespace
         if (!lua_string_without_nul(L, 1, path,
                                     "sqlite: path", path_err))
         {
-            return push_fail(L, path_err);
+            return push_fail_protected(L, path_err);
         }
 
         // Sans readonly, conserver exactement la politique historique de

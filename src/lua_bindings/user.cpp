@@ -347,17 +347,24 @@ namespace
                        : do_getpwuid_r(arg.uid, pwd_out, buf, err_msg);
         if (r == Lookup::Found)
         {
-            push_passwd_table(L, pwd_out);
-            return 1;
+            // pwd_out points into buf, so both must stay alive while Lua copies
+            // the strings. Build the table under lua_pcall: LUA_ERRMEM is then
+            // converted to a C++ marker and buf/err_msg unwind normally.
+            auto builder = [&pwd_out](lua_State *Ls) noexcept -> int
+            {
+                push_passwd_table(Ls, pwd_out);
+                return 1;
+            };
+            return lua_build_results_protected(L, builder, 1);
         }
         if (r == Lookup::NotFound)
         {
-            return push_fail(L, "user not found");
+            return push_fail_protected(L, "user not found");
         }
         // Error
         std::string full = "user: ";
         full += err_msg;
-        return push_fail(L, full);
+        return push_fail_protected(L, full);
     }
 
     // babet.user.exists(name_or_uid) -> boolean

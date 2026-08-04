@@ -781,9 +781,12 @@ When `stdin = "inherit"` refers to the controlling terminal and Babet owns its
 foreground, the child keeps its separate process group but Babet transfers the
 terminal before allowing it to execute the program. The handoff is
 synchronized, so the child cannot attempt its first read as a background group
-and be stopped by `SIGTTIN`. Interactive tools such as `pacman`, `makepkg`, or
-an editor can read normally, and `Ctrl+C` is delivered to the foreground child
-group.
+and be stopped by `SIGTTIN`. Direct interactive children covered by the PTY
+regression can read normally, and `Ctrl+C` is delivered to the foreground child
+group. A separately reported yaourt-to-pacman wrapper chain still blocks in a
+real installation; 2.15.0 records the tested binary path and SHA-256 and adds an
+optional `sudo` layer to the regression, but does not claim that unresolved
+nested case as fixed.
 
 After the child is reaped—normal exit, `terminate()`, `kill()`, `close()`, or
 automatic cleanup—Babet reclaims the foreground and restores the saved

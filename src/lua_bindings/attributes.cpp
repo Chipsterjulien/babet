@@ -203,7 +203,7 @@ int lua_setattr(lua_State *L)
 
     if (owner_raw < 0 || group_raw < 0)
     {
-        return push_fail(L, "UID and GID must be non-negative");
+        return push_fail_protected(L, "UID and GID must be non-negative");
     }
 
     using uid_limits = std::numeric_limits<uid_t>;
@@ -211,20 +211,20 @@ int lua_setattr(lua_State *L)
     if (static_cast<unsigned long long>(owner_raw) > uid_limits::max() ||
         static_cast<unsigned long long>(group_raw) > gid_limits::max())
     {
-        return push_fail(L, "UID or GID out of range");
+        return push_fail_protected(L, "UID or GID out of range");
     }
 
     if (argc == 4)
     {
         if (mode_raw < 0 || mode_raw > static_cast<lua_Integer>(MODE_MASK))
         {
-            return push_fail(L, "mode must be an integer between 0 and 07777");
+            return push_fail_protected(L, "mode must be an integer between 0 and 07777");
         }
         mode = static_cast<mode_t>(mode_raw);
     }
 
     const std::string path(path_view);
-    return push_action_result(
+    return push_action_result_protected(
         L, set_attributes(path,
                           static_cast<uid_t>(owner_raw),
                           static_cast<gid_t>(group_raw),
@@ -243,10 +243,14 @@ int lua_getattr(lua_State *L)
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0)
     {
-        return push_fail(L, errno_message(errno));
+        return push_fail_protected(L, errno_message(errno));
     }
 
-    push_attributes(L, st);
-    lua_pushnil(L);
-    return 2;
+    auto builder = [&st](lua_State *Ls) noexcept -> int
+    {
+        push_attributes(Ls, st);
+        lua_pushnil(Ls);
+        return 2;
+    };
+    return lua_build_results_protected(L, builder, 2);
 }

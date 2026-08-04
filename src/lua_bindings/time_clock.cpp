@@ -40,7 +40,7 @@ namespace
         }
     }
 
-    // push_fail() vient de lua_utils.hpp (helper global du projet).
+    // push_fail_protected() vient de lua_utils.hpp (helper global du projet).
     // Pas de redéfinition locale.
 
 } // namespace
@@ -55,7 +55,7 @@ int lua_monotonic(lua_State *L)
         // En pratique impossible sur Linux moderne. On respecte la
         // convention (nil, err) pour cohérence avec le reste de
         // l'API Babet.
-        return push_fail(L,
+        return push_fail_protected(L,
                          std::string("babet.monotonic: clock_gettime failed: ") + std::strerror(errno));
     }
 
@@ -70,7 +70,7 @@ int lua_now(lua_State *L)
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          std::string("babet.now: clock_gettime failed: ") + std::strerror(errno));
     }
 

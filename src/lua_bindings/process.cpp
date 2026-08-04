@@ -419,6 +419,15 @@ int push_process_result(lua_State *L, const Process *process)
     return 2;
 }
 
+int push_process_result_protected(lua_State *L, const Process *process)
+{
+    auto builder = [process](lua_State *Ls) noexcept -> int
+    {
+        return push_process_result(Ls, process);
+    };
+    return lua_build_results_protected(L, builder, 2);
+}
+
 void restore_process_terminal(Process *process) noexcept
 {
     if (process)
@@ -546,42 +555,44 @@ int process_read_stream(lua_State *L, int Process::*fd_member,
 
     double timeout = 0.0;
     bool timeout_present = false;
-    std::string parse_error;
-    if (argc >= 3 &&
-        !parse_timeout_value(L, 3, "timeout", 0.0, false,
-                             timeout, timeout_present, parse_error))
     {
-        std::string full = method_name;
-        full += ": ";
-        full += parse_error;
-        return push_fail(L, full);
+        std::string parse_error;
+        if (argc >= 3 &&
+            !parse_timeout_value(L, 3, "timeout", 0.0, false,
+                                 timeout, timeout_present, parse_error))
+        {
+            std::string full = method_name;
+            full += ": ";
+            full += parse_error;
+            return push_fail_protected(L, full);
+        }
     }
 
     if (!(process->*piped_member))
     {
-        return push_fail(L, "not_piped");
+        return push_fail_protected(L, "not_piped");
     }
 
     int &fd = process->*fd_member;
     if (fd < 0)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     const int ready = wait_fd(L, fd, POLLIN, timeout);
     if (ready == -2)
     {
-        return push_fail(L, "interrupted");
+        return push_fail_protected(L, "interrupted");
     }
     if (ready < 0)
     {
         const std::string error = std::string("process: poll failed: ") +
                                   std::strerror(errno);
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     if (ready == 0)
     {
-        return push_fail(L, "timeout");
+        return push_fail_protected(L, "timeout");
     }
 
     // Le tampon temporaire vit dans un userdata Lua : si lua_pushlstring()
@@ -603,7 +614,7 @@ int process_read_stream(lua_State *L, int Process::*fd_member,
         {
             babet_process::close_fd(fd);
             lua_pop(L, 1); // userdata tampon
-            return push_fail(L, "closed");
+            return push_fail_protected(L, "closed");
         }
         if (errno == EINTR)
         {
@@ -611,19 +622,19 @@ int process_read_stream(lua_State *L, int Process::*fd_member,
             {
                 signal_dispatch_pending(L);
                 lua_pop(L, 1); // userdata tampon
-                return push_fail(L, "interrupted");
+                return push_fail_protected(L, "interrupted");
             }
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
             lua_pop(L, 1); // userdata tampon
-            return push_fail(L, "timeout");
+            return push_fail_protected(L, "timeout");
         }
         const std::string error = std::string("process: read failed: ") +
                                   std::strerror(errno);
         lua_pop(L, 1); // userdata tampon
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 }
 
@@ -653,21 +664,24 @@ int process_write(lua_State *L)
 
     double timeout = 0.0;
     bool timeout_present = false;
-    std::string parse_error;
-    if (argc == 3 &&
-        !parse_timeout_value(L, 3, "timeout", 0.0, false,
-                             timeout, timeout_present, parse_error))
     {
-        return push_fail(L, std::string("process.write: ") + parse_error);
+        std::string parse_error;
+        if (argc == 3 &&
+            !parse_timeout_value(L, 3, "timeout", 0.0, false,
+                                 timeout, timeout_present, parse_error))
+        {
+            return push_fail_protected(
+                L, std::string("process.write: ") + parse_error);
+        }
     }
 
     if (!process->stdin_piped)
     {
-        return push_fail(L, "not_piped");
+        return push_fail_protected(L, "not_piped");
     }
     if (process->stdin_fd < 0)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     size_t length = 0;
@@ -682,17 +696,17 @@ int process_write(lua_State *L)
     const int ready = wait_fd(L, process->stdin_fd, POLLOUT, timeout);
     if (ready == -2)
     {
-        return push_fail(L, "interrupted");
+        return push_fail_protected(L, "interrupted");
     }
     if (ready < 0)
     {
         const std::string error = std::string("process: poll failed: ") +
                                   std::strerror(errno);
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     if (ready == 0)
     {
-        return push_fail(L, "timeout");
+        return push_fail_protected(L, "timeout");
     }
 
     for (;;)
@@ -713,22 +727,22 @@ int process_write(lua_State *L)
             if (signal_any_handled_pending())
             {
                 signal_dispatch_pending(L);
-                return push_fail(L, "interrupted");
+                return push_fail_protected(L, "interrupted");
             }
             continue;
         }
         if (errno == EAGAIN || errno == EWOULDBLOCK)
         {
-            return push_fail(L, "timeout");
+            return push_fail_protected(L, "timeout");
         }
         if (errno == EPIPE)
         {
             babet_process::close_fd(process->stdin_fd);
-            return push_fail(L, "closed");
+            return push_fail_protected(L, "closed");
         }
         const std::string error = std::string("process: write failed: ") +
                                   std::strerror(errno);
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 }
 
@@ -741,10 +755,10 @@ int process_close_stdin(lua_State *L)
     Process *process = check_process(L, 1);
     if (!process->stdin_piped)
     {
-        return push_fail(L, "not_piped");
+        return push_fail_protected(L, "not_piped");
     }
     babet_process::close_fd(process->stdin_fd);
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 int process_pid(lua_State *L)
@@ -773,7 +787,7 @@ int process_is_running(lua_State *L)
     std::string error;
     if (!refresh_status(process, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     lua_pushboolean(L, process->status_valid ? 0 : 1);
     return 1;
@@ -784,11 +798,11 @@ int wait_for_process(lua_State *L, Process *process,
 {
     if (process->status_valid)
     {
-        return push_process_result(L, process);
+        return push_process_result_protected(L, process);
     }
     if (process->closed)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     const long long deadline = has_timeout
@@ -802,7 +816,7 @@ int wait_for_process(lua_State *L, Process *process,
         if (signal_any_handled_pending())
         {
             signal_dispatch_pending(L);
-            return push_fail(L, "interrupted");
+            return push_fail_protected(L, "interrupted");
         }
         const pid_t r = ::waitpid(process->pid, &process->status,
                                   has_timeout ? WNOHANG : 0);
@@ -811,7 +825,7 @@ int wait_for_process(lua_State *L, Process *process,
             process->status_valid = true;
             babet_process::close_fd(process->stdin_fd);
             restore_process_terminal(process);
-            return push_process_result(L, process);
+            return push_process_result_protected(L, process);
         }
         if (r < 0)
         {
@@ -820,23 +834,23 @@ int wait_for_process(lua_State *L, Process *process,
                 if (signal_any_handled_pending())
                 {
                     signal_dispatch_pending(L);
-                    return push_fail(L, "interrupted");
+                    return push_fail_protected(L, "interrupted");
                 }
                 continue;
             }
             const std::string error = std::string("process: waitpid failed: ") +
                                       std::strerror(errno);
-            return push_fail(L, error);
+            return push_fail_protected(L, error);
         }
 
         if (signal_any_handled_pending())
         {
             signal_dispatch_pending(L);
-            return push_fail(L, "interrupted");
+            return push_fail_protected(L, "interrupted");
         }
         if (has_timeout && babet_process::now_ms() >= deadline)
         {
-            return push_fail(L, "timeout");
+            return push_fail_protected(L, "timeout");
         }
         struct timespec pause{0, 10 * 1000 * 1000};
         while (::nanosleep(&pause, &pause) < 0 && errno == EINTR)
@@ -844,7 +858,7 @@ int wait_for_process(lua_State *L, Process *process,
             if (signal_any_handled_pending())
             {
                 signal_dispatch_pending(L);
-                return push_fail(L, "interrupted");
+                return push_fail_protected(L, "interrupted");
             }
         }
     }
@@ -866,7 +880,7 @@ int process_wait(lua_State *L)
         !parse_timeout_value(L, 2, "timeout", 0.0, false,
                              timeout, has_timeout, error))
     {
-        return push_fail(L, std::string("process.wait: ") + error);
+        return push_fail_protected(L, std::string("process.wait: ") + error);
     }
     return wait_for_process(L, process, has_timeout, timeout);
 }
@@ -877,15 +891,15 @@ int terminate_process(lua_State *L, Process *process, int signal,
     std::string error;
     if (!refresh_status(process, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
     if (process->status_valid)
     {
-        return push_process_result(L, process);
+        return push_process_result_protected(L, process);
     }
     if (process->closed)
     {
-        return push_fail(L, "closed");
+        return push_fail_protected(L, "closed");
     }
 
     babet_process::kill_group(process->pid, signal);
@@ -907,17 +921,17 @@ int terminate_process(lua_State *L, Process *process, int signal,
     {
         const std::string wait_error =
             std::string("process: waitpid failed: ") + std::strerror(errno);
-        return push_fail(L, wait_error);
+        return push_fail_protected(L, wait_error);
     }
     if (result != babet_process::ChildWaitResult::reaped)
     {
-        return push_fail(L, "process: child could not be reaped");
+        return push_fail_protected(L, "process: child could not be reaped");
     }
 
     process->status_valid = true;
     babet_process::close_fd(process->stdin_fd);
     restore_process_terminal(process);
-    return push_process_result(L, process);
+    return push_process_result_protected(L, process);
 }
 
 int process_terminate(lua_State *L)
@@ -938,7 +952,8 @@ int process_terminate(lua_State *L)
                              DEFAULT_TERMINATE_GRACE, false,
                              grace, present, error))
     {
-        return push_fail(L, std::string("process.terminate: ") + error);
+        return push_fail_protected(
+            L, std::string("process.terminate: ") + error);
     }
     return terminate_process(L, process, SIGTERM, grace);
 }
@@ -953,17 +968,34 @@ int process_kill(lua_State *L)
     return terminate_process(L, process, SIGKILL, 2.0);
 }
 
-void cleanup_process(Process *process)
+void cleanup_process(Process *process) noexcept
 {
     if (!process || process->closed)
     {
         return;
     }
 
-    std::string ignored;
-    if (!refresh_status(process, ignored) && !process->status_valid)
+    if (!process->status_valid && process->pid > 0)
     {
-        // On tente tout de même le nettoyage borné ci-dessous.
+        for (;;)
+        {
+            const pid_t result = ::waitpid(process->pid, &process->status,
+                                           WNOHANG);
+            if (result == process->pid)
+            {
+                process->status_valid = true;
+                break;
+            }
+            if (result == 0)
+            {
+                break;
+            }
+            if (result < 0 && errno == EINTR)
+            {
+                continue;
+            }
+            break;
+        }
     }
     if (!process->status_valid && process->pid > 0)
     {
@@ -986,7 +1018,7 @@ int process_close(lua_State *L)
     }
     Process *process = check_process(L, 1);
     cleanup_process(process);
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 int process_gc(lua_State *L)
@@ -995,6 +1027,18 @@ int process_gc(lua_State *L)
         luaL_testudata(L, 1, PROCESS_META));
     cleanup_process(process);
     return 0;
+}
+
+int process_gc_boundary(lua_State *L) noexcept
+{
+    try
+    {
+        return process_gc(L);
+    }
+    catch (...)
+    {
+        return 0;
+    }
 }
 
 int process_tostring(lua_State *L)
@@ -1008,11 +1052,8 @@ int process_tostring(lua_State *L)
     return 1;
 }
 
-int lua_spawn(lua_State *L)
+int lua_spawn_impl(lua_State *L)
 {
-    bool empty_userdata_pushed = false;
-    try
-    {
     if (!lua_arity_between(L, 1, 3))
     {
         return luaL_error(L, "spawn expects command, optional args and opts");
@@ -1026,18 +1067,18 @@ int lua_spawn(lua_State *L)
     std::string command;
     if (!lua_string_without_nul(L, 1, command, "command", error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     std::vector<std::string> args;
     if (!babet_process::collect_args(L, 2, command, args, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     if (!validate_spawn_opts_keys(L, 3, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     std::string cwd;
@@ -1045,7 +1086,7 @@ int lua_spawn(lua_State *L)
     std::vector<std::pair<std::string, std::string>> env;
     if (!babet_process::collect_cwd_env(L, 3, cwd, has_cwd, env, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     bool has_launch_timeout = false;
@@ -1053,7 +1094,7 @@ int lua_spawn(lua_State *L)
     if (!parse_launch_timeout(L, 3, has_launch_timeout,
                               launch_deadline, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     babet_process::StreamRedirection stdin_redirection;
@@ -1066,7 +1107,7 @@ int lua_spawn(lua_State *L)
         !parse_stream_redirection(L, 3, "stderr", StreamRole::stderr_stream,
                                   stderr_redirection, error))
     {
-        return push_fail(L, error);
+        return push_fail_protected(L, error);
     }
 
     babet_process::LaunchSpec spec;
@@ -1085,75 +1126,74 @@ int lua_spawn(lua_State *L)
     // Alloue le userdata AVANT fork(). Une panne d'allocation Lua ne peut
     // ainsi pas abandonner un processus enfant déjà lancé. Le userdata est
     // initialisé fermé jusqu'au succès complet de launch().
-    Process *process = push_empty_process(L);
-    empty_userdata_pushed = true;
+    auto builder = [](lua_State *Ls) noexcept -> int
+    {
+        push_empty_process(Ls);
+        return 1;
+    };
+    lua_build_results_protected(L, builder, 1);
+    Process *process = static_cast<Process *>(lua_touserdata(L, -1));
 
     babet_process::LaunchResult launched = babet_process::launch(spec);
     if (!launched.success)
     {
         lua_pop(L, 1); // userdata vide, aucune ressource à nettoyer
-        empty_userdata_pushed = false;
         if (launched.timed_out)
         {
-            return push_fail(L, "spawn: launch timed out");
+            return push_fail_protected(L, "spawn: launch timed out");
         }
-        return push_fail(L, launched.error);
+        return push_fail_protected(L, launched.error);
     }
 
     initialize_process(process, launched.process);
-    empty_userdata_pushed = false; // le userdata possède désormais les ressources
     lua_pushnil(L);
     return 2;
-    }
-    catch (const std::bad_alloc &)
-    {
-        if (empty_userdata_pushed)
-        {
-            lua_pop(L, 1);
-        }
-        return push_fail(L, "spawn: out of memory during launch");
-    }
-    catch (...)
-    {
-        if (empty_userdata_pushed)
-        {
-            lua_pop(L, 1);
-        }
-        return push_fail(L, "spawn: internal launch failure");
-    }
+}
+
+template <int (*Fn)(lua_State *)>
+int process_lua_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "process: out of memory", "process: internal C++ failure",
+        "process: unknown internal C++ failure");
+}
+
+int lua_spawn(lua_State *L)
+{
+    return process_lua_boundary<lua_spawn_impl>(L);
 }
 
 void register_process_metatable(lua_State *L)
 {
     if (luaL_newmetatable(L, PROCESS_META))
     {
-        lua_pushcfunction(L, process_gc);
+        lua_pushcfunction(L, process_gc_boundary);
         lua_setfield(L, -2, "__gc");
-        lua_pushcfunction(L, process_gc);
+        lua_pushcfunction(L, process_gc_boundary);
         lua_setfield(L, -2, "__close");
-        lua_pushcfunction(L, process_tostring);
+        lua_pushcfunction(L, process_lua_boundary<process_tostring>);
         lua_setfield(L, -2, "__tostring");
 
         lua_newtable(L);
-        lua_pushcfunction(L, process_read_stdout);
+        lua_pushcfunction(L, process_lua_boundary<process_read_stdout>);
         lua_setfield(L, -2, "read_stdout");
-        lua_pushcfunction(L, process_read_stderr);
+        lua_pushcfunction(L, process_lua_boundary<process_read_stderr>);
         lua_setfield(L, -2, "read_stderr");
-        lua_pushcfunction(L, process_write);
+        lua_pushcfunction(L, process_lua_boundary<process_write>);
         lua_setfield(L, -2, "write");
-        lua_pushcfunction(L, process_close_stdin);
+        lua_pushcfunction(L, process_lua_boundary<process_close_stdin>);
         lua_setfield(L, -2, "close_stdin");
-        lua_pushcfunction(L, process_is_running);
+        lua_pushcfunction(L, process_lua_boundary<process_is_running>);
         lua_setfield(L, -2, "is_running");
-        lua_pushcfunction(L, process_pid);
+        lua_pushcfunction(L, process_lua_boundary<process_pid>);
         lua_setfield(L, -2, "pid");
-        lua_pushcfunction(L, process_wait);
+        lua_pushcfunction(L, process_lua_boundary<process_wait>);
         lua_setfield(L, -2, "wait");
-        lua_pushcfunction(L, process_terminate);
+        lua_pushcfunction(L, process_lua_boundary<process_terminate>);
         lua_setfield(L, -2, "terminate");
-        lua_pushcfunction(L, process_kill);
+        lua_pushcfunction(L, process_lua_boundary<process_kill>);
         lua_setfield(L, -2, "kill");
-        lua_pushcfunction(L, process_close);
+        lua_pushcfunction(L, process_lua_boundary<process_close>);
         lua_setfield(L, -2, "close");
         lua_setfield(L, -2, "__index");
     }

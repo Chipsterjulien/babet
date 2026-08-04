@@ -92,52 +92,53 @@ std::optional<std::string> crc32sum(const std::string &path,
     return to_hex8(static_cast<uint32_t>(crc));
 }
 
-int lua_crc32(lua_State *L)
+namespace
+{
+int lua_crc32_impl(lua_State *L)
 {
     if (!lua_arity_is(L, 1))
-    {
         return luaL_error(L, "Expected one argument");
-    }
     if (!lua_is_strict_string(L, 1))
-    {
         return luaL_error(L, "Expected a string as argument");
-    }
 
-    // lua_tolstring returns the pointer and length without converting
-    // the value; Lua strings are binary-safe and may contain NULs.
     size_t len = 0;
     const char *data = lua_tolstring(L, 1, &len);
-
     std::string hex = crc32_hex(
         reinterpret_cast<const unsigned char *>(data), len);
-    lua_pushstring(L, hex.c_str());
-    return 1;
+    auto builder = [&hex](lua_State *Ls) noexcept -> int
+    {
+        lua_pushlstring(Ls, hex.data(), hex.size());
+        return 1;
+    };
+    return lua_build_results_protected(L, builder, 1);
 }
 
-int lua_crc32sum(lua_State *L)
+int lua_crc32sum_impl(lua_State *L)
 {
     if (!lua_arity_is(L, 1))
-    {
         return luaL_error(L, "Expected one argument");
-    }
     if (!lua_is_strict_string(L, 1))
-    {
         return luaL_error(L, "Expected a string as argument");
-    }
 
     std::string path = luaL_checkstring_without_nul(L, 1, "path");
     std::string err_msg;
     auto result = crc32sum(path, err_msg);
-
     if (result.has_value())
-    {
-        lua_pushstring(L, result->c_str());
-        lua_pushnil(L);
-    }
-    else
-    {
-        lua_pushnil(L);
-        lua_pushstring(L, err_msg.c_str());
-    }
-    return 2;
+        return push_string_result_protected(L, *result);
+    return push_fail_protected(L, err_msg);
+}
+} // namespace
+
+int lua_crc32(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<lua_crc32_impl>(
+        L, "crc32: out of memory", "crc32: internal failure",
+        "crc32: unknown internal failure");
+}
+
+int lua_crc32sum(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<lua_crc32sum_impl>(
+        L, "crc32sum: out of memory", "crc32sum: internal failure",
+        "crc32sum: unknown internal failure");
 }

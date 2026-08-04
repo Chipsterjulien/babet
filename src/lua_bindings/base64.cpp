@@ -498,7 +498,7 @@ bool decode_input(std::string_view input, const DecodeOptions &options,
 
 } // namespace
 
-int lua_base64_encode(lua_State *L)
+int lua_base64_encode_impl(lua_State *L)
 {
     if (!lua_arity_between(L, 1, 2))
     {
@@ -525,28 +525,26 @@ int lua_base64_encode(lua_State *L)
             {
                 error = "base64: internal encoded-size mismatch";
             }
-            return push_fail(L, error);
+            return push_fail_protected(L, error);
         }
 
-        lua_pushlstring(L, output.data(), output.size());
-        lua_pushnil(L);
-        return 2;
+        return push_string_result_protected(L, output);
     }
     catch (const std::length_error &)
     {
-        return push_fail(L, "base64: encoded output too large");
+        return push_fail_protected(L, "base64: encoded output too large");
     }
     catch (const std::bad_alloc &)
     {
-        return push_fail(L, "base64: out of memory");
+        throw;
     }
     catch (...)
     {
-        return push_fail(L, "base64: unexpected internal error");
+        return push_fail_protected(L, "base64: unexpected internal error");
     }
 }
 
-int lua_base64_decode(lua_State *L)
+int lua_base64_decode_impl(lua_State *L)
 {
     if (!lua_arity_between(L, 1, 2))
     {
@@ -569,31 +567,47 @@ int lua_base64_decode(lua_State *L)
         std::string error;
         if (!analyze_input(text, options, shape, error))
         {
-            return push_fail(L, error);
+            return push_fail_protected(L, error);
         }
 
         std::string output;
         if (!decode_input(text, options, shape, output, error))
         {
-            return push_fail(L, error);
+            return push_fail_protected(L, error);
         }
 
-        lua_pushlstring(L, output.data(), output.size());
-        lua_pushnil(L);
-        return 2;
+        return push_string_result_protected(L, output);
     }
     catch (const std::length_error &)
     {
-        return push_fail(L, "base64: decoded output too large");
+        return push_fail_protected(L, "base64: decoded output too large");
     }
     catch (const std::bad_alloc &)
     {
-        return push_fail(L, "base64: out of memory");
+        throw;
     }
     catch (...)
     {
-        return push_fail(L, "base64: unexpected internal error");
+        return push_fail_protected(L, "base64: unexpected internal error");
     }
+}
+
+template <int (*Fn)(lua_State *)>
+int base64_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "base64: out of memory", "base64: internal failure",
+        "base64: unknown internal failure");
+}
+
+int lua_base64_encode(lua_State *L)
+{
+    return base64_boundary<lua_base64_encode_impl>(L);
+}
+
+int lua_base64_decode(lua_State *L)
+{
+    return base64_boundary<lua_base64_decode_impl>(L);
 }
 
 void register_base64(lua_State *L)

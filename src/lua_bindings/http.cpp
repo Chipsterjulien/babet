@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <limits>
@@ -168,6 +169,81 @@ namespace
         std::string target; // /path?query (fragment retiré)
     };
 
+    struct HttpRequestState
+    {
+        std::string url;
+        std::string method = "GET";
+        std::string body;
+        std::string error;
+        std::string ca_cert;
+        std::string content_type;
+        std::string destination;
+        UrlParts parts;
+        std::vector<std::pair<std::string, std::string>> headers;
+        std::string header_key;
+        std::string header_value;
+        std::string query_string;
+        std::string query_key;
+        std::string query_value;
+    };
+
+    struct HttpRequestStateUserdata
+    {
+        bool constructed = false;
+        alignas(HttpRequestState) std::byte storage[sizeof(HttpRequestState)];
+
+        HttpRequestState *get() noexcept
+        {
+            return std::launder(
+                reinterpret_cast<HttpRequestState *>(storage));
+        }
+    };
+
+    constexpr const char *HTTP_REQUEST_STATE_META =
+        "babet.http.request_state";
+
+    void destroy_http_request_state(
+        HttpRequestStateUserdata *userdata) noexcept
+    {
+        if (userdata != nullptr && userdata->constructed)
+        {
+            userdata->get()->~HttpRequestState();
+            userdata->constructed = false;
+        }
+    }
+
+    int http_request_state_gc(lua_State *L)
+    {
+        auto *userdata = static_cast<HttpRequestStateUserdata *>(
+            lua_touserdata(L, 1));
+        destroy_http_request_state(userdata);
+        return 0;
+    }
+
+    int http_request_state_gc_boundary(lua_State *L) noexcept
+    {
+        try
+        {
+            return http_request_state_gc(L);
+        }
+        catch (...)
+        {
+            return 0;
+        }
+    }
+
+    HttpRequestState &make_http_request_state(lua_State *L)
+    {
+        auto *userdata = static_cast<HttpRequestStateUserdata *>(
+            lua_newuserdatauv(L, sizeof(HttpRequestStateUserdata), 0));
+        userdata->constructed = false;
+        luaL_getmetatable(L, HTTP_REQUEST_STATE_META);
+        lua_setmetatable(L, -2);
+        new (userdata->storage) HttpRequestState();
+        userdata->constructed = true;
+        return *userdata->get();
+    }
+
     // Découpe une URL http(s) absolue. Renvoie false + remplit `err`
     // sur URL malformée ou scheme non http(s) : condition runtime,
     // donc (nil, err), pas luaL_error.
@@ -271,85 +347,110 @@ namespace
         return true;
     }
 
-    // Ajoute opts.query (table à `qidx`) au target. (nil, err) si une
-    // clé/valeur n'est pas string/number.
-    bool append_query(lua_State *L, int qidx, std::string &target,
-                      std::string &err)
+    // Ajoute opts.query sans propriétaire C++ local autour des appels Lua.
+    // Les buffers appartiennent au userdata HttpRequestState : un LUA_ERRMEM
+    // peut donc dérouler Lua sans perdre leur destruction.
+    bool append_query(lua_State *L, int qidx, HttpRequestState &state)
     {
         qidx = lua_absindex(L, qidx);
-        std::string qs;
+        state.query_string.clear();
         lua_pushnil(L);
         while (lua_next(L, qidx) != 0)
         {
             if (!lua_is_strict_string(L, -2))
             {
                 lua_pop(L, 2);
-                err = "http: query keys must be strings";
+                state.error = "http: query keys must be strings";
                 return false;
             }
-            size_t klen = 0;
-            const char *ks = lua_tolstring(L, -2, &klen);
-            std::string k(ks, klen);
-            std::string v;
-            if (!lua_value_to_string(L, -1, v))
+            std::size_t key_length = 0;
+            const char *key = lua_tolstring(L, -2, &key_length);
+            state.query_key.assign(key, key_length);
+            if (!lua_value_to_string(L, -1, state.query_value))
             {
                 lua_pop(L, 2);
-                err = "http: query values must be strings or numbers";
+                state.error =
+                    "http: query values must be strings or numbers";
                 return false;
             }
-            if (!qs.empty())
-            {
-                qs.push_back('&');
-            }
-            qs += percent_encode(k);
-            qs.push_back('=');
-            qs += percent_encode(v);
-            lua_pop(L, 1); // garde la clé pour lua_next
+            if (!state.query_string.empty())
+                state.query_string.push_back('&');
+            state.query_string += percent_encode(state.query_key);
+            state.query_string.push_back('=');
+            state.query_string += percent_encode(state.query_value);
+            lua_pop(L, 1);
         }
-        if (qs.empty())
-        {
+        if (state.query_string.empty())
             return true;
-        }
-        target.push_back(target.find('?') != std::string::npos ? '&' : '?');
-        target += qs;
+        state.parts.target.push_back(
+            state.parts.target.find('?') != std::string::npos ? '&' : '?');
+        state.parts.target += state.query_string;
         return true;
     }
 
-    void push_status_and_headers(lua_State *L, const httplib::Result &res)
+    struct HttpHeaderSnapshot
     {
-        lua_pushinteger(L, res->status);
+        std::string name;
+        std::string value;
+    };
+
+    struct HttpResponseSnapshot
+    {
+        int status = 0;
+        std::vector<HttpHeaderSnapshot> headers;
+        std::string body;
+        std::string destination;
+        std::uint64_t bytes = 0;
+        bool download = false;
+        bool saved = false;
+    };
+
+    HttpResponseSnapshot snapshot_response(
+        const httplib::Result &response, std::string body,
+        bool download, std::string destination,
+        std::uint64_t bytes, bool saved)
+    {
+        HttpResponseSnapshot snapshot;
+        snapshot.status = response->status;
+        snapshot.body = std::move(body);
+        snapshot.destination = std::move(destination);
+        snapshot.bytes = bytes;
+        snapshot.download = download;
+        snapshot.saved = saved;
+        snapshot.headers.reserve(response->headers.size());
+        for (const auto &header : response->headers)
+            snapshot.headers.push_back(
+                HttpHeaderSnapshot{to_lower(header.first), header.second});
+        return snapshot;
+    }
+
+    void push_status_and_headers(lua_State *L,
+                                 const HttpResponseSnapshot &response)
+    {
+        lua_pushinteger(L, response.status);
         lua_setfield(L, -2, "status");
 
-        // Table rétrocompatible : une chaîne par nom, dernière valeur
-        // rencontrée gagnante.
         lua_newtable(L);
-        int headers_idx = lua_absindex(L, -1);
-
-        // Vue complète : chaque nom est toujours associé à un tableau,
-        // même lorsqu'il n'apparaît qu'une seule fois. Cela permet de
-        // traiter Set-Cookie et les autres en-têtes répétés sans changer
-        // le contrat historique de `headers`.
+        const int headers_index = lua_absindex(L, -1);
         lua_newtable(L);
-        int multi_idx = lua_absindex(L, -1);
+        const int multi_index = lua_absindex(L, -1);
 
-        for (const auto &h : res->headers)
+        for (const auto &header : response.headers)
         {
-            std::string key = to_lower(h.first);
+            lua_pushlstring(L, header.value.data(), header.value.size());
+            lua_setfield(L, headers_index, header.name.c_str());
 
-            lua_pushlstring(L, h.second.data(), h.second.size());
-            lua_setfield(L, headers_idx, key.c_str());
-
-            lua_getfield(L, multi_idx, key.c_str());
+            lua_getfield(L, multi_index, header.name.c_str());
             if (lua_isnil(L, -1))
             {
                 lua_pop(L, 1);
                 lua_newtable(L);
                 lua_pushvalue(L, -1);
-                lua_setfield(L, multi_idx, key.c_str());
+                lua_setfield(L, multi_index, header.name.c_str());
             }
-            lua_Integer next =
+            const lua_Integer next =
                 static_cast<lua_Integer>(lua_rawlen(L, -1)) + 1;
-            lua_pushlstring(L, h.second.data(), h.second.size());
+            lua_pushlstring(L, header.value.data(), header.value.size());
             lua_seti(L, -2, next);
             lua_pop(L, 1);
         }
@@ -358,94 +459,100 @@ namespace
         lua_setfield(L, -2, "headers");
     }
 
-    // Empile (result, nil). Pile inchangée par ailleurs.
-    int push_response(lua_State *L, const httplib::Result &res)
+    int push_response_protected(lua_State *L,
+                                const HttpResponseSnapshot &response)
     {
-        lua_newtable(L);
-        push_status_and_headers(L, res);
-
-        // Binaire-safe : le corps peut contenir des octets nuls.
-        lua_pushlstring(L, res->body.data(), res->body.size());
-        lua_setfield(L, -2, "body");
-
-        lua_pushnil(L);
-        return 2;
-    }
-
-    int push_download_response(lua_State *L, const httplib::Result &res,
-                               const std::string &destination,
-                               std::uint64_t bytes, bool saved)
-    {
-        lua_newtable(L);
-        push_status_and_headers(L, res);
-
-        lua_pushboolean(L, saved);
-        lua_setfield(L, -2, "saved");
-
-        lua_pushinteger(L, static_cast<lua_Integer>(bytes));
-        lua_setfield(L, -2, "bytes");
-
-        if (saved)
+        auto builder = [&response](lua_State *Ls) noexcept -> int
         {
-            lua_pushlstring(L, destination.data(), destination.size());
-            lua_setfield(L, -2, "path");
-        }
-
-        lua_pushnil(L);
-        return 2;
+            lua_newtable(Ls);
+            push_status_and_headers(Ls, response);
+            if (response.download)
+            {
+                lua_pushboolean(Ls, response.saved ? 1 : 0);
+                lua_setfield(Ls, -2, "saved");
+                lua_pushinteger(Ls,
+                                static_cast<lua_Integer>(response.bytes));
+                lua_setfield(Ls, -2, "bytes");
+                if (response.saved)
+                {
+                    lua_pushlstring(Ls, response.destination.data(),
+                                    response.destination.size());
+                    lua_setfield(Ls, -2, "path");
+                }
+            }
+            else
+            {
+                lua_pushlstring(Ls, response.body.data(),
+                                response.body.size());
+                lua_setfield(Ls, -2, "body");
+            }
+            lua_pushnil(Ls);
+            return 2;
+        };
+        return lua_build_results_protected(L, builder, 2);
     }
 
     // Cœur partagé. `opts_idx` = table d'options sur la pile.
     // Lorsque download_destination != nullptr, le corps est écrit dans un
     // temporaire adjacent puis remplacé atomiquement pour une réponse 2xx.
     int http_perform(lua_State *L, int opts_idx,
-                     const std::string *download_destination = nullptr)
+                     const std::string_view *download_destination = nullptr)
     {
         opts_idx = lua_absindex(L, opts_idx);
+        HttpRequestState &state = make_http_request_state(L);
+        if (download_destination != nullptr)
+            state.destination.assign(download_destination->data(),
+                                     download_destination->size());
+        auto &url = state.url;
+        auto &method = state.method;
+        auto &body = state.body;
+        auto &string_err = state.error;
+        auto &ca_cert = state.ca_cert;
+        auto &content_type = state.content_type;
+        auto &parts = state.parts;
+        auto &hdrs = state.headers;
 
         // --- url (requis) ---------------------------------------------
         lua_getfield(L, opts_idx, "url");
         if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 1);
-            return push_fail(L, "http: 'url' (string) is required");
+            return push_fail_protected(L, "http: 'url' (string) is required");
         }
-        std::string url;
-        std::string string_err;
         if (!lua_string_without_nul(L, -1, url, "http: url", string_err))
         {
             lua_pop(L, 1);
-            return push_fail(L, string_err);
+            return push_fail_protected(L, string_err);
         }
         if (contains_cr_or_lf(url))
         {
             lua_pop(L, 1);
-            return push_fail(L, "http: url must not contain CR or LF");
+            return push_fail_protected(L, "http: url must not contain CR or LF");
         }
         lua_pop(L, 1);
 
         // --- method (optionnel, défaut GET) ---------------------------
-        std::string method = "GET";
+        method = "GET";
         lua_getfield(L, opts_idx, "method");
         if (!lua_isnil(L, -1))
         {
             if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(L, "http: 'method' must be a string");
+                return push_fail_protected(L, "http: 'method' must be a string");
             }
             if (!lua_string_without_nul(L, -1, method,
                                         "http: method", string_err))
             {
                 lua_pop(L, 1);
-                return push_fail(L, string_err);
+                return push_fail_protected(L, string_err);
             }
             to_upper_ascii(method);
         }
         lua_pop(L, 1);
 
         // --- body (optionnel) -----------------------------------------
-        std::string body;
+        body.clear();
         bool has_body = false;
         lua_getfield(L, opts_idx, "body");
         if (!lua_isnil(L, -1))
@@ -453,7 +560,7 @@ namespace
             if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(L, "http: 'body' must be a string");
+                return push_fail_protected(L, "http: 'body' must be a string");
             }
             size_t blen = 0;
             const char *bs = lua_tolstring(L, -1, &blen);
@@ -471,7 +578,7 @@ namespace
             if (!lua_is_strict_number(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(L, "http: 'timeout' must be a number");
+                return push_fail_protected(L, "http: 'timeout' must be a number");
             }
             timeout_s = lua_tonumber(L, -1);
             has_timeout = true;
@@ -496,16 +603,16 @@ namespace
         {
             if (!std::isfinite(timeout_s))
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "http: timeout must be finite (not NaN or inf)");
             }
             if (!(timeout_s > 0.0))
             {
-                return push_fail(L, "http: timeout must be > 0");
+                return push_fail_protected(L, "http: timeout must be > 0");
             }
             if (timeout_s * 1000.0 > static_cast<double>(INT_MAX))
             {
-                return push_fail(L, "http: timeout too large");
+                return push_fail_protected(L, "http: timeout too large");
             }
         }
 
@@ -517,14 +624,14 @@ namespace
             if (!lua_is_strict_boolean(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(L, "http: 'verify' must be a boolean");
+                return push_fail_protected(L, "http: 'verify' must be a boolean");
             }
             verify = lua_toboolean(L, -1) != 0;
         }
         lua_pop(L, 1);
 
         // --- ca_cert (optionnel) --------------------------------------
-        std::string ca_cert;
+        ca_cert.clear();
         bool has_ca = false;
         lua_getfield(L, opts_idx, "ca_cert");
         if (!lua_isnil(L, -1))
@@ -532,13 +639,13 @@ namespace
             if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(L, "http: 'ca_cert' must be a string");
+                return push_fail_protected(L, "http: 'ca_cert' must be a string");
             }
             if (!lua_string_without_nul(L, -1, ca_cert,
                                         "http: ca_cert", string_err))
             {
                 lua_pop(L, 1);
-                return push_fail(L, string_err);
+                return push_fail_protected(L, string_err);
             }
             has_ca = true;
         }
@@ -552,7 +659,7 @@ namespace
             if (!lua_is_strict_boolean(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(
+                return push_fail_protected(
                     L, "http: 'follow_redirects' must be a boolean");
             }
             follow = lua_toboolean(L, -1) != 0;
@@ -575,21 +682,21 @@ namespace
             if (!lua_is_strict_integer(L, -1))
             {
                 lua_pop(L, 1);
-                return push_fail(L, std::string("http: '") + limit_field +
+                return push_fail_protected(L, std::string("http: '") + limit_field +
                                         "' must be an integer");
             }
             lua_Integer raw_limit = lua_tointeger(L, -1);
             if (raw_limit <= 0)
             {
                 lua_pop(L, 1);
-                return push_fail(L, std::string("http: '") + limit_field +
+                return push_fail_protected(L, std::string("http: '") + limit_field +
                                         "' must be > 0");
             }
             if (download_destination == nullptr &&
                 raw_limit > MAX_CONFIGURABLE_BODY_SIZE)
             {
                 lua_pop(L, 1);
-                return push_fail(
+                return push_fail_protected(
                     L, "http: 'max_body_size' too large (maximum is 2 GiB)");
             }
             if (download_destination != nullptr)
@@ -608,8 +715,6 @@ namespace
         // passé via l'argument content_type dédié de httplib (évite un
         // header dupliqué). Pour les méthodes sans corps, tous les
         // headers passent tels quels.
-        std::vector<std::pair<std::string, std::string>> hdrs;
-        std::string content_type;
         bool has_ct = false;
         lua_getfield(L, opts_idx, "headers");
         if (!lua_isnil(L, -1))
@@ -617,7 +722,7 @@ namespace
             if (lua_type(L, -1) != LUA_TTABLE)
             {
                 lua_pop(L, 1);
-                return push_fail(L, "http: 'headers' must be a table");
+                return push_fail_protected(L, "http: 'headers' must be a table");
             }
             int hidx = lua_absindex(L, -1);
             lua_pushnil(L);
@@ -626,51 +731,51 @@ namespace
                 if (!lua_is_strict_string(L, -2))
                 {
                     lua_pop(L, 2);
-                    return push_fail(L, "http: header names must be strings");
+                    return push_fail_protected(L, "http: header names must be strings");
                 }
-                std::string hk;
-                if (!lua_string_without_nul(L, -2, hk,
+                state.header_key.clear();
+                if (!lua_string_without_nul(L, -2, state.header_key,
                                             "http: header name", string_err))
                 {
                     lua_pop(L, 2);
-                    return push_fail(L, string_err);
+                    return push_fail_protected(L, string_err);
                 }
-                if (!valid_header_name(hk))
+                if (!valid_header_name(state.header_key))
                 {
                     lua_pop(L, 2);
-                    return push_fail(
+                    return push_fail_protected(
                         L, "http: invalid header name");
                 }
-                std::string hv;
-                if (!lua_value_to_string(L, -1, hv))
+                state.header_value.clear();
+                if (!lua_value_to_string(L, -1, state.header_value))
                 {
                     lua_pop(L, 2);
-                    return push_fail(
+                    return push_fail_protected(
                         L, "http: header values must be strings or numbers");
                 }
-                if (hv.find('\0') != std::string::npos)
+                if (state.header_value.find('\0') != std::string::npos)
                 {
                     lua_pop(L, 2);
-                    return push_fail(
+                    return push_fail_protected(
                         L, "http: header value must not contain NUL byte");
                 }
-                if (contains_cr_or_lf(hv))
+                if (contains_cr_or_lf(state.header_value))
                 {
                     lua_pop(L, 2);
-                    return push_fail(
+                    return push_fail_protected(
                         L, "http: header value must not contain CR or LF");
                 }
                 bool is_body_method =
                     (method == "POST" || method == "PUT" ||
                      method == "PATCH" || method == "DELETE");
-                if (is_body_method && to_lower(hk) == "content-type")
+                if (is_body_method && to_lower(state.header_key) == "content-type")
                 {
-                    content_type = hv;
+                    content_type = state.header_value;
                     has_ct = true;
                 }
                 else
                 {
-                    hdrs.emplace_back(hk, hv);
+                    hdrs.emplace_back(state.header_key, state.header_value);
                 }
                 lua_pop(L, 1);
             }
@@ -678,11 +783,9 @@ namespace
         lua_pop(L, 1);
 
         // --- url + query ----------------------------------------------
-        UrlParts parts;
-        std::string err;
-        if (!split_url(url, parts, err))
+        if (!split_url(url, parts, string_err))
         {
-            return push_fail(L, err);
+            return push_fail_protected(L, string_err);
         }
         lua_getfield(L, opts_idx, "query");
         if (!lua_isnil(L, -1))
@@ -690,12 +793,12 @@ namespace
             if (lua_type(L, -1) != LUA_TTABLE)
             {
                 lua_pop(L, 1);
-                return push_fail(L, "http: 'query' must be a table");
+                return push_fail_protected(L, "http: 'query' must be a table");
             }
-            if (!append_query(L, -1, parts.target, err))
+            if (!append_query(L, -1, state))
             {
                 lua_pop(L, 1);
-                return push_fail(L, err);
+                return push_fail_protected(L, string_err);
             }
         }
         lua_pop(L, 1);
@@ -705,7 +808,7 @@ namespace
             method != "POST" && method != "PUT" && method != "PATCH" &&
             method != "DELETE")
         {
-            return push_fail(L, "http: unsupported method '" + method + "'");
+            return push_fail_protected(L, "http: unsupported method '" + method + "'");
         }
 
         // Pas de comportement muet : un body sur une méthode sans
@@ -713,7 +816,7 @@ namespace
         if (has_body &&
             (method == "GET" || method == "HEAD" || method == "OPTIONS"))
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "http: body not allowed for " + method);
         }
 
@@ -727,10 +830,10 @@ namespace
             if (download_destination != nullptr)
             {
                 std::string open_error;
-                if (!download_file.open(*download_destination, max_file_size,
+                if (!download_file.open(state.destination, max_file_size,
                                         open_error))
                 {
-                    return push_fail(L, open_error);
+                    return push_fail_protected(L, open_error);
                 }
             }
 
@@ -883,15 +986,15 @@ namespace
                     download_file.discard();
                     if (!download_error.empty())
                     {
-                        return push_fail(L, download_error);
+                        return push_fail_protected(L, download_error);
                     }
                 }
                 if (body_too_large)
                 {
-                    return push_fail(
+                    return push_fail_protected(
                         L, "http: response body exceeds max_body_size");
                 }
-                return push_fail(L, std::string("http: ") +
+                return push_fail_protected(L, std::string("http: ") +
                                         httplib::to_string(res.error()));
             }
 
@@ -906,33 +1009,34 @@ namespace
                     if (!download_file.commit(commit_error))
                     {
                         download_file.discard();
-                        return push_fail(L, commit_error);
+                        return push_fail_protected(L, commit_error);
                     }
                 }
                 else
                 {
                     download_file.discard();
                 }
-                return push_download_response(
-                    L, res, *download_destination, downloaded_bytes, save);
+                return push_response_protected(
+                    L, snapshot_response(res, {}, true, state.destination,
+                                          downloaded_bytes, save));
             }
 
-            // Avec un ContentReceiver, cpp-httplib ne remplit pas
-            // res->body : transférer explicitement le buffer validé.
-            res->body = std::move(response_body);
-            return push_response(L, res);
+            // Copier tout l'état réseau avant de construire les valeurs Lua.
+            const HttpResponseSnapshot snapshot = snapshot_response(
+                res, std::move(response_body), false, {}, 0, false);
+            return push_response_protected(L, snapshot);
         }
         catch (const std::bad_alloc &)
         {
-            return push_fail(L, "http: out of memory");
+            throw;
         }
         catch (const std::exception &)
         {
-            return push_fail(L, "http: internal failure");
+            return push_fail_protected(L, "http: internal failure");
         }
         catch (...)
         {
-            return push_fail(L, "http: unknown error");
+            return push_fail_protected(L, "http: unknown error");
         }
     }
 
@@ -953,13 +1057,13 @@ namespace
 
 } // namespace
 
-int lua_http_request(lua_State *L)
+int lua_http_request_impl(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TTABLE);
     return http_perform(L, 1);
 }
 
-int lua_http_get(lua_State *L)
+int lua_http_get_impl(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TSTRING);
 
@@ -977,7 +1081,7 @@ int lua_http_get(lua_State *L)
     return http_perform(L, dst);
 }
 
-int lua_http_post(lua_State *L)
+int lua_http_post_impl(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TSTRING);
 
@@ -1019,7 +1123,7 @@ int lua_http_post(lua_State *L)
     return http_perform(L, dst);
 }
 
-int lua_http_download(lua_State *L)
+int lua_http_download_impl(lua_State *L)
 {
     const int argc = lua_gettop(L);
     luaL_argcheck(L, argc == 2 || argc == 3, 1,
@@ -1035,8 +1139,6 @@ int lua_http_download(lua_State *L)
         luaL_checkstring_view_without_nul(L, 1, "url");
     const std::string_view destination_view =
         luaL_checkstring_view_without_nul(L, 2, "destination");
-    const std::string destination(destination_view);
-
     lua_newtable(L);
     const int dst = lua_gettop(L);
     if (argc == 3)
@@ -1049,11 +1151,48 @@ int lua_http_download(lua_State *L)
     lua_pushstring(L, "GET");
     lua_setfield(L, dst, "method");
 
-    return http_perform(L, dst, &destination);
+    return http_perform(L, dst, &destination_view);
+}
+
+template <int (*Fn)(lua_State *)>
+int http_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "http: out of memory", "http: internal C++ failure",
+        "http: unknown internal C++ failure");
+}
+
+int lua_http_request(lua_State *L)
+{
+    return http_boundary<lua_http_request_impl>(L);
+}
+
+int lua_http_get(lua_State *L)
+{
+    return http_boundary<lua_http_get_impl>(L);
+}
+
+int lua_http_post(lua_State *L)
+{
+    return http_boundary<lua_http_post_impl>(L);
+}
+
+int lua_http_download(lua_State *L)
+{
+    return http_boundary<lua_http_download_impl>(L);
 }
 
 void register_http(lua_State *L)
 {
+    if (luaL_newmetatable(L, HTTP_REQUEST_STATE_META))
+    {
+        lua_pushcfunction(L, http_request_state_gc_boundary);
+        lua_setfield(L, -2, "__gc");
+        lua_pushboolean(L, 0);
+        lua_setfield(L, -2, "__metatable");
+    }
+    lua_pop(L, 1);
+
     // Précondition : table babet au sommet (-1), comme register_json.
     lua_newtable(L);
 

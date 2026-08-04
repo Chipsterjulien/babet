@@ -475,6 +475,10 @@ void register_main_thread()
 
 void register_signal(lua_State *L)
 {
+    // Les trois fonctions publiques ne conservent aucun propriétaire C++
+    // non trivial autour d'une API Lua susceptible d'allouer. Elles peuvent
+    // donc rester enregistrées directement : leurs erreurs de programmation
+    // suivent le longjmp Lua normal sans contourner de nettoyage RAII.
     // Précondition : la table babet est au sommet.
     lua_newtable(L);
 

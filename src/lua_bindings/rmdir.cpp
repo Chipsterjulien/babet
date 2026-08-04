@@ -83,7 +83,7 @@ int lua_rmdir(lua_State *L)
     }
 
     const std::string path = luaL_checkstring_without_nul(L, 1, "path");
-    return push_action_result(L, rmdir(path));
+    return push_action_result_protected(L, rmdir(path));
 }
 
 int lua_rmdir_all(lua_State *L)
@@ -98,5 +98,5 @@ int lua_rmdir_all(lua_State *L)
     }
 
     const std::string path = luaL_checkstring_without_nul(L, 1, "path");
-    return push_action_result(L, rmdir_all(path));
+    return push_action_result_protected(L, rmdir_all(path));
 }

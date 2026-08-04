@@ -6,6 +6,141 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.15.0] - 2026-08-04
+
+### Summary
+
+Babet 2.15.0 audits Lua allocation failures that use a non-local jump instead
+of C++ stack unwinding. It protects binding-owned RAII state while Lua results
+are allocated, fixes cooperative cancellation of a worker blocked on a full
+outbox, and makes `createFileIterator` genuinely lazy. No command-line mode is
+added and existing one-value uses of `iterator:next()` remain compatible.
+
+### Lua `longjmp` and C++ RAII safety
+
+- added a protected Lua result builder that performs allocating result emission
+  under `lua_pcall`, carries `LUA_ERRMEM` through an allocation-free C++ marker,
+  destroys every active binding-owned C++ object, then re-raises the original
+  Lua error;
+- added Lua-owned temporary state for results whose native owners must survive
+  until Lua has copied the final strings or tables;
+- applied the audited pattern to JSON, TOML, HTTP, Archive, Socket, SQLite,
+  Workers, Base64, CRC32, MD5, SHA-1, SHA-2, SHA-3, and BLAKE2 result paths;
+- completed the same audit for all 14 `spawn` process registrations and all 15
+  synchronous/streaming pipeline registrations, including protected process
+  and pipeline userdata allocation plus protected status/result tables;
+- made process and pipeline finalizer cleanup allocation-free, and routed their
+  `__gc` / `__close` functions through silent `noexcept` boundaries;
+- added explicit constructed-state userdata wrappers for socket and worker
+  objects, so a placement-new failure can never make a finalizer destroy an
+  object whose lifetime did not begin;
+- routed the channel, worker, HTTP request-state, and file-iterator finalizers
+  through silent boundaries; documented why the signal API and
+  `json.as_array` can remain direct because they own no non-trivial C++ state
+  across allocating Lua calls;
+- fixed the protected TOML snapshot dispatch to inspect the native node kind
+  before `value<T>()`, because toml++ permits selected lossless conversions
+  such as boolean to integer; scalar booleans, quoted dotted keys,
+  heterogeneous arrays, and nested sections now preserve their Lua types;
+- kept programmer errors, ordinary `(nil, err)` failures, binary strings,
+  response tables, archive limits, socket timeouts, and database contracts
+  unchanged;
+- ensured HTTP clients, requests, responses, temporary download state, TOML
+  trees, JSON values, worker messages, and filesystem iterator owners are not
+  bypassed by a Lua allocation jump;
+- completed the audit for `exec`, `find`, `listFiles`, `deepCopyTable`, SYS,
+  Compression, and Inotify: native directory traversal now finishes before
+  Lua table emission, the source table is explicitly forwarded into
+  `deepCopyTable`'s protected call frame, registry references are released on
+  every path, and dynamic results are emitted under `lua_pcall`;
+- fixed the protected parser runner so every original Lua argument is
+  forwarded into its `lua_pcall` frame with unchanged indices; this restores
+  `exec` arguments/options, `find` filters, Compression options, and
+  `joinPath` segments while keeping their C++ owners protected;
+- protected Archive source/options parsing and `user.get` passwd-table
+  construction, closing the remaining identified result/parser OOM paths;
+- routed every historical flat registration in `main.cpp` through one common
+  C++ boundary, globally rejected direct `push_fail()` and
+  `push_action_result()` builders in binding sources, and protected both the
+  main and worker Lua-runtime setup phases against an OOM panic;
+- fixed worker-channel handle construction with raw-storage constructed-state
+  tracking, a metatable armed before the `shared_ptr` begins its lifetime,
+  `noexcept` destruction, and ownership transfer only after userdata
+  construction commits;
+- extended the structural boundary preflight to 161 audited contracts and
+  expanded the real allocator-driven OOM self-test to exercise the actual
+  `exec`, `listFiles`, and `deepCopyTable` paths in addition to C++ stack
+  owners and Lua-owned userdata cleanup;
+- removed the last fifteen direct `push_fail()` result builders from Archive
+  and Socket, so their diagnostics are also emitted under `lua_pcall` while
+  strings, vectors, or RAII owners remain alive;
+- made the raw-userdata contracts explicit: `Sock` construction must remain
+  `noexcept`, `Worker` destruction must remain `noexcept`, and the
+  `constructed` flag is always initialized explicitly before the metatable can
+  expose the storage to `__gc`.
+
+### C++23 build hygiene
+
+- marked the `toml++` header directory as a CMake `SYSTEM` include; GCC 16 no
+  longer clutters builds with dependency-owned
+  `-Wdeprecated-literal-operator` diagnostics from the pinned 3.4.0 header,
+  while warnings from Babet sources remain enabled.
+
+### Workers
+
+- fixed a guaranteed `cancel()` / `join()` deadlock when a worker was blocked
+  indefinitely in `worker.send()` because its outbox was full;
+- cancellation now wakes outbox waiters and returns `(false, "cancelled")` only
+  when the send would otherwise remain blocked;
+- preserved the documented final-diagnostic behavior: a message still enters
+  the open outbox when space is already available, and messages queued before
+  cancellation remain drainable by the parent;
+- kept cancellation cooperative and did not introduce `pthread_cancel()` or
+  asynchronous interruption of Lua, SQLite, transactions, or C++ critical
+  sections;
+- explicitly retained the protocol-boundary rule that a command popped from
+  the inbox but not yet delivered when cancellation becomes visible is
+  discarded instead of executed after cancellation;
+- added a deterministic capacity-one regression that fills the outbox, blocks
+  a second send, cancels, joins with a deadline, and drains the first message.
+
+### Lazy `FileIterator`
+
+- replaced the eager `std::vector<std::string>` preload with a native
+  `directory_iterator` or `recursive_directory_iterator` stored in the Lua
+  userdata;
+- moved traversal to `iterator:next()`, so creation no longer walks the entire
+  tree or retains every file path in memory;
+- extended `next()` to return `(path, nil)`, `(nil, err)`, or `(nil, nil)` at
+  normal end; callers that consume only the first value keep their historical
+  behavior, while new code can distinguish a deferred traversal failure from
+  end of iteration;
+- preserved regular-file and symlink rules, strict arguments, explicit close,
+  garbage-collection cleanup, and the Lua error after use of a closed iterator.
+
+### Interactive spawn diagnostics
+
+- kept the 2.14.0 terminal engine unchanged because the direct PTY regression
+  and a controlled optional `sudo` layer do not reproduce a second foreground-
+  group failure;
+- made every PTY run print the canonical Babet executable path and its SHA-256,
+  preventing a stale copied or embedded runtime from being confused with the
+  binary compiled by the release suite;
+- retained the hard anti-hang deadline and the direct read, timeout, signal,
+  stop, status-refresh, and terminal-restoration scenarios;
+- recorded the separately reported real yaourt-to-pacman interactive block as
+  unresolved: 2.15.0 does not claim that wrapper chain is fixed without a red
+  reproducer that identifies the actual foreground process group.
+
+### Validation and documentation
+
+- integrated the Lua OOM/RAII self-test and the expanded PTY diagnostic into
+  both normal and ASan/UBSan release paths;
+- updated the French and English filesystem, workers, and process references,
+  README files, release checklist, roadmap, notices, changelogs, GitHub notes,
+  and PDF manuals;
+- kept the Linux-only platform and all vendored dependency versions unchanged.
+
 ## [2.14.0] - 2026-08-03
 
 ### Summary

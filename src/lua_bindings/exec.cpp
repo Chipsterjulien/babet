@@ -518,10 +518,11 @@ namespace
         bool armed_ = true;
     };
 
-    int push_exec_result(lua_State *L, const std::string &out_buf,
-                         const std::string &err_buf, int status,
-                         bool status_valid, bool timed_out,
-                         bool out_truncated, bool err_truncated)
+    int push_exec_result_protected(lua_State *L,
+                                   const std::string &out_buf,
+                                   const std::string &err_buf, int status,
+                                   bool status_valid, bool timed_out,
+                                   bool out_truncated, bool err_truncated)
     {
         int exit_code = -1;
         if (status_valid)
@@ -536,29 +537,31 @@ namespace
             }
         }
 
-        lua_newtable(L);
-        lua_pushlstring(L, out_buf.data(), out_buf.size());
-        lua_setfield(L, -2, "stdout");
-        lua_pushlstring(L, err_buf.data(), err_buf.size());
-        lua_setfield(L, -2, "stderr");
-        lua_pushinteger(L, exit_code);
-        lua_setfield(L, -2, "code");
-        lua_pushboolean(L, timed_out ? 1 : 0);
-        lua_setfield(L, -2, "timed_out");
-        lua_pushboolean(L, out_truncated ? 1 : 0);
-        lua_setfield(L, -2, "stdout_truncated");
-        lua_pushboolean(L, err_truncated ? 1 : 0);
-        lua_setfield(L, -2, "stderr_truncated");
-        lua_pushnil(L);
-        return 2;
+        auto builder = [&](lua_State *Ls) noexcept -> int
+        {
+            lua_newtable(Ls);
+            lua_pushlstring(Ls, out_buf.data(), out_buf.size());
+            lua_setfield(Ls, -2, "stdout");
+            lua_pushlstring(Ls, err_buf.data(), err_buf.size());
+            lua_setfield(Ls, -2, "stderr");
+            lua_pushinteger(Ls, exit_code);
+            lua_setfield(Ls, -2, "code");
+            lua_pushboolean(Ls, timed_out ? 1 : 0);
+            lua_setfield(Ls, -2, "timed_out");
+            lua_pushboolean(Ls, out_truncated ? 1 : 0);
+            lua_setfield(Ls, -2, "stdout_truncated");
+            lua_pushboolean(Ls, err_truncated ? 1 : 0);
+            lua_setfield(Ls, -2, "stderr_truncated");
+            lua_pushnil(Ls);
+            return 2;
+        };
+        return lua_build_results_protected(L, builder, 2);
     }
 
 } // namespace
 
-int lua_exec(lua_State *L)
+static int lua_exec_impl(lua_State *L)
 {
-    try
-    {
     // --- validation des arguments Lua -------------------------------
     if (!lua_arity_between(L, 1, 3) ||
         !lua_is_strict_string(L, 1))
@@ -569,13 +572,19 @@ int lua_exec(lua_State *L)
     std::string cmd;
     if (!lua_string_without_nul(L, 1, cmd, "command", err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     std::vector<std::string> args;
-    if (!collect_args(L, 2, cmd, args, err))
+    bool args_ok = false;
+    auto args_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        args_ok = collect_args(Ls, 2, cmd, args, err);
+    };
+    lua_run_protected(L, args_parser);
+    if (!args_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     std::string cwd;
@@ -586,10 +595,17 @@ int lua_exec(lua_State *L)
     double timeout_sec = 0.0;
     bool has_timeout = false;
     size_t max_output = DEFAULT_MAX_OUTPUT;
-    if (!collect_opts(L, 3, cwd, has_cwd, env, stdin_data, has_stdin,
-                      timeout_sec, has_timeout, max_output, err))
+    bool opts_ok = false;
+    auto opts_parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        opts_ok = collect_opts(Ls, 3, cwd, has_cwd, env, stdin_data,
+                               has_stdin, timeout_sec, has_timeout,
+                               max_output, err);
+    };
+    lua_run_protected(L, opts_parser);
+    if (!opts_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     // La deadline commence avant toute préparation/fork : elle couvre donc
@@ -620,11 +636,11 @@ int lua_exec(lua_State *L)
     {
         if (launch_result.timed_out)
         {
-            return push_exec_result(L, "", "", launch_result.status,
-                                    launch_result.status_valid, true, false,
-                                    false);
+            return push_exec_result_protected(
+                L, "", "", launch_result.status,
+                launch_result.status_valid, true, false, false);
         }
-        return push_fail(L, launch_result.error);
+        return push_fail_protected(L, launch_result.error);
     }
 
     pid_t pid = launch_result.process.pid;
@@ -853,7 +869,7 @@ int lua_exec(lua_State *L)
                 " (child could not be reaped within cleanup deadline)";
         }
         emergency_guard.cleanup_now();
-        return push_fail(L, io_internal_error);
+        return push_fail_protected(L, io_internal_error);
     }
 
     // --- code de sortie ---------------------------------------------
@@ -874,7 +890,7 @@ int lua_exec(lua_State *L)
         else if (wait_result == ChildWaitResult::error)
         {
             emergency_guard.cleanup_now();
-            return push_fail(L, "exec: waitpid failed");
+            return push_fail_protected(L, "exec: waitpid failed");
         }
         else
         {
@@ -923,7 +939,7 @@ int lua_exec(lua_State *L)
         if (!status_valid)
         {
             emergency_guard.cleanup_now();
-            return push_fail(L, "exec: waitpid failed");
+            return push_fail_protected(L, "exec: waitpid failed");
         }
         pid = -1;
     }
@@ -936,15 +952,15 @@ int lua_exec(lua_State *L)
     {
         emergency_guard.release();
     }
-    return push_exec_result(L, out_buf, err_buf, status, status_valid,
-                            timed_out, out_truncated, err_truncated);
-    }
-    catch (const std::bad_alloc &)
-    {
-        return push_fail(L, "exec: out of memory during execution");
-    }
-    catch (...)
-    {
-        return push_fail(L, "exec: internal execution failure");
-    }
+    return push_exec_result_protected(L, out_buf, err_buf, status,
+                                      status_valid, timed_out, out_truncated,
+                                      err_truncated);
+}
+
+int lua_exec(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<lua_exec_impl>(
+        L, "exec: out of memory during execution",
+        "exec: internal execution failure",
+        "exec: unknown internal execution failure");
 }

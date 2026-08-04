@@ -62,13 +62,9 @@ int lua_genericFunction(lua_State* L, Func func) {
     auto result = func(path);
 
     if (result) {
-        lua_pushstring(L, result->c_str());
-        lua_pushnil(L);
-    } else {
-        lua_pushnil(L);
-        lua_pushstring(L, "cannot extract path component");
+        return push_string_result_protected(L, *result);
     }
-    return 2;
+    return push_fail_protected(L, "cannot extract path component");
 }
 
 /**

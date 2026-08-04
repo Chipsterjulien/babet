@@ -110,7 +110,7 @@ int lua_sleep(lua_State *L)
     double seconds = 0.0;
     if (!convert_to_seconds(duration, unit, seconds))
     {
-        return push_fail(L, "Invalid time unit");
+        return push_fail_protected(L, "Invalid time unit");
     }
 
     // CORRECTIF (audit v21) : borne haute avant le cast vers time_t.
@@ -161,7 +161,7 @@ int lua_sleep(lua_State *L)
         if (signal_any_handled_pending())
         {
             signal_dispatch_pending(L);
-            return push_fail(L, "interrupted");
+            return push_fail_protected(L, "interrupted");
         }
         if (::nanosleep(&req, &rem) == 0)
         {
@@ -175,7 +175,7 @@ int lua_sleep(lua_State *L)
             // ligne, cohérent avec le style "sleep: <strerror>".
             std::string msg = "sleep: ";
             msg += std::strerror(errno);
-            return push_fail(L, msg);
+            return push_fail_protected(L, msg);
         }
         // EINTR : un signal est arrivé. Si c'est un signal qu'on
         // gère, on dispatche son callback et on retourne
@@ -184,7 +184,7 @@ int lua_sleep(lua_State *L)
         if (signal_any_handled_pending())
         {
             signal_dispatch_pending(L);
-            return push_fail(L, "interrupted");
+            return push_fail_protected(L, "interrupted");
         }
         req = rem;
     }

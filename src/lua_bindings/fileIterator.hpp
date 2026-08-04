@@ -2,81 +2,52 @@
 #define FILEITERATOR_HPP
 
 #include <filesystem>
-#include <vector>
-#include <string>
 #include <optional>
-#include <memory>
+#include <string>
+#include <string_view>
+
 #include <lua.hpp>
 
-/**
- * @brief Class to iterate over files in a directory.
- */
-class FileIterator {
+/** Lazy iterator over regular files in a directory. */
+class FileIterator
+{
 public:
-    /**
-     * @brief Constructs a FileIterator for the given path.
-     * @param path The directory path to iterate over.
-     * @param recursive If true, iterate recursively through subdirectories.
-     */
-    FileIterator(const std::string& path, bool recursive);
+    enum class NextState
+    {
+        file,
+        end,
+        error,
+    };
 
-    /**
-     * @brief Returns the next file in the directory.
-     * @return An optional string containing the next file path, or std::nullopt if no more files are available.
-     */
-    std::optional<std::string> next();
+    FileIterator(std::string_view path, bool recursive);
+    FileIterator(const FileIterator &) = delete;
+    FileIterator &operator=(const FileIterator &) = delete;
+    FileIterator(FileIterator &&) = delete;
+    FileIterator &operator=(FileIterator &&) = delete;
+    ~FileIterator() = default;
 
-    /**
-     * @brief Checks if there are more files to iterate over.
-     * @return True if there are more files, false otherwise.
-     */
-    bool hasNext() const;
+    NextState next();
+    const std::string &value() const noexcept { return value_; }
+    const std::string &error() const noexcept { return error_; }
 
 private:
-    /**
-     * @brief Loads the files from the given path.
-     * @param path The directory path to load files from.
-     * @param recursive If true, load files recursively from subdirectories.
-     */
-    void loadFiles(const std::filesystem::path& path, bool recursive);
+    bool inspect_current(const std::filesystem::directory_entry &entry,
+                         bool &yield);
+    bool advance();
 
-    std::vector<std::string> files; ///< Vector to store file paths.
-    std::vector<std::string>::iterator current; ///< Iterator to the current file in the vector.
+    bool recursive_ = false;
+    std::optional<std::filesystem::directory_iterator> flat_;
+    std::optional<std::filesystem::recursive_directory_iterator> recursive_it_;
+    std::string value_;
+    std::string error_;
+    bool exhausted_ = false;
+    bool deferred_error_ = false;
 };
 
-/**
- * @brief Lua binding for getting the next file from the FileIterator.
- * @param L The Lua state.
- * @return The number of return values.
- */
-int lua_nextFile(lua_State* L);
-
-/**
- * @brief Lua binding for garbage collecting the FileIterator.
- * @param L The Lua state.
- * @return The number of return values.
- */
-int lua_gcFileIterator(lua_State* L);
-
-/**
- * @brief Lua binding for creating a new FileIterator.
- * @param L The Lua state.
- * @return The number of return values.
- */
-int lua_createFileIterator(lua_State* L);
-
-/**
- * @brief Creates the metatable for FileIterator.
- * @param L The Lua state.
- * @return The number of return values.
- */
+int lua_nextFile(lua_State *L);
+int lua_gcFileIterator(lua_State *L);
+int lua_createFileIterator(lua_State *L);
 int file_iterator_create_meta(lua_State *L);
-
-/**
- * @brief Opens the file_iterator module in Lua.
- * @param L The Lua state.
- * @return The number of return values.
- */
-extern "C" int luaopen_file_iterator(lua_State* L);
+extern "C" int luaopen_file_iterator(lua_State *L);
 
 #endif // FILEITERATOR_HPP

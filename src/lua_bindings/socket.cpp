@@ -7,14 +7,16 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <exception>
 #include <mutex>
 #include <new>
 #include <string>
 #include <string_view>
-#include <vector>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -62,9 +64,29 @@ namespace
         std::string recv_pending;
     };
 
+    struct SockUserdata
+    {
+        // lua_newuserdata() returns raw storage: this structure is never
+        // C++-constructed, so push_empty_sock() must initialize the flag
+        // explicitly before arming __gc through the metatable.
+        bool constructed;
+        alignas(Sock) std::byte storage[sizeof(Sock)];
+
+        Sock *get() noexcept
+        {
+            return std::launder(reinterpret_cast<Sock *>(storage));
+        }
+    };
+
     Sock *check_sock(lua_State *L, int idx)
     {
-        return static_cast<Sock *>(luaL_checkudata(L, idx, SOCK_META));
+        auto *userdata = static_cast<SockUserdata *>(
+            luaL_checkudata(L, idx, SOCK_META));
+        if (!userdata->constructed)
+        {
+            luaL_error(L, "socket is not initialized");
+        }
+        return userdata->get();
     }
 
     // Integer arguments exposed by the socket API are strict Lua integers.
@@ -87,15 +109,35 @@ namespace
     // frontière sûre ; les ressources sont attachées seulement ensuite.
     Sock *push_empty_sock(lua_State *L)
     {
-        void *raw = lua_newuserdata(L, sizeof(Sock));
-        Sock *s = new (raw) Sock(); // placement new : init du std::string
+        auto *userdata = static_cast<SockUserdata *>(
+            lua_newuserdata(L, sizeof(SockUserdata)));
+        userdata->constructed = false;
+        luaL_getmetatable(L, SOCK_META);
+        lua_setmetatable(L, -2);
+
+        static_assert(
+            std::is_nothrow_default_constructible_v<Sock>,
+            "Sock construction runs inside a noexcept protected Lua builder");
+        Sock *s = new (userdata->storage) Sock();
+        userdata->constructed = true;
         s->fd = -1;
         s->listening = false;
         s->timeout_ms = 0;
         s->ssl = nullptr;
-        luaL_getmetatable(L, SOCK_META);
-        lua_setmetatable(L, -2);
         return s;
+    }
+
+    Sock *push_empty_sock_protected(lua_State *L)
+    {
+        auto builder = [](lua_State *Ls) noexcept -> int
+        {
+            push_empty_sock(Ls);
+            return 1;
+        };
+        lua_build_results_protected(L, builder, 1);
+        auto *userdata = static_cast<SockUserdata *>(
+            lua_touserdata(L, -1));
+        return userdata->get();
     }
 
     void attach_plain_sock(Sock *s, int fd, bool listening) noexcept
@@ -112,7 +154,7 @@ namespace
         msg += prefix;
         msg += ": ";
         msg += std::strerror(saved);
-        return push_fail(L, msg);
+        return push_fail_protected(L, msg);
     }
 
     // Toute fonction exposée à Lua passe par cette frontière. Lua 5.5
@@ -122,22 +164,9 @@ namespace
     template <int (*Fn)(lua_State *)>
     int socket_lua_boundary(lua_State *L)
     {
-        try
-        {
-            return Fn(L);
-        }
-        catch (const std::bad_alloc &)
-        {
-            return push_fail(L, "socket: out of memory");
-        }
-        catch (const std::exception &)
-        {
-            return push_fail(L, "socket: internal failure");
-        }
-        catch (...)
-        {
-            return push_fail(L, "socket: unknown internal failure");
-        }
+        return lua_cfunction_exception_boundary<Fn>(
+            L, "socket: out of memory", "socket: internal C++ failure",
+            "socket: unknown internal C++ failure");
     }
 
     // -----------------------------------------------------------------
@@ -1273,11 +1302,11 @@ namespace
         const char *data = lua_tolstring(L, 2, &len);
         if (s->fd < 0)
         {
-            return push_fail(L, "socket: send: socket is closed");
+            return push_fail_protected(L, "socket: send: socket is closed");
         }
         if (s->listening)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: send: cannot send on a listening socket");
         }
 
@@ -1328,7 +1357,7 @@ namespace
             if (r == WAIT_INTERRUPTED)
             {
                 signal_dispatch_pending(L);
-                return push_fail(L, "interrupted");
+                return push_fail_protected(L, "interrupted");
             }
             if (r < 0)
             {
@@ -1336,7 +1365,7 @@ namespace
             }
             if (r == 0)
             {
-                return push_fail(L, "timeout");
+                return push_fail_protected(L, "timeout");
             }
 
             if (is_tls)
@@ -1350,7 +1379,7 @@ namespace
                 }
                 if (rc == TLS_IO_EOF)
                 {
-                    return push_fail(L, "closed");
+                    return push_fail_protected(L, "closed");
                 }
                 if (rc == TLS_IO_WANT_READ)
                 {
@@ -1358,10 +1387,10 @@ namespace
                     if (wr == WAIT_INTERRUPTED)
                     {
                         signal_dispatch_pending(L);
-                        return push_fail(L, "interrupted");
+                        return push_fail_protected(L, "interrupted");
                     }
                     if (wr == 0)
-                        return push_fail(L, "timeout");
+                        return push_fail_protected(L, "timeout");
                     if (wr < 0)
                         return push_errno_fail(L, "send");
                     continue;
@@ -1370,7 +1399,7 @@ namespace
                 {
                     continue; // déjà attendu POLLOUT, reboucle
                 }
-                return push_fail(L, tls_err); // FATAL
+                return push_fail_protected(L, tls_err); // FATAL
             }
 
             // Branche TCP brut (inchangée).
@@ -1392,7 +1421,7 @@ namespace
                 }
                 if (errno == EPIPE || errno == ECONNRESET)
                 {
-                    return push_fail(L, "closed");
+                    return push_fail_protected(L, "closed");
                 }
                 return push_errno_fail(L, "send");
             }
@@ -1418,11 +1447,11 @@ namespace
             L, 2, "count must be an integer");
         if (n <= 0)
         {
-            return push_fail(L, "socket: recv: count must be > 0");
+            return push_fail_protected(L, "socket: recv: count must be > 0");
         }
         if (n > MAX_RECV_SIZE)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: recv: count exceeds 16 MB cap");
         }
 
@@ -1432,15 +1461,15 @@ namespace
                                     &effective_timeout_ms, timeout_error,
                                     "socket: recv"))
         {
-            return push_fail(L, timeout_error);
+            return push_fail_protected(L, timeout_error);
         }
         if (s->fd < 0)
         {
-            return push_fail(L, "socket: recv: socket is closed");
+            return push_fail_protected(L, "socket: recv: socket is closed");
         }
         if (s->listening)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: recv: cannot recv on a listening socket");
         }
 
@@ -1451,9 +1480,10 @@ namespace
         {
             const size_t count = std::min(
                 static_cast<size_t>(n), s->recv_pending.size());
-            lua_pushlstring(L, s->recv_pending.data(), count);
+            const int result = push_string_protected(
+                L, std::string_view(s->recv_pending.data(), count));
             s->recv_pending.erase(0, count);
-            return 1;
+            return result;
         }
 
         // CORRECTIF (post-revue ChatGPT) : symétrie avec send(),
@@ -1490,7 +1520,7 @@ namespace
                 if (r == WAIT_INTERRUPTED)
                 {
                     signal_dispatch_pending(L);
-                    return push_fail(L, "interrupted");
+                    return push_fail_protected(L, "interrupted");
                 }
                 if (r < 0)
                 {
@@ -1498,7 +1528,7 @@ namespace
                 }
                 if (r == 0)
                 {
-                    return push_fail(L, "timeout");
+                    return push_fail_protected(L, "timeout");
                 }
             }
 
@@ -1508,13 +1538,13 @@ namespace
                                        tls_err);
                 if (rc > 0)
                 {
-                    lua_pushlstring(L, buf.data(),
-                                    static_cast<size_t>(rc));
-                    return 1;
+                    return push_string_protected(
+                        L, std::string_view(buf.data(),
+                                            static_cast<size_t>(rc)));
                 }
                 if (rc == TLS_IO_EOF)
                 {
-                    return push_fail(L, "closed");
+                    return push_fail_protected(L, "closed");
                 }
                 if (rc == TLS_IO_WANT_READ)
                 {
@@ -1526,15 +1556,15 @@ namespace
                     if (wr == WAIT_INTERRUPTED)
                     {
                         signal_dispatch_pending(L);
-                        return push_fail(L, "interrupted");
+                        return push_fail_protected(L, "interrupted");
                     }
                     if (wr == 0)
-                        return push_fail(L, "timeout");
+                        return push_fail_protected(L, "timeout");
                     if (wr < 0)
                         return push_errno_fail(L, "recv");
                     continue;
                 }
-                return push_fail(L, tls_err); // FATAL
+                return push_fail_protected(L, tls_err); // FATAL
             }
 
             // Branche TCP brut (inchangée).
@@ -1544,11 +1574,11 @@ namespace
             {
                 if (got == 0)
                 {
-                    return push_fail(L, "closed");
+                    return push_fail_protected(L, "closed");
                 }
-                lua_pushlstring(L, buf.data(),
-                                static_cast<size_t>(got));
-                return 1;
+                return push_string_protected(
+                    L, std::string_view(buf.data(),
+                                        static_cast<size_t>(got)));
             }
             if (errno == EINTR)
             {
@@ -1573,11 +1603,11 @@ namespace
         Sock *s = check_sock(L, 1);
         if (s->fd < 0)
         {
-            return push_fail(L, "socket: recv_line: socket is closed");
+            return push_fail_protected(L, "socket: recv_line: socket is closed");
         }
         if (s->listening)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: recv_line: cannot recv on a listening socket");
         }
 
@@ -1587,7 +1617,7 @@ namespace
                                     &effective_timeout_ms, timeout_error,
                                     "socket: recv_line"))
         {
-            return push_fail(L, timeout_error);
+            return push_fail_protected(L, timeout_error);
         }
 
         // DEADLINE GLOBALE : la lecture ligne-par-ligne peut faire
@@ -1648,7 +1678,7 @@ namespace
                     // utilisateur, puis on remonte "interrupted".
                     s->recv_pending = std::move(acc);
                     signal_dispatch_pending(L);
-                    return push_fail(L, "interrupted");
+                    return push_fail_protected(L, "interrupted");
                 }
                 if (r < 0)
                 {
@@ -1669,7 +1699,7 @@ namespace
                     // le ':' est jeté et l'appel suivant récupère
                     // "server NOTICE ..." sans son ':'.
                     s->recv_pending = std::move(acc);
-                    return push_fail(L, "timeout");
+                    return push_fail_protected(L, "timeout");
                 }
             }
             // Si ssl_has_data, on saute wait_ready_deadline et on lit
@@ -1690,13 +1720,13 @@ namespace
                     {
                         s->recv_pending = std::move(acc);
                         signal_dispatch_pending(L);
-                        return push_fail(L, "interrupted");
+                        return push_fail_protected(L, "interrupted");
                     }
                     if (wr == 0)
                     {
                         // Idem : conserver acc.
                         s->recv_pending = std::move(acc);
-                        return push_fail(L, "timeout");
+                        return push_fail_protected(L, "timeout");
                     }
                     if (wr < 0)
                     {
@@ -1709,7 +1739,7 @@ namespace
                 {
                     // Erreur TLS fatale : on garde quand même.
                     s->recv_pending = std::move(acc);
-                    return push_fail(L, tls_err);
+                    return push_fail_protected(L, tls_err);
                 }
                 got = (rc == TLS_IO_EOF) ? 0 : rc;
             }
@@ -1734,10 +1764,14 @@ namespace
                 // EOF en plein milieu : 3 valeurs (nil, "closed", partial)
                 // Pas de conservation du buffer ici : le contrat est
                 // déjà documenté et le user récupère partial en main.
-                lua_pushnil(L);
-                lua_pushstring(L, "closed");
-                lua_pushlstring(L, acc.data(), acc.size());
-                return 3;
+                auto result_builder = [&acc](lua_State *Ls) noexcept -> int
+                {
+                    lua_pushnil(Ls);
+                    lua_pushstring(Ls, "closed");
+                    lua_pushlstring(Ls, acc.data(), acc.size());
+                    return 3;
+                };
+                return lua_build_results_protected(L, result_builder, 3);
             }
             if (c == '\n')
             {
@@ -1746,8 +1780,7 @@ namespace
                 {
                     acc.pop_back();
                 }
-                lua_pushlstring(L, acc.data(), acc.size());
-                return 1;
+                return push_string_protected(L, acc);
             }
             // Garde contre DoS : sans limite, un peer malveillant ou
             // un serveur buggué qui envoie un flux infini sans '\n'
@@ -1766,7 +1799,7 @@ namespace
             if (acc.size() >= MAX_LINE_BYTES)
             {
                 s->recv_pending.clear();
-                return push_fail(L, "line too long");
+                return push_fail_protected(L, "line too long");
             }
             acc.push_back(c);
         }
@@ -1782,11 +1815,11 @@ namespace
         Sock *s = check_sock(L, 1);
         if (s->fd < 0)
         {
-            return push_fail(L, "socket: recv_all: socket is closed");
+            return push_fail_protected(L, "socket: recv_all: socket is closed");
         }
         if (s->listening)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: recv_all: cannot recv on a listening socket");
         }
 
@@ -1796,14 +1829,14 @@ namespace
                                     &effective_timeout_ms, timeout_error,
                                     "socket: recv_all"))
         {
-            return push_fail(L, timeout_error);
+            return push_fail_protected(L, timeout_error);
         }
 
         size_t max_bytes = 0;
         std::string max_bytes_error;
         if (!parse_recv_all_max_bytes(L, 3, &max_bytes, max_bytes_error))
         {
-            return push_fail(L, max_bytes_error);
+            return push_fail_protected(L, max_bytes_error);
         }
 
         const bool is_tls = (s->ssl != nullptr);
@@ -1814,7 +1847,7 @@ namespace
         // consuming it so a later call with a larger limit can recover it.
         if (s->recv_pending.size() > max_bytes)
         {
-            return push_fail(
+            return push_fail_protected(
                 L, "socket: recv_all: data exceeds max_bytes");
         }
         std::string acc = std::move(s->recv_pending);
@@ -1823,7 +1856,7 @@ namespace
         auto preserve_and_fail = [&](std::string_view message) -> int
         {
             s->recv_pending = std::move(acc);
-            return push_fail(L, message);
+            return push_fail_protected(L, message);
         };
         auto preserve_and_errno_fail = [&](const char *prefix) -> int
         {
@@ -1847,7 +1880,7 @@ namespace
                 {
                     s->recv_pending = std::move(acc);
                     signal_dispatch_pending(L);
-                    return push_fail(L, "interrupted");
+                    return push_fail_protected(L, "interrupted");
                 }
                 if (r < 0)
                 {
@@ -1874,7 +1907,7 @@ namespace
                     {
                         s->recv_pending = std::move(acc);
                         signal_dispatch_pending(L);
-                        return push_fail(L, "interrupted");
+                        return push_fail_protected(L, "interrupted");
                     }
                     if (wr == 0)
                     {
@@ -1909,8 +1942,7 @@ namespace
 
             if (got == 0)
             {
-                lua_pushlstring(L, acc.data(), acc.size());
-                return 1;
+                return push_string_protected(L, acc);
             }
 
             const size_t chunk_size = static_cast<size_t>(got);
@@ -1933,11 +1965,11 @@ namespace
         Sock *s = check_sock(L, 1);
         if (s->fd < 0)
         {
-            return push_fail(L, "socket: accept: socket is closed");
+            return push_fail_protected(L, "socket: accept: socket is closed");
         }
         if (!s->listening)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: accept: socket is not listening");
         }
 
@@ -1947,12 +1979,12 @@ namespace
                                     &effective_timeout_ms, timeout_error,
                                     "socket: accept"))
         {
-            return push_fail(L, timeout_error);
+            return push_fail_protected(L, timeout_error);
         }
 
         // Créer l'userdata vide avant accept4 : un OOM Lua ne peut alors
         // jamais abandonner un client_fd qui n'aurait pas de propriétaire.
-        Sock *owner = push_empty_sock(L);
+        Sock *owner = push_empty_sock_protected(L);
 
         // DEADLINE GLOBALE : accept() bloque jusqu'à arrivée d'un
         // client. Si EINTR au milieu, on reboucle avec le temps
@@ -1963,7 +1995,7 @@ namespace
         if (r == WAIT_INTERRUPTED)
         {
             signal_dispatch_pending(L);
-            return push_fail(L, "interrupted");
+            return push_fail_protected(L, "interrupted");
         }
         if (r < 0)
         {
@@ -1971,7 +2003,7 @@ namespace
         }
         if (r == 0)
         {
-            return push_fail(L, "timeout");
+            return push_fail_protected(L, "timeout");
         }
 
         int client_fd;
@@ -2001,7 +2033,7 @@ namespace
                 if (r2 == WAIT_INTERRUPTED)
                 {
                     signal_dispatch_pending(L);
-                    return push_fail(L, "interrupted");
+                    return push_fail_protected(L, "interrupted");
                 }
                 if (r2 < 0)
                 {
@@ -2009,7 +2041,7 @@ namespace
                 }
                 if (r2 == 0)
                 {
-                    return push_fail(L, "timeout");
+                    return push_fail_protected(L, "timeout");
                 }
                 continue;
             }
@@ -2034,7 +2066,7 @@ namespace
             s->fd = -1;
         }
         std::string().swap(s->recv_pending);
-        return push_ok(L);
+        return push_ok_protected(L);
     }
 
     int sock_set_timeout(lua_State *L)
@@ -2048,13 +2080,13 @@ namespace
         // 0 et toutes les valeurs finies).
         if (std::isnan(t) || !std::isfinite(t))
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: set_timeout: value must be finite "
                              "(not NaN or inf)");
         }
         if (t < 0.0)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "socket: set_timeout: value must be >= 0 (0 disables)");
         }
         // t = 0 -> timeout_ms = 0 -> bloquant infini (cf. make_deadline).
@@ -2072,12 +2104,12 @@ namespace
             double ms = t * 1000.0;
             if (ms > static_cast<double>(INT_MAX))
             {
-                return push_fail(L,
+                return push_fail_protected(L,
                                  "socket: set_timeout: value too large");
             }
             s->timeout_ms = (ms < 1.0) ? 1 : static_cast<int>(ms);
         }
-        return push_ok(L);
+        return push_ok_protected(L);
     }
 
     // peer() / sockname() : renvoie une table { host, port }.
@@ -2093,7 +2125,7 @@ namespace
         {
             std::string msg = "socket: getnameinfo: ";
             msg += ::gai_strerror(rc);
-            return push_fail(L, msg);
+            return push_fail_protected(L, msg);
         }
         lua_newtable(L);
         lua_pushstring(L, host);
@@ -2108,7 +2140,7 @@ namespace
         Sock *s = check_sock(L, 1);
         if (s->fd < 0)
         {
-            return push_fail(L, "socket: peer: socket is closed");
+            return push_fail_protected(L, "socket: peer: socket is closed");
         }
         struct sockaddr_storage ss;
         socklen_t slen = sizeof(ss);
@@ -2127,7 +2159,7 @@ namespace
         Sock *s = check_sock(L, 1);
         if (s->fd < 0)
         {
-            return push_fail(L, "socket: sockname: socket is closed");
+            return push_fail_protected(L, "socket: sockname: socket is closed");
         }
         struct sockaddr_storage ss;
         socklen_t slen = sizeof(ss);
@@ -2148,10 +2180,11 @@ namespace
     // pour initialiser le std::string recv_pending.
     int sock_gc(lua_State *L)
     {
-        Sock *s = static_cast<Sock *>(
+        auto *userdata = static_cast<SockUserdata *>(
             luaL_testudata(L, 1, SOCK_META));
-        if (s)
+        if (userdata && userdata->constructed)
         {
+            Sock *s = userdata->get();
             if (s->ssl != nullptr)
             {
                 tls_close(s->ssl);
@@ -2163,6 +2196,7 @@ namespace
                 s->fd = -1;
             }
             s->~Sock(); // libère recv_pending
+            userdata->constructed = false;
         }
         return 0;
     }
@@ -2421,15 +2455,15 @@ int lua_socket_connect(lua_State *L)
     if (!lua_string_without_nul(L, 1, host,
                                 "socket: connect: host", err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     if (host.empty())
     {
-        return push_fail(L, "socket: connect: host must not be empty");
+        return push_fail_protected(L, "socket: connect: host must not be empty");
     }
     if (port < 0 || port > 65535)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: connect: port must be in [0, 65535]");
     }
 
@@ -2437,11 +2471,11 @@ int lua_socket_connect(lua_State *L)
     if (!parse_timeout_argument(L, 3, 0, &timeout_ms, err,
                                 "socket: connect"))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     // lua_newuserdata peut longjmp : créer le propriétaire avant le FD.
-    Sock *owner = push_empty_sock(L);
+    Sock *owner = push_empty_sock_protected(L);
 
     bool timed_out = false;
     int fd = tcp_connect_blocking(host.c_str(), port, timeout_ms, err, timed_out);
@@ -2449,7 +2483,7 @@ int lua_socket_connect(lua_State *L)
     {
         if (timed_out)
         {
-            return push_fail(L, "timeout");
+            return push_fail_protected(L, "timeout");
         }
         if (err == "interrupted")
         {
@@ -2457,7 +2491,7 @@ int lua_socket_connect(lua_State *L)
             // (tcp_connect_blocking n'a pas accès à L).
             signal_dispatch_pending(L);
         }
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     attach_plain_sock(owner, fd, false);
     return 1;
@@ -2491,33 +2525,33 @@ int lua_socket_connect_tls(lua_State *L)
     if (!lua_string_without_nul(L, 1, host,
                                 "socket: connect_tls: host", err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     if (host.empty())
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: connect_tls: host must not be empty");
     }
     if (port < 0 || port > 65535)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: connect_tls: port must be in [0, 65535]");
     }
 
     TlsOptions opts;
     if (!parse_tls_options(L, 3, opts, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     if (!init_openssl_ctx(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     // lua_newuserdata peut longjmp. Le propriétaire Lua est donc créé
     // avant le premier FD et reste vide tant que la connexion échoue.
-    Sock *owner = push_empty_sock(L);
+    Sock *owner = push_empty_sock_protected(L);
 
     try
     {
@@ -2531,13 +2565,13 @@ int lua_socket_connect_tls(lua_State *L)
         {
             if (timed_out)
             {
-                return push_fail(L, "timeout");
+                return push_fail_protected(L, "timeout");
             }
             if (err == "interrupted")
             {
                 signal_dispatch_pending(L);
             }
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         attach_plain_sock(owner, fd, false);
 
@@ -2545,7 +2579,7 @@ int lua_socket_connect_tls(lua_State *L)
         if (ssl == nullptr)
         {
             close_sock_resources(owner);
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         owner->ssl = ssl;
 
@@ -2553,13 +2587,13 @@ int lua_socket_connect_tls(lua_State *L)
         {
             std::string detail = format_tls_error("SSL_set_fd failed");
             close_sock_resources(owner);
-            return push_fail(L, detail);
+            return push_fail_protected(L, detail);
         }
 
         if (!apply_tls_options(ssl, opts, host.c_str(), err))
         {
             close_sock_resources(owner);
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
 
         int flags = ::fcntl(fd, F_GETFL, 0);
@@ -2569,7 +2603,7 @@ int lua_socket_connect_tls(lua_State *L)
             std::string detail = "socket: connect_tls: fcntl: ";
             detail += std::strerror(e);
             close_sock_resources(owner);
-            return push_fail(L, detail);
+            return push_fail_protected(L, detail);
         }
 
         bool hs_ok = tls_handshake(ssl, fd, operation_deadline, err);
@@ -2582,7 +2616,7 @@ int lua_socket_connect_tls(lua_State *L)
             {
                 signal_dispatch_pending(L);
             }
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
 
         // Succès : le FD reste O_NONBLOCK et owner possède déjà fd + ssl.
@@ -2622,21 +2656,21 @@ int sock_starttls(lua_State *L)
     Sock *s = check_sock(L, 1);
     if (s->fd < 0)
     {
-        return push_fail(L, "socket: starttls: socket is closed");
+        return push_fail_protected(L, "socket: starttls: socket is closed");
     }
     if (s->listening)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: starttls: cannot start TLS on a listening socket");
     }
     if (s->ssl != nullptr)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: starttls: TLS already active on this socket");
     }
     if (!s->recv_pending.empty())
     {
-        return push_fail(
+        return push_fail_protected(
             L, "socket: starttls: pending plaintext data must be consumed first");
     }
 
@@ -2644,25 +2678,25 @@ int sock_starttls(lua_State *L)
     TlsOptions opts;
     if (!parse_tls_options(L, 2, opts, err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     if (opts.verify && opts.hostname.empty())
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "tls: starttls with verify=true requires opts.hostname; "
                          "pass hostname or set verify=false");
     }
 
     if (!init_openssl_ctx(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     SSL *ssl = new_ssl_for_options(opts, err);
     if (ssl == nullptr)
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     PendingTlsUpgradeGuard guard(s, ssl);
 
@@ -2672,13 +2706,13 @@ int sock_starttls(lua_State *L)
     {
         std::string detail = format_tls_error("SSL_set_fd failed");
         guard.cleanup();
-        return push_fail(L, detail);
+        return push_fail_protected(L, detail);
     }
 
     if (!apply_tls_options(ssl, opts, nullptr, err))
     {
         guard.cleanup();
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     int flags = ::fcntl(s->fd, F_GETFL, 0);
@@ -2688,7 +2722,7 @@ int sock_starttls(lua_State *L)
         std::string detail = "socket: starttls: fcntl: ";
         detail += std::strerror(e);
         guard.cleanup();
-        return push_fail(L, detail);
+        return push_fail_protected(L, detail);
     }
     guard.mark_nonblocking(flags);
 
@@ -2704,13 +2738,13 @@ int sock_starttls(lua_State *L)
         if (interrupted)
         {
             signal_dispatch_pending(L);
-            return push_fail(L, "interrupted");
+            return push_fail_protected(L, "interrupted");
         }
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     s->ssl = guard.release();
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 // babet.socket.listen(host, port [, backlog]) -> socket | (nil, err)
@@ -2735,27 +2769,27 @@ int lua_socket_listen(lua_State *L)
     if (!lua_string_without_nul(L, 1, host,
                                 "socket: listen: host", err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     if (port < 0 || port > 65535)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: listen: port must be in [0, 65535]");
     }
     if (requested_backlog <= 0)
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: listen: backlog must be > 0");
     }
     if (requested_backlog > static_cast<lua_Integer>(INT_MAX))
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "socket: listen: backlog out of range");
     }
     const int backlog = static_cast<int>(requested_backlog);
 
     // Comme connect()/accept(), listen() crée d'abord l'userdata vide.
-    Sock *owner = push_empty_sock(L);
+    Sock *owner = push_empty_sock_protected(L);
 
     char port_str[16];
     std::snprintf(port_str, sizeof(port_str), "%lld",
@@ -2764,7 +2798,7 @@ int lua_socket_listen(lua_State *L)
     struct addrinfo *res = resolve(host.c_str(), port_str, true, err);
     if (!res)
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     int fd = -1;
@@ -2829,7 +2863,7 @@ int lua_socket_listen(lua_State *L)
     {
         std::string msg = "socket: listen: ";
         msg += std::strerror(last_errno);
-        return push_fail(L, msg);
+        return push_fail_protected(L, msg);
     }
     attach_plain_sock(owner, fd, true);
     return 1;

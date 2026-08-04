@@ -54,28 +54,28 @@ int lua_fileSize(lua_State *L)
         if (ec == std::errc::no_such_file_or_directory ||
             ec == std::errc::not_a_directory)
         {
-            return push_fail(L, "path does not exist");
+            return push_fail_protected(L, "path does not exist");
         }
-        return push_fail(L, "cannot inspect file '" + path + "': " +
+        return push_fail_protected(L, "cannot inspect file '" + path + "': " +
                                 ec.message());
     }
 
     if (!fs::is_regular_file(status))
     {
-        return push_fail(L, "path is not a regular file");
+        return push_fail_protected(L, "path is not a regular file");
     }
 
     const uintmax_t size = fs::file_size(file_path, ec);
     if (ec)
     {
-        return push_fail(L, "cannot get size of file '" + path + "': " +
+        return push_fail_protected(L, "cannot get size of file '" + path + "': " +
                                 ec.message());
     }
 
     if (size > static_cast<uintmax_t>(
                    std::numeric_limits<lua_Integer>::max()))
     {
-        return push_fail(L, "file size is out of Lua integer range");
+        return push_fail_protected(L, "file size is out of Lua integer range");
     }
 
     lua_pushinteger(L, static_cast<lua_Integer>(size));

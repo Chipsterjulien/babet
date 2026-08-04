@@ -16,19 +16,24 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current stable and audited release: **2.14.0**. See the
+Current release candidate: **2.15.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.14.0 closes the remaining C++ exception gaps in `babet.compression`,
-the flat SYS functions, `babet.user`, and `babet.inotify`. All 17 registered
-Lua C functions now enter through an audited exception boundary; unexpected
-C++ failures become stable Lua diagnostics instead of crossing C frames. This
-release also fixes interactive processes launched by `babet.spawn` with
-inherited streams: the child group receives the foreground terminal, and Babet
-reclaims it with its attributes after the process exits or is terminated. There
-is no new public function and ordinary return values are unchanged. Babet 2.13.0
-added nested `db:savepoint(callback)` scopes with automatic
+Babet 2.15.0 audits Lua allocation failures that use `longjmp` instead of C++
+stack unwinding. Result construction for JSON, TOML, HTTP, Archive, Socket,
+SQLite, Workers, Process, Pipeline, Base64, and the checksum modules now runs
+through protected Lua builders or Lua-owned state, so `LUA_ERRMEM` cannot
+bypass binding-owned RAII cleanup. Resource-owning finalizers use silent
+boundaries and structured userdata prevents destruction of partially built
+Socket or Worker objects. The release also fixes cancellation of a worker blocked on a full
+outbox and turns `createFileIterator` into a genuinely lazy filesystem
+iterator. The direct `spawn` PTY regression now records the exact binary path
+and SHA-256 and can exercise `sudo`; a separately reported yaourt-to-pacman
+interactive block remains under investigation and is not claimed as fixed by
+2.15.0. Babet 2.14.0 introduced the foreground-terminal handoff for direct
+interactive `spawn` children. Babet 2.13.0 added nested
+`db:savepoint(callback)` scopes with automatic
 `ROLLBACK TO` and `RELEASE` on callback failure. It works on its own, inside a
 managed or manual transaction, and recursively inside another savepoint.
 Babet 2.12.0 remains the connection-options and counters release, while the

@@ -31,19 +31,40 @@ namespace
         int fd; // -1 si fermé
     };
 
+    class OwnedFd
+    {
+    public:
+        explicit OwnedFd(int fd) noexcept : fd_(fd) {}
+        OwnedFd(const OwnedFd &) = delete;
+        OwnedFd &operator=(const OwnedFd &) = delete;
+        ~OwnedFd() noexcept
+        {
+            if (fd_ >= 0)
+                ::close(fd_);
+        }
+        void release() noexcept { fd_ = -1; }
+
+    private:
+        int fd_;
+    };
+
     Watcher *check_watcher(lua_State *L, int idx)
     {
         return static_cast<Watcher *>(luaL_checkudata(L, idx, INOT_META));
     }
 
-    // Pousse un nouveau userdata Watcher initialisé, métatable posée.
+    // Pousse un nouveau userdata Watcher, puis lui transfère le FD seulement
+    // après la dernière API Lua susceptible d'allouer. Si la pose de la
+    // métatable échoue, __gc voit donc -1 tandis que OwnedFd ferme l'original :
+    // aucune fuite et aucun double close différé.
     Watcher *push_new_watcher(lua_State *L, int fd)
     {
         void *raw = lua_newuserdata(L, sizeof(Watcher));
         Watcher *w = static_cast<Watcher *>(raw);
-        w->fd = fd;
+        w->fd = -1;
         luaL_getmetatable(L, INOT_META);
         lua_setmetatable(L, -2);
+        w->fd = fd; // transfert après toutes les allocations Lua possibles
         return w;
     }
 
@@ -56,7 +77,7 @@ namespace
         msg += prefix;
         msg += ": ";
         msg += std::strerror(saved);
-        return push_fail(L, msg);
+        return push_fail_protected(L, msg);
     }
 
     // -----------------------------------------------------------------
@@ -266,7 +287,7 @@ namespace
                 if (!lua_is_strict_boolean(L, -1))
                 {
                     lua_pop(L, 1);
-                    return push_fail(L,
+                    return push_fail_protected(L,
                                      "inotify: add: opts.onlydir must be a boolean");
                 }
                 onlydir = lua_toboolean(L, -1) != 0;
@@ -274,23 +295,15 @@ namespace
             lua_pop(L, 1);
         }
 
-        std::string path;
-        std::string string_err;
-        if (!lua_string_without_nul(L, 2, path,
-                                    "inotify: add: path", string_err))
-        {
-            return push_fail(L, string_err);
-        }
-
         if (w->fd < 0)
         {
-            return push_fail(L, "inotify: add: watcher is closed");
+            return push_fail_protected(L, "inotify: add: watcher is closed");
         }
 
         lua_Integer count = static_cast<lua_Integer>(lua_rawlen(L, 3));
         if (count == 0)
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "inotify: add: events list must not be empty");
         }
 
@@ -312,7 +325,7 @@ namespace
                 msg += " must be a string, got ";
                 msg += lua_typename(L, lua_type(L, -1));
                 lua_pop(L, 1);
-                return push_fail(L, msg);
+                return push_fail_protected(L, msg);
             }
             std::string ename;
             std::string event_err;
@@ -320,7 +333,7 @@ namespace
                                         "inotify: add: event", event_err))
             {
                 lua_pop(L, 1);
-                return push_fail(L, event_err);
+                return push_fail_protected(L, event_err);
             }
             uint32_t flag = event_name_to_flag(ename);
             if (flag == 0)
@@ -329,7 +342,7 @@ namespace
                 msg += ename;
                 msg += "'";
                 lua_pop(L, 1);
-                return push_fail(L, msg);
+                return push_fail_protected(L, msg);
             }
             mask |= flag;
             lua_pop(L, 1);
@@ -356,14 +369,14 @@ namespace
                                       "] outside 1.." +
                                       std::to_string(count);
                     lua_pop(L, 2); // value + key
-                    return push_fail(L, msg);
+                    return push_fail_protected(L, msg);
                 }
             }
             else if (kt == LUA_TNUMBER)
             {
                 // Float key (e.g. [1.5])
                 lua_pop(L, 2);
-                return push_fail(L,
+                return push_fail_protected(L,
                                  "inotify: add: events table has a "
                                  "non-integer numeric key");
             }
@@ -376,18 +389,29 @@ namespace
                 msg.append(key, key_len);
                 msg += "' (events must be a list, not a dict)";
                 lua_pop(L, 2);
-                return push_fail(L, msg);
+                return push_fail_protected(L, msg);
             }
             else
             {
                 // Autre type de clé (table, boolean...) : très rare,
                 // on refuse pour rester strict.
                 lua_pop(L, 2);
-                return push_fail(L,
+                return push_fail_protected(L,
                                  "inotify: add: events table has a "
                                  "key of unexpected type");
             }
             lua_pop(L, 1); // value, keep key for next iteration
+        }
+
+        // Construire les propriétaires C++ seulement APRÈS tout parcours de
+        // la table Lua. Ainsi, un longjmp provenant de lua_rawgeti/lua_next
+        // ne peut contourner aucun destructeur std::string.
+        std::string path;
+        std::string string_err;
+        if (!lua_string_without_nul(L, 2, path,
+                                    "inotify: add: path", string_err))
+        {
+            return push_fail_protected(L, string_err);
         }
 
         int wd = ::inotify_add_watch(w->fd, path.c_str(), mask);
@@ -408,7 +432,7 @@ namespace
         Watcher *w = check_watcher(L, 1);
         if (w->fd < 0)
         {
-            return push_fail(L, "inotify: read: watcher is closed");
+            return push_fail_protected(L, "inotify: read: watcher is closed");
         }
 
         // timeout : absent/nil -> bloquant infini. Sinon doit être
@@ -426,13 +450,13 @@ namespace
             const double secs = lua_tonumber(L, 2);
             if (std::isnan(secs) || !std::isfinite(secs) || secs < 0)
             {
-                return push_fail(L,
+                return push_fail_protected(L,
                                  "inotify: read: timeout must be a "
                                  "finite number >= 0");
             }
             if (secs * 1000.0 > static_cast<double>(INT_MAX))
             {
-                return push_fail(L,
+                return push_fail_protected(L,
                                  "inotify: read: timeout too large");
             }
             const auto timeout_ms = static_cast<long long>(secs * 1000.0);
@@ -453,11 +477,11 @@ namespace
             if (wr == WAIT_INTERRUPTED)
             {
                 signal_dispatch_pending(L);
-                return push_fail(L, "interrupted");
+                return push_fail_protected(L, "interrupted");
             }
             if (wr == 0)
             {
-                return push_fail(L, "timeout");
+                return push_fail_protected(L, "timeout");
             }
             if (wr < 0)
             {
@@ -473,7 +497,7 @@ namespace
                     if (signal_any_handled_pending())
                     {
                         signal_dispatch_pending(L);
-                        return push_fail(L, "interrupted");
+                        return push_fail_protected(L, "interrupted");
                     }
                     continue; // signal non géré : re-poll
                 }
@@ -490,7 +514,7 @@ namespace
             {
                 // inotify ne fait jamais d'EOF ; défensif pour ne pas
                 // boucler indéfiniment si ça arrivait.
-                return push_fail(L,
+                return push_fail_protected(L,
                                  "inotify: read: unexpected zero-length read");
             }
             break; // n > 0 : on a des événements
@@ -510,13 +534,13 @@ namespace
             if (status ==
                 babet::inotify_detail::RecordStatus::truncated_header)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "inotify: malformed event buffer: truncated header");
             }
             if (status ==
                 babet::inotify_detail::RecordStatus::truncated_name)
             {
-                return push_fail(
+                return push_fail_protected(
                     L, "inotify: malformed event buffer: truncated name");
             }
             if (status == babet::inotify_detail::RecordStatus::end)
@@ -598,12 +622,12 @@ namespace
         if (wd < static_cast<lua_Integer>(INT_MIN) ||
             wd > static_cast<lua_Integer>(INT_MAX))
         {
-            return push_fail(L,
+            return push_fail_protected(L,
                              "inotify: remove: watch descriptor out of range");
         }
         if (w->fd < 0)
         {
-            return push_fail(L, "inotify: remove: watcher is closed");
+            return push_fail_protected(L, "inotify: remove: watcher is closed");
         }
         // Note : le noyau émet un événement `ignored` pour ce wd juste
         // après le retrait — visible au prochain read().
@@ -611,7 +635,7 @@ namespace
         {
             return push_errno_fail(L, "remove");
         }
-        return push_ok(L);
+        return push_ok_protected(L);
     }
 
     int inot_close(lua_State *L)
@@ -626,7 +650,7 @@ namespace
             ::close(w->fd);
             w->fd = -1;
         }
-        return push_ok(L); // idempotent
+        return push_ok_protected(L); // idempotent
     }
 
     int inot_gc(lua_State *L)
@@ -669,8 +693,15 @@ namespace
         {
             return push_errno_fail(L, "new");
         }
-        push_new_watcher(L, fd);
-        return 1;
+        OwnedFd owned_fd(fd);
+        auto builder = [fd](lua_State *Ls) noexcept -> int
+        {
+            push_new_watcher(Ls, fd);
+            return 1;
+        };
+        const int result = lua_build_results_protected(L, builder, 1);
+        owned_fd.release();
+        return result;
     }
 
     template <int (*Fn)(lua_State *)>

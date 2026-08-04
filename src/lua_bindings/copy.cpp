@@ -27,7 +27,7 @@ int lua_copy_file(lua_State *L)
     const std::string_view destination =
         luaL_checkstring_view_without_nul(L, 2, "destination");
 
-    return push_action_result(
+    return push_action_result_protected(
         L, custom_copy_file(std::filesystem::path(source),
                             std::filesystem::path(destination)));
 }

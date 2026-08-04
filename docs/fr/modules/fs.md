@@ -682,10 +682,15 @@ convertis. La fonction accepte exactement un ou deux arguments.
 <a id="createfileiterator"></a>
 ### `babet.createFileIterator(path, recursive?)`
 
-Crée un userdata possédant deux méthodes :
+Crée un véritable userdata paresseux possédant deux méthodes :
 
-- `iterator:next()` — renvoie le chemin suivant, ou `nil` à la fin ;
-- `iterator:close()` — libère explicitement l’itérateur.
+- `iterator:next()` — `(chemin, nil)`, `(nil, err)` ou `(nil, nil)` à la fin ;
+- `iterator:close()` — libère explicitement l’itérateur natif.
+
+Seul l’itérateur de dossier est créé au départ. L’arbre avance d’une entrée à
+chaque appel à `next()` : un gros parcours n’est plus copié dans un
+`std::vector` avant le premier résultat et la mémoire ne croît plus avec le
+nombre total de fichiers.
 
 #### Non récursif
 
@@ -694,7 +699,8 @@ local iterator, err = babet.createFileIterator("assets")
 assert(iterator, err)
 
 while true do
-    local path = iterator:next()
+    local path, next_err = iterator:next()
+    assert(not next_err, next_err)
     if path == nil then
         break
     end
@@ -709,29 +715,34 @@ iterator:close()
 ```lua
 local iterator = assert(babet.createFileIterator("assets", true))
 while true do
-    local path = iterator:next()
+    local path, next_err = iterator:next()
+    assert(not next_err, next_err)
     if not path then break end
     print(path)
 end
 iterator:close()
 ```
 
-Contrairement à son nom, l’objet construit actuellement la liste complète au
-moment de `createFileIterator`. Une erreur d’accès ou de parcours est donc
-renvoyée lors de la création, avant le premier `next()`.
+L’ouverture de la racine peut toujours échouer immédiatement et renvoie
+`(nil, err)`. Une erreur rencontrée plus tard pendant l’inspection ou
+l’avancement du dossier est différée jusqu’à l’appel à `next()` correspondant,
+qui renvoie `(nil, err)`. La fin normale possède le résultat distinct
+`(nil, nil)`.
 
 Comportement des symlinks :
 
 - lien valide vers un fichier régulier : inclus sous le chemin du lien ;
 - lien cassé, boucle ou cible inaccessible : ignoré ;
 - lien vers un dossier : non parcouru ;
-- véritable erreur d’inspection d’une entrée ou d’avancement du parcours :
-  création en échec avec `(nil, err)`.
+- véritable erreur d’inspection d’une entrée ou d’avancement : renvoyée par
+  `next()`.
 
-Après `close()`, appeler `next()` lève une erreur Lua. Oublier `close()` n’est
-pas fatal : le garbage collector finit par libérer l’objet. L’argument
-facultatif `recursive` doit être un booléen Lua strict et le constructeur
-accepte exactement un ou deux arguments.
+Le code existant qui ne lit que la première valeur reste compatible, mais il ne
+peut pas distinguer la fin d’une erreur de parcours différée ; le nouveau code
+doit contrôler la seconde valeur. Après `close()`, appeler `next()` lève une
+erreur Lua. Oublier `close()` n’est pas fatal : le garbage collector finit par
+libérer l’objet. L’argument facultatif `recursive` doit être un booléen Lua
+strict et le constructeur accepte exactement un ou deux arguments.
 
 <a id="find"></a>
 ### `babet.find(path, opts?)`

@@ -103,7 +103,13 @@ always reap, query, or close the interactive process before the parent resumes
 its own terminal input. PTY regression coverage verifies the bounded `Ctrl+Z`
 recovery path and restoration after `is_running()` observes a completed child.
 
-**Planned audit**: after the 2.15.0 Lua longjmp / C++ RAII work, evaluate an
+**2.15.0 diagnostic update**: the PTY regression now prints the canonical
+binary path and SHA-256 and can insert a non-interactive `sudo` layer. The
+reported yaourt-to-pacman block remains open because neither the direct nor the
+controlled sudo scenario is red; no second terminal-engine change is justified
+without a reproducer that identifies the actual foreground process group.
+
+**Planned audit**: in 2.16.0, evaluate an
 explicit stopped/continued state model, possible resume/foreground operations,
 and a safe way to reclaim terminal ownership promptly after child exit. No
 signal handler may call Lua or perform non-async-signal-safe terminal cleanup.

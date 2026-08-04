@@ -77,6 +77,17 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+template <int (*Fn)(lua_State *)>
+int babet_lua_boundary(lua_State *L)
+{
+    return lua_cfunction_exception_boundary<Fn>(
+        L, "babet: out of memory", "babet: internal failure",
+        "babet: unknown internal failure");
+}
+} // namespace
+
 /**
  * @brief Register Babet functions to Lua state.
  * @param L Lua state.
@@ -85,34 +96,34 @@ void register_babet(lua_State *L)
 {
     lua_newtable(L);
 
-    lua_pushcfunction(L, lua_setattr);
+    lua_pushcfunction(L, babet_lua_boundary<lua_setattr>);
     lua_setfield(L, -2, "setAttributes");
 
-    lua_pushcfunction(L, lua_getattr);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getattr>);
     lua_setfield(L, -2, "getAttributes");
 
-    lua_pushcfunction(L, lua_chdir);
+    lua_pushcfunction(L, babet_lua_boundary<lua_chdir>);
     lua_setfield(L, -2, "chdir");
 
-    lua_pushcfunction(L, lua_copy_file);
+    lua_pushcfunction(L, babet_lua_boundary<lua_copy_file>);
     lua_setfield(L, -2, "copy");
 
-    lua_pushcfunction(L, lua_copyTree);
+    lua_pushcfunction(L, babet_lua_boundary<lua_copyTree>);
     lua_setfield(L, -2, "copyTree");
 
-    lua_pushcfunction(L, lua_crc32);
+    lua_pushcfunction(L, babet_lua_boundary<lua_crc32>);
     lua_setfield(L, -2, "crc32");
 
-    lua_pushcfunction(L, lua_crc32sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_crc32sum>);
     lua_setfield(L, -2, "crc32sum");
 
-    lua_pushcfunction(L, lua_currentDir);
+    lua_pushcfunction(L, babet_lua_boundary<lua_currentDir>);
     lua_setfield(L, -2, "currentDir");
 
-    lua_pushcfunction(L, lua_deepCopyTable);
+    lua_pushcfunction(L, babet_lua_boundary<lua_deepCopyTable>);
     lua_setfield(L, -2, "deepCopyTable");
 
-    lua_pushcfunction(L, lua_exec);
+    lua_pushcfunction(L, babet_lua_boundary<lua_exec>);
     lua_setfield(L, -2, "exec");
 
     // Processus pilotables en streaming (2.4.0). Enregistre babet.spawn
@@ -122,34 +133,34 @@ void register_babet(lua_State *L)
     // Pipelines synchrones et pilotables en streaming (2.5.0).
     register_pipeline(L);
 
-    lua_pushcfunction(L, lua_fileExists);
+    lua_pushcfunction(L, babet_lua_boundary<lua_fileExists>);
     lua_setfield(L, -2, "fileExists");
 
-    lua_pushcfunction(L, lua_fileSize);
+    lua_pushcfunction(L, babet_lua_boundary<lua_fileSize>);
     lua_setfield(L, -2, "fileSize");
 
-    lua_pushcfunction(L, lua_find);
+    lua_pushcfunction(L, babet_lua_boundary<lua_find>);
     lua_setfield(L, -2, "find");
 
-    lua_pushcfunction(L, lua_getBasename);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getBasename>);
     lua_setfield(L, -2, "getBasename");
 
-    lua_pushcfunction(L, lua_getExtension);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getExtension>);
     lua_setfield(L, -2, "getExtension");
 
-    lua_pushcfunction(L, lua_getFilename);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getFilename>);
     lua_setfield(L, -2, "getFilename");
 
-    lua_pushcfunction(L, lua_getMemoryUsage);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getMemoryUsage>);
     lua_setfield(L, -2, "getMemoryUsage");
 
-    lua_pushcfunction(L, lua_getDetailedMemoryUsage);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getDetailedMemoryUsage>);
     lua_setfield(L, -2, "getDetailedMemoryUsage");
 
-    lua_pushcfunction(L, lua_getPath);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getPath>);
     lua_setfield(L, -2, "getPath");
 
-    lua_pushcfunction(L, lua_helloThere);
+    lua_pushcfunction(L, babet_lua_boundary<lua_helloThere>);
     lua_setfield(L, -2, "helloThere");
 
     // Nommage (décision post-v2.1.1) : les composés Babet sont en
@@ -158,107 +169,107 @@ void register_babet(lua_State *L)
     // isdir/isfile/symlinkattr étaient les trois intrus : le
     // camelCase devient canonique, les minuscules restent des alias
     // dépréciés (même fonction C, zéro coût, zéro casse).
-    lua_pushcfunction(L, lua_isDir);
+    lua_pushcfunction(L, babet_lua_boundary<lua_isDir>);
     lua_setfield(L, -2, "isDir");
-    lua_pushcfunction(L, lua_isDir);
+    lua_pushcfunction(L, babet_lua_boundary<lua_isDir>);
     lua_setfield(L, -2, "isdir"); // alias déprécié
 
-    lua_pushcfunction(L, lua_isFile);
+    lua_pushcfunction(L, babet_lua_boundary<lua_isFile>);
     lua_setfield(L, -2, "isFile");
-    lua_pushcfunction(L, lua_isFile);
+    lua_pushcfunction(L, babet_lua_boundary<lua_isFile>);
     lua_setfield(L, -2, "isfile"); // alias déprécié
 
-    lua_pushcfunction(L, lua_link);
+    lua_pushcfunction(L, babet_lua_boundary<lua_link>);
     lua_setfield(L, -2, "link");
 
-    lua_pushcfunction(L, lua_listFiles);
+    lua_pushcfunction(L, babet_lua_boundary<lua_listFiles>);
     lua_setfield(L, -2, "listFiles");
 
-    lua_pushcfunction(L, lua_md5sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_md5sum>);
     lua_setfield(L, -2, "md5sum");
 
-    lua_pushcfunction(L, lua_mergeTables);
+    lua_pushcfunction(L, babet_lua_boundary<lua_mergeTables>);
     lua_setfield(L, -2, "mergeTables");
 
-    lua_pushcfunction(L, lua_mkdir);
+    lua_pushcfunction(L, babet_lua_boundary<lua_mkdir>);
     lua_setfield(L, -2, "mkdir");
 
-    lua_pushcfunction(L, lua_moveTree);
+    lua_pushcfunction(L, babet_lua_boundary<lua_moveTree>);
     lua_setfield(L, -2, "moveTree");
 
-    lua_pushcfunction(L, lua_joinPath);
+    lua_pushcfunction(L, babet_lua_boundary<lua_joinPath>);
     lua_setfield(L, -2, "joinPath");
 
-    lua_pushcfunction(L, lua_remove_file);
+    lua_pushcfunction(L, babet_lua_boundary<lua_remove_file>);
     lua_setfield(L, -2, "remove");
 
-    lua_pushcfunction(L, lua_rename);
+    lua_pushcfunction(L, babet_lua_boundary<lua_rename>);
     lua_setfield(L, -2, "rename");
 
-    lua_pushcfunction(L, lua_rmdir);
+    lua_pushcfunction(L, babet_lua_boundary<lua_rmdir>);
     lua_setfield(L, -2, "rmdir");
 
-    lua_pushcfunction(L, lua_rmdir_all);
+    lua_pushcfunction(L, babet_lua_boundary<lua_rmdir_all>);
     lua_setfield(L, -2, "rmdirAll");
 
-    lua_pushcfunction(L, lua_setmode);
+    lua_pushcfunction(L, babet_lua_boundary<lua_setmode>);
     lua_setfield(L, -2, "setMode");
 
-    lua_pushcfunction(L, lua_getmode);
+    lua_pushcfunction(L, babet_lua_boundary<lua_getmode>);
     lua_setfield(L, -2, "getMode");
 
-    lua_pushcfunction(L, lua_sha1sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sha1sum>);
     lua_setfield(L, -2, "sha1sum");
 
-    lua_pushcfunction(L, lua_sha3_256sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sha3_256sum>);
     lua_setfield(L, -2, "sha3_256sum");
 
-    lua_pushcfunction(L, lua_sha3_512sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sha3_512sum>);
     lua_setfield(L, -2, "sha3_512sum");
 
-    lua_pushcfunction(L, lua_sha256sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sha256sum>);
     lua_setfield(L, -2, "sha256sum");
 
-    lua_pushcfunction(L, lua_sha512sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sha512sum>);
     lua_setfield(L, -2, "sha512sum");
 
-    lua_pushcfunction(L, lua_blake2b512sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_blake2b512sum>);
     lua_setfield(L, -2, "blake2b512sum");
 
-    lua_pushcfunction(L, lua_blake2s256sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_blake2s256sum>);
     lua_setfield(L, -2, "blake2s256sum");
 
-    lua_pushcfunction(L, lua_sha384sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sha384sum>);
     lua_setfield(L, -2, "sha384sum");
 
-    lua_pushcfunction(L, lua_sha3_384sum);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sha3_384sum>);
     lua_setfield(L, -2, "sha3_384sum");
 
-    lua_pushcfunction(L, lua_sleep);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sleep>);
     lua_setfield(L, -2, "sleep");
 
     // Chantier 11 : monotonic + now pour mesurer durées et timestamper.
-    lua_pushcfunction(L, lua_monotonic);
+    lua_pushcfunction(L, babet_lua_boundary<lua_monotonic>);
     lua_setfield(L, -2, "monotonic");
 
-    lua_pushcfunction(L, lua_now);
+    lua_pushcfunction(L, babet_lua_boundary<lua_now>);
     lua_setfield(L, -2, "now");
 
-    lua_pushcfunction(L, lua_split);
+    lua_pushcfunction(L, babet_lua_boundary<lua_split>);
     lua_setfield(L, -2, "split");
 
-    lua_pushcfunction(L, lua_symlinkattr);
+    lua_pushcfunction(L, babet_lua_boundary<lua_symlinkattr>);
     lua_setfield(L, -2, "symlinkAttr");
-    lua_pushcfunction(L, lua_symlinkattr);
+    lua_pushcfunction(L, babet_lua_boundary<lua_symlinkattr>);
     lua_setfield(L, -2, "symlinkattr"); // alias déprécié
 
-    lua_pushcfunction(L, lua_touch);
+    lua_pushcfunction(L, babet_lua_boundary<lua_touch>);
     lua_setfield(L, -2, "touch");
 
-    lua_pushcfunction(L, lua_writeFileAtomic);
+    lua_pushcfunction(L, babet_lua_boundary<lua_writeFileAtomic>);
     lua_setfield(L, -2, "writeFileAtomic");
 
-    lua_pushcfunction(L, lua_createFileIterator);
+    lua_pushcfunction(L, babet_lua_boundary<lua_createFileIterator>);
     lua_setfield(L, -2, "createFileIterator");
 
     // Sous-table babet.base64 (RFC 4648, chaînes binaires).
@@ -349,21 +360,21 @@ void register_babet(lua_State *L)
     // ---------------------------------------------------------------
     lua_newtable(L);
 
-    lua_pushcfunction(L, lua_time_iso);
+    lua_pushcfunction(L, babet_lua_boundary<lua_time_iso>);
     lua_setfield(L, -2, "iso");
-    lua_pushcfunction(L, lua_time_parse_iso);
+    lua_pushcfunction(L, babet_lua_boundary<lua_time_parse_iso>);
     lua_setfield(L, -2, "parse_iso");
-    lua_pushcfunction(L, lua_time_parse_duration);
+    lua_pushcfunction(L, babet_lua_boundary<lua_time_parse_duration>);
     lua_setfield(L, -2, "parse_duration");
-    lua_pushcfunction(L, lua_time_format_duration);
+    lua_pushcfunction(L, babet_lua_boundary<lua_time_format_duration>);
     lua_setfield(L, -2, "format_duration");
 
     // Aliases for ergonomy: same C functions used at babet.X.
-    lua_pushcfunction(L, lua_now);
+    lua_pushcfunction(L, babet_lua_boundary<lua_now>);
     lua_setfield(L, -2, "now");
-    lua_pushcfunction(L, lua_monotonic);
+    lua_pushcfunction(L, babet_lua_boundary<lua_monotonic>);
     lua_setfield(L, -2, "monotonic");
-    lua_pushcfunction(L, lua_sleep);
+    lua_pushcfunction(L, babet_lua_boundary<lua_sleep>);
     lua_setfield(L, -2, "sleep");
 
     lua_setfield(L, -2, "time"); // babet.time = <new table>
@@ -376,24 +387,27 @@ void register_babet(lua_State *L)
 }
 
 /**
- * @brief Prepends a project's "?.lua" and "?/init.lua" to package.path,
- *        so that require() can find sibling modules of main.lua.
+ * @brief Prepends an already-owned prefix to package.path.
+ *
+ * This is a pure Lua emitter intended to run under
+ * lua_run_setup_protected(). It deliberately creates no std::string around
+ * lua_concat/lua_setfield, so LUA_ERRMEM cannot bypass a local C++ owner.
  */
-static void prepend_project_to_package_path(lua_State *L, const fs::path &projectDir)
+static void prepend_package_path(lua_State *L, std::string_view prefix)
 {
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "path");
-
-    const char *current = lua_tostring(L, -1);
-    std::string oldPath = current ? current : "";
-    lua_pop(L, 1);
-
-    std::string newPath =
-        (projectDir / "?.lua").string() + ";" +
-        (projectDir / "?" / "init.lua").string() + ";" +
-        oldPath;
-
-    lua_pushstring(L, newPath.c_str());
+    if (lua_type(L, -1) == LUA_TSTRING)
+    {
+        lua_pushlstring(L, prefix.data(), prefix.size());
+        lua_insert(L, -2); // package, prefix, oldpath
+        lua_concat(L, 2);  // package, prefix .. oldpath
+    }
+    else
+    {
+        lua_pop(L, 1);
+        lua_pushlstring(L, prefix.data(), prefix.size());
+    }
     lua_setfield(L, -2, "path");
     lua_pop(L, 1); // pop package
 }
@@ -448,17 +462,42 @@ static int run_tool_script(const fs::path &anchorDir,
         std::cerr << "Erreur : impossible d'allouer un état Lua" << std::endl;
         return 1;
     }
-    luaL_openlibs(L);
-    register_bundled_modules(L);
-    register_babet(L);
-    prepend_project_to_package_path(L, anchorDir);
+    std::string package_prefix;
+    try
+    {
+        package_prefix = (anchorDir / "?.lua").string() + ";" +
+                         (anchorDir / "?" / "init.lua").string() + ";";
+    }
+    catch (const std::exception &error)
+    {
+        std::cerr << "Erreur : impossible de préparer package.path - "
+                  << error.what() << std::endl;
+        lua_close(L);
+        return 1;
+    }
+
+    auto setup_runtime = [&](lua_State *state)
+    {
+        luaL_openlibs(state);
+        register_bundled_modules(state);
+        register_babet(state);
+        prepend_package_path(state, package_prefix);
+        push_lua_arg(state, argc, argv, 1);
+    };
+    std::string setup_error;
+    if (!lua_run_setup_protected(
+            L, setup_runtime, "Erreur : initialisation Lua impossible",
+            setup_error))
+    {
+        std::cerr << setup_error << std::endl;
+        lua_close(L);
+        return 1;
+    }
 
     // Workers (Chantier 8) : indiquer le mode d'exécution pour que
     // require() utilisateur fonctionne aussi dans les workers
     // (cf. set_workers_init_context).
     set_workers_init_context(anchorDir.string(), "", false);
-
-    push_lua_arg(L, argc, argv, 1);
 
     bool ok = loadLuaFile(L, scriptPath);
     lua_close(L);
@@ -616,19 +655,31 @@ int main(int argc, char *argv[])
                 std::cerr << "Erreur : impossible d'allouer un état Lua" << std::endl;
                 return 1;
             }
-            luaL_openlibs(L);
-            register_bundled_modules(L);
-            register_babet(L);
-            register_embedded_searcher(L, exePath.c_str());
+            auto setup_runtime = [&](lua_State *state)
+            {
+                luaL_openlibs(state);
+                register_bundled_modules(state);
+                register_babet(state);
+                register_embedded_searcher(state, exePath.c_str());
+                // Binaire packagé = l'application elle-même est le script :
+                // arg[0] = binaire, arg[1..n] = ses arguments.
+                push_lua_arg(state, argc, argv, 0);
+            };
+            std::string setup_error;
+            if (!lua_run_setup_protected(
+                    L, setup_runtime,
+                    "Erreur : initialisation Lua embarquée impossible",
+                    setup_error))
+            {
+                std::cerr << setup_error << std::endl;
+                lua_close(L);
+                return 1;
+            }
 
             // Workers (Chantier 8) : indiquer le mode d'exécution
             // pour que require() utilisateur fonctionne aussi dans
             // les workers (cf. set_workers_init_context).
             set_workers_init_context("", exePath, true);
-
-            // Binaire packagé = l'application elle-même est le script :
-            // arg[0] = binaire, arg[1..n] = ses arguments.
-            push_lua_arg(L, argc, argv, 0);
 
             if (luaL_loadbuffer(L, fileData->data(), fileData->size(), "main.lua") || lua_pcall(L, 0, LUA_MULTRET, 0))
             {

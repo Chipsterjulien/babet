@@ -61,5 +61,5 @@ int lua_mkdir(lua_State *L)
     }
 
     std::string path = luaL_checkstring_without_nul(L, 1, "path");
-    return push_action_result(L, create_directory(path));
+    return push_action_result_protected(L, create_directory(path));
 }

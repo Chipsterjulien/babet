@@ -581,27 +581,33 @@ int lua_compress(lua_State *L)
 
     if (source_view.empty())
     {
-        return push_fail(L, "compression: source path must not be empty");
+        return push_fail_protected(L, "compression: source path must not be empty");
     }
     if (destination_view.empty())
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "compression: destination path must not be empty");
     }
 
     babet::compression_stream::Format format{};
     if (!babet::compression_stream::parse_format(format_view, format))
     {
-        return push_fail(
+        return push_fail_protected(
             L,
             "compression: format must be 'gzip', 'xz', 'bzip2', or 'zstd'");
     }
 
     CompressionOptions options;
     std::string err;
-    if (!parse_options(L, 4, false, options, err))
+    bool options_ok = false;
+    auto parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        options_ok = parse_options(Ls, 4, false, options, err);
+    };
+    lua_run_protected(L, parser);
+    if (!options_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     const babet::compression_stream::CompressionLevelInfo level_info =
@@ -619,7 +625,7 @@ int lua_compress(lua_State *L)
             err += std::to_string(level_info.minimum);
             err += " and ";
             err += std::to_string(level_info.maximum);
-            return push_fail(L, err);
+            return push_fail_protected(L, err);
         }
         compression_level = static_cast<int>(requested);
     }
@@ -627,7 +633,7 @@ int lua_compress(lua_State *L)
     PinnedSource source;
     if (!source.open(fs::path(std::string(source_view)), err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     AtomicOutput output;
@@ -635,7 +641,7 @@ int lua_compress(lua_State *L)
                      options.overwrite, source.stat(), err) ||
         !source.rewind(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     std::uint64_t input_bytes = 0;
@@ -645,10 +651,10 @@ int lua_compress(lua_State *L)
             output_bytes, err) ||
         !source.unchanged(err) || !output.publish(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 int lua_decompress(lua_State *L)
@@ -666,32 +672,38 @@ int lua_decompress(lua_State *L)
 
     if (source_view.empty())
     {
-        return push_fail(L, "compression: source path must not be empty");
+        return push_fail_protected(L, "compression: source path must not be empty");
     }
     if (destination_view.empty())
     {
-        return push_fail(L,
+        return push_fail_protected(L,
                          "compression: destination path must not be empty");
     }
 
     CompressionOptions options;
     std::string err;
-    if (!parse_options(L, 3, true, options, err))
+    bool options_ok = false;
+    auto parser = [&](lua_State *Ls)
     {
-        return push_fail(L, err);
+        options_ok = parse_options(Ls, 3, true, options, err);
+    };
+    lua_run_protected(L, parser);
+    if (!options_ok)
+    {
+        return push_fail_protected(L, err);
     }
 
     PinnedSource source;
     if (!source.open(fs::path(std::string(source_view)), err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     babet::compression_stream::Format format{};
     if (!babet::compression_stream::detect_format_fd(source.fd(), format,
                                                        err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     AtomicOutput output;
@@ -699,7 +711,7 @@ int lua_decompress(lua_State *L)
                      options.overwrite, source.stat(), err) ||
         !source.rewind(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
     std::uint64_t input_bytes = 0;
@@ -709,10 +721,10 @@ int lua_decompress(lua_State *L)
             input_bytes, output_bytes, err) ||
         !source.unchanged(err) || !output.publish(err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
 
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 template <int (*Fn)(lua_State *)>

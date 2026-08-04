@@ -6,6 +6,147 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.15.0] - 2026-08-04
+
+### Résumé
+
+Babet 2.15.0 audite les échecs d'allocation Lua qui utilisent un saut non local
+au lieu de dérouler la pile C++. Elle protège l'état RAII possédé par les
+bindings pendant l'allocation des résultats Lua, corrige l'annulation d'un
+worker bloqué sur une outbox pleine et rend `createFileIterator` réellement
+paresseux. Aucun mode de ligne de commande n'est ajouté et le code existant qui
+ne lit qu'une valeur de `iterator:next()` reste compatible.
+
+### Sûreté entre `longjmp` Lua et RAII C++
+
+- ajout d'un builder de résultats Lua protégé : les allocations sont exécutées
+  sous `lua_pcall`, `LUA_ERRMEM` est transporté par un marqueur C++ sans
+  allocation, tous les propriétaires C++ actifs sont détruits, puis l'erreur
+  Lua originale est relancée ;
+- ajout d'états temporaires possédés par Lua lorsque les propriétaires natifs
+  doivent survivre jusqu'à la copie finale des chaînes ou tables ;
+- application du modèle audité aux chemins de résultats JSON, TOML, HTTP,
+  Archive, Socket, SQLite, Workers, Base64, CRC32, MD5, SHA-1, SHA-2, SHA-3 et
+  BLAKE2 ;
+- extension du même audit aux 14 enregistrements de processus `spawn` et aux
+  15 enregistrements de pipelines synchrones ou streaming, avec allocation
+  protégée des userdata et construction protégée des tables de résultats ;
+- nettoyage des finalizers processus et pipeline rendu sans allocation, puis
+  passage de leurs `__gc` / `__close` par des frontières silencieuses
+  `noexcept` ;
+- ajout d'un état de construction explicite pour les userdata Socket et Worker,
+  afin qu'un échec du placement-new ne puisse jamais faire détruire par `__gc`
+  un objet dont la durée de vie n'a pas commencé ;
+- passage des finalizers Channel, Worker, état HTTP et FileIterator par des
+  frontières silencieuses ; justification écrite du maintien direct de Signal,
+  qui ne conserve aucun propriétaire C++ non trivial autour d'une allocation
+  Lua ;
+- correction du snapshot TOML protégé : le type natif du nœud est désormais
+  testé avant `value<T>()`, car toml++ autorise certaines conversions exactes
+  comme booléen vers entier ; les booléens simples, clés pointées citées,
+  tableaux hétérogènes et sections imbriquées conservent donc leur type Lua ;
+- conservation des erreurs de programmation, des retours ordinaires
+  `(nil, err)`, des chaînes binaires, tables HTTP, limites d'archives, timeouts
+  socket et contrats SQLite ;
+- protection des clients, requêtes, réponses et téléchargements HTTP, arbres
+  TOML, valeurs JSON, messages workers et itérateurs de fichiers contre un saut
+  d'allocation Lua qui contournerait leur nettoyage ;
+- achèvement de l'audit sur `exec`, `find`, `listFiles`, `deepCopyTable`, SYS,
+  Compression et Inotify : les parcours natifs sont terminés avant la
+  construction des tables Lua, la table source est transmise explicitement à
+  la frame protégée de `deepCopyTable`, les références du registre sont
+  libérées sur tous les chemins et les résultats dynamiques sont émis sous
+  `lua_pcall` ;
+- correction du runner de parseur protégé afin que tous les arguments Lua
+  d'origine soient transmis à sa frame `lua_pcall` sans changer leurs indices ;
+  les arguments et options d'`exec`, les filtres de `find`, les options de
+  Compression et les segments de `joinPath` restent ainsi fonctionnels tout en
+  protégeant leurs propriétaires C++ ;
+- protection du parsing des sources/options Archive et de la construction de
+  la table passwd de `user.get`, ce qui ferme les derniers chemins OOM de
+  parsing/résultat identifiés ;
+- passage de tous les anciens enregistrements plats de `main.cpp` par une
+  frontière C++ commune, interdiction globale des builders `push_fail()` et
+  `push_action_result()` directs dans les bindings, et protection des phases
+  d'initialisation des runtimes Lua principal et workers contre un panic OOM ;
+- correction de la création des handles de channels workers : stockage brut
+  avec drapeau `constructed`, métatable armée avant la construction du
+  `shared_ptr`, destruction `noexcept` et transfert de propriété seulement
+  après l'achèvement du userdata ;
+- extension du préflight structurel à 161 contrats audités et ajout d'un
+  auto-test OOM piloté par un véritable allocateur Lua, qui exerce maintenant
+  les vrais chemins `exec`, `listFiles` et `deepCopyTable` en plus des
+  propriétaires de pile C++ et userdata possédés par Lua ;
+- suppression des quinze derniers builders `push_fail()` directs dans Archive
+  et Socket, afin que leurs diagnostics soient eux aussi construits sous
+  `lua_pcall` tant que des chaînes, vecteurs ou propriétaires RAII sont vivants ;
+- documentation de la frontière directe volontaire de `json.as_array`, qui ne
+  conserve aucun propriétaire C++ non trivial, et verrouillage des userdata :
+  construction de `Sock` exigée `noexcept`, destruction de `Worker` exigée
+  `noexcept`, avec initialisation explicite du drapeau `constructed` dans le
+  stockage brut retourné par Lua.
+
+### Compilation C++23
+
+- classement du répertoire d’en-têtes `toml++` comme include CMake `SYSTEM` ;
+  GCC 16 ne pollue plus les builds avec les avertissements
+  `-Wdeprecated-literal-operator` provenant des opérateurs littéraux de la
+  dépendance 3.4.0, sans désactiver les avertissements du code Babet.
+
+### Workers
+
+- correction de l'interblocage garanti `cancel()` / `join()` lorsqu'un worker
+  attendait indéfiniment dans `worker.send()` sur une outbox pleine ;
+- l'annulation réveille maintenant les attentes de l'outbox et renvoie
+  `(false, "cancelled")` uniquement si l'envoi aurait dû rester bloqué ;
+- conservation du dernier diagnostic documenté : si une place est déjà libre,
+  le message entre encore dans l'outbox ouverte, et les messages présents avant
+  l'annulation restent drainables par le parent ;
+- maintien d'une annulation coopérative, sans `pthread_cancel()` ni interruption
+  asynchrone de Lua, SQLite, transactions ou sections critiques C++ ;
+- maintien explicite de la frontière de protocole : une commande extraite de
+  l'inbox mais pas encore livrée lorsque l'annulation devient visible est
+  abandonnée plutôt qu'exécutée après l'annulation ;
+- ajout d'une régression déterministe de capacité 1 qui remplit l'outbox, bloque
+  un second envoi, annule, rejoint avec délai puis draine le premier message.
+
+### `FileIterator` paresseux
+
+- remplacement du préchargement dans un `std::vector<std::string>` par un
+  `directory_iterator` ou `recursive_directory_iterator` natif conservé dans
+  le userdata Lua ;
+- déplacement du parcours dans `iterator:next()` : la création ne parcourt plus
+  tout l'arbre et ne garde plus tous les chemins en mémoire ;
+- extension de `next()` avec `(chemin, nil)`, `(nil, err)` ou `(nil, nil)` à la
+  fin normale ; les appels qui ne lisent que la première valeur gardent leur
+  comportement historique, tandis que le nouveau code distingue une erreur de
+  parcours différée de la fin ;
+- conservation des règles sur fichiers réguliers et symlinks, arguments
+  stricts, fermeture explicite, nettoyage GC et erreur Lua après fermeture.
+
+### Diagnostic du `spawn` interactif
+
+- maintien inchangé du moteur de terminal 2.14.0 : la régression PTY directe et
+  une couche `sudo` facultative contrôlée ne reproduisent pas une seconde
+  défaillance de groupe de premier plan ;
+- affichage du chemin canonique du binaire Babet et de son SHA-256 à chaque test
+  PTY, afin de ne pas confondre un runtime copié ou embarqué ancien avec le
+  binaire compilé par la campagne de release ;
+- conservation du délai anti-blocage et des scénarios de lecture directe,
+  timeout, signal, arrêt, rafraîchissement d'état et restauration du terminal ;
+- enregistrement du blocage interactif réel yaourt vers pacman comme non
+  résolu : la 2.15.0 ne prétend pas corriger cette chaîne sans reproducer rouge
+  identifiant le véritable groupe de processus au premier plan.
+
+### Validation et documentation
+
+- intégration de l'auto-test OOM/RAII Lua et du diagnostic PTY étendu dans les
+  chemins normal et ASan/UBSan ;
+- mise à jour synchronisée des références françaises et anglaises FS, Workers
+  et processus, README, procédure de release, feuille de route, notices,
+  changelogs, notes GitHub et manuels PDF ;
+- plateforme Linux et versions des dépendances vendorisées inchangées.
+
 ## [2.14.0] - 2026-08-03
 
 ### Résumé

@@ -807,11 +807,13 @@ Après une annulation :
 
 - `worker.cancelled()` renvoie `true` ;
 - le prochain `worker.recv()` renvoie `(false, "cancelled")` et ne livre plus
-  les commandes qui attendaient encore dans l'inbox ; une commande déjà
-  extraite par le worker avant la demande d'annulation peut naturellement être
-  en cours de traitement ;
+  les commandes qui attendaient encore dans l'inbox ; lorsque l'annulation
+  devient visible juste après un `pop` réussi, cette commande extraite est
+  volontairement abandonnée plutôt que livrée après la frontière de protocole ;
+  une commande déjà rendue au Lua peut naturellement être en cours ;
 - `worker.send()` reste disponible pour un dernier résultat, un diagnostic ou
-  un accusé d'arrêt ;
+  un accusé d'arrêt si l'outbox possède déjà une place ; un envoi bloqué sur une
+  outbox pleine est réveillé et renvoie `(false, "cancelled")` ;
 - le chunk décide lui-même quand et comment terminer.
 
 Les règles FIFO, capacités, timeouts et fermeture restent symétriques en dehors
@@ -1078,7 +1080,9 @@ local ok, err = job:cancel()
 - réveille aussi le `channel:send()` ou `channel:recv()` actuellement bloqué
   dans ce worker, sans fermer le channel global ;
 - fait renvoyer `(false, "cancelled")` aux futurs `job:send()` ;
-- laisse l'outbox ouverte afin que le worker puisse publier un dernier message ;
+- laisse l'outbox ouverte, accepte un dernier message si une place est
+  immédiatement disponible et réveille un `worker.send()` bloqué sur une
+  outbox pleine avec `(false, "cancelled")` ;
 - ne rejoint pas le thread ;
 - ne consomme pas le résultat final ;
 - est idempotent et renvoie toujours `(true, nil)` pour un job valide.
@@ -1102,11 +1106,11 @@ Ce mécanisme n'utilise jamais `pthread_cancel()` et n'interrompt pas brutalemen
 Lua, SQLite, un verrou C++ ou une transaction. Un worker doit donc consulter
 `worker.cancelled()` ou revenir régulièrement dans `worker.recv()`.
 
-Un worker bloqué dans un appel système non interruptible, un `worker.send()`
-sans timeout sur une outbox pleine ou une boucle qui ne vérifie jamais le
-drapeau peut rester actif. Les attentes de channel Babet, elles, sont réveillées
-par l'annulation. Dans ce cas, `join(timeout)` permet au parent de ne
-pas se bloquer, mais Babet ne force pas la terminaison.
+Un worker bloqué dans un appel système non interruptible ou une boucle qui ne
+vérifie jamais le drapeau peut rester actif. Les attentes de channel Babet et
+un `worker.send()` attendant une place dans l'outbox sont réveillés par
+l'annulation. `join(timeout)` permet au parent de rester borné dans les autres
+cas, mais Babet ne force pas la terminaison.
 
 `close()` et `cancel()` sont distincts :
 
@@ -1620,7 +1624,10 @@ Solutions :
 - le parent lit régulièrement `job:recv()` ;
 - le worker utilise un timeout fini ;
 - l'outbox possède une capacité adaptée ;
-- le protocole sépare clairement la phase de messages et la phase de join.
+- le protocole sépare clairement la phase de messages et la phase de join ;
+- lors d'une annulation, le parent appelle `job:cancel()` avant le `join()`
+  borné : l'annulation réveille désormais l'envoi bloqué sans supprimer les
+  messages déjà placés dans l'outbox.
 
 ### Producteurs bloqués sur un channel plein
 

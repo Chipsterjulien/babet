@@ -117,9 +117,9 @@ Cette restriction évite des courses de données entre threads.
 Les quatre constantes décrivent le binaire Babet qui exécute le script.
 
 ```lua
-print(babet.VERSION)       -- par exemple "2.14.0"
+print(babet.VERSION)       -- par exemple "2.15.0"
 print(babet.VERSION_MAJOR) -- par exemple 2
-print(babet.VERSION_MINOR) -- par exemple 14
+print(babet.VERSION_MINOR) -- par exemple 15
 print(babet.VERSION_PATCH) -- par exemple 0
 ```
 

@@ -47,6 +47,6 @@ int lua_isDir(lua_State *L)
     }
     catch (const std::exception &e)
     {
-        return push_fail(L, e.what());
+        return push_fail_protected(L, e.what());
     }
 }

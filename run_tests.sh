@@ -197,6 +197,16 @@ if [ ! -f "${BINARY}" ]; then
     exit 1
 fi
 
+print_preflight_stage "Régression — nettoyage OOM Lua / RAII C++"
+OOM_ARGS=()
+if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    OOM_ARGS+=(--sanitizers)
+fi
+if ! bash "${SCRIPT_DIR}/tools/test_lua_longjmp_oom.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : le test OOM Lua / RAII C++ a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — spawn interactif sous pseudo-terminal"
 if ! bash "${SCRIPT_DIR}/tools/test_spawn_pty.sh" "${BINARY}"; then
     echo "ÉCHEC : le test PTY de babet.spawn a échoué."

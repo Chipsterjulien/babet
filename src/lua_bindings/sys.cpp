@@ -105,16 +105,16 @@ int lua_sys_which(lua_State *L)
     std::string err;
     if (!lua_string_without_nul(L, 1, name, "which: name", err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     std::string found = find_in_path(name);
     if (found.empty())
     {
-        return push_fail(L,
-                         std::string("which: '") + name + "' not found in PATH");
+        const std::string message =
+            std::string("which: '") + name + "' not found in PATH";
+        return push_fail_protected(L, message);
     }
-    lua_pushlstring(L, found.data(), found.size());
-    return 1;
+    return push_string_protected(L, found);
 }
 
 // babet.env(name) -> "value" | nil   (PAS de (nil, err))
@@ -145,8 +145,7 @@ int lua_sys_env(lua_State *L)
         lua_pushnil(L);
         return 1;
     }
-    lua_pushstring(L, val);
-    return 1;
+    return push_string_protected(L, val);
 }
 
 // babet.setenv(name, value) -> (true, nil) | (nil, err)
@@ -165,7 +164,7 @@ int lua_sys_setenv(lua_State *L)
     if (!lua_string_without_nul(L, 1, name, "setenv: name", err) ||
         !lua_string_without_nul(L, 2, value, "setenv: value", err))
     {
-        return push_fail(L, err);
+        return push_fail_protected(L, err);
     }
     // 1 = overwrite : on remplace une valeur existante (comportement
     // attendu d'un setter, sinon on aurait un setter qui ne fait
@@ -184,17 +183,18 @@ int lua_sys_setenv(lua_State *L)
             rc = ::setenv(name.c_str(), value.c_str(), 1);
             saved = errno; }))
     {
-        return push_fail(L,
-                         "setenv: forbidden after workers.spawn (the process "
-                         "environment is shared across threads; set it before "
-                         "spawning workers)");
+        return push_fail_protected(
+            L, "setenv: forbidden after workers.spawn (the process "
+               "environment is shared across threads; set it before "
+               "spawning workers)");
     }
     if (rc != 0)
     {
-        return push_fail(L,
-                         std::string("setenv: ") + std::strerror(saved));
+        const std::string message =
+            std::string("setenv: ") + std::strerror(saved);
+        return push_fail_protected(L, message);
     }
-    return push_ok(L);
+    return push_ok_protected(L);
 }
 
 // babet.hostname() -> "host" | (nil, err)
@@ -209,12 +209,12 @@ int lua_sys_hostname(lua_State *L)
     if (::gethostname(buf, sizeof(buf)) != 0)
     {
         int saved = errno;
-        return push_fail(L,
-                         std::string("hostname: ") + std::strerror(saved));
+        const std::string message =
+            std::string("hostname: ") + std::strerror(saved);
+        return push_fail_protected(L, message);
     }
     buf[sizeof(buf) - 1] = '\0';
-    lua_pushstring(L, buf);
-    return 1;
+    return push_string_protected(L, buf);
 }
 
 // babet.uname() -> { sysname, nodename, release, version, machine }
@@ -229,21 +229,26 @@ int lua_sys_uname(lua_State *L)
     if (::uname(&u) != 0)
     {
         int saved = errno;
-        return push_fail(L,
-                         std::string("uname: ") + std::strerror(saved));
+        const std::string message =
+            std::string("uname: ") + std::strerror(saved);
+        return push_fail_protected(L, message);
     }
-    lua_newtable(L);
-    lua_pushstring(L, u.sysname);
-    lua_setfield(L, -2, "sysname");
-    lua_pushstring(L, u.nodename);
-    lua_setfield(L, -2, "nodename");
-    lua_pushstring(L, u.release);
-    lua_setfield(L, -2, "release");
-    lua_pushstring(L, u.version);
-    lua_setfield(L, -2, "version");
-    lua_pushstring(L, u.machine);
-    lua_setfield(L, -2, "machine");
-    return 1;
+    auto builder = [&u](lua_State *Ls) noexcept -> int
+    {
+        lua_createtable(Ls, 0, 5);
+        lua_pushstring(Ls, u.sysname);
+        lua_setfield(Ls, -2, "sysname");
+        lua_pushstring(Ls, u.nodename);
+        lua_setfield(Ls, -2, "nodename");
+        lua_pushstring(Ls, u.release);
+        lua_setfield(Ls, -2, "release");
+        lua_pushstring(Ls, u.version);
+        lua_setfield(Ls, -2, "version");
+        lua_pushstring(Ls, u.machine);
+        lua_setfield(Ls, -2, "machine");
+        return 1;
+    };
+    return lua_build_results_protected(L, builder, 1);
 }
 
 // babet.pid() -> integer

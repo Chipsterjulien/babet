@@ -78,6 +78,6 @@ int lua_link(lua_State *L)
     const std::string_view linkpath =
         luaL_checkstring_view_without_nul(L, 2, "link path");
 
-    return push_action_result(
+    return push_action_result_protected(
         L, create_symlink(std::string(target), std::string(linkpath)));
 }

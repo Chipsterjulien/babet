@@ -17,21 +17,26 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version stable et auditée actuelle : **2.14.0**. Voir le
+Version candidate actuelle : **2.15.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.14.0 ferme les dernières frontières d’exception C++ de
-`babet.compression`, des fonctions SYS plates, de `babet.user` et de
-`babet.inotify`. Les 17 fonctions C enregistrées dans Lua passent désormais
-par une frontière auditée ; une exception C++ inattendue devient un diagnostic
-Lua stable au lieu de traverser des frames C. Cette version corrige aussi les
-processus interactifs lancés par `babet.spawn` avec les flux hérités : le groupe
-enfant reçoit réellement le terminal au premier plan, puis Babet le récupère
-avec ses attributs après la fin ou la terminaison du processus. Aucune fonction
-publique n’est ajoutée et les retours ordinaires restent inchangés. Babet
-2.13.0 a ajouté
-`db:savepoint(callback)`, avec savepoints imbriqués et
+Babet 2.15.0 audite les échecs d’allocation Lua qui utilisent un `longjmp` au
+lieu de dérouler la pile C++. La construction des résultats JSON, TOML, HTTP,
+Archive, Socket, SQLite, Workers, Process, Pipeline, Base64 et checksums passe
+désormais par des builders Lua protégés ou un état possédé par Lua :
+`LUA_ERRMEM` ne peut plus court-circuiter le nettoyage RAII des bindings
+concernés. Les finalizers possédant des ressources utilisent des frontières
+silencieuses et les userdata structurés empêchent la destruction d'un objet
+Socket ou Worker partiellement construit. Cette version corrige
+aussi l’annulation d’un worker bloqué sur une outbox pleine et transforme
+`createFileIterator` en véritable itérateur paresseux. La régression PTY directe
+de `spawn` affiche maintenant le chemin exact et le SHA-256 du binaire et peut
+tester `sudo` ; le blocage interactif yaourt vers pacman signalé séparément
+reste en investigation et n’est pas annoncé comme corrigé par la 2.15.0. Babet
+2.14.0 a introduit le transfert du terminal pour les enfants interactifs
+directs de `spawn`. Babet 2.13.0 a ajouté `db:savepoint(callback)`, avec
+savepoints imbriqués et
 `ROLLBACK TO` puis `RELEASE` automatiques lorsque le callback échoue. Le helper
 fonctionne seul, dans une transaction assistée ou manuelle et récursivement
 dans un autre savepoint. La 2.12.0 reste la version des options de connexion et
