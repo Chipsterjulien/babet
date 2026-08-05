@@ -17,9 +17,14 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.16.0**. Voir le
+Version candidate actuelle : **2.16.1**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
+
+Babet 2.16.1 est une version corrective exclusivement documentaire. Elle
+republie les manuels PDF français et anglais après le correctif final de
+course sur le transfert de terminal de la 2.16.0, sans changement du
+comportement du runtime.
 
 Babet 2.16.0 termine l’audit Linux du cycle de vie du terminal pour les
 processus interactifs lancés avec `babet.spawn()`. `process:state()` distingue

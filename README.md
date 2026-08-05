@@ -16,9 +16,13 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.16.0**. See the
+Current release candidate: **2.16.1**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
+
+Babet 2.16.1 is a documentation-only patch release. It republishes the
+English and French PDF manuals after the final 2.16.0 terminal-handoff
+race fix, with no runtime behavior change.
 
 Babet 2.16.0 completes the Linux terminal lifecycle audit for interactive
 `babet.spawn()` processes. `process:state()` now distinguishes running,

@@ -15,7 +15,10 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the **Babet 2.16.0** release candidate.
+Documentation for the **Babet 2.16.1** release candidate.
+
+Babet 2.16.1 republishes the generated English and French PDF manuals from
+the final 2.16.0 Markdown sources. It does not change the runtime or API.
 
 ## Getting started
 
@@ -25,7 +28,7 @@ Documentation for the **Babet 2.16.0** release candidate.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.16.0 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.16.1 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 

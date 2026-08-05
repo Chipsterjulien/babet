@@ -6,6 +6,18 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.16.1] - 2026-08-05
+
+### Correction du paquet documentaire
+
+- régénération de `docs/manual-en.pdf` et `docs/manual-fr.pdf` depuis les
+  sources Markdown finales de la 2.16.0, après le correctif de course sur le
+  transfert de terminal ;
+- mise à jour des exemples de version, des références de version dans les
+  README et de la procédure de publication vers la 2.16.1 ;
+- ajout de notes GitHub dédiées à cette version corrective ;
+- aucun changement du runtime ni de l’API publique par rapport à Babet 2.16.0.
+
 ## [2.16.0] - 2026-08-04
 
 ### Résumé

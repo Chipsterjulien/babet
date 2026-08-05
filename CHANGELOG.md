@@ -6,6 +6,17 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.16.1] - 2026-08-05
+
+### Documentation packaging fix
+
+- regenerated `docs/manual-en.pdf` and `docs/manual-fr.pdf` from the final
+  2.16.0 Markdown sources after the terminal-handoff race fix;
+- updated current-version examples, README release references, and the release
+  checklist to 2.16.1;
+- added dedicated GitHub release notes for this patch release;
+- made no runtime or public API change compared with Babet 2.16.0.
+
 ## [2.16.0] - 2026-08-04
 
 ### Summary
