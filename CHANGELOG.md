@@ -6,6 +6,89 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.17.0] - 2026-08-05
+
+### Summary
+
+Babet 2.17.0 completes the Linux process-launch hardening planned after the
+terminal lifecycle work. It updates the embedded runtime to Lua 5.5.1, makes
+the final child environment authoritative for executable lookup, removes
+`execvpe()` from post-fork code, bounds competing interactive-terminal
+reservations, and separates launch and terminal responsibilities from
+`process_common.cpp`.
+
+### Lua 5.5.1
+
+- updated the downloaded and statically embedded Lua release from 5.5.0 to
+  5.5.1 with the official SHA-256 checksum;
+- updated the archive fallback date and made the Lua OOM harness derive its
+  include path from `build_local.sh` instead of encoding `lua-5.5.0`;
+- retained the existing Lua 5.5 API and the 2.15 OOM/RAII protection model.
+
+### Parent-side command preparation
+
+- build the inherited-plus-overridden environment, `argv`, `envp`, effective
+  working directory, and ordered executable candidate list before `fork()` for
+  `exec`, `spawn`, `pipeline`, and `spawnPipeline`;
+- use the final `opts.env.PATH` for initial lookup, fixing the former mismatch
+  where the child received one `PATH` while `execvpe()` searched another;
+- resolve empty and relative `PATH` components from the child's effective
+  `cwd`, use the system `_CS_PATH` default when `PATH` is absent, and leave that
+  default out of the transmitted environment;
+- preserve Linux lookup precedence: continue after `ENOENT`/`ENOTDIR`, allow a
+  later candidate after `EACCES`, and report `EACCES` when all usable candidates
+  were denied;
+- traverse the prepared candidates in each child using only `execve()`, with
+  no allocation or `PATH` parsing. A file that disappears after preparation
+  returns the actual lookup error, and `ENOEXEC` is not retried through an
+  implicit shell;
+- make `PreparedCommand` non-copyable and non-movable because its `argv`/`envp`
+  views point into strings owned by the same object, turning accidental future
+  relocation into a compile-time error;
+- serialize Lua sequences through raw access (`lua_rawlen`/`lua_rawgeti`) so
+  `__len` and `__index` cannot execute Lua code while C++ objects are alive.
+
+### Migrating from Babet 2.16
+
+An executable file without a shebang is no longer retried implicitly through
+`/bin/sh`. It now fails with `ENOEXEC` (“Exec format error”). Add an explicit
+interpreter on the first line, for example:
+
+```sh
+#!/bin/sh
+```
+
+No Lua signature changes, but this can affect older helpers or scripts that
+relied on the implicit `execvpe()` fallback.
+
+### Bounded terminal handoff
+
+- replace the unbounded terminal-registry condition wait with a monotonic timed
+  wait of at most two seconds, capped by the remaining `launch_timeout`;
+- return `terminal handoff is busy` before `fork()` when another thread keeps a
+  reservation too long, so no untracked child is created and no process is
+  silently launched without terminal ownership;
+- keep reservation cancellation, terminal ownership, saved parent `termios`,
+  direct-child monitoring, and recovery for subsequent interactive launches
+  intact;
+- add a deterministic PTY regression that holds a reservation, verifies the
+  bounded failure and absence of a parasite child, then proves that a later
+  interactive prompt and terminal echo still work.
+
+### Internal structure and tests
+
+- move parent launch preparation into `process_launch_internal.*` and keep the
+  terminal registry private to `process_terminal_internal.*`, reducing the
+  responsibilities and size of `process_common.cpp`;
+- add a network-free C++ preflight for final-environment lookup, `cwd`, empty
+  and relative `PATH` entries, `ENOENT`, `ENOTDIR`, `EACCES`, `ENOEXEC`, and the
+  resolution-to-`execve()` race;
+- extend the Lua integration suite across all four process APIs and extend the
+  structural audit for parent preparation, `execve()`, timed terminal waits,
+  rollback, and PTY recovery;
+- update the English and French process and pipeline references and regenerate
+  both PDF manuals.
+
 ## [2.16.1] - 2026-08-05
 
 ### Documentation packaging fix

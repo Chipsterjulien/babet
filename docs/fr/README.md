@@ -17,10 +17,11 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version candidate **Babet 2.16.1**.
+Documentation de la version candidate **Babet 2.17.0**.
 
-Babet 2.16.1 republie les manuels PDF français et anglais générés depuis les
-sources Markdown finales de la 2.16.0. Le runtime et l’API ne changent pas.
+Babet 2.17.0 passe le runtime embarqué à Lua 5.5.1 et durcit le lancement des
+processus Linux avec résolution de `PATH` dans le parent, `execve()` dans
+l'enfant et réservation bornée du terminal interactif.
 
 ## Pour démarrer
 
@@ -30,7 +31,7 @@ sources Markdown finales de la 2.16.0. Le runtime et l’API ne changent pas.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.16.1 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.17.0 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 

@@ -47,11 +47,13 @@ local remplace le `cwd` global. L'environnement local est fusionné après
 l'environnement global et gagne en cas de nom identique. Toutes les commandes
 sont validées avant le premier `fork()`.
 
-Comme pour `exec()` et `spawn()`, lorsqu’une commande ne contient pas `/`, sa
-recherche initiale utilise le `PATH` du processus Babet, pas un `PATH` remplacé
-dans `opts.env` ou dans l’environnement local d’une étape. Pour lancer un outil
-présent uniquement dans ce nouveau `PATH`, utilisez son chemin explicite ou
-modifiez le `PATH` de Babet avant le lancement.
+Comme pour `exec()` et `spawn()`, lorsqu'une commande ne contient pas `/`, sa
+recherche utilise le `PATH` de l'environnement final de l'étape, après fusion
+de l'environnement hérité, des options globales et des options locales. Une
+composante vide ou relative de `PATH` est interprétée depuis le `cwd` effectif
+de cette étape. Toutes les listes ordonnées de candidats, tous les `argv` et
+tous les `envp` sont préparés avant le premier `fork()` ; chaque enfant ne
+parcourt ensuite que sa liste avec `execve()`, sans analyser `PATH` ni allouer.
 
 # `babet.pipeline()` — exécution complète
 

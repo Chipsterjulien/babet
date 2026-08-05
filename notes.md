@@ -4,24 +4,7 @@ This file lists known topics intentionally left outside the current Babet
 development roadmap. They are not hidden defects: each item records the current
 behavior, the remaining risk, and the reason it is deferred.
 
-## 1. Resolve PATH in the parent and use only `execve`
-
-**Current state**: `exec.cpp` uses glibc `execvpe()` after `fork()`. Arguments,
-environment storage, pipes, and most launch preparation are built in the parent.
-
-**Remaining theoretical risk**: `execvpe()` resolves `$PATH` in the child and
-reads the process environment. On glibc this is a simple lookup and no concrete
-failure has been observed, but `getenv` is not formally listed as
-async-signal-safe by POSIX.
-
-**Possible hardening**: resolve the executable path in the parent, then call
-`execve(path, argv, envp)` in the child.
-
-**Why deferred**: the demonstrated multithreaded hazards were removed. The
-remaining concern is theoretical on the supported Linux/glibc target and does
-not justify another path-resolution implementation without a real use case.
-
-## 2. Forced worker termination
+## 1. Forced worker termination
 
 **Current state**: there is no `worker:kill()`. A worker stops cooperatively
 through `job:cancel()` / `worker.cancelled()`, after `close()` wakes its inbox,
@@ -41,7 +24,7 @@ runtime.
 make worker loops check `worker.cancelled()` or return to cancellation-aware
 `worker.recv()` / channel operations when they must remain externally stoppable.
 
-## 3. Linear-time or otherwise bounded pattern matching
+## 2. Linear-time or otherwise bounded pattern matching
 
 **Current state**: `babet.find()` offers bounded `glob`, `iglob`, `path_glob`,
 and `path_iglob` filters implemented by a small non-recursive matcher with a
@@ -55,7 +38,7 @@ RE2 intentionally does not implement constructs whose matching cost cannot be
 kept linear, notably backreferences and look-around assertions. Scripts that
 need only wildcard filename filtering should prefer the simpler glob fields.
 
-## 4. Shared strict Lua argument validators
+## 3. Shared strict Lua argument validators
 
 **Current state**: since 2.6.0, Babet provides shared allocation-free helpers for exact and
 bounded arity, strict Lua strings, numbers, integers and booleans, optional

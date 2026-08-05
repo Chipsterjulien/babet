@@ -46,10 +46,12 @@ Global `cwd` and `env` options provide defaults. A local `cwd` replaces the
 global one. Local environment entries are merged last and win on duplicate
 names. Every command is validated before the first `fork()`.
 
-As with `exec()` and `spawn()`, when a command contains no `/`, its initial
-lookup uses the Babet process's `PATH`, not a `PATH` replaced through `opts.env`
-or a stage-local environment. To launch a tool available only through that new
-`PATH`, use its explicit path or change Babet's `PATH` before launching.
+As with `exec()` and `spawn()`, when a command contains no `/`, lookup uses the
+stage's final environment after merging the inherited environment, global
+options, and local options. An empty or relative `PATH` component is interpreted
+from that stage's effective `cwd`. Every ordered candidate list, `argv`, and `envp` is prepared before the first
+`fork()`; each child then traverses only that list with `execve()`, without
+parsing `PATH` or allocating memory.
 
 # `babet.pipeline()` — complete execution
 

@@ -259,7 +259,8 @@ Dans le worker :
 - `worker.args` contient une copie désérialisée de la table ;
 - sans `args`, `worker.args == nil` ;
 - modifier `worker.args` ne modifie jamais la table du parent ;
-- les métatables et l'identité des sous-tables ne traversent pas.
+- les métatables et l'identité des sous-tables ne traversent pas ;
+- la sérialisation lit les entrées brutes et n'invoque ni `__len` ni `__index`.
 
 Un scalaire direct n'est pas accepté comme deuxième argument :
 

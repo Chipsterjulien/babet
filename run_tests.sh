@@ -171,6 +171,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_exception_boundaries.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — préparation parent du lancement"
+if ! bash "${SCRIPT_DIR}/tools/test_process_launch_preparation.sh"; then
+    echo "ÉCHEC : le préflight de préparation du lancement a échoué."
+    exit 1
+fi
+
 BUILD_ARGS=()
 if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
     BUILD_ARGS+=(--sanitizers)

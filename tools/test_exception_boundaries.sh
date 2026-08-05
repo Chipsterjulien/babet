@@ -105,6 +105,24 @@ forbid_pattern \
     "at least one audited Lua C function is still registered directly" \
     "${ROOT_DIR}/src/lua_bindings/"{compression,sys,user,inotify}.cpp
 
+forbid_pattern \
+    'execvpe[[:space:]]*\(' \
+    "post-fork command launch still uses execvpe" \
+    "${ROOT_DIR}/src/lua_bindings/"*.cpp
+
+forbid_pattern \
+    'luaL_len[[:space:]]*\(' \
+    "workers serialization can still execute __len" \
+    "${ROOT_DIR}/src/lua_bindings/workers.cpp"
+
+forbid_pattern \
+    'lua_geti[[:space:]]*\(' \
+    "audited sequence readers can still execute __index" \
+    "${ROOT_DIR}/src/lua_bindings/workers.cpp" \
+    "${ROOT_DIR}/src/lua_bindings/json.cpp" \
+    "${ROOT_DIR}/src/lua_bindings/pipeline.cpp" \
+    "${ROOT_DIR}/src/lua_bindings/process_common.cpp"
+
 require_pattern "src/lua_bindings/lua_utils.hpp" \
     'lua_cfunction_exception_boundary' \
     "common Lua C++ exception boundary helper is missing"
@@ -265,16 +283,16 @@ do
 done
 
 for specification in \
-    "src/lua_bindings/process_common.cpp|WEXITED.*WNOWAIT|terminal exit monitor observes completion without reaping" \
-    "src/lua_bindings/process_common.cpp|SYS_pidfd_open|terminal exit monitor pins the child identity when pidfd is available" \
+    "src/lua_bindings/process_terminal_internal.cpp|WEXITED.*WNOWAIT|terminal exit monitor observes completion without reaping" \
+    "src/lua_bindings/process_terminal_internal.cpp|SYS_pidfd_open|terminal exit monitor pins the child identity when pidfd is available" \
     "src/lua_bindings/process_common.hpp|pid_t owner_pgid = -1|terminal handoff tracks its exact foreground owner" \
-    "src/lua_bindings/process_common.cpp|reserve_terminal_handoff\(|terminal handoffs are serialized before fork" \
-    "src/lua_bindings/process_common.cpp|WEXITED.*WNOHANG.*WNOWAIT|successive spawn recovery detects a finished direct child without reaping" \
-    "src/lua_bindings/process_common.cpp|commit_terminal_handoff\(|foreground transfer and registry ownership commit together" \
-    "src/lua_bindings/process_common.cpp|terminal_handoff_registry.owner_pgid == context->pid|old terminal monitor restores only its own child" \
-    "src/lua_bindings/process_common.cpp|BABET_TEST_TERMINAL_MONITOR_DELAY_MS|PTY race delay hook remains available" \
-    "src/lua_bindings/process_common.cpp|reclaim_terminal\(TerminalHandoff &terminal\)|stopped-child terminal reclamation helper" \
-    "src/lua_bindings/process_common.cpp|foreground_terminal\(TerminalHandoff &terminal|foreground resume helper" \
+    "src/lua_bindings/process_terminal_internal.cpp|reserve_terminal_handoff\(|terminal handoffs are serialized before fork" \
+    "src/lua_bindings/process_terminal_internal.cpp|WEXITED.*WNOHANG.*WNOWAIT|successive spawn recovery detects a finished direct child without reaping" \
+    "src/lua_bindings/process_terminal_internal.cpp|commit_terminal_handoff\(|foreground transfer and registry ownership commit together" \
+    "src/lua_bindings/process_terminal_internal.cpp|terminal_handoff_registry.owner_pgid == context->pid|old terminal monitor restores only its own child" \
+    "src/lua_bindings/process_terminal_internal.cpp|BABET_TEST_TERMINAL_MONITOR_DELAY_MS|PTY race delay hook remains available" \
+    "src/lua_bindings/process_terminal_internal.cpp|reclaim_terminal\(TerminalHandoff &terminal\)|stopped-child terminal reclamation helper" \
+    "src/lua_bindings/process_terminal_internal.cpp|foreground_terminal\(TerminalHandoff &terminal|foreground resume helper" \
     "src/lua_bindings/process.cpp|WNOHANG.*WUNTRACED.*WCONTINUED|non-blocking process state refresh observes stop/continue" \
     "src/lua_bindings/process.cpp|wait_options = WUNTRACED.*WCONTINUED|blocking process wait observes stop/continue" \
     "src/lua_bindings/process.cpp|push_fail_protected\(L, \"stopped\"\)|wait reports stopped state without hanging" \
@@ -283,7 +301,15 @@ for specification in \
     "tools/test_spawn_pty.sh|STOP_RESUME_OK|PTY regression covers stopped-child resume" \
     "tools/test_spawn_pty.sh|ASYNC_RECLAIM_OK|PTY regression covers asynchronous terminal reclamation" \
     "tools/test_spawn_pty.sh|BABET_TEST_TERMINAL_MONITOR_DELAY_MS.*1500|PTY race widens the stale-monitor window deterministically" \
-    "tools/test_spawn_pty.sh|SUCCESSIVE_SPAWN_OK|PTY regression covers two immediate interactive spawns"
+    "tools/test_spawn_pty.sh|SUCCESSIVE_SPAWN_OK|PTY regression covers two immediate interactive spawns" \
+    "src/lua_bindings/process_launch_internal.cpp|environment_value\(environment,.*PATH|parent launch preparation uses the effective child PATH" \
+    "src/lua_bindings/process_launch_internal.cpp|::execve\(|prepared child launch uses execve only" \
+    "src/lua_bindings/process_common.cpp|exec_prepared_command|process launch delegates to the allocation-free exec helper" \
+    "src/lua_bindings/process_terminal_internal.cpp|pthread_cond_timedwait|terminal reservation wait is bounded" \
+    "src/lua_bindings/process_terminal_internal.cpp|pthread_condattr_setclock|terminal reservation deadline prefers a monotonic condition clock" \
+    "src/lua_bindings/process_terminal_internal.cpp|TerminalReservationResult::busy|terminal reservation timeout has a typed result" \
+    "tools/test_spawn_pty.sh|TERMINAL_BUSY_NO_CHILD_OK|PTY regression covers bounded busy reservation without child leak" \
+    "tools/test_spawn_pty.sh|TERMINAL_BUSY_RECOVERY_OK|PTY regression covers terminal recovery after busy timeout"
 do
     IFS='|' read -r file pattern label <<< "${specification}"
     require_pattern "${file}" "${pattern}" "${label} is missing"

@@ -159,21 +159,41 @@ Main outcomes:
 local result, err = babet.exec("git", { "status", "--short" })
 ```
 
-When `cmd` contains no `/`, Babet asks the C library to search for it through
-the Babet process's `PATH`.
+When `cmd` contains no `/`, Babet first builds the child's final environment
+in the parent, then searches with the exact `PATH` that will be transmitted. A
+`PATH` replacement in `opts.env` therefore controls both the initial lookup and
+commands started later by the child.
 
 ```lua
-local result = assert(babet.exec("python3", { "--version" }))
+local result = assert(babet.exec("my-private-tool", {}, {
+    env = { PATH = "/opt/private/bin:/usr/bin:/bin" },
+}))
 ```
 
-When `cmd` contains `/`, it is treated as a direct path.
+When the effective environment has no `PATH` variable, Babet uses the system's
+POSIX search path (`_CS_PATH`, falling back to `/bin:/usr/bin`). It does not add
+that default value to the child's environment.
+
+Each empty `PATH` component denotes the child's effective working directory.
+A relative component is also resolved from that directory, after applying
+`opts.cwd` when present.
 
 ```lua
-local result = assert(babet.exec("/usr/bin/id", { "-u" }))
+local result = assert(babet.exec("tool", {}, {
+    cwd = "/opt/my-app",
+    env = { PATH = "bin:/usr/bin:/bin" },
+}))
+-- first candidate: /opt/my-app/bin/tool
 ```
 
-A relative path containing `/` is resolved in the child's directory after
-`opts.cwd` has been applied.
+Lookup continues after `ENOENT` or `ENOTDIR`. A present but non-executable
+candidate (`EACCES`) does not hide a later valid candidate; if no candidate
+works and at least one was denied, the final error remains `EACCES` instead of
+being reduced to “not found”.
+
+When `cmd` contains `/`, `PATH` is not consulted. An absolute path is passed
+directly to `execve()`; a relative path is interpreted from the child's working
+directory.
 
 ```lua
 local result = assert(babet.exec("./tool", {}, {
@@ -181,29 +201,14 @@ local result = assert(babet.exec("./tool", {}, {
 }))
 ```
 
-#### `PATH` and `opts.env` nuance
-
-The child may receive a replacement `PATH` through `opts.env`. However, the
-current Linux implementation uses `execvpe`, whose initial lookup of `cmd` uses
-the Babet process's `PATH`, not `opts.env.PATH`.
-
-```lua
-local result, err = babet.exec("my-private-tool", {}, {
-    env = { PATH = "/opt/private/bin" },
-})
-```
-
-This does not guarantee that `/opt/private/bin/my-private-tool` will be found.
-Use a direct path:
-
-```lua
-local result, err = babet.exec("/opt/private/bin/my-private-tool", {}, {
-    env = { PATH = "/opt/private/bin" },
-})
-```
-
-The replacement `PATH` is still visible **inside** the child and to commands it
-starts later.
+The ordered candidate list, `argv`, and `envp` are prepared before `fork()`.
+The child performs no allocation or `PATH` parsing: it only tries those paths
+with `execve()`, continuing after `ENOENT`, `ENOTDIR`, or `EACCES`. A file may
+still be removed or replaced before one of those calls; Babet then returns
+`(nil, err)` with the system error it observed. An executable file with an
+unrecognized format also returns a launch error (`ENOEXEC`): Babet never retries
+it through an implicit shell. When migrating from Babet 2.16.x, add a shebang
+to executable scripts that do not have one, for example `#!/bin/sh`.
 
 <a id="exec-args"></a>
 ### `args` and shell-free execution
@@ -218,8 +223,8 @@ local result = assert(babet.exec("cp", {
 }))
 ```
 
-Babet reads only the Lua sequence part, from `1` through `#args`. For predictable
-behavior:
+Babet reads only the raw entries of the dense `1..n` sequence. The `__len`
+and `__index` metamethods are not invoked. For predictable behavior:
 
 - use consecutive indexes starting at `1`;
 - do not leave holes;
@@ -723,7 +728,7 @@ local process, err = babet.spawn(command, args?, opts?)
 | `args` | dense string array | no arguments | `argv[1]..argv[n]` |
 | `opts.cwd` | string | inherited directory | child working directory |
 | `opts.env` | string-to-string table | inherited environment | variables to add/replace |
-| `opts.launch_timeout` | finite number > 0 | unlimited wait | bounds the `chdir` + `exec` phase |
+| `opts.launch_timeout` | finite number > 0 | no general deadline | bounds preparation, terminal handoff, `chdir`, and `exec` |
 | `opts.stdin` | `"pipe"`, `"inherit"`, or `"null"` | `"pipe"` | standard-input source |
 | `opts.stdout` | mode or file table | `"pipe"` | standard-output destination |
 | `opts.stderr` | mode, `"stdout"`, or file table | `"pipe"` | standard-error destination |
@@ -734,7 +739,8 @@ Unknown options are rejected. `spawn` does not accept the `timeout` and
 
 `launch_timeout` covers preparation and launch only, until the new executable
 is established. It is not a total process-lifetime limit. A redirection-file
-open failure happens before `fork()`, so no child is created in that case.
+open failure or program-resolution failure happens before `fork()`, so no child
+is created in that case.
 
 `PATH` lookup, paths containing `/`, environment merging, and shell-free
 execution follow the same rules as `exec`.
@@ -855,6 +861,14 @@ reached final exit with non-reaping `waitid(..., WNOHANG | WNOWAIT)`, restores
 the exact saved parent foreground group and `termios`, then performs the new
 handoff. An older monitor only restores while its own child group still owns
 the terminal, so it cannot take the terminal back from a later child.
+
+An active reservation held by another thread is never awaited indefinitely.
+Babet waits for at most two seconds, or only the remaining `launch_timeout`
+when that deadline is shorter. If the reservation is still held, `spawn()`
+returns `(nil, "terminal handoff is busy")` before any `fork()`: no child is
+silently launched without terminal ownership. The original reservation
+continues its normal handoff or rollback; once released, a later interactive
+launch can acquire the terminal again with the saved parent `termios` intact.
 
 The monitor follows the direct child, not an entire shell job. If that child
 exits after leaving descendants in its process group, Babet restores the parent
@@ -1168,6 +1182,7 @@ The following validations return `(nil, err)` rather than raising:
 - timeout is zero, negative, non-finite, or too large;
 - `max_output` is zero, negative, fractional, or above 2 GiB;
 - program not found or not executable;
+- interactive terminal reservation held for too long;
 - invalid `cwd`;
 - `pipe`, `fork`, `poll`, `waitpid`, or another internal system failure.
 
@@ -1227,7 +1242,7 @@ output in total, in addition to application and Lua-string allocations.
 <a id="exec-design"></a>
 ## Design and limitations
 
-- Linux/POSIX only: the implementation uses `fork`, `execvpe`, `poll`, process
+- Linux/POSIX only: the implementation uses `fork`, `execve`, `poll`, process
   groups, and signals.
 - No implicit shell.
 - One `exec` call still represents one command; native pipelines use
@@ -1239,8 +1254,8 @@ output in total, in addition to application and Lua-string allocations.
 - No full environment replacement or unset operation: `env` merges and an empty
   string remains a defined variable.
 - Unknown `opts` fields are ignored.
-- Initial `PATH` lookup currently follows the Babet process environment even
-  when `opts.env.PATH` is replaced.
+- The ordered `PATH` candidate list, `argv`, and `envp` are prepared in the
+  parent; after `fork()`, the child only traverses that list with `execve()`.
 - `babet.signal` callbacks are not dispatched during the call.
 
 See [`Security`](../security.md) for the general security model.

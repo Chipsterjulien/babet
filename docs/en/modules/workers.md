@@ -255,7 +255,8 @@ Inside the worker:
 - `worker.args` contains a deserialized copy of the table;
 - without `args`, `worker.args == nil`;
 - modifying `worker.args` never changes the parent's table;
-- metatables and subtable identity do not cross the boundary.
+- metatables and subtable identity do not cross the boundary;
+- serialization reads raw entries and invokes neither `__len` nor `__index`.
 
 A direct scalar is not accepted as the second argument:
 

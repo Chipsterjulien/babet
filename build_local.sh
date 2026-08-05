@@ -242,7 +242,7 @@ fi
 PROJECT_NAME="babet"
 #
 # LUA_VERSION="5.4.7"
-LUA_VERSION="5.5.0"
+LUA_VERSION="5.5.1"
 LUA_DIR="lua-$LUA_VERSION"
 LUA_TAR="$LUA_DIR.tar.gz"
 LUA_BUILD_DIR="${BUILD_DIR}/lua_build"
@@ -252,12 +252,12 @@ LUA_URL="https://www.lua.org/ftp/$LUA_TAR"
 # binaire et le SHA256 est revérifié après téléchargement.
 LUA_URLS=(
     "${LUA_URL}"
-    "https://web.archive.org/web/2025id_/${LUA_URL}"
+    "https://web.archive.org/web/202608id_/${LUA_URL}"
 )
 # Pour renseigner LUA_SHA256, calcule le hash depuis la source
 # officielle (laisse vide = build refusé) :
-#   wget -qO- https://www.lua.org/ftp/lua-5.5.0.tar.gz | sha256sum
-LUA_SHA256="57ccc32bbbd005cab75bcc52444052535af691789dba2b9016d5c50640d68b3d"
+#   wget -qO- https://www.lua.org/ftp/lua-5.5.1.tar.gz | sha256sum
+LUA_SHA256="1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce"
 LUA_LIB_NAME="liblua.a"
 LUA_LIB="${LUA_BUILD_DIR}/${LUA_DIR}/src/${LUA_LIB_NAME}"
 LUA_INCLUDE="${LUA_BUILD_DIR}/${LUA_DIR}/src"

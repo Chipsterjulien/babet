@@ -164,21 +164,42 @@ Résultats principaux :
 local result, err = babet.exec("git", { "status", "--short" })
 ```
 
-Si `cmd` ne contient pas de `/`, Babet demande à la libc de rechercher le
-programme dans le `PATH` du processus Babet.
+Si `cmd` ne contient pas de `/`, Babet construit d'abord l'environnement
+final de l'enfant dans le parent, puis recherche le programme avec la valeur de
+`PATH` réellement transmise. Un `PATH` remplacé dans `opts.env` contrôle donc à
+la fois la recherche initiale et les sous-commandes lancées ensuite.
 
 ```lua
-local result = assert(babet.exec("python3", { "--version" }))
+local result = assert(babet.exec("my-private-tool", {}, {
+    env = { PATH = "/opt/private/bin:/usr/bin:/bin" },
+}))
 ```
 
-Si `cmd` contient un `/`, il est traité comme un chemin direct.
+Lorsque l'environnement effectif ne contient aucune variable `PATH`, Babet
+utilise le chemin de recherche POSIX fourni par le système (`_CS_PATH`, avec
+`/bin:/usr/bin` comme repli). Il n'ajoute pas cette valeur à l'environnement de
+l'enfant.
 
-```lua
-local result = assert(babet.exec("/usr/bin/id", { "-u" }))
-```
-
-Un chemin relatif contenant `/` est résolu dans le répertoire de l'enfant,
+Chaque composante vide de `PATH` désigne le répertoire de travail effectif de
+l'enfant. Une composante relative est elle aussi résolue depuis ce répertoire,
 après application éventuelle de `opts.cwd`.
+
+```lua
+local result = assert(babet.exec("tool", {}, {
+    cwd = "/opt/my-app",
+    env = { PATH = "bin:/usr/bin:/bin" },
+}))
+-- recherche d'abord /opt/my-app/bin/tool
+```
+
+Babet poursuit la recherche après `ENOENT` ou `ENOTDIR`. Un candidat présent
+mais non exécutable (`EACCES`) n'empêche pas un candidat ultérieur de réussir ;
+si aucun candidat ne fonctionne et qu'au moins un accès a été refusé, l'erreur
+finale reste `EACCES` plutôt que d'être transformée en « introuvable ».
+
+Si `cmd` contient un `/`, `PATH` n'est pas consulté. Un chemin absolu est
+transmis directement à `execve()` ; un chemin relatif est interprété depuis le
+répertoire de l'enfant.
 
 ```lua
 local result = assert(babet.exec("./tool", {}, {
@@ -186,30 +207,16 @@ local result = assert(babet.exec("./tool", {}, {
 }))
 ```
 
-#### Nuance sur `PATH` et `opts.env`
-
-L'environnement final du programme enfant peut contenir un `PATH` remplacé via
-`opts.env`. Toutefois, avec l'implémentation Linux actuelle basée sur
-`execvpe`, la recherche initiale de `cmd` utilise le `PATH` du processus Babet,
-pas la valeur `PATH` fournie dans `opts.env`.
-
-```lua
-local result, err = babet.exec("my-private-tool", {}, {
-    env = { PATH = "/opt/private/bin" },
-})
-```
-
-Cette forme ne garantit donc pas que `/opt/private/bin/my-private-tool` sera
-trouvé. Utilise un chemin direct :
-
-```lua
-local result, err = babet.exec("/opt/private/bin/my-private-tool", {}, {
-    env = { PATH = "/opt/private/bin" },
-})
-```
-
-Le nouveau `PATH` sera bien visible **dans** le programme enfant et par les
-sous-commandes qu'il lancera ensuite.
+La liste ordonnée des candidats, `argv` et `envp` sont préparés avant
+`fork()`. L'enfant n'alloue rien et ne reparcourt pas `PATH` : il essaie
+uniquement ces chemins avec `execve()`, en poursuivant après `ENOENT`,
+`ENOTDIR` ou `EACCES`. Un fichier peut néanmoins être supprimé ou remplacé
+avant l'un de ces appels ; Babet renvoie alors `(nil, err)` avec l'erreur
+système observée. Un fichier
+exécutable dont le format n'est pas reconnu renvoie également une erreur de
+lancement (`ENOEXEC`) : Babet ne tente jamais de le relancer implicitement avec
+un shell. Lors d'une migration depuis Babet 2.16.x, ajoutez donc un shebang aux
+scripts exécutables qui en sont dépourvus, par exemple `#!/bin/sh`.
 
 <a id="exec-args"></a>
 ### `args` et absence de shell
@@ -225,8 +232,9 @@ local result = assert(babet.exec("cp", {
 }))
 ```
 
-Babet lit uniquement la partie séquence déterminée par Lua, de `1` à `#args`.
-Pour un comportement prévisible :
+Babet lit uniquement les entrées brutes de la séquence dense `1..n`. Les
+métaméthodes `__len` et `__index` ne sont pas invoquées. Pour un comportement
+prévisible :
 
 - utilise des indices consécutifs à partir de `1` ;
 - ne laisse aucun trou ;
@@ -742,7 +750,7 @@ local process, err = babet.spawn(command, args?, opts?)
 | `args` | array dense de strings | aucun argument | `argv[1]..argv[n]` |
 | `opts.cwd` | string | répertoire courant hérité | répertoire de l'enfant |
 | `opts.env` | table string -> string | environnement hérité | variables ajoutées/remplacées |
-| `opts.launch_timeout` | nombre fini > 0 | attente illimitée | borne la phase `chdir` + `exec` |
+| `opts.launch_timeout` | nombre fini > 0 | aucune échéance générale | borne la préparation, le transfert terminal, `chdir` et `exec` |
 | `opts.stdin` | `"pipe"`, `"inherit"` ou `"null"` | `"pipe"` | source de l'entrée standard |
 | `opts.stdout` | mode ou table fichier | `"pipe"` | destination de la sortie standard |
 | `opts.stderr` | mode, `"stdout"` ou table fichier | `"pipe"` | destination de la sortie d'erreur |
@@ -754,8 +762,9 @@ progressivement.
 
 `launch_timeout` couvre uniquement la préparation et la phase de lancement
 jusqu'à l'établissement du nouvel exécutable. Il ne limite pas la durée totale
-du programme. Une erreur d'ouverture d'un fichier de redirection survient avant
-`fork()` : aucun enfant n'est alors créé.
+du programme. Une erreur d'ouverture d'un fichier de redirection ou de
+résolution du programme survient avant `fork()` : aucun enfant n'est alors
+créé.
 
 La recherche dans `PATH`, les chemins contenant `/`, la fusion de `env` et
 l'absence de shell implicite suivent les mêmes règles que `exec`.
@@ -881,6 +890,15 @@ récolter, restaure exactement le groupe de premier plan et le `termios` parent
 sauvegardés, puis effectue le nouveau transfert. Un ancien moniteur ne restaure
 que tant que son propre groupe enfant possède encore le terminal : il ne peut
 donc pas le reprendre à un enfant lancé ensuite.
+
+Une réservation encore active dans un autre thread n'est jamais attendue sans
+limite. Babet attend au plus deux secondes, ou seulement le temps restant de
+`launch_timeout` lorsqu'il est plus court. Si la réservation n'est toujours
+pas libérée, `spawn()` renvoie `(nil, "terminal handoff is busy")` avant tout
+`fork()` : aucun enfant n'est lancé silencieusement sans terminal. La
+réservation initiale poursuit son propre rollback ou transfert normal ; une
+fois libérée, un lancement interactif suivant peut de nouveau acquérir le
+terminal et retrouve le `termios` parent sauvegardé.
 
 Le moniteur suit l'enfant direct, pas un job shell complet. Si cet enfant se
 termine après avoir laissé des descendants dans son groupe de processus, Babet
@@ -1216,6 +1234,7 @@ Les validations suivantes ne lèvent pas ; elles renvoient `(nil, err)` :
 - timeout nul, négatif, non fini ou trop grand ;
 - `max_output` nul, négatif, fractionnaire ou supérieur à 2 Gio ;
 - programme introuvable ou non exécutable ;
+- réservation du terminal interactif occupée trop longtemps ;
 - `cwd` invalide ;
 - échec de `pipe`, `fork`, `poll`, `waitpid` ou autre erreur interne système.
 
@@ -1276,7 +1295,7 @@ au total, plus les allocations du programme et des chaînes Lua.
 <a id="exec-design"></a>
 ## Décisions et limites
 
-- Linux/POSIX uniquement : l'implémentation utilise `fork`, `execvpe`, `poll`,
+- Linux/POSIX uniquement : l'implémentation utilise `fork`, `execve`, `poll`,
   les groupes de processus et les signaux.
 - Aucun shell implicite.
 - Un appel `exec` reste une commande unique ; les pipelines natifs utilisent
@@ -1288,8 +1307,9 @@ au total, plus les allocations du programme et des chaînes Lua.
 - Pas de modification/unset complet de l'environnement : `env` fusionne et une
   chaîne vide reste une variable définie.
 - Les champs inconnus de `opts` sont ignorés.
-- La recherche initiale dans `PATH` suit actuellement l'environnement du
-  processus Babet, même si `opts.env.PATH` est remplacé.
+- La liste ordonnée des candidats de `PATH`, `argv` et `envp` sont préparés
+  dans le parent ; après `fork()`, l'enfant ne parcourt cette liste qu'avec
+  `execve()`.
 - Les callbacks de `babet.signal` ne sont pas dispatchés pendant l'appel.
 
 Pour les règles de sécurité générales, consulte

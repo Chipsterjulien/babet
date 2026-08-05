@@ -371,7 +371,7 @@ bool collect_stages(
 
     for (size_t i = 1; i <= count; ++i)
     {
-        lua_geti(L, idx, static_cast<lua_Integer>(i));
+        lua_rawgeti(L, idx, static_cast<lua_Integer>(i));
         const int stage_idx = lua_absindex(L, -1);
         size_t stage_size = 0;
         const std::string label = "commands[" + std::to_string(i) + "]";
@@ -382,7 +382,7 @@ bool collect_stages(
             return false;
         }
 
-        lua_geti(L, stage_idx, 1);
+        lua_rawgeti(L, stage_idx, 1);
         if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 2);
@@ -405,7 +405,7 @@ bool collect_stages(
         }
         lua_pop(L, 1);
 
-        lua_geti(L, stage_idx, 2);
+        lua_rawgeti(L, stage_idx, 2);
         if (!babet_process::collect_args(L, -1, stage.command,
                                          stage.argv_strings, err))
         {
@@ -418,7 +418,7 @@ bool collect_stages(
         std::string local_cwd;
         bool has_local_cwd = false;
         std::vector<std::pair<std::string, std::string>> local_env;
-        lua_geti(L, stage_idx, 3);
+        lua_rawgeti(L, stage_idx, 3);
         if (!validate_keys(L, -1, local_keys, "stage", err) ||
             !babet_process::collect_cwd_env(L, -1, local_cwd,
                                             has_local_cwd, local_env, err))

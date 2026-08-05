@@ -6,6 +6,95 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.17.0] - 2026-08-05
+
+### Résumé
+
+Babet 2.17.0 termine le durcissement Linux du lancement des processus prévu
+après le travail sur le cycle de vie du terminal. La version passe le runtime
+embarqué à Lua 5.5.1, rend l'environnement final de l'enfant autoritaire pour
+la recherche de l'exécutable, retire `execvpe()` du code après `fork()`, borne
+les réservations concurrentes du terminal interactif et sépare les
+responsabilités de lancement et de terminal de `process_common.cpp`.
+
+### Lua 5.5.1
+
+- mise à jour de Lua 5.5.0 vers Lua 5.5.1, téléchargé puis lié statiquement,
+  avec le checksum SHA-256 officiel ;
+- actualisation du fallback d'archive et suppression du chemin
+  `lua-5.5.0` codé en dur dans le harnais OOM, qui lit maintenant la version
+  déclarée par `build_local.sh` ;
+- conservation de l'API Lua 5.5 et du modèle de protection OOM/RAII introduit
+  en 2.15.
+
+### Préparation du lancement dans le parent
+
+- construction avant `fork()` de l'environnement hérité puis surchargé, de
+  `argv`, `envp`, du répertoire de travail effectif et de la liste ordonnée des
+  candidats exécutables pour `exec`, `spawn`, `pipeline` et `spawnPipeline` ;
+- utilisation du `opts.env.PATH` final pour la recherche initiale, ce qui
+  corrige l'ancienne incohérence où l'enfant recevait un `PATH` mais
+  `execvpe()` en consultait un autre ;
+- résolution des composantes vides et relatives de `PATH` depuis le `cwd`
+  effectif de l'enfant, utilisation du défaut système `_CS_PATH` lorsque
+  `PATH` est absent, sans ajouter ce défaut à l'environnement transmis ;
+- conservation de la priorité Linux : poursuite après `ENOENT`/`ENOTDIR`,
+  candidat ultérieur autorisé après `EACCES`, puis retour de `EACCES` lorsque
+  tous les candidats utilisables ont été refusés ;
+- parcours des candidats préparés dans chaque enfant en n'appelant que
+  `execve()`, sans allocation ni analyse de `PATH`. Un fichier qui disparaît
+  après la préparation renvoie l'erreur réelle de recherche et `ENOEXEC` n'est
+  pas relancé implicitement par un shell ;
+- verrouillage de `PreparedCommand` contre toute copie ou tout déplacement :
+  ses vues `argv`/`envp` pointent dans ses propres chaînes et une future
+  relocalisation accidentelle devient désormais une erreur de compilation ;
+- sérialisation des séquences Lua par accès bruts (`lua_rawlen`/
+  `lua_rawgeti`) afin que `__len` et `__index` ne puissent pas exécuter de code
+  Lua au-dessus d'objets C++ vivants.
+
+### Migration depuis Babet 2.16
+
+Un fichier marqué exécutable mais dépourvu de shebang n'est plus relancé
+implicitement avec `/bin/sh`. Il échoue désormais avec `ENOEXEC` (« Exec format
+error »). Ajoutez un interpréteur explicite en première ligne, par exemple :
+
+```sh
+#!/bin/sh
+```
+
+Cette modification ne change aucune signature Lua, mais elle peut affecter les
+helpers ou scripts historiques qui comptaient sur le fallback implicite de
+`execvpe()`.
+
+### Transfert de terminal borné
+
+- remplacement de l'attente sans limite du registre terminal par une attente
+  temporisée monotone de deux secondes au maximum, plafonnée par le temps
+  restant de `launch_timeout` ;
+- retour de `terminal handoff is busy` avant `fork()` lorsqu'un autre thread
+  conserve trop longtemps une réservation, sans enfant parasite ni lancement
+  silencieux sans terminal ;
+- conservation de l'annulation de réservation, du propriétaire du terminal,
+  du `termios` parent sauvegardé, du moniteur de l'enfant direct et de la
+  récupération lors du lancement interactif suivant ;
+- ajout d'une régression PTY déterministe qui bloque une réservation, vérifie
+  l'échec borné et l'absence d'enfant parasite, puis prouve qu'une nouvelle
+  invite interactive et l'écho du terminal fonctionnent encore.
+
+### Structure interne et tests
+
+- déplacement de la préparation parent dans `process_launch_internal.*` et
+  maintien du registre terminal privé dans `process_terminal_internal.*`, ce
+  qui réduit les responsabilités et la taille de `process_common.cpp` ;
+- ajout d'un préflight C++ hors réseau pour l'environnement final, le `cwd`,
+  les composantes `PATH` vides ou relatives, `ENOENT`, `ENOTDIR`, `EACCES`,
+  `ENOEXEC` et la course entre résolution et `execve()` ;
+- extension de la suite Lua aux quatre API processus et de l'audit structurel
+  à la préparation parent, `execve()`, l'attente terminal temporisée, le
+  rollback et la récupération PTY ;
+- mise à jour des références processus et pipelines en français et en anglais,
+  puis régénération des deux manuels PDF.
+
 ## [2.16.1] - 2026-08-05
 
 ### Correction du paquet documentaire

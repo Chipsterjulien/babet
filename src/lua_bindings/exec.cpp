@@ -1,16 +1,6 @@
-// _GNU_SOURCE rend visibles les extensions GNU/Linux dans les
-// headers POSIX : execvpe() (depuis glibc 2.11) et pipe2() (depuis
-// glibc 2.9). pipe2() est formellement async-signal-safe et nous
-// évite la fenêtre de race entre pipe() et fcntl(FD_CLOEXEC).
-// execvpe() n'est PAS formellement async-signal-safe (résolution
-// $PATH), mais permet d'éviter setenv() dans l'enfant après fork
-// (un cas avéré de deadlock multi-thread) — gain pratique net. Le
-// détail est dans le commentaire avant l'execvpe() lui-même + dans
-// notes.md (dette technique : résoudre PATH côté parent un jour).
-// DOIT être défini AVANT tous les includes système.
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
+// Le moteur commun prépare désormais argv, envp et la résolution PATH dans
+// le parent. Après fork(), l'enfant n'effectue que les opérations POSIX
+// nécessaires aux redirections, au cwd et à execve().
 
 #include "exec.hpp"
 #include "lua_utils.hpp"
@@ -33,13 +23,6 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sys/wait.h>
-
-// `environ` est défini par la libc système (POSIX). Il pointe vers
-// le tableau d'environnement du processus courant, terminé par NULL.
-// On le lit dans le parent pour construire un envp custom avant fork,
-// ce qui évite d'appeler setenv() dans l'enfant (non async-signal-safe,
-// risque de deadlock heap en contexte multi-thread — cf. revue Gemini).
-extern char **environ;
 
 namespace
 {

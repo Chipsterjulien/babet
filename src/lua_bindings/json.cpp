@@ -185,7 +185,7 @@ namespace
             json arr = json::array();
             for (lua_Integer i = 1; i <= len; ++i)
             {
-                lua_geti(L, idx, i);
+                lua_rawgeti(L, idx, i);
                 arr.push_back(lua_to_json(L, -1, depth + 1));
                 lua_pop(L, 1);
             }

@@ -434,6 +434,134 @@ if status_restored ~= "status-restored" then
     os.exit(33)
 end
 
+-- Babet 2.17 : une réservation de terminal détenue par un autre thread ne
+-- doit jamais bloquer indéfiniment ni laisser lancer un enfant sans terminal.
+local busy_marker = os.getenv("BABET_TEST_TERMINAL_BUSY_MARKER")
+local busy_parasite = os.getenv("BABET_TEST_TERMINAL_BUSY_PARASITE")
+if not busy_marker or not busy_parasite then
+    io.stderr:write("terminal busy fixture paths are missing\n")
+    os.exit(40)
+end
+os.remove(busy_marker)
+os.remove(busy_parasite)
+assert(babet.setenv("BABET_TEST_TERMINAL_RESERVATION_MARKER", busy_marker))
+assert(babet.setenv("BABET_TEST_TERMINAL_RESERVATION_DELAY_MS", "800"))
+
+local busy_worker, busy_worker_err = babet.workers.spawn([[
+    local process, spawn_err = babet.spawn("sh", {
+        "-c", "stty -echo; sleep 0.2; exit 0",
+    }, {
+        stdin = "inherit",
+        stdout = "inherit",
+        stderr = "inherit",
+    })
+    if not process then
+        return { spawned = false, error = spawn_err }
+    end
+    local result, wait_err = process:wait(3.0)
+    process:close()
+    return {
+        spawned = true,
+        code = result and result.code or nil,
+        wait_error = wait_err,
+    }
+]])
+if not busy_worker then
+    io.stderr:write("terminal busy worker failed: "
+        .. tostring(busy_worker_err) .. "\n")
+    os.exit(41)
+end
+
+local reservation_observed = false
+for _ = 1, 200 do
+    local exists, exists_err = babet.fileExists(busy_marker)
+    if exists == true then
+        reservation_observed = true
+        break
+    end
+    if exists == nil then
+        io.stderr:write("terminal busy marker check failed: "
+            .. tostring(exists_err) .. "\n")
+        os.exit(42)
+    end
+    assert(babet.sleep(5, "ms"))
+end
+if not reservation_observed then
+    io.stderr:write("terminal reservation was not observed\n")
+    os.exit(43)
+end
+
+local busy_started = babet.monotonic()
+local blocked_process, blocked_err = babet.spawn("sh", {
+    "-c", [[printf launched > "$BABET_TEST_TERMINAL_BUSY_PARASITE"]],
+}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+    launch_timeout = 0.15,
+})
+local busy_elapsed = babet.monotonic() - busy_started
+if blocked_process then
+    blocked_process:kill()
+    blocked_process:close()
+    io.stderr:write("busy terminal unexpectedly launched a child\n")
+    os.exit(44)
+end
+if type(blocked_err) ~= "string"
+        or blocked_err:find("terminal handoff is busy", 1, true) == nil
+        or busy_elapsed > 1.0 then
+    io.stderr:write("unexpected terminal busy result: "
+        .. tostring(blocked_err) .. " dt=" .. tostring(busy_elapsed) .. "\n")
+    os.exit(45)
+end
+print("TERMINAL_BUSY_TIMEOUT_OK")
+
+local parasite_exists, parasite_err = babet.fileExists(busy_parasite)
+if parasite_exists ~= false then
+    io.stderr:write("terminal busy launch left a child: "
+        .. tostring(parasite_err) .. "\n")
+    os.exit(46)
+end
+print("TERMINAL_BUSY_NO_CHILD_OK")
+
+local joined, worker_result = busy_worker:join(4.0)
+if joined ~= true or type(worker_result) ~= "table"
+        or worker_result.spawned ~= true or worker_result.code ~= 0
+        or worker_result.wait_error ~= nil then
+    io.stderr:write("terminal busy worker result mismatch: "
+        .. tostring(joined) .. " / " .. tostring(worker_result) .. "\n")
+    os.exit(47)
+end
+print("TERMINAL_BUSY_WORKER_OK")
+
+local recovery_process, recovery_err = babet.spawn("sh", {
+    "-c", [[printf 'BUSY_RECOVERY_PROMPT\n'; IFS= read -r answer; if [ "$answer" = busy-recovered ]; then printf 'BUSY_RECOVERY_ACCEPTED\n'; exit 0; else exit 48; fi]],
+}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+})
+if not recovery_process then
+    io.stderr:write("terminal busy recovery spawn failed: "
+        .. tostring(recovery_err) .. "\n")
+    os.exit(48)
+end
+local recovery_result, recovery_wait_err = recovery_process:wait(2.0)
+if not recovery_result then
+    recovery_process:kill()
+    recovery_process:close()
+    io.stderr:write("terminal busy recovery did not finish: "
+        .. tostring(recovery_wait_err) .. "\n")
+    os.exit(49)
+end
+recovery_process:close()
+if recovery_result.code ~= 0 then
+    io.stderr:write("terminal busy recovery exit code: "
+        .. tostring(recovery_result.code) .. "\n")
+    os.exit(50)
+end
+print("TERMINAL_BUSY_RECOVERY_OK")
+
 print("PTY_SPAWN_OK")
 LUA
 
@@ -449,12 +577,16 @@ import time
 binary, project, sudo_enabled = sys.argv[1:4]
 environment = os.environ.copy()
 environment["BABET_TEST_SUDO_PTY"] = sudo_enabled
+environment["BABET_TEST_TERMINAL_BUSY_MARKER"] = os.path.join(
+    project, "terminal-busy-reserved.marker")
+environment["BABET_TEST_TERMINAL_BUSY_PARASITE"] = os.path.join(
+    project, "terminal-busy-parasite.marker")
 pid, master = pty.fork()
 if pid == 0:
     os.execve(binary, [binary, project], environment)
 
 os.set_blocking(master, False)
-deadline = time.monotonic() + 18.0
+deadline = time.monotonic() + 24.0
 output = bytearray()
 sent_parent = False
 sent_child = False
@@ -468,6 +600,7 @@ sent_resume_restored = False
 sent_async_restored = False
 sent_race_child = False
 sent_status_restored = False
+sent_busy_recovery = False
 sent_sudo_child = False
 status = None
 
@@ -533,6 +666,10 @@ try:
                 and b"STATUS_RESTORED_PROMPT" in output):
             os.write(master, b"status-restored\n")
             sent_status_restored = True
+        if (sent_status_restored and not sent_busy_recovery
+                and b"BUSY_RECOVERY_PROMPT" in output):
+            os.write(master, b"busy-recovered\n")
+            sent_busy_recovery = True
 
         waited, current = os.waitpid(pid, os.WNOHANG)
         if waited == pid:
@@ -600,6 +737,13 @@ required = (
     "STATUS_REFRESH_OK",
     "STATUS_RESTORED_PROMPT",
     "status-restored",
+    "TERMINAL_BUSY_TIMEOUT_OK",
+    "TERMINAL_BUSY_NO_CHILD_OK",
+    "TERMINAL_BUSY_WORKER_OK",
+    "BUSY_RECOVERY_PROMPT",
+    "busy-recovered",
+    "BUSY_RECOVERY_ACCEPTED",
+    "TERMINAL_BUSY_RECOVERY_OK",
     "PTY_SPAWN_OK",
 )
 if sudo_enabled == "1":

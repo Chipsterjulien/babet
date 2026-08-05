@@ -1,8 +1,6 @@
 #ifndef BABET_PROCESS_COMMON_HPP
 #define BABET_PROCESS_COMMON_HPP
 
-#include <lua.hpp>
-
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -11,6 +9,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <termios.h>
+
+struct lua_State;
 
 namespace babet_process
 {

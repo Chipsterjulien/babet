@@ -51,6 +51,95 @@ local function ok_raises(name, fn, needle)
     ok(name, good, tostring(err))
 end
 
+function write_test_file(path, data)
+    local file, err = io.open(path, "wb")
+    if not file then return nil, err end
+    local wrote, write_err = file:write(data)
+    local closed, close_err = file:close()
+    if not wrote then return nil, write_err end
+    if not closed then return nil, close_err end
+    return true
+end
+
+-- Isolated in its own Lua function so these regression fixtures do not consume
+-- local-variable slots in the already large main test chunk.
+function run_raw_table_access_regressions(W)
+    do
+        local len_calls, index_calls = 0, 0
+        local payload = setmetatable({ "alpha", "beta" }, {
+            __len = function()
+                len_calls = len_calls + 1
+                error("workers serialization must not invoke __len")
+            end,
+            __index = function()
+                index_calls = index_calls + 1
+                error("workers serialization must not invoke __index")
+            end,
+        })
+        local call_ok, job, spawn_err = pcall(
+            W.spawn,
+            "return table.concat(worker.args, ':')",
+            payload)
+        local joined, value = false, nil
+        if call_ok and job then
+            joined, value = job:join()
+        end
+        ok("workers serialization ignores __len/__index metamethods",
+            call_ok and spawn_err == nil and len_calls == 0
+            and index_calls == 0 and joined == true
+            and value == "alpha:beta",
+            "call_ok=" .. tostring(call_ok)
+            .. " spawn_err=" .. tostring(spawn_err)
+            .. " len_calls=" .. tostring(len_calls)
+            .. " index_calls=" .. tostring(index_calls)
+            .. " joined=" .. tostring(joined)
+            .. " value=" .. tostring(value))
+    end
+
+    do
+        local index_calls = 0
+        local hostile = {
+            __index = function()
+                index_calls = index_calls + 1
+                error("raw sequence access must not invoke __index")
+            end,
+        }
+
+        local encoded, encode_err = babet.json.encode(
+            setmetatable({ "a", "b" }, hostile))
+        ok("json array serialization uses raw sequence access",
+            encoded == '["a","b"]' and encode_err == nil
+            and index_calls == 0,
+            "encoded=" .. tostring(encoded)
+            .. " err=" .. tostring(encode_err)
+            .. " index_calls=" .. tostring(index_calls))
+
+        local exec_result, exec_err = babet.exec(
+            "printf", setmetatable({ "%s", "raw-exec" }, hostile))
+        ok("exec args use raw sequence access",
+            type(exec_result) == "table" and exec_err == nil
+            and exec_result.stdout == "raw-exec"
+            and index_calls == 0,
+            "err=" .. tostring(exec_err)
+            .. " index_calls=" .. tostring(index_calls))
+
+        local pipeline_result, pipeline_err = babet.pipeline(
+            setmetatable({
+                setmetatable({
+                    "printf",
+                    setmetatable({ "%s", "raw-pipeline" }, hostile),
+                }, hostile),
+                setmetatable({ "cat" }, hostile),
+            }, hostile))
+        ok("pipeline stages and args use raw sequence access",
+            type(pipeline_result) == "table" and pipeline_err == nil
+            and pipeline_result.stdout == "raw-pipeline"
+            and index_calls == 0,
+            "err=" .. tostring(pipeline_err)
+            .. " index_calls=" .. tostring(index_calls))
+    end
+end
+
 -- --- setup -----------------------------------------------------------
 local startDir, sderr = babet.currentDir()
 if not startDir then
@@ -2809,6 +2898,82 @@ do
         type(r7) == "table" and r7.stdout:find("ok42", 1, true) ~= nil,
         "stdout=" .. tostring(r7 and r7.stdout))
 
+    -- Babet 2.17 : la recherche utilise le PATH de l'environnement final
+    -- transmis à l'enfant, et non plus le PATH du processus Babet.
+    local exec_path_dir = sb("exec_path")
+    assert(babet.mkdir(exec_path_dir))
+    local exec_path_tool = exec_path_dir .. "/private-exec-tool"
+    local exec_path_file = assert(io.open(exec_path_tool, "w"))
+    exec_path_file:write("#!/bin/sh\nprintf exec-path")
+    exec_path_file:close()
+    assert(babet.setMode(exec_path_tool, "755"))
+    local exec_path_result, exec_path_err = babet.exec(
+        "private-exec-tool", {}, { env = { PATH = exec_path_dir } })
+    ok("exec lookup uses opts.env.PATH",
+        type(exec_path_result) == "table" and exec_path_err == nil
+        and exec_path_result.stdout == "exec-path"
+        and exec_path_result.code == 0, tostring(exec_path_err))
+
+    local exec_cwd_dir = sb("exec_path_cwd")
+    assert(babet.mkdir(exec_cwd_dir))
+    local exec_cwd_tool = exec_cwd_dir .. "/cwd-exec-tool"
+    local exec_cwd_file = assert(io.open(exec_cwd_tool, "w"))
+    exec_cwd_file:write("#!/bin/sh\nprintf cwd-path")
+    exec_cwd_file:close()
+    assert(babet.setMode(exec_cwd_tool, "755"))
+    local exec_cwd_result, exec_cwd_err = babet.exec(
+        "cwd-exec-tool", {}, {
+            cwd = exec_cwd_dir,
+            env = { PATH = ":/usr/bin:/bin" },
+        })
+    ok("exec empty PATH component follows opts.cwd",
+        type(exec_cwd_result) == "table" and exec_cwd_err == nil
+        and exec_cwd_result.stdout == "cwd-path"
+        and exec_cwd_result.code == 0, tostring(exec_cwd_err))
+
+    local exec_relative_bin = exec_cwd_dir .. "/bin"
+    assert(babet.mkdir(exec_relative_bin))
+    local exec_relative_tool = exec_relative_bin .. "/relative-exec-tool"
+    local exec_relative_file = assert(io.open(exec_relative_tool, "w"))
+    exec_relative_file:write("#!/bin/sh\nprintf relative-path")
+    exec_relative_file:close()
+    assert(babet.setMode(exec_relative_tool, "755"))
+    local exec_relative_result, exec_relative_err = babet.exec(
+        "relative-exec-tool", {}, {
+            cwd = exec_cwd_dir,
+            env = { PATH = "bin:/usr/bin:/bin" },
+        })
+    ok("exec relative PATH component follows opts.cwd",
+        type(exec_relative_result) == "table" and exec_relative_err == nil
+        and exec_relative_result.stdout == "relative-path"
+        and exec_relative_result.code == 0, tostring(exec_relative_err))
+
+    local denied_path_dir = sb("exec_path_denied")
+    local allowed_path_dir = sb("exec_path_allowed")
+    assert(babet.mkdir(denied_path_dir))
+    assert(babet.mkdir(allowed_path_dir))
+    local denied_tool = denied_path_dir .. "/path-priority-tool"
+    local allowed_tool = allowed_path_dir .. "/path-priority-tool"
+    assert(write_test_file(denied_tool, "not executable\n"))
+    assert(babet.setMode(denied_tool, "644"))
+    assert(write_test_file(allowed_tool,
+        "#!/bin/sh\nprintf eacces-then-success"))
+    assert(babet.setMode(allowed_tool, "755"))
+    local priority_result, priority_err = babet.exec(
+        "path-priority-tool", {}, {
+            env = {
+                PATH = denied_path_dir .. ":" .. allowed_path_dir,
+            },
+        })
+    ok("exec skips an EACCES candidate when a later PATH entry works",
+        type(priority_result) == "table" and priority_err == nil
+        and priority_result.stdout == "eacces-then-success"
+        and priority_result.code == 0, tostring(priority_err))
+    local denied_result, denied_err = babet.exec(
+        "path-priority-tool", {}, { env = { PATH = denied_path_dir } })
+    ok_fail("exec reports failure when PATH only contains EACCES",
+        denied_result, denied_err)
+
     local r7_empty = babet.exec("sh", { "-c", [[
         if [ "${BABET_EMPTY+x}" = x ] && [ -z "$BABET_EMPTY" ]; then
             printf empty-but-defined
@@ -3178,11 +3343,12 @@ do
     pipeline_path_file:close()
     assert(babet.setMode(pipeline_path_tool, "755"))
     r, e = babet.pipeline({ { "private-tool" }, { "cat" } }, {
-        env = { PATH = pipeline_path_dir },
+        env = { PATH = pipeline_path_dir .. ":/usr/bin:/bin" },
     })
-    ok_fail("pipeline lookup does not use opts.env.PATH", r, e)
+    ok("pipeline lookup uses opts.env.PATH",
+        type(r) == "table" and e == nil and r.stdout == "pipeline-path")
     r, e = babet.pipeline({ { pipeline_path_tool }, { "cat" } }, {
-        env = { PATH = pipeline_path_dir },
+        env = { PATH = pipeline_path_dir .. ":/usr/bin:/bin" },
     })
     ok("pipeline explicit command path uses overridden child environment",
         type(r) == "table" and e == nil and r.stdout == "pipeline-path")
@@ -3623,6 +3789,36 @@ do
     ok("pipeline write after close -> closed",
         closed_write == nil and closed_write_err == "closed")
 
+    local spawn_pipeline_path_dir = sb("spawn_pipeline_path")
+    assert(babet.mkdir(spawn_pipeline_path_dir))
+    local spawn_pipeline_path_tool =
+        spawn_pipeline_path_dir .. "/private-spawn-pipeline-tool"
+    local spawn_pipeline_path_file =
+        assert(io.open(spawn_pipeline_path_tool, "w"))
+    spawn_pipeline_path_file:write(
+        "#!/bin/sh\nprintf spawn-pipeline-path")
+    spawn_pipeline_path_file:close()
+    assert(babet.setMode(spawn_pipeline_path_tool, "755"))
+    p, e = babet.spawnPipeline({
+        { "private-spawn-pipeline-tool" }, { "cat" },
+    }, {
+        env = { PATH = spawn_pipeline_path_dir .. ":/usr/bin:/bin" },
+    })
+    ok("spawnPipeline lookup uses opts.env.PATH",
+        p ~= nil and e == nil, tostring(e))
+    if p then
+        local path_out, path_errs, path_stream_err = drain_pipeline(p, 2, 5)
+        local path_result, path_wait_err = p:wait(2)
+        ok("spawnPipeline PATH command executes successfully",
+            path_out == "spawn-pipeline-path"
+            and path_stream_err == nil
+            and path_result and path_result.code == 0
+            and path_wait_err == nil
+            and path_errs[1] == "" and path_errs[2] == "",
+            tostring(path_stream_err or path_wait_err))
+        p:close()
+    end
+
     p, e = babet.spawnPipeline({
         { "sh", { "-c", "printf '%s|%s' \"$PWD\" \"$BABET_PIPE_ENV\"" }, {
             cwd = "/tmp",
@@ -3956,15 +4152,6 @@ do
         end
     end
 
-    local function write_test_file(path, data)
-        local file, err = io.open(path, "wb")
-        if not file then return nil, err end
-        local wrote, write_err = file:write(data)
-        local closed, close_err = file:close()
-        if not wrote then return nil, write_err end
-        if not closed then return nil, close_err end
-        return true
-    end
 
     local function read_test_file(path)
         local file, err = io.open(path, "rb")
@@ -4031,6 +4218,27 @@ do
     ok_fail("spawn redirection rejects NUL paths", p, e)
     p, e = babet.spawn("__babet_missing_command__")
     ok_fail("spawn missing command -> (nil, err)", p, e)
+
+    local spawn_path_dir = sb("spawn_path")
+    assert(babet.mkdir(spawn_path_dir))
+    local spawn_path_tool = spawn_path_dir .. "/private-spawn-tool"
+    assert(write_test_file(spawn_path_tool, "#!/bin/sh\nprintf spawn-path"))
+    assert(babet.setMode(spawn_path_tool, "755"))
+    p, e = babet.spawn("private-spawn-tool", {}, {
+        env = { PATH = spawn_path_dir },
+    })
+    ok("spawn lookup uses opts.env.PATH", p ~= nil and e == nil, tostring(e))
+    if p then
+        local spawn_path_output, spawn_path_read_err = read_stdout_all(p, 3)
+        local spawn_path_result, spawn_path_wait_err = p:wait(2)
+        ok("spawn PATH command executes successfully",
+            spawn_path_output == "spawn-path"
+            and spawn_path_read_err == nil
+            and spawn_path_result and spawn_path_result.code == 0
+            and spawn_path_wait_err == nil,
+            tostring(spawn_path_read_err or spawn_path_wait_err))
+        p:close()
+    end
 
     -- Redirections de fichiers : troncature, ajout, permissions et fusion.
     local result, wait_err
@@ -12057,6 +12265,9 @@ do
     ok("babet.workers is a table", type(W) == "table")
     ok("workers.spawn is a function", type(W.spawn) == "function")
     ok("workers.channel is a function", type(W.channel) == "function")
+
+    run_raw_table_access_regressions(W)
+    run_raw_table_access_regressions = nil
 
     do
         local job, spawn_err = W.spawn([[

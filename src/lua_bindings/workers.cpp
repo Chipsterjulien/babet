@@ -1172,8 +1172,15 @@ namespace
             }
         } guard{visited, table_id, table_id != nullptr};
 
-        // Compter les clés et déterminer si c'est une séquence 1..n.
-        lua_Integer n = luaL_len(L, idx);
+        // Compter les clés sans exécuter __len : la sérialisation copie les
+        // entrées réellement stockées et ignore volontairement les métatables.
+        const size_t raw_n = lua_rawlen(L, idx);
+        if (raw_n > static_cast<size_t>(LUA_MAXINTEGER))
+        {
+            set_transfer_error(err, context, "array is too large");
+            return false;
+        }
+        lua_Integer n = static_cast<lua_Integer>(raw_n);
         bool is_array = (n > 0);
         if (is_array)
         {
@@ -1229,7 +1236,7 @@ namespace
             out = json::array();
             for (lua_Integer i = 1; i <= n; ++i)
             {
-                lua_geti(L, idx, i);
+                lua_rawgeti(L, idx, i);
                 json elem;
                 if (!lua_to_json(L, lua_gettop(L), elem, err, depth + 1,
                                  visited, budget, context))

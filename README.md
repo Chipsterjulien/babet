@@ -16,28 +16,26 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.16.1**. See the
+Current release candidate: **2.17.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.16.1 is a documentation-only patch release. It republishes the
-English and French PDF manuals after the final 2.16.0 terminal-handoff
-race fix, with no runtime behavior change.
+Babet 2.17.0 hardens process launch on Linux and updates the embedded runtime
+to Lua 5.5.1. `exec`, `spawn`, `pipeline`, and `spawnPipeline` now build the
+final environment, resolve `PATH`, and prepare `argv`/`envp` entirely in the
+parent. A replacement `opts.env.PATH` therefore controls the initial lookup,
+including empty and relative components interpreted from the child's effective
+working directory. After `fork()`, children traverse that prepared candidate
+list using only `execve()`, without rebuilding the environment or parsing
+`PATH`.
 
-Babet 2.16.0 completes the Linux terminal lifecycle audit for interactive
-`babet.spawn()` processes. `process:state()` now distinguishes running,
-stopped, exited, and closed handles; `wait()` reports a stopped child without
-hanging; and `process:resume()` can continue it in the background or restore
-its terminal state and foreground ownership first. A native exit monitor also
-returns the controlling terminal and saved `termios` settings to Babet as soon
-as the child terminates, even when Lua has not yet called `wait()`,
-`is_running()`, or `close()`. Pipelines remain intentionally non-interactive.
-The real Babet → Yaourt → Pacman workflow fixed in 2.15.0 has also been
-validated successfully. Babet remains Linux-only. Earlier releases retain the
-Lua OOM/RAII hardening, worker cancellation, lazy filesystem iteration,
-SQLite savepoints, bounded archive reads, configurable process redirections,
-Base64, atomic file publication, and shared worker channels.
-
+Interactive terminal handoff reservations are now bounded: a competing
+`spawn()` waits for at most two seconds, or the remaining `launch_timeout`, and
+fails before `fork()` with `terminal handoff is busy` rather than blocking
+indefinitely or launching without the terminal. The launch and terminal
+internals have also been separated from `process_common.cpp` while preserving
+the 2.16 process-state, Ctrl+Z/resume, asynchronous terminal reclamation, and
+successive-spawn guarantees. Babet remains Linux-only.
 Can be used in three modes:
 
 1. **As a Lua interpreter** : `babet script.lua` or `babet folder/`
