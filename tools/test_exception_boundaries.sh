@@ -65,8 +65,10 @@ for specification in \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_write>|process.write" \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_close_stdin>|process.close_stdin" \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_is_running>|process.is_running" \
+    "src/lua_bindings/process.cpp|process_lua_boundary<process_state>|process.state" \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_pid>|process.pid" \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_wait>|process.wait" \
+    "src/lua_bindings/process.cpp|process_lua_boundary<process_resume>|process.resume" \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_terminate>|process.terminate" \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_kill>|process.kill" \
     "src/lua_bindings/process.cpp|process_lua_boundary<process_close>|process.close" \
@@ -257,6 +259,31 @@ for specification in \
     "tools/lua_longjmp_oom_selftest.cpp|run_setup_oom|OOM test exercises protected runtime setup" \
     "tools/lua_longjmp_oom_selftest.cpp|run_list_files_oom|OOM test exercises listFiles descriptor cleanup" \
     "tools/lua_longjmp_oom_selftest.cpp|run_deepcopy_oom|OOM test exercises deepCopyTable registry cleanup"
+do
+    IFS='|' read -r file pattern label <<< "${specification}"
+    require_pattern "${file}" "${pattern}" "${label} is missing"
+done
+
+for specification in \
+    "src/lua_bindings/process_common.cpp|WEXITED.*WNOWAIT|terminal exit monitor observes completion without reaping" \
+    "src/lua_bindings/process_common.cpp|SYS_pidfd_open|terminal exit monitor pins the child identity when pidfd is available" \
+    "src/lua_bindings/process_common.hpp|pid_t owner_pgid = -1|terminal handoff tracks its exact foreground owner" \
+    "src/lua_bindings/process_common.cpp|reserve_terminal_handoff\(|terminal handoffs are serialized before fork" \
+    "src/lua_bindings/process_common.cpp|WEXITED.*WNOHANG.*WNOWAIT|successive spawn recovery detects a finished direct child without reaping" \
+    "src/lua_bindings/process_common.cpp|commit_terminal_handoff\(|foreground transfer and registry ownership commit together" \
+    "src/lua_bindings/process_common.cpp|terminal_handoff_registry.owner_pgid == context->pid|old terminal monitor restores only its own child" \
+    "src/lua_bindings/process_common.cpp|BABET_TEST_TERMINAL_MONITOR_DELAY_MS|PTY race delay hook remains available" \
+    "src/lua_bindings/process_common.cpp|reclaim_terminal\(TerminalHandoff &terminal\)|stopped-child terminal reclamation helper" \
+    "src/lua_bindings/process_common.cpp|foreground_terminal\(TerminalHandoff &terminal|foreground resume helper" \
+    "src/lua_bindings/process.cpp|WNOHANG.*WUNTRACED.*WCONTINUED|non-blocking process state refresh observes stop/continue" \
+    "src/lua_bindings/process.cpp|wait_options = WUNTRACED.*WCONTINUED|blocking process wait observes stop/continue" \
+    "src/lua_bindings/process.cpp|push_fail_protected\(L, \"stopped\"\)|wait reports stopped state without hanging" \
+    "src/lua_bindings/process.cpp|return push_string_protected\(L, state\)|process.state emits its allocating result under pcall" \
+    "src/lua_bindings/process.cpp|foreground_terminal\(process->terminal, process->pid\)|resume restores foreground ownership" \
+    "tools/test_spawn_pty.sh|STOP_RESUME_OK|PTY regression covers stopped-child resume" \
+    "tools/test_spawn_pty.sh|ASYNC_RECLAIM_OK|PTY regression covers asynchronous terminal reclamation" \
+    "tools/test_spawn_pty.sh|BABET_TEST_TERMINAL_MONITOR_DELAY_MS.*1500|PTY race widens the stale-monitor window deterministically" \
+    "tools/test_spawn_pty.sh|SUCCESSIVE_SPAWN_OK|PTY regression covers two immediate interactive spawns"
 do
     IFS='|' read -r file pattern label <<< "${specification}"
     require_pattern "${file}" "${pattern}" "${label} is missing"

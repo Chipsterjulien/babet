@@ -55,14 +55,21 @@ struct LaunchSpec
 };
 
 // État conservé par un spawn interactif dont stdin hérite du terminal de
-// contrôle. Le parent reste propriétaire de ce descripteur jusqu'à la récolte
-// de l'enfant afin de reprendre le premier plan et les attributs termios.
+// contrôle. Le handle processus conserve ce descripteur pour les transitions
+// arrêt/reprise ; un moniteur natif en possède une duplication indépendante
+// afin de restaurer le parent dès la fin définitive de l'enfant.
 struct TerminalHandoff
 {
     int fd = -1;
+    // Groupe enfant exact auquel ce handle a transféré le premier plan. Il
+    // permet aux nettoyages et moniteurs anciens de ne jamais voler le terminal
+    // à un transfert interactif plus récent.
+    pid_t owner_pgid = -1;
     pid_t restore_pgid = -1;
     struct termios restore_attributes{};
     bool attributes_valid = false;
+    struct termios child_attributes{};
+    bool child_attributes_valid = false;
     bool active = false;
 };
 
@@ -158,6 +165,13 @@ bool set_nonblocking(int fd, const char *prefix, const char *label,
 
 void close_fd(int &fd) noexcept;
 void close_process_fds(LaunchedProcess &process) noexcept;
+// Rend le premier plan et les attributs sauvegardés au parent sans fermer le
+// descripteur. Lorsqu'un enfant est suspendu, ses attributs courants sont
+// mémorisés afin de pouvoir les restaurer avant une reprise au premier plan.
+bool reclaim_terminal(TerminalHandoff &terminal) noexcept;
+// Redonne le terminal au groupe enfant. Les attributs capturés lors du dernier
+// arrêt sont restaurés avant le transfert du premier plan.
+bool foreground_terminal(TerminalHandoff &terminal, pid_t child_pgid) noexcept;
 void restore_terminal(TerminalHandoff &terminal) noexcept;
 
 // Nettoyage d'urgence sans allocation C++ : ferme les flux, envoie SIGKILL
@@ -170,8 +184,9 @@ bool emergency_kill_and_reap(LaunchedProcess &process,
 // Prépare les redirections, fork, configure le groupe de processus et attend
 // le résultat de chdir/exec via un pipe CLOEXEC. Si stdin hérite d'un terminal
 // dont Babet possède le premier plan, le groupe enfant reçoit ce terminal de
-// manière synchronisée ; LaunchedProcess conserve de quoi le restaurer après
-// la récolte. En succès, seuls les flux configurés avec `pipe` possèdent un fd
+// manière synchronisée ; LaunchedProcess conserve de quoi gérer arrêt/reprise
+// et un moniteur natif restaure aussi le parent après la fin définitive. En
+// succès, seuls les flux configurés avec `pipe` possèdent un fd
 // parent non bloquant.
 LaunchResult launch(const LaunchSpec &spec);
 

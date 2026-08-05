@@ -781,54 +781,97 @@ When `stdin = "inherit"` refers to the controlling terminal and Babet owns its
 foreground, the child keeps its separate process group but Babet transfers the
 terminal before allowing it to execute the program. The handoff is
 synchronized, so the child cannot attempt its first read as a background group
-and be stopped by `SIGTTIN`. Direct interactive children covered by the PTY
-regression can read normally, and `Ctrl+C` is delivered to the foreground child
-group. A separately reported yaourt-to-pacman wrapper chain still blocks in a
-real installation; 2.15.0 records the tested binary path and SHA-256 and adds an
-optional `sudo` layer to the regression, but does not claim that unresolved
-nested case as fixed.
+and be stopped by `SIGTTIN`. Direct interactive children can read normally and
+`Ctrl+C` is delivered to the foreground child group. The real
+Babet → Yaourt → Pacman workflow is also validated with Babet 2.15.0 and later.
 
-After the child is reaped—normal exit, `terminate()`, `kill()`, `close()`, or
-automatic cleanup—Babet reclaims the foreground and restores the saved
-`termios` attributes. If inherited stdin is a pipe, file, or another
-non-terminal descriptor, no foreground-group transfer occurs and the previous
-behavior is unchanged. stdout and stderr may still be captured or redirected:
-inheriting the terminal on stdin is what enables this interactive handling.
+Babet 2.16.0 adds a limited, explicit job-control contract:
 
-A `wait(timeout)` result of `"timeout"` does not kill the child or take the
-terminal away from it; follow with `wait()`, `terminate()`, `kill()`, or
-`close()` to complete its lifecycle cleanly.
-
-Babet does not yet provide full shell job control. If the user suspends an
-interactive child with `Ctrl+Z`, the child group remains stopped in the
-foreground. Wait methods do not request intermediate states with `WUNTRACED`,
-so an unbounded `wait()` may remain blocked until the child is resumed or
-terminated. For a command that may be suspended, use a bounded wait followed
-by `terminate()`, `kill()`, or `close()` to reclaim the terminal.
-`wait(timeout)` alone does not reclaim it.
-
-Reclamation is not triggered asynchronously at the instant the child exits. It
-happens when Babet observes that exit through `wait()` or `is_running()`, or
-during `terminate()`, `kill()`, `close()`, and automatic cleanup. Before the
-parent script reads the terminal itself again with `io.read()`, it must
-therefore reap, query, or close the interactive child:
+- `wait()` and `state()` observe stopped and continued child states;
+- when `Ctrl+Z` stops the child, Babet saves the child's current `termios`,
+  restores the parent foreground group and parent `termios`, then
+  `wait()` returns `(nil, "stopped")`;
+- `is_running()` remains `true` while stopped because the child has not exited;
+- `resume()` restores the saved child `termios`, returns the terminal to the
+  child group, and sends `SIGCONT`;
+- `resume(false)` sends `SIGCONT` without foregrounding the terminal. This is
+  intended for pipe-oriented jobs; a background process that reads the
+  terminal may be stopped again by the kernel.
 
 ```lua
-local process <close> = assert(babet.spawn("interactive-tool", {}, {
+local process = assert(babet.spawn("interactive-tool", {}, {
     stdin = "inherit",
     stdout = "inherit",
     stderr = "inherit",
 }))
 
-local result, err = process:wait(30)
-if not result and err == "timeout" then
-    result = assert(process:terminate(0.5))
+local result, err = process:wait()
+if not result and err == "stopped" then
+    assert(process:state() == "stopped")
+
+    -- The parent owns the terminal here and may interact with the user.
+    print("child suspended")
+
+    -- Restore the child terminal state and foreground group, then SIGCONT.
+    assert(process:resume())
+    result, err = process:wait()
 end
 assert(result, err)
-
--- The parent group owns the terminal again here.
-local answer = io.read("*l")
 ```
+
+This is deliberately not a full shell job-control API. Babet does not maintain
+a jobs table, implement shell commands such as `fg`/`bg`, or transfer terminal
+ownership to `pipeline()` and `spawnPipeline()`.
+
+Final-exit reclamation is asynchronous. Each interactive handoff has a native
+monitor that waits for the direct child to terminate without reaping it. On
+Linux it uses a pidfd when available and falls back to `waitid(..., WNOWAIT)`.
+The monitor owns a duplicated terminal descriptor; the serialized native
+handoff registry keeps the copied restoration state. The monitor does not call
+Lua and no `SIGCHLD` handler performs terminal work.
+Consequently the parent may read its terminal after the child exits even before
+calling `wait()`, `is_running()`, `state()`, or `close()`:
+
+```lua
+local process <close> = assert(babet.spawn("short-interactive-tool", {}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+}))
+
+-- Other Lua work may happen here. Once the child exits, Babet's native
+-- monitor restores the parent foreground group and termios automatically.
+babet.sleep(0.5)
+local answer = io.read("*l")
+
+-- The final child status is still reaped and cached normally.
+local result = assert(process:wait())
+```
+
+Terminal transfers are serialized inside Babet. If an interactive child exits
+and another interactive `spawn()` starts before the detached monitor is
+scheduled, the new launch detects that the previous direct child has already
+reached final exit with non-reaping `waitid(..., WNOHANG | WNOWAIT)`, restores
+the exact saved parent foreground group and `termios`, then performs the new
+handoff. An older monitor only restores while its own child group still owns
+the terminal, so it cannot take the terminal back from a later child.
+
+The monitor follows the direct child, not an entire shell job. If that child
+exits after leaving descendants in its process group, Babet restores the parent
+terminal at the direct child's exit. Descendants that later attempt terminal
+input are background processes and may receive `SIGTTIN`. This limitation is
+intentional: Babet does not implement a shell jobs table or wait for arbitrary
+job descendants.
+
+A `wait(timeout)` result of `"timeout"` still does not kill the child or take
+the terminal away from a running foreground child. Follow it with another
+`wait()`, `terminate()`, `kill()`, or `close()` as appropriate. A stopped child
+is different: `wait()` reports `"stopped"` immediately and Babet has already
+returned the terminal to the parent.
+
+If inherited stdin is a pipe, file, or another non-terminal descriptor, no
+foreground-group transfer or asynchronous terminal monitor is created. stdout
+and stderr may still be captured or redirected independently.
 
 #### `"null"`
 
@@ -908,23 +951,29 @@ tables because it uses one descriptor and one write offset.
 
 | Method | Return | Purpose |
 | --- | --- | --- |
-| `process:read_stdout([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read stdout when it is a pipe |
-| `process:read_stderr([max_bytes [, timeout]])` | `(data, nil)` or `(nil, reason)` | read stderr when it is a pipe |
-| `process:write(data [, timeout])` | `(bytes_written, nil)` or `(nil, reason)` | write stdin when it is a pipe |
-| `process:close_stdin()` | `(true, nil)` or `(nil, reason)` | idempotently close piped stdin |
-| `process:is_running()` | `boolean` or `(nil, err)` | check state without blocking |
-| `process:pid()` | integer | return the assigned PID |
-| `process:wait([timeout])` | `(result, nil)` or `(nil, reason)` | wait without killing on timeout |
-| `process:terminate([grace_period])` | `(result, nil)` or `(nil, err)` | SIGTERM, then SIGKILL if needed |
-| `process:kill()` | `(result, nil)` or `(nil, err)` | SIGKILL the process group |
-| `process:close()` | `(true, nil)` | clean descriptors and any active child |
+| `read_stdout([max [, timeout]])` | `data, nil` or `nil, reason` | read piped stdout |
+| `read_stderr([max [, timeout]])` | `data, nil` or `nil, reason` | read piped stderr |
+| `write(data [, timeout])` | `count, nil` or `nil, reason` | write piped stdin |
+| `close_stdin()` | `true, nil` or `nil, reason` | close piped stdin |
+| `is_running()` | boolean or `nil, err` | true until final exit |
+| `state()` | state string or `nil, err` | inspect lifecycle state |
+| `pid()` | integer | return the child PID |
+| `wait([timeout])` | `result, nil` or `nil, reason` | wait, or report stop/timeout |
+| `resume([foreground])` | `true, nil` or `nil, reason` | continue a stopped child |
+| `terminate([grace])` | `result, nil` or `nil, err` | SIGTERM then bounded SIGKILL |
+| `kill()` | `result, nil` or `nil, err` | SIGKILL the process group |
+| `close()` | `true, nil` | finalize the process handle |
 
 Short reasons are:
 
 - `"timeout"`: no progress before the deadline;
-- `"closed"`: closed pipe or EOF;
+- `"stopped"`: `wait()` observed a suspended child and returned the terminal;
+- `"closed"`: closed handle, closed pipe, or EOF depending on the method;
 - `"interrupted"`: handled Babet interruption;
-- `"not_piped"`: the method targets a stream not configured as `"pipe"`.
+- `"not_piped"`: the method targets a stream not configured as `"pipe"`;
+- `"not_stopped"`: `resume()` was requested for a running child;
+- `"not_interactive"`: foreground resume was requested without a terminal handoff;
+- `"exited"`: `resume()` was requested after final child exit.
 
 Other diagnostics use a `process:` or `spawn:` prefix.
 

@@ -17,34 +17,24 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.15.0**. Voir le
+Version candidate actuelle : **2.16.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.15.0 audite les échecs d’allocation Lua qui utilisent un `longjmp` au
-lieu de dérouler la pile C++. La construction des résultats JSON, TOML, HTTP,
-Archive, Socket, SQLite, Workers, Process, Pipeline, Base64 et checksums passe
-désormais par des builders Lua protégés ou un état possédé par Lua :
-`LUA_ERRMEM` ne peut plus court-circuiter le nettoyage RAII des bindings
-concernés. Les finalizers possédant des ressources utilisent des frontières
-silencieuses et les userdata structurés empêchent la destruction d'un objet
-Socket ou Worker partiellement construit. Cette version corrige
-aussi l’annulation d’un worker bloqué sur une outbox pleine et transforme
-`createFileIterator` en véritable itérateur paresseux. La régression PTY directe
-de `spawn` affiche maintenant le chemin exact et le SHA-256 du binaire et peut
-tester `sudo` ; le blocage interactif yaourt vers pacman signalé séparément
-reste en investigation et n’est pas annoncé comme corrigé par la 2.15.0. Babet
-2.14.0 a introduit le transfert du terminal pour les enfants interactifs
-directs de `spawn`. Babet 2.13.0 a ajouté `db:savepoint(callback)`, avec
-savepoints imbriqués et
-`ROLLBACK TO` puis `RELEASE` automatiques lorsque le callback échoue. Le helper
-fonctionne seul, dans une transaction assistée ou manuelle et récursivement
-dans un autre savepoint. La 2.12.0 reste la version des options de connexion et
-des compteurs ; le travail 2.11.0 non publié fournit la lecture binaire et
-bornée des entrées ZIP/TAR avec `babet.archive.read()`. L’audit SQLite et
-`babet.sqlite.NULL` de la 2.10 restent inchangés. Les nouveautés fonctionnelles de la série 2.9 restent les redirections de
-`babet.spawn()`, le module `babet.base64`, `babet.writeFileAtomic()`, le cycle
-de vie workers renforcé et les channels directs entre workers.
+Babet 2.16.0 termine l’audit Linux du cycle de vie du terminal pour les
+processus interactifs lancés avec `babet.spawn()`. `process:state()` distingue
+maintenant les handles actifs, suspendus, terminés et fermés ; `wait()` signale
+immédiatement un enfant suspendu au lieu de rester bloqué ; et
+`process:resume()` peut le reprendre en arrière-plan ou restaurer d’abord ses
+attributs de terminal et son groupe de premier plan. Un moniteur natif rend
+aussi le terminal de contrôle et le `termios` sauvegardé à Babet dès la fin de
+l’enfant, même si Lua n’a pas encore appelé `wait()`, `is_running()` ou
+`close()`. Les pipelines restent volontairement non interactifs. La chaîne
+réelle Babet → Yaourt → Pacman corrigée en 2.15.0 a également été validée avec
+succès. Babet reste limité à Linux. Les versions précédentes conservent le
+durcissement OOM/RAII Lua, l’annulation workers, l’itération paresseuse, les
+savepoints SQLite, la lecture bornée des archives, les redirections de
+processus, Base64, la publication atomique et les channels workers.
 
 Babet s’utilise de trois façons :
 

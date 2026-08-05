@@ -800,59 +800,104 @@ respecter une redirection appliquée extérieurement au processus Babet.
 
 Lorsque `stdin = "inherit"` désigne le terminal de contrôle et que Babet en
 possède le premier plan, l'enfant conserve son groupe de processus séparé mais
-Babet lui transfère le terminal avant de le laisser exécuter le programme. Le
-transfert est synchronisé : l'enfant ne peut donc pas tenter sa première
-lecture en arrière-plan et être suspendu par `SIGTTIN`. Les enfants
-interactifs directs couverts par la régression PTY peuvent lire normalement ;
-`Ctrl+C` est envoyé au groupe enfant de premier plan. Une chaîne réelle yaourt
-vers pacman signalée séparément bloque encore : la 2.15.0 journalise le chemin
-et le SHA-256 du binaire testé et ajoute une couche `sudo` facultative au test,
-mais n'annonce pas ce cas imbriqué non résolu comme corrigé.
+Babet lui transfère le terminal avant de l'autoriser à exécuter le programme.
+Le transfert est synchronisé : l'enfant ne peut pas tenter sa première lecture
+comme groupe d'arrière-plan et recevoir `SIGTTIN`. Les enfants interactifs
+directs lisent normalement et `Ctrl+C` est envoyé au groupe enfant de premier
+plan. La chaîne réelle Babet → Yaourt → Pacman est également validée avec
+Babet 2.15.0 et les versions suivantes.
 
-Après la récolte de l'enfant — sortie normale, `terminate()`, `kill()`,
-`close()` ou nettoyage automatique — Babet reprend le premier plan et restaure
-les attributs `termios` sauvegardés. Si le `stdin` hérité est un pipe, un
-fichier ou un autre descripteur non terminal, aucun transfert de groupe n'est
-effectué et le comportement historique reste inchangé. `stdout` et `stderr`
-peuvent rester capturés ou redirigés : c'est l'héritage du terminal sur
-`stdin` qui active cette gestion interactive.
+Babet 2.16.0 ajoute un contrat de contrôle de jobs volontairement limité et
+explicite :
 
-Un `wait(timeout)` qui renvoie `"timeout"` ne tue pas l'enfant et ne lui retire
-pas le terminal : utilise ensuite `wait()`, `terminate()`, `kill()` ou `close()`
-pour terminer proprement son cycle de vie.
-
-Babet ne fournit pas encore un contrôle de jobs de shell complet. Si
-l'utilisateur suspend l'enfant interactif avec `Ctrl+Z`, le groupe enfant reste
-arrêté au premier plan. Les méthodes d'attente ne demandent pas les états
-intermédiaires avec `WUNTRACED` : un `wait()` sans délai peut donc rester bloqué
-tant que l'enfant n'est ni repris ni terminé. Pour une commande susceptible
-d'être suspendue, utilise une attente bornée puis `terminate()`, `kill()` ou
-`close()` afin de récupérer le terminal. `wait(timeout)` seul ne le restitue
-pas.
-
-La restitution n'est pas déclenchée de façon asynchrone au seul instant où
-l'enfant se termine. Elle intervient lorsque Babet observe cette fin avec
-`wait()` ou `is_running()`, ou lors de `terminate()`, `kill()`, `close()` et du
-nettoyage automatique. Avant que le script parent recommence à lire lui-même
-le terminal avec `io.read()`, il doit donc récolter, interroger ou fermer
-l'enfant interactif :
+- `wait()` et `state()` observent les états suspendu et repris ;
+- lorsque `Ctrl+Z` suspend l'enfant, Babet sauvegarde son `termios`, restaure le
+  groupe de premier plan et le `termios` du parent, puis `wait()` renvoie
+  `(nil, "stopped")` ;
+- `is_running()` reste à `true` pendant la suspension puisque l'enfant n'est
+  pas terminé ;
+- `resume()` restaure le `termios` enfant, lui rend le premier plan puis envoie
+  `SIGCONT` ;
+- `resume(false)` envoie `SIGCONT` sans lui rendre le terminal. Ce mode vise
+  les jobs raccordés à des pipes ; un processus en arrière-plan qui tente de
+  lire le terminal peut être suspendu de nouveau par le noyau.
 
 ```lua
-local process <close> = assert(babet.spawn("outil-interactif", {}, {
+local process = assert(babet.spawn("outil-interactif", {}, {
     stdin = "inherit",
     stdout = "inherit",
     stderr = "inherit",
 }))
 
-local result, err = process:wait(30)
-if not result and err == "timeout" then
-    result = assert(process:terminate(0.5))
+local result, err = process:wait()
+if not result and err == "stopped" then
+    assert(process:state() == "stopped")
+
+    -- Le parent possède le terminal et peut dialoguer avec l'utilisateur.
+    print("enfant suspendu")
+
+    -- Restaure le terminal enfant, le premier plan, puis envoie SIGCONT.
+    assert(process:resume())
+    result, err = process:wait()
 end
 assert(result, err)
-
--- Le groupe parent possède de nouveau le terminal à cet endroit.
-local answer = io.read("*l")
 ```
+
+Il ne s'agit volontairement pas d'une API complète de shell. Babet ne maintient
+pas de table de jobs, n'implémente pas des commandes telles que `fg`/`bg` et ne
+transfère pas le terminal à `pipeline()` ou `spawnPipeline()`.
+
+La restitution après la fin définitive est asynchrone. Chaque transfert
+interactif crée un moniteur natif qui attend la fin de l'enfant direct sans le
+récolter. Sous Linux, il utilise un pidfd lorsque disponible, puis
+`waitid(..., WNOWAIT)` comme fallback. Le moniteur possède un descripteur de
+terminal dupliqué ; le registre natif sérialisé conserve la copie de l'état à
+restaurer. Le moniteur n'appelle jamais Lua et aucun handler `SIGCHLD`
+n'effectue d'opération terminal. Le parent peut donc
+relire son terminal après la fin de l'enfant avant même d'appeler `wait()`,
+`is_running()`, `state()` ou `close()` :
+
+```lua
+local process <close> = assert(babet.spawn("outil-interactif-court", {}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+}))
+
+-- D'autres traitements Lua peuvent avoir lieu. Dès la fin de l'enfant, le
+-- moniteur natif restaure le groupe parent et son termios.
+babet.sleep(0.5)
+local answer = io.read("*l")
+
+-- Le statut final est toujours récolté et mis en cache normalement.
+local result = assert(process:wait())
+```
+
+Les transferts de terminal sont sérialisés dans Babet. Si un enfant interactif
+se termine et qu'un autre `spawn()` interactif commence avant que le moniteur
+détaché ne soit ordonnancé, le nouveau lancement constate la fin définitive de
+l'enfant direct précédent avec `waitid(..., WNOHANG | WNOWAIT)` sans le
+récolter, restaure exactement le groupe de premier plan et le `termios` parent
+sauvegardés, puis effectue le nouveau transfert. Un ancien moniteur ne restaure
+que tant que son propre groupe enfant possède encore le terminal : il ne peut
+donc pas le reprendre à un enfant lancé ensuite.
+
+Le moniteur suit l'enfant direct, pas un job shell complet. Si cet enfant se
+termine après avoir laissé des descendants dans son groupe de processus, Babet
+rend le terminal au parent dès la fin de l'enfant direct. Les descendants qui
+tentent ensuite de lire le terminal sont en arrière-plan et peuvent recevoir
+`SIGTTIN`. Cette limite est volontaire : Babet ne maintient pas de table de
+jobs shell et n'attend pas des descendants arbitraires.
+
+Un retour `"timeout"` de `wait(timeout)` ne tue toujours pas l'enfant et ne
+retire pas le terminal à un enfant actif au premier plan. Il faut ensuite
+utiliser `wait()`, `terminate()`, `kill()` ou `close()` selon le besoin. Un
+enfant suspendu est différent : `wait()` renvoie immédiatement `"stopped"` et
+Babet a déjà rendu le terminal au parent.
+
+Si stdin hérité est un pipe, un fichier ou un autre descripteur non terminal,
+aucun transfert de groupe de premier plan ni moniteur asynchrone n'est créé.
+stdout et stderr peuvent toujours être capturés ou redirigés indépendamment.
 
 #### `"null"`
 
@@ -933,23 +978,29 @@ offset d'écriture.
 
 | Méthode | Retour | Rôle |
 | --- | --- | --- |
-| `process:read_stdout([max_bytes [, timeout]])` | `(data, nil)` ou `(nil, reason)` | lit stdout si ce flux est un pipe |
-| `process:read_stderr([max_bytes [, timeout]])` | `(data, nil)` ou `(nil, reason)` | lit stderr si ce flux est un pipe |
-| `process:write(data [, timeout])` | `(bytes_written, nil)` ou `(nil, reason)` | écrit sur stdin si ce flux est un pipe |
-| `process:close_stdin()` | `(true, nil)` ou `(nil, reason)` | ferme un stdin raccordé à un pipe, de façon idempotente |
-| `process:is_running()` | `boolean` ou `(nil, err)` | vérifie l'état sans bloquer |
-| `process:pid()` | integer | renvoie le PID attribué |
-| `process:wait([timeout])` | `(result, nil)` ou `(nil, reason)` | attend la fin sans tuer au timeout |
-| `process:terminate([grace_period])` | `(result, nil)` ou `(nil, err)` | envoie SIGTERM puis SIGKILL si nécessaire |
-| `process:kill()` | `(result, nil)` ou `(nil, err)` | envoie SIGKILL au groupe |
-| `process:close()` | `(true, nil)` | nettoie les descripteurs et un enfant encore actif |
+| `read_stdout([max [, timeout]])` | `data, nil` ou `nil, reason` | lit stdout en pipe |
+| `read_stderr([max [, timeout]])` | `data, nil` ou `nil, reason` | lit stderr en pipe |
+| `write(data [, timeout])` | `count, nil` ou `nil, reason` | écrit sur stdin en pipe |
+| `close_stdin()` | `true, nil` ou `nil, reason` | ferme stdin en pipe |
+| `is_running()` | booléen ou `nil, err` | vrai jusqu'à la fin définitive |
+| `state()` | état ou `nil, err` | inspecte le cycle de vie |
+| `pid()` | entier | renvoie le PID enfant |
+| `wait([timeout])` | `result, nil` ou `nil, reason` | attend ou signale arrêt/timeout |
+| `resume([foreground])` | `true, nil` ou `nil, reason` | reprend un enfant suspendu |
+| `terminate([grace])` | `result, nil` ou `nil, err` | SIGTERM puis SIGKILL borné |
+| `kill()` | `result, nil` ou `nil, err` | SIGKILL sur le groupe |
+| `close()` | `true, nil` | finalise le handle processus |
 
 Les raisons courtes sont :
 
 - `"timeout"` : aucun progrès avant la fin du délai ;
-- `"closed"` : pipe fermé ou EOF atteint ;
+- `"stopped"` : `wait()` a observé un enfant suspendu et rendu le terminal ;
+- `"closed"` : handle fermé, pipe fermé ou EOF selon la méthode ;
 - `"interrupted"` : interruption Babet traitée ;
-- `"not_piped"` : la méthode vise un flux configuré autrement que `"pipe"`.
+- `"not_piped"` : la méthode vise un flux configuré autrement que `"pipe"` ;
+- `"not_stopped"` : `resume()` vise un enfant qui n'est pas suspendu ;
+- `"not_interactive"` : une reprise au premier plan est demandée sans terminal ;
+- `"exited"` : `resume()` est demandé après la fin définitive.
 
 Les autres diagnostics utilisent un préfixe `process:` ou `spawn:`.
 

@@ -41,6 +41,7 @@ struct Process
     babet_process::TerminalHandoff terminal;
     int status;
     bool status_valid;
+    bool stopped;
     bool closed;
 };
 
@@ -63,6 +64,7 @@ Process *push_empty_process(lua_State *L)
     process->terminal = babet_process::TerminalHandoff{};
     process->status = 0;
     process->status_valid = false;
+    process->stopped = false;
     process->closed = true;
     luaL_getmetatable(L, PROCESS_META);
     lua_setmetatable(L, -2);
@@ -82,6 +84,7 @@ void initialize_process(Process *process,
     process->terminal = launched.terminal;
     process->status = 0;
     process->status_valid = false;
+    process->stopped = false;
     process->closed = false;
 }
 
@@ -436,6 +439,41 @@ void restore_process_terminal(Process *process) noexcept
     }
 }
 
+void reclaim_process_terminal(Process *process) noexcept
+{
+    if (process)
+    {
+        babet_process::reclaim_terminal(process->terminal);
+    }
+}
+
+bool apply_wait_status(Process *process, int status)
+{
+    if (WIFEXITED(status) || WIFSIGNALED(status))
+    {
+        process->status = status;
+        process->status_valid = true;
+        process->stopped = false;
+        babet_process::close_fd(process->stdin_fd);
+        restore_process_terminal(process);
+        return true;
+    }
+    if (WIFSTOPPED(status))
+    {
+        process->stopped = true;
+        reclaim_process_terminal(process);
+        return true;
+    }
+#ifdef WIFCONTINUED
+    if (WIFCONTINUED(status))
+    {
+        process->stopped = false;
+        return true;
+    }
+#endif
+    return false;
+}
+
 bool refresh_status(Process *process, std::string &err)
 {
     if (process->status_valid || process->pid <= 0)
@@ -445,13 +483,17 @@ bool refresh_status(Process *process, std::string &err)
 
     for (;;)
     {
-        const pid_t r = ::waitpid(process->pid, &process->status, WNOHANG);
+        int observed_status = 0;
+        const pid_t r = ::waitpid(process->pid, &observed_status,
+                                  WNOHANG | WUNTRACED | WCONTINUED);
         if (r == process->pid)
         {
-            process->status_valid = true;
-            babet_process::close_fd(process->stdin_fd);
-            restore_process_terminal(process);
-            return true;
+            apply_wait_status(process, observed_status);
+            if (process->status_valid || process->stopped)
+            {
+                return true;
+            }
+            continue;
         }
         if (r == 0)
         {
@@ -793,9 +835,45 @@ int process_is_running(lua_State *L)
     return 1;
 }
 
+int process_state(lua_State *L)
+{
+    if (!lua_arity_is(L, 1))
+    {
+        return luaL_error(L, "process.state expects no argument");
+    }
+    Process *process = check_process(L, 1);
+    if (process->closed)
+    {
+        return push_string_protected(L, "closed");
+    }
+
+    std::string_view state = "running";
+    {
+        std::string error;
+        if (!refresh_status(process, error))
+        {
+            return push_fail_protected(L, error);
+        }
+        if (process->status_valid)
+        {
+            state = "exited";
+        }
+        else if (process->stopped)
+        {
+            state = "stopped";
+        }
+    }
+    return push_string_protected(L, state);
+}
+
 int wait_for_process(lua_State *L, Process *process,
                      bool has_timeout, double timeout)
 {
+    std::string refresh_error;
+    if (!refresh_status(process, refresh_error))
+    {
+        return push_fail_protected(L, refresh_error);
+    }
     if (process->status_valid)
     {
         return push_process_result_protected(L, process);
@@ -803,6 +881,10 @@ int wait_for_process(lua_State *L, Process *process,
     if (process->closed)
     {
         return push_fail_protected(L, "closed");
+    }
+    if (process->stopped)
+    {
+        return push_fail_protected(L, "stopped");
     }
 
     const long long deadline = has_timeout
@@ -818,14 +900,26 @@ int wait_for_process(lua_State *L, Process *process,
             signal_dispatch_pending(L);
             return push_fail_protected(L, "interrupted");
         }
-        const pid_t r = ::waitpid(process->pid, &process->status,
-                                  has_timeout ? WNOHANG : 0);
+        int observed_status = 0;
+        int wait_options = WUNTRACED | WCONTINUED;
+        if (has_timeout)
+        {
+            wait_options |= WNOHANG;
+        }
+        const pid_t r = ::waitpid(process->pid, &observed_status,
+                                  wait_options);
         if (r == process->pid)
         {
-            process->status_valid = true;
-            babet_process::close_fd(process->stdin_fd);
-            restore_process_terminal(process);
-            return push_process_result_protected(L, process);
+            apply_wait_status(process, observed_status);
+            if (process->status_valid)
+            {
+                return push_process_result_protected(L, process);
+            }
+            if (process->stopped)
+            {
+                return push_fail_protected(L, "stopped");
+            }
+            continue;
         }
         if (r < 0)
         {
@@ -885,6 +979,95 @@ int process_wait(lua_State *L)
     return wait_for_process(L, process, has_timeout, timeout);
 }
 
+bool signal_process_group_checked(pid_t pid, int signal) noexcept
+{
+    if (pid <= 0)
+    {
+        errno = ESRCH;
+        return false;
+    }
+    if (::kill(-pid, signal) == 0)
+    {
+        return true;
+    }
+    const int group_errno = errno;
+    if (group_errno == ESRCH && ::kill(pid, signal) == 0)
+    {
+        return true;
+    }
+    errno = group_errno;
+    return false;
+}
+
+int process_resume(lua_State *L)
+{
+    const int argc = lua_gettop(L);
+    if (!lua_arity_between(L, 1, 2))
+    {
+        return luaL_error(L,
+                          "process.resume expects an optional foreground boolean");
+    }
+    Process *process = check_process(L, 1);
+
+    bool foreground = process->terminal.fd >= 0;
+    if (argc == 2 && !lua_isnil(L, 2))
+    {
+        if (!lua_is_strict_boolean(L, 2))
+        {
+            return luaL_error(L,
+                              "process.resume: foreground must be a boolean");
+        }
+        foreground = lua_toboolean(L, 2) != 0;
+    }
+
+    if (process->closed)
+    {
+        return push_fail_protected(L, "closed");
+    }
+    std::string error;
+    if (!refresh_status(process, error))
+    {
+        return push_fail_protected(L, error);
+    }
+    if (process->status_valid)
+    {
+        return push_fail_protected(L, "exited");
+    }
+    if (!process->stopped)
+    {
+        return push_fail_protected(L, "not_stopped");
+    }
+    if (foreground && process->terminal.fd < 0)
+    {
+        return push_fail_protected(L, "not_interactive");
+    }
+
+    if (foreground &&
+        !babet_process::foreground_terminal(process->terminal, process->pid))
+    {
+        const std::string terminal_error =
+            std::string("process: cannot foreground child: ") +
+            std::strerror(errno);
+        return push_fail_protected(L, terminal_error);
+    }
+
+    if (!signal_process_group_checked(process->pid, SIGCONT))
+    {
+        const int signal_errno = errno;
+        if (foreground)
+        {
+            reclaim_process_terminal(process);
+        }
+        const std::string signal_error =
+            std::string("process: cannot continue child: ") +
+            std::strerror(signal_errno);
+        return push_fail_protected(L, signal_error);
+    }
+
+    process->stopped = false;
+    return push_ok_protected(L);
+}
+
 int terminate_process(lua_State *L, Process *process, int signal,
                       double grace_seconds)
 {
@@ -903,6 +1086,11 @@ int terminate_process(lua_State *L, Process *process, int signal,
     }
 
     babet_process::kill_group(process->pid, signal);
+    if (process->stopped && signal != SIGKILL)
+    {
+        babet_process::kill_group(process->pid, SIGCONT);
+        process->stopped = false;
+    }
     babet_process::ChildWaitResult result =
         babet_process::wait_child_until(
             process->pid, process->status,
@@ -1046,7 +1234,9 @@ int process_tostring(lua_State *L)
     Process *process = check_process(L, 1);
     const char *state = process->closed
                             ? "closed"
-                            : (process->status_valid ? "exited" : "running");
+                            : (process->status_valid
+                                   ? "exited"
+                                   : (process->stopped ? "stopped" : "running"));
     lua_pushfstring(L, "babet.process(pid=%d, %s)",
                     static_cast<int>(process->pid), state);
     return 1;
@@ -1185,10 +1375,14 @@ void register_process_metatable(lua_State *L)
         lua_setfield(L, -2, "close_stdin");
         lua_pushcfunction(L, process_lua_boundary<process_is_running>);
         lua_setfield(L, -2, "is_running");
+        lua_pushcfunction(L, process_lua_boundary<process_state>);
+        lua_setfield(L, -2, "state");
         lua_pushcfunction(L, process_lua_boundary<process_pid>);
         lua_setfield(L, -2, "pid");
         lua_pushcfunction(L, process_lua_boundary<process_wait>);
         lua_setfield(L, -2, "wait");
+        lua_pushcfunction(L, process_lua_boundary<process_resume>);
+        lua_setfield(L, -2, "resume");
         lua_pushcfunction(L, process_lua_boundary<process_terminate>);
         lua_setfield(L, -2, "terminate");
         lua_pushcfunction(L, process_lua_boundary<process_kill>);

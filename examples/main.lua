@@ -4241,6 +4241,7 @@ do
     ok("process pid() returns an integer",
         math.type(p:pid()) == "integer" and p:pid() > 0)
     ok("process is_running() initially true", p:is_running() == true)
+    ok("process state() initially running", p:state() == "running")
 
     local out, errout, stream_err = read_both(p, 3)
     ok("stream stdout is captured progressively",
@@ -4255,11 +4256,13 @@ do
         result and result.code == 0 and result.exited == true
         and result.signaled == false)
     ok("process is_running() false after wait", p:is_running() == false)
+    ok("process state() after wait is exited", p:state() == "exited")
     local result2, wait_err2 = p:wait(0)
     ok("process wait is idempotent",
         result2 and result2.code == 0 and wait_err2 == nil)
     ok_act("process close() succeeds", p:close())
     ok_act("process close() is idempotent", p:close())
+    ok("process state() after close is closed", p:state() == "closed")
     local closed_data, closed_err = p:read_stdout(1, 0)
     ok("read_stdout after close -> closed",
         closed_data == nil and closed_err == "closed")
@@ -4277,6 +4280,31 @@ do
     ok("spawn cwd/env reach the child",
         out == "/tmp|ok" and errout == "" and result.code == 0,
         tostring(out))
+    p:close()
+
+    -- Les états intermédiaires sont explicites : wait() rend "stopped",
+    -- is_running() reste vrai et resume(false) poursuit le groupe sans
+    -- transfert de terminal pour ce processus raccordé à des pipes.
+    p, e = babet.spawn("sh", {
+        "-c", "kill -STOP $$; printf resumed",
+    })
+    ok("spawn stopped-state fixture", p ~= nil and e == nil, tostring(e))
+    local stopped_result, stopped_err = p:wait(2)
+    ok("process wait reports a stopped child",
+        stopped_result == nil and stopped_err == "stopped",
+        tostring(stopped_err))
+    ok("process state() reports stopped", p:state() == "stopped")
+    ok("process is_running() stays true while stopped",
+        p:is_running() == true)
+    local resumed, resume_err = p:resume(false)
+    ok("process resume(false) continues a stopped child",
+        resumed == true and resume_err == nil, tostring(resume_err))
+    out, errout, stream_err = read_both(p, 3)
+    result, wait_err = p:wait(2)
+    ok("resumed process completes normally",
+        out == "resumed" and errout == "" and stream_err == nil
+        and result and result.code == 0 and wait_err == nil,
+        tostring(stream_err or wait_err))
     p:close()
 
     -- Lecture non bloquante et wait borné ne tuent pas le processus.
@@ -4381,6 +4409,15 @@ do
         pcall(function() p:write(42) end) == false)
     ok("pid rejects extra arguments",
         pcall(function() p:pid(true) end) == false)
+    ok("state rejects extra arguments",
+        pcall(function() p:state(true) end) == false)
+    local resume_running, resume_running_err = p:resume(false)
+    ok("resume rejects a process that is not stopped",
+        resume_running == nil and resume_running_err == "not_stopped")
+    ok("resume foreground must be a strict boolean",
+        pcall(function() p:resume(1) end) == false)
+    ok("resume rejects extra arguments",
+        pcall(function() p:resume(false, true) end) == false)
     ok("wait rejects extra arguments",
         pcall(function() p:wait(0, 1) end) == false)
     p:close()

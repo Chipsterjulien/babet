@@ -6,6 +6,94 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.16.0] - 2026-08-04
+
+### Résumé
+
+Babet 2.16.0 termine l'audit Linux du cycle de vie du terminal et du contrôle
+de jobs volontairement limité pour les enfants interactifs de
+`babet.spawn()`. La version expose l'état suspendu, permet de reprendre un
+enfant explicitement arrêté et rend le terminal de contrôle après sa fin même
+si Lua n'a pas encore interrogé l'objet processus. Babet ne devient pas un
+shell et `pipeline()` / `spawnPipeline()` restent volontairement non
+interactifs.
+
+### États du processus et reprise
+
+- ajout de `process:state()`, qui renvoie `"running"`, `"stopped"`, `"exited"`
+  ou `"closed"` sans modifier la table de résultat final mise en cache ;
+- prise en compte de `WUNTRACED` et `WCONTINUED` par
+  `process:wait([timeout])` : un enfant suspendu par `Ctrl+Z` renvoie maintenant
+  rapidement `(nil, "stopped")` au lieu de bloquer une attente sans délai
+  jusqu'à la fin définitive ;
+- maintien de `process:is_running()` à `true` pour un enfant suspendu, car il
+  n'est pas terminé et peut encore être repris ou arrêté ;
+- ajout de `process:resume([foreground])` : par défaut, un enfant interactif
+  raccordé au terminal récupère le premier plan ; `resume(false)` envoie
+  `SIGCONT` sans transfert de terminal pour un job raccordé à des pipes ;
+- retour de `"not_stopped"`, `"not_interactive"`, `"exited"` ou `"closed"`
+  lorsqu'une reprise ne respecte pas ses préconditions documentées ;
+- capture du `termios` enfant lorsqu'un arrêt est observé, restauration de
+  l'état parent pendant la suspension, puis réapplication de l'état enfant
+  avant une reprise au premier plan ;
+- reprise d'un processus suspendu après `SIGTERM`, afin qu'il puisse traiter
+  l'arrêt gracieux avant le fallback SIGKILL existant.
+
+### Restitution asynchrone du terminal
+
+- ajout d'un moniteur natif détaché pour chaque transfert de terminal
+  interactif ;
+- utilisation de `pidfd_open` et `poll()` sous Linux lorsque disponibles, avec
+  `waitid(P_PID, ..., WEXITED | WNOWAIT)` comme fallback sans récolte ;
+- restitution du groupe de premier plan et du `termios` parent sauvegardé dès
+  la fin définitive de l'enfant direct, même si Lua n'a pas encore appelé
+  `wait()`, `is_running()`, `state()`, `terminate()`, `kill()` ou `close()` ;
+- indépendance du moniteur vis-à-vis du userdata Lua grâce à un descripteur de
+  terminal dupliqué avec close-on-exec, tandis qu'un registre natif sérialisé
+  possède la copie de l'état à restaurer ;
+- absence volontaire de handler `SIGCHLD` : aucune API Lua, allocation, mutex
+  ou opération terminal non async-signal-safe n'est exécutée depuis un signal ;
+- nettoyage ultérieur idempotent : un `wait()` ou `close()` constate que le
+  parent possède déjà le terminal et termine proprement son propre descripteur ;
+- sérialisation des changements de propriétaire du terminal et mémorisation du
+  groupe enfant exact associé à chaque transfert ;
+- lorsque deux spawns interactifs se suivent avant l'ordonnancement du premier
+  moniteur détaché, détection de la fin de l'enfant direct par
+  `waitid(..., WNOHANG | WNOWAIT)` sans récolte, restauration de l'état parent
+  sauvegardé puis validation atomique du transfert suivant ;
+- vérification par chaque moniteur que son propre groupe enfant possède encore
+  le terminal avant toute restauration, afin qu'un ancien moniteur ne puisse
+  jamais le reprendre à un enfant interactif lancé ensuite.
+
+### Périmètre et compatibilité
+
+- conservation du groupe de processus enfant séparé et des signaux envoyés au
+  groupe entier ;
+- conservation des tables finales de `wait()`, des timeouts, des pipes, des
+  redirections et du statut final mis en cache ;
+- maintien de `pipeline()` et `spawnPipeline()` en mode pipe non interactif ;
+- validation de la chaîne interactive réelle Babet → Yaourt → Pacman corrigée
+  en 2.15.0, en plus des scénarios PTY directs automatisés ;
+- maintien d'un projet Linux uniquement ; aucun port macOS ou BSD n'est prévu
+  sans machines cibles ni validation reproductible.
+
+### Tests et documentation
+
+- remplacement de la récupération bornée après Ctrl+Z par un véritable scénario
+  PTY arrêt/état/reprise, avec contrôle des lectures avant et après la remise au
+  premier plan ;
+- ajout d'un scénario PTY où l'enfant se termine et le parent relit stdin avant
+  toute interrogation de l'objet processus, ce qui prouve la restitution
+  asynchrone ;
+- ajout d'un scénario PTY déterministe qui retarde le premier moniteur et lance
+  immédiatement deux enfants interactifs, afin de vérifier que le second reçoit
+  toujours l'entrée du terminal et que le premier moniteur ne peut pas la lui
+  reprendre ;
+- ajout de tests non interactifs pour `state()` / `resume()` dans la suite Lua
+  principale et extension du préflight structurel à 182 contrats audités ;
+- synchronisation des références processus FR/EN, README, changelogs, feuille
+  de route, notes GitHub et manuels PDF.
+
 ## [2.15.0] - 2026-08-04
 
 ### Résumé

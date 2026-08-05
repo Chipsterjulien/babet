@@ -41,21 +41,7 @@ runtime.
 make worker loops check `worker.cancelled()` or return to cancellation-aware
 `worker.recv()` / channel operations when they must remain externally stoppable.
 
-## 3. macOS and BSD portability
-
-**Current state**: Babet targets Linux/glibc. It uses Linux facilities such as
-inotify, `/proc/self/exe`, `accept4`, and `SOCK_CLOEXEC`.
-
-**Impact**: compilation or runtime behavior is not supported on macOS or BSD.
-
-**Possible work**: provide portability helpers for close-on-exec sockets,
-replace inotify, abstract executable-path discovery, and add tested CI targets.
-
-**Why deferred**: no supported user or contributor currently requires those
-platforms. A portability patch should be tested on the target OS rather than
-written blind.
-
-## 4. Linear-time or otherwise bounded pattern matching
+## 3. Linear-time or otherwise bounded pattern matching
 
 **Current state**: `babet.find()` offers bounded `glob`, `iglob`, `path_glob`,
 and `path_iglob` filters implemented by a small non-recursive matcher with a
@@ -69,7 +55,7 @@ RE2 intentionally does not implement constructs whose matching cost cannot be
 kept linear, notably backreferences and look-around assertions. Scripts that
 need only wildcard filename filtering should prefer the simpler glob fields.
 
-## 5. Shared strict Lua argument validators
+## 4. Shared strict Lua argument validators
 
 **Current state**: since 2.6.0, Babet provides shared allocation-free helpers for exact and
 bounded arity, strict Lua strings, numbers, integers and booleans, optional
@@ -81,40 +67,25 @@ truncation while retaining their documented error contracts.
 before conversion and should avoid `luaL_error` while non-trivial C++ objects
 that require destruction are alive.
 
-## 6. Interactive process job control and asynchronous terminal reclamation
+## Platform scope
 
-**Current state**: `babet.spawn()` transfers the controlling terminal only when
-inherited stdin is that terminal and Babet already owns the foreground. The
-child remains in a separate process group, and Babet restores the foreground
-group and saved `termios` state when `wait()`, `is_running()`, explicit cleanup,
-or automatic cleanup observes or ends the child. `pipeline()` and
-`spawnPipeline()` remain pipe-oriented and do not transfer the terminal.
+Babet is intentionally a Linux/glibc project. macOS and BSD ports are not part
+of the roadmap while no target machines and maintainers are available to build,
+run, and validate them. Platform-specific code must therefore remain explicit
+rather than introducing untested portability abstractions.
 
-**Known boundary**: Babet does not currently request stopped or continued child
-states with `WUNTRACED` / `WCONTINUED`. A child suspended with `Ctrl+Z` can
-therefore keep the terminal while an unbounded `wait()` waits for final exit.
-Also, if a child exits and the Lua script never interrogates or closes its
-process object before reading stdin itself, terminal ownership has not yet been
-reclaimed asynchronously.
+## Direct-child terminal monitor scope
 
-**Supported mitigation in 2.14.0**: use bounded waits for interactive commands
-that may be suspended, then call `terminate()`, `kill()`, or `close()`; and
-always reap, query, or close the interactive process before the parent resumes
-its own terminal input. PTY regression coverage verifies the bounded `Ctrl+Z`
-recovery path and restoration after `is_running()` observes a completed child.
+The asynchronous terminal monitor follows the direct child created by
+`babet.spawn()`, not an arbitrary shell job tree. When that direct child exits,
+Babet restores the parent foreground group and terminal attributes even if
+descendants remain in the child's process group. A remaining descendant that
+later attempts terminal input is then a background process and may receive
+`SIGTTIN`.
 
-**2.15.0 diagnostic update**: the PTY regression now prints the canonical
-binary path and SHA-256 and can insert a non-interactive `sudo` layer. The
-reported yaourt-to-pacman block remains open because neither the direct nor the
-controlled sudo scenario is red; no second terminal-engine change is justified
-without a reproducer that identifies the actual foreground process group.
-
-**Planned audit**: in 2.16.0, evaluate an
-explicit stopped/continued state model, possible resume/foreground operations,
-and a safe way to reclaim terminal ownership promptly after child exit. No
-signal handler may call Lua or perform non-async-signal-safe terminal cleanup.
-A full shell-style job-control API must be justified and tested rather than
-introduced as an incidental change to `wait()`.
+This is an intentional boundary rather than an unfinished shell feature:
+Babet does not maintain a jobs table, track arbitrary process-group membership,
+or wait for an entire shell job before returning terminal ownership.
 
 ## Validation note
 

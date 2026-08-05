@@ -118,21 +118,28 @@ Babet 2.15.0 Lua longjmp / C++ RAII audit
     construction, and resource-owning finalizers identified by the final
     external audit.
 
-Next planned release: 2.16.0 process terminal lifecycle and job-control audit.
+Babet 2.16.0 process terminal lifecycle and limited job control
 
-[ ] Inventory stopped/continued child states and the consequences of adding
-    WUNTRACED/WCONTINUED without changing the existing result contract blindly.
-[ ] Decide whether Babet needs an explicit stopped/resume/foreground API or
-    should continue to document bounded termination as its supported policy.
-[ ] Investigate safe terminal reclamation when an interactive child exits
-    before Lua next interrogates its process object, without doing Lua work or
-    non-async-signal-safe cleanup in a SIGCHLD handler.
-[ ] Add red tests for every accepted design before changing process state or
-    terminal ownership code.
-[ ] Keep pipeline()/spawnPipeline() non-interactive unless a separate audited
-    terminal model is deliberately designed for them.
+[x] Inventory stopped/continued child states and preserve the existing final
+    result table while observing WUNTRACED/WCONTINUED.
+[x] Add process:state() with running/stopped/exited/closed states.
+[x] Make wait() report a stopped child promptly and keep is_running() true
+    until final exit.
+[x] Add process:resume([foreground]) with saved child termios and foreground
+    restoration for interactive children.
+[x] Reclaim the terminal asynchronously after direct-child exit without Lua
+    work or terminal cleanup in a SIGCHLD handler.
+[x] Add red PTY tests for stop/resume and exit-before-parent-query, then make
+    both scenarios pass.
+[x] Serialize terminal handoffs and add a deterministic regression for two
+    immediate interactive spawns while the first exit monitor is delayed.
+[x] Keep pipeline()/spawnPipeline() non-interactive.
+[x] Synchronise French/English documentation, changelogs, release notes and
+    PDF manuals.
 
-Deferred ideas retained in notes.md:
+Possible later hardening retained in notes.md:
 - parent-side PATH resolution followed by execve;
-- forced worker termination (pthread_cancel remains intentionally excluded);
-- macOS/BSD portability.
+- forced worker termination remains intentionally excluded without a safe
+  cooperative design.
+
+No macOS or BSD port is planned: Babet remains Linux-only.

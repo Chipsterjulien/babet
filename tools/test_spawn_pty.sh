@@ -1,8 +1,8 @@
 #!/bin/bash
 # Régression : un enfant spawné avec les trois flux hérités doit pouvoir lire
 # depuis le terminal après une première lecture du parent Lua. Le test contrôle
-# aussi SIGINT, la récupération bornée après SIGTSTP, le rafraîchissement
-# d'état après une sortie déjà survenue et la restitution du premier plan/termios.
+# aussi SIGINT, la suspension/reprise après SIGTSTP, la restitution
+# asynchrone après sortie, le rafraîchissement d'état et les attributs termios.
 set -u
 
 if [ "$#" -ne 1 ]; then
@@ -161,7 +161,11 @@ end
 
 local stop_process, stop_spawn_err = babet.spawn("sh", {
     "-c",
-    "stty -echo; printf 'STOP_PROMPT\\n'; exec sleep 30",
+    "stty -echo; printf 'STOP_PROMPT\\n'; "
+        .. "IFS= read -r answer; "
+        .. "if [ \"$answer\" = resumed-child ]; then "
+        .. "printf 'RESUMED_CHILD_ACCEPTED\\n'; exit 0; "
+        .. "else exit 37; fi",
 }, {
     stdin = "inherit",
     stdout = "inherit",
@@ -173,61 +177,179 @@ if not stop_process then
     os.exit(23)
 end
 
-local stop_result, stop_wait_err = stop_process:wait(0.5)
-if stop_result ~= nil or stop_wait_err ~= "timeout" then
+local stop_result, stop_wait_err = stop_process:wait(2.0)
+if stop_result ~= nil or stop_wait_err ~= "stopped" then
     stop_process:kill()
     stop_process:close()
-    io.stderr:write("stopped child wait did not time out: "
+    io.stderr:write("stopped child was not reported immediately: "
         .. tostring(stop_wait_err) .. "\n")
     os.exit(24)
 end
 
-local status_path = "/proc/" .. tostring(stop_process:pid()) .. "/status"
-local status_file, status_open_err = io.open(status_path, "rb")
-if not status_file then
+local stopped_state, state_err = stop_process:state()
+if stopped_state ~= "stopped" then
     stop_process:kill()
     stop_process:close()
-    io.stderr:write("cannot inspect stopped child: "
-        .. tostring(status_open_err) .. "\n")
+    io.stderr:write("unexpected stopped state: "
+        .. tostring(stopped_state) .. " / " .. tostring(state_err) .. "\n")
     os.exit(25)
 end
-local status_text = status_file:read("*a")
-status_file:close()
-if not status_text:match("State:%s+[Tt]") then
+local still_running, running_err = stop_process:is_running()
+if still_running ~= true then
     stop_process:kill()
     stop_process:close()
-    io.stderr:write("child was not stopped by terminal Ctrl+Z\n")
+    io.stderr:write("stopped child is_running mismatch: "
+        .. tostring(still_running) .. " / " .. tostring(running_err) .. "\n")
     os.exit(26)
 end
 print("STOPPED_STATE_OK")
-
-local killed_result, killed_err = stop_process:kill()
-if not killed_result then
-    stop_process:close()
-    io.stderr:write("cannot kill stopped child: "
-        .. tostring(killed_err) .. "\n")
-    os.exit(27)
-end
-stop_process:close()
-if killed_result.code ~= 137
-        or killed_result.signaled ~= true
-        or killed_result.signal ~= 9 then
-    io.stderr:write("unexpected stopped-child kill result: code="
-        .. tostring(killed_result.code)
-        .. ", signaled=" .. tostring(killed_result.signaled)
-        .. ", signal=" .. tostring(killed_result.signal) .. "\n")
-    os.exit(28)
-end
-print("STOP_RECOVERY_OK")
 
 io.write("STOP_RESTORED_PROMPT\n")
 io.flush()
 local stop_restored = io.read("*l")
 if stop_restored ~= "stop-restored" then
+    stop_process:kill()
+    stop_process:close()
     io.stderr:write("terminal was not restored after stopped child: "
         .. tostring(stop_restored) .. "\n")
+    os.exit(27)
+end
+
+local resumed, resume_err = stop_process:resume()
+if not resumed then
+    stop_process:kill()
+    stop_process:close()
+    io.stderr:write("cannot resume stopped child: "
+        .. tostring(resume_err) .. "\n")
+    os.exit(28)
+end
+print("RESUME_SENT")
+
+local resumed_result, resumed_wait_err = stop_process:wait(2.0)
+if not resumed_result then
+    stop_process:kill()
+    stop_process:close()
+    io.stderr:write("resumed child did not finish: "
+        .. tostring(resumed_wait_err) .. "\n")
     os.exit(29)
 end
+stop_process:close()
+if resumed_result.code ~= 0 then
+    io.stderr:write("resumed child exit code: "
+        .. tostring(resumed_result.code) .. "\n")
+    os.exit(30)
+end
+print("STOP_RESUME_OK")
+
+io.write("RESUME_RESTORED_PROMPT\n")
+io.flush()
+local resume_restored = io.read("*l")
+if resume_restored ~= "resume-restored" then
+    io.stderr:write("terminal was not restored after resumed child: "
+        .. tostring(resume_restored) .. "\n")
+    os.exit(31)
+end
+
+local async_process, async_spawn_err = babet.spawn("sh", {
+    "-c",
+    "printf 'ASYNC_CHILD_DONE\\n'; sleep 0.1; exit 0",
+}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+})
+if not async_process then
+    io.stderr:write("async spawn failed: "
+        .. tostring(async_spawn_err) .. "\n")
+    os.exit(32)
+end
+
+-- Aucun wait(), is_running(), state() ni close() avant cette lecture : le
+-- moniteur natif doit rendre le terminal dès la sortie de l'enfant.
+assert(babet.sleep(300, "ms"))
+io.write("ASYNC_RECLAIM_PROMPT\n")
+io.flush()
+local async_restored = io.read("*l")
+if async_restored ~= "async-restored" then
+    async_process:kill()
+    async_process:close()
+    io.stderr:write("terminal was not reclaimed asynchronously: "
+        .. tostring(async_restored) .. "\n")
+    os.exit(33)
+end
+local async_result, async_wait_err = async_process:wait(2.0)
+if not async_result or async_result.code ~= 0 then
+    async_process:close()
+    io.stderr:write("async child result mismatch: "
+        .. tostring(async_wait_err) .. "\n")
+    os.exit(34)
+end
+async_process:close()
+print("ASYNC_RECLAIM_OK")
+
+-- Élargit volontairement la fenêtre entre la sortie de l'enfant A et le
+-- réveil de son moniteur. Le spawn B doit reconnaître le transfert devenu
+-- obsolète, restaurer le parent puis recevoir le terminal sans appeler au
+-- préalable wait(), state(), is_running() ou close() sur A.
+assert(babet.setenv("BABET_TEST_TERMINAL_MONITOR_DELAY_MS", "1500"))
+local race_a, race_a_err = babet.spawn("sh", {
+    "-c", "printf 'RACE_A_DONE\\n'; exit 0",
+}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+})
+if not race_a then
+    io.stderr:write("race A spawn failed: " .. tostring(race_a_err) .. "\n")
+    os.exit(35)
+end
+assert(babet.setenv("BABET_TEST_TERMINAL_MONITOR_DELAY_MS", "0"))
+assert(babet.sleep(500, "ms"))
+
+local race_b, race_b_err = babet.spawn("sh", {
+    "-c",
+    "printf 'RACE_B_PROMPT\\n'; "
+        .. "IFS= read -r answer; "
+        .. "if [ \"$answer\" = race-child ]; then "
+        .. "printf 'RACE_B_ACCEPTED\\n'; exit 0; "
+        .. "else exit 38; fi",
+}, {
+    stdin = "inherit",
+    stdout = "inherit",
+    stderr = "inherit",
+})
+if not race_b then
+    race_a:close()
+    io.stderr:write("race B spawn failed: " .. tostring(race_b_err) .. "\n")
+    os.exit(36)
+end
+
+local race_b_result, race_b_wait_err = race_b:wait(2.0)
+if not race_b_result then
+    race_b:kill()
+    race_b:close()
+    race_a:close()
+    io.stderr:write("successive interactive spawn lost terminal: "
+        .. tostring(race_b_wait_err) .. "\n")
+    os.exit(37)
+end
+race_b:close()
+if race_b_result.code ~= 0 then
+    race_a:close()
+    io.stderr:write("race B exit code: "
+        .. tostring(race_b_result.code) .. "\n")
+    os.exit(38)
+end
+
+local race_a_result, race_a_wait_err = race_a:wait(2.0)
+if not race_a_result or race_a_result.code ~= 0 then
+    race_a:close()
+    io.stderr:write("race A result mismatch: "
+        .. tostring(race_a_wait_err) .. "\n")
+    os.exit(39)
+end
+race_a:close()
+print("SUCCESSIVE_SPAWN_OK")
 
 local status_process, status_spawn_err = babet.spawn("sh", {
     "-c",
@@ -332,7 +454,7 @@ if pid == 0:
     os.execve(binary, [binary, project], environment)
 
 os.set_blocking(master, False)
-deadline = time.monotonic() + 8.0
+deadline = time.monotonic() + 18.0
 output = bytearray()
 sent_parent = False
 sent_child = False
@@ -341,6 +463,10 @@ sent_signal = False
 sent_restored = False
 sent_stop = False
 sent_stop_restored = False
+sent_resumed_child = False
+sent_resume_restored = False
+sent_async_restored = False
+sent_race_child = False
 sent_status_restored = False
 sent_sudo_child = False
 status = None
@@ -383,11 +509,27 @@ try:
                 and b"STOP_RESTORED_PROMPT" in output):
             os.write(master, b"stop-restored\n")
             sent_stop_restored = True
+        if (sent_stop_restored and not sent_resumed_child
+                and b"RESUME_SENT" in output):
+            os.write(master, b"resumed-child\n")
+            sent_resumed_child = True
+        if (sent_resumed_child and not sent_resume_restored
+                and b"RESUME_RESTORED_PROMPT" in output):
+            os.write(master, b"resume-restored\n")
+            sent_resume_restored = True
+        if (sent_resume_restored and not sent_async_restored
+                and b"ASYNC_RECLAIM_PROMPT" in output):
+            os.write(master, b"async-restored\n")
+            sent_async_restored = True
+        if (sent_async_restored and not sent_race_child
+                and b"RACE_B_PROMPT" in output):
+            os.write(master, b"race-child\n")
+            sent_race_child = True
         if (sudo_enabled == "1" and not sent_sudo_child
                 and b"SUDO_CHILD_PROMPT" in output):
             os.write(master, b"sudo-child\n")
             sent_sudo_child = True
-        if (sent_stop_restored and not sent_status_restored
+        if (sent_async_restored and not sent_status_restored
                 and b"STATUS_RESTORED_PROMPT" in output):
             os.write(master, b"status-restored\n")
             sent_status_restored = True
@@ -439,9 +581,21 @@ required = (
     "restored",
     "STOP_PROMPT",
     "STOPPED_STATE_OK",
-    "STOP_RECOVERY_OK",
     "STOP_RESTORED_PROMPT",
     "stop-restored",
+    "RESUME_SENT",
+    "RESUMED_CHILD_ACCEPTED",
+    "STOP_RESUME_OK",
+    "RESUME_RESTORED_PROMPT",
+    "resume-restored",
+    "ASYNC_CHILD_DONE",
+    "ASYNC_RECLAIM_PROMPT",
+    "async-restored",
+    "ASYNC_RECLAIM_OK",
+    "RACE_A_DONE",
+    "RACE_B_PROMPT",
+    "RACE_B_ACCEPTED",
+    "SUCCESSIVE_SPAWN_OK",
     "STATUS_CHILD_DONE",
     "STATUS_REFRESH_OK",
     "STATUS_RESTORED_PROMPT",

@@ -6,6 +6,87 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.16.0] - 2026-08-04
+
+### Summary
+
+Babet 2.16.0 completes the Linux terminal-lifecycle and limited job-control
+audit for interactive `babet.spawn()` children. It exposes stopped state,
+allows an explicitly stopped child to be resumed, and reclaims the controlling
+terminal after final exit even when Lua has not yet queried the process object.
+It does not turn Babet into a shell and keeps `pipeline()` and
+`spawnPipeline()` intentionally non-interactive.
+
+### Process states and resume
+
+- added `process:state()`, returning `"running"`, `"stopped"`, `"exited"`, or
+  `"closed"` without changing the cached final-result table;
+- made `process:wait([timeout])` observe `WUNTRACED` and `WCONTINUED`; a child
+  suspended by `Ctrl+Z` now returns `(nil, "stopped")` promptly instead of
+  keeping an unbounded wait blocked until final exit;
+- kept `process:is_running()` true for a stopped child because the process has
+  not exited and can still be resumed or terminated;
+- added `process:resume([foreground])`; its default restores foreground
+  ownership for a terminal-backed interactive child, while `resume(false)`
+  sends `SIGCONT` without a terminal transfer for pipe-oriented jobs;
+- return `"not_stopped"`, `"not_interactive"`, `"exited"`, or `"closed"` when
+  a requested resume cannot satisfy its documented preconditions;
+- capture the child `termios` state when a stop is observed, restore the
+  parent's saved state while the child is suspended, and reapply the child's
+  state before a foreground resume;
+- continue a stopped process after `SIGTERM` so graceful termination can be
+  processed before the existing SIGKILL fallback.
+
+### Asynchronous terminal reclamation
+
+- added one detached native monitor for each interactive terminal handoff;
+- use Linux `pidfd_open` plus `poll()` when available, with
+  `waitid(P_PID, ..., WEXITED | WNOWAIT)` as the non-reaping fallback;
+- return the foreground process group and saved parent `termios` as soon as the
+  direct child reaches final exit, even if Lua has not yet called `wait()`,
+  `is_running()`, `state()`, `terminate()`, `kill()`, or `close()`;
+- keep the monitor independent from Lua userdata through a duplicated
+  close-on-exec terminal descriptor, while a serialized native registry owns
+  the copied restoration state;
+- avoid a `SIGCHLD` handler entirely: no Lua API, allocation, mutex, or
+  non-async-signal-safe terminal operation is performed from signal context;
+- preserve idempotent later cleanup: a subsequent wait or close detects that
+  the parent already owns the terminal and safely finalizes its own descriptor;
+- serialize terminal ownership transitions and record the exact child process
+  group that owns each handoff;
+- when two interactive spawns follow each other before the first detached
+  monitor is scheduled, detect the finished direct child with non-reaping
+  `waitid(..., WNOHANG | WNOWAIT)`, restore the saved parent state, and commit
+  the next foreground transfer atomically;
+- make every detached monitor verify that its own child group still owns the
+  terminal before restoring it, preventing an older monitor from taking the
+  terminal away from a later interactive child.
+
+### Scope and compatibility
+
+- retain the separate child process group and group-wide signal behavior;
+- keep `wait()` final result tables, timeout behavior, process pipes, stream
+  redirections, and cached completion status unchanged;
+- keep `pipeline()` and `spawnPipeline()` pipe-oriented and non-interactive;
+- validate the real Babet → Yaourt → Pacman interactive workflow fixed by
+  2.15.0 in addition to the automated direct PTY scenarios;
+- remain Linux-only; macOS and BSD ports are not part of the roadmap without
+  target machines and reproducible validation.
+
+### Tests and documentation
+
+- replace the bounded Ctrl+Z cleanup regression with a true stop/state/resume
+  PTY scenario that verifies terminal input before and after foreground resume;
+- add a PTY scenario where the child exits and the parent reads stdin before
+  interrogating the process object, proving asynchronous reclamation;
+- add a deterministic PTY race scenario with a delayed first monitor and two
+  immediate interactive spawns, proving that the second child still receives
+  terminal input and that the first monitor cannot reclaim it later;
+- add non-interactive state/resume coverage to the main Lua suite and extend
+  the structural preflight to 182 audited contracts;
+- synchronize the French and English process references, README files,
+  changelogs, roadmap, release notes, and PDF manuals.
+
 ## [2.15.0] - 2026-08-04
 
 ### Summary
