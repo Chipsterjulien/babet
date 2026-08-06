@@ -4,11 +4,13 @@
 #include <lua.hpp>
 
 /**
- * @brief TCP/TLS client and TCP server bindings exposed as `babet.socket`.
+ * @brief TCP, TLS and Unix-domain stream bindings exposed as `babet.socket`.
  *
  * Constructors:
  *   connect(host, port, timeout?)       -> socket | (nil, err)
  *   listen(host, port, backlog?)        -> server_socket | (nil, err)
+ *   connect_unix(path, timeout?)        -> socket | (nil, err)
+ *   listen_unix(path, opts?)            -> server_socket | (nil, err)
  *   connect_tls(host, port, opts?)      -> tls_socket | (nil, err)
  *
  * Stream methods:
@@ -24,7 +26,10 @@
  *   accept(timeout?)                    -> socket | (nil, err)
  *
  * Observable contracts:
- *   - TCP only; UDP and Unix-domain sockets are not exposed.
+ *   - Stream sockets only: TCP/TLS and pathname-based AF_UNIX. UDP and
+ *     Linux abstract Unix sockets are not exposed.
+ *   - Unix listeners refuse every pre-existing pathname, apply exact
+ *     permissions, and remove only the socket inode they created.
  *   - All I/O is synchronous. A timeout is one absolute budget for the
  *     complete call, not a fresh duration for every chunk.
  *   - A positional recv/recv_line/recv_all/accept timeout overrides the
@@ -52,6 +57,8 @@
 
 int lua_socket_connect(lua_State *L);
 int lua_socket_listen(lua_State *L);
+int lua_socket_connect_unix(lua_State *L);
+int lua_socket_listen_unix(lua_State *L);
 int lua_socket_connect_tls(lua_State *L);
 
 /**

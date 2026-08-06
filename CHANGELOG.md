@@ -6,6 +6,42 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.20.0] - 2026-08-06
+
+### Summary
+
+Babet 2.20.0 extends `babet.socket` with pathname-based Unix stream sockets.
+The new constructors reuse the TCP module's binary-safe methods, monotonic
+deadlines, signal interruption, and RAII ownership while adding a conservative
+local-path policy.
+
+### Unix sockets
+
+- add `babet.socket.connect_unix(path, timeout?)` with internal non-blocking
+  connect, one global deadline, handled-signal interruption, and typed timeout;
+- add `babet.socket.listen_unix(path, opts?)` with strict `backlog`,
+  `permissions`, and `unlink_on_close` options;
+- apply the final private `0600` mode by default after `bind()` without
+  following symlinks, then verify the pathname still names the created inode;
+  during that brief interval the initial mode remains filtered by the process
+  `umask`, so sensitive services should use a private parent directory;
+- refuse every pre-existing entry without automatically deleting stale sockets
+  or user files;
+- remove the pathname on close/GC only when it is still the same socket inode,
+  preserving concurrent replacements;
+- expose `{ path = ... }` from `peer()` and `sockname()`, inherit the domain on
+  accepted sockets, and identify Unix streams in `tostring`;
+- restrict STARTTLS to TCP without closing a Unix stream on refusal;
+- retain CLOEXEC, timeouts, block/line/EOF reads, and binary strings locally.
+
+### Tests and documentation
+
+- add a 44th suite covering strict validation, the `sockaddr_un` boundary,
+  permissions, lifecycle, existing-entry refusal, replacement protection, GC,
+  address introspection, and worker interoperability;
+- add a 13-contract structural preflight for Unix sockets;
+- update French and English documentation and regenerate both PDF manuals.
+
 ## [2.19.0] - 2026-08-06
 
 ### Summary

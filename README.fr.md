@@ -17,15 +17,14 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.19.0**. Voir le
+Version candidate actuelle : **2.20.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.19.0 modularise entièrement le harnais de régression Lua :
-`examples/main.lua` devient un orchestrateur léger, tandis que 43 suites
-thématiques restent exécutées dans le même ordre en mode dossier, embarqué et
-embarqué via `PATH`. Un préflight empêche le retour d'un fichier monolithique
-et vérifie que toutes les suites restent atteignables.
+Babet 2.20.0 ajoute les sockets de flux Unix nommées avec validation
+stricte, mode final exact, deadline globale de connexion, nettoyage du
+listener vérifié par inode, support des workers et les mêmes méthodes
+binary-safe que TCP.
 
 La version ajoute aussi `db:backup(path, opts?)`, une sauvegarde SQLite
 synchrone fondée sur `sqlite3_backup`. Elle prend en charge les sources WAL,

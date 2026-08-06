@@ -16,15 +16,14 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.19.0**. See the
+Current release candidate: **2.20.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.19.0 fully modularizes the Lua regression harness:
-`examples/main.lua` is now a lightweight orchestrator, while 43 thematic suites
-remain executed in the same order in folder, embedded, and embedded-via-`PATH`
-modes. A preflight prevents the main script from becoming monolithic again and
-checks that every suite remains reachable.
+Babet 2.20.0 adds pathname-based Unix-domain stream sockets with strict
+validation, an exact final mode, global connect deadlines, inode-sensitive
+listener cleanup, worker support, and the same binary-safe stream methods as
+TCP.
 
 The release also adds `db:backup(path, opts?)`, a synchronous SQLite backup
 based on `sqlite3_backup`. It supports WAL sources, concurrent writes, one

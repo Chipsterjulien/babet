@@ -1,15 +1,17 @@
 > [English](../../en/modules/socket.md) | **Français**
 
-# SOCKET — client et serveur TCP, flux binaires, lignes et timeouts
+# SOCKET — TCP et sockets Unix, flux binaires, lignes et timeouts
 
-`babet.socket` fournit des sockets TCP synchrones pour écrire des clients et
-serveurs de protocoles personnalisés : IRC, SMTP en clair avant STARTTLS,
-protocoles ligne par ligne, flux binaires ou petits services internes.
+`babet.socket` fournit des sockets de flux synchrones, en TCP ou dans le
+domaine Unix (`AF_UNIX`), pour écrire des clients et serveurs de protocoles
+personnalisés : IRC, SMTP en clair avant STARTTLS, protocoles ligne par ligne,
+flux binaires ou petits services locaux.
 
 Le module couvre :
 
 - la connexion TCP à un hostname ou une adresse IP ;
-- l'écoute sur une interface précise ou sur toutes les interfaces ;
+- les connexions locales par chemin de socket Unix ;
+- l'écoute sur une interface réseau ou sur un pathname Unix ;
 - l'acceptation de clients ;
 - l'envoi intégral d'une chaîne binaire ;
 - la lecture par blocs, par lignes ou jusqu'à la fermeture distante ;
@@ -18,8 +20,9 @@ Le module couvre :
 - la fermeture explicite et le nettoyage automatique par le GC ;
 - l'interaction avec les signaux gérés par Babet.
 
-Il ne fournit pas UDP, les sockets Unix, l'I/O asynchrone, le multiplexage de
-milliers de connexions, ni un protocole applicatif prêt à l'emploi. Pour HTTP,
+Il ne fournit pas UDP, l'espace de noms abstrait Linux, l'I/O asynchrone, le
+multiplexage de milliers de connexions, ni un protocole applicatif prêt à
+l'emploi. Pour HTTP,
 utilise [`babet.http`](http.md). Pour TLS direct ou STARTTLS, consulte
 [`TLS`](tls.md).
 
@@ -28,7 +31,9 @@ utilise [`babet.http`](http.md). Pour TLS direct ou STARTTLS, consulte
 - [Conventions essentielles](#socket-conventions)
 - [Vue d'ensemble de l'API](#socket-api-summary)
 - [Créer une connexion cliente](#socket-connect)
-- [Créer un serveur](#socket-listen)
+- [Créer un serveur TCP](#socket-listen)
+- [Se connecter à un socket Unix](#socket-connect-unix)
+- [Créer un serveur Unix](#socket-listen-unix)
 - [Accepter un client](#socket-accept)
 - [Configurer le timeout par défaut](#socket-set-timeout)
 - [Envoyer des données](#socket-send)
@@ -46,10 +51,11 @@ utilise [`babet.http`](http.md). Pour TLS direct ou STARTTLS, consulte
 <a id="socket-conventions"></a>
 ## Conventions essentielles
 
-### TCP synchrone et bloquant
+### Flux synchrones et bloquants
 
 Chaque appel s'exécute dans le thread courant. Sans timeout, `connect`,
-`accept`, `send` et les lectures peuvent attendre indéfiniment.
+`connect_unix`, `accept`, `send` et les lectures peuvent attendre
+indéfiniment.
 
 Pour une application qui gère plusieurs connexions indépendantes, utilise des
 [`workers`](workers.md) ou conçois une boucle autour de plusieurs processus.
@@ -66,8 +72,8 @@ local data = assert(sock:recv(5, 2))
 assert(#data == 5 and data:byte(3) == 0)
 ```
 
-Les hostnames utilisent en revanche une chaîne C et ne peuvent pas contenir de
-NUL.
+Les hostnames et pathnames Unix utilisent en revanche une chaîne C et ne
+peuvent pas contenir de NUL.
 
 ### Timeouts
 
@@ -109,6 +115,8 @@ de transport ou de timeout renvoie généralement `(nil, err)`.
 ```lua
 local sock, err = babet.socket.connect(host, port, timeout?)
 local server, err = babet.socket.listen(host, port, backlog?)
+local local_sock, err = babet.socket.connect_unix(path, timeout?)
+local local_server, err = babet.socket.listen_unix(path, opts?)
 ```
 
 | Argument | Type | Défaut | Rôle |
@@ -121,6 +129,14 @@ local server, err = babet.socket.listen(host, port, backlog?)
 
 Les chaînes numériques comme `"443"` et les floats comme `443.0` sont refusés
 pour `port` et `backlog`, même si leur valeur mathématique est entière.
+
+Pour `listen_unix`, `opts` accepte strictement :
+
+| Option | Défaut | Contrat |
+| --- | ---: | --- |
+| `backlog` | `16` | entier `1..INT_MAX` |
+| `permissions` | `0600` | mode final Unix exact `0000..0777`, appliqué après `bind()` |
+| `unlink_on_close` | `true` | supprime le pathname créé lors de `close()`/GC |
 
 ### Méthodes communes
 
@@ -234,6 +250,64 @@ local server = assert(babet.socket.listen("127.0.0.1", 9000, 128))
 
 Le backlog est une demande faite au noyau. Le système peut le plafonner. Ce
 n'est ni un nombre maximal de clients simultanés ni une limite applicative.
+
+<a id="socket-connect-unix"></a>
+## `babet.socket.connect_unix(path, timeout?)`
+
+Ouvre un flux local vers un socket Unix nommé dans le système de fichiers :
+
+```lua
+local sock, err = babet.socket.connect_unix("/run/my-service.sock", 2)
+assert(sock, err)
+```
+
+Le pathname est une chaîne stricte, non vide, sans NUL, et doit tenir dans
+`sockaddr_un.sun_path` (107 octets utiles sur Linux). Le timeout suit le même
+contrat monotone que `connect`; `0` signifie attente infinie. Le timeout du
+constructeur n'est pas conservé pour les I/O suivantes.
+
+Les sockets abstraits Linux ne sont pas exposés : l'adresse est toujours un
+pathname réel. `peer()` renvoie `{ path = ... }`; le `sockname()` d'un client
+non lié renvoie normalement `{ path = "" }`.
+
+<a id="socket-listen-unix"></a>
+## `babet.socket.listen_unix(path, opts?)`
+
+Crée un listener local `AF_UNIX`/`SOCK_STREAM` :
+
+```lua
+local server = assert(babet.socket.listen_unix("/run/my-service.sock", {
+    backlog = 32,
+    permissions = tonumber("660", 8),
+    unlink_on_close = true,
+}))
+```
+
+Par sécurité, Babet refuse **toute entrée déjà présente** au pathname : socket
+obsolète, fichier régulier, symlink, FIFO ou dossier. Il ne supprime jamais
+silencieusement une entrée préexistante. Un socket obsolète doit être retiré
+explicitement par l'application après vérification.
+
+Après `bind()`, les permissions finales sont appliquées exactement avec une
+opération sans suivi de symlink. Le défaut final `0600` limite l'accès au
+propriétaire. Entre `bind()` et cette mise en permissions, le pathname possède
+brièvement le mode créé par le noyau, donc filtré par l'`umask` du processus.
+Babet ne modifie pas cet `umask`, car il est global au processus et le runtime
+est multithread. Pour un service sensible, place donc le socket dans un
+répertoire parent privé, par exemple de mode `0700`. Ce parent doit déjà
+exister ; Babet ne le crée pas.
+
+Avec `unlink_on_close = true`, `close()` et le GC retirent le pathname seulement
+si l'entrée courante est encore le même inode socket que celui créé par ce
+listener. Un fichier qui a remplacé le pathname n'est jamais supprimé. Avec
+`false`, le pathname reste présent après fermeture et doit être retiré
+explicitement.
+
+```lua
+local server = assert(babet.socket.listen_unix("/tmp/demo.sock"))
+local addr = assert(server:sockname())
+assert(addr.path == "/tmp/demo.sock")
+```
 
 <a id="socket-accept"></a>
 ## `server:accept(timeout?)`
@@ -494,7 +568,7 @@ clair avec des records TLS.
 <a id="socket-addresses"></a>
 ## `sock:peer()` et `sock:sockname()`
 
-Les deux méthodes renvoient une table :
+Pour TCP, les deux méthodes renvoient une table :
 
 ```lua
 {
@@ -517,6 +591,15 @@ Les adresses sont numériques : Babet ne réalise pas de reverse DNS.
 `peer()` est refusé sur un socket d'écoute. `sockname()` fonctionne aussi sur
 un serveur et permet de retrouver le port choisi après `listen(..., 0)`.
 
+Pour un socket Unix, la table contient `path` à la place de `host`/`port` :
+
+```lua
+local addr = assert(sock:peer())
+print(addr.path)
+```
+
+Un client Unix non lié possède un chemin local vide.
+
 <a id="socket-close"></a>
 ## `sock:close()` et nettoyage automatique
 
@@ -538,6 +621,10 @@ du GC n'est pas déterministe.
 Les sockets créés et acceptés sont marqués close-on-exec. Un programme lancé
 par [`babet.exec`](exec.md) n'hérite pas silencieusement des connexions ou du
 port d'écoute.
+
+Pour un listener Unix, la fermeture applique aussi la politique
+`unlink_on_close` décrite plus haut, avec vérification de l'inode avant toute
+suppression.
 
 <a id="socket-signals"></a>
 ## Signaux et interruptions
@@ -602,6 +689,31 @@ while true do
 end
 ```
 
+### Petit service local par socket Unix
+
+```lua
+local path = "/tmp/babet-echo.sock"
+local server = assert(babet.socket.listen_unix(path, {
+    permissions = tonumber("600", 8),
+}))
+assert(server:set_timeout(1))
+
+while true do
+    local client, err = server:accept()
+    if client then
+        local line = client:recv_line(30)
+        if line then assert(client:send(line .. "\n")) end
+        client:close()
+    elseif err ~= "timeout" and err ~= "interrupted" then
+        server:close()
+        error(err)
+    end
+end
+```
+
+Le pathname est retiré automatiquement par `server:close()` ou par le GC si
+l'entrée est toujours celle créée par Babet.
+
 ### Client avec longueur préfixée
 
 ```lua
@@ -662,6 +774,8 @@ Les valeurs hors plage et les erreurs d'exécution renvoient `(nil, err)` :
 
 - port négatif ou supérieur à 65535 ;
 - backlog nul ou trop grand ;
+- pathname Unix vide, trop long, contenant un NUL ou déjà présent ;
+- options Unix inconnues ou permissions hors `0000..0777` ;
 - timeout invalide ;
 - count de `recv` hors limite ;
 - `max_bytes` invalide ;
@@ -701,7 +815,17 @@ fonctions et méthodes publiques de `babet.socket`.
 - **Pas de half-close exposé.** Babet n'expose pas `shutdown(SHUT_WR)` ; seule
   la fermeture complète est disponible.
 - **Pas de keepalive configuré.** Les options TCP avancées ne sont pas exposées.
-- **Propriété des ressources pendant la construction.** `connect`, `listen`,
+- **Unix pathname uniquement.** Pas de sockets abstraits Linux, de datagrammes
+  Unix, de `SCM_RIGHTS` ni de credentials.
+- **Répertoire parent et `umask`.** Le mode final demandé est appliqué après
+  `bind()`. Pendant le bref intervalle précédent, le pathname hérite du mode
+  filtré par l'`umask` du processus. Babet ne change pas cet état global
+  multithread ; pour un service sensible, place le socket dans un répertoire
+  privé, idéalement `0700`. Les permissions finales du socket ne remplacent
+  pas la sécurité du répertoire.
+- **STARTTLS réservé au TCP.** Un flux Unix refuse `starttls()` sans fermer la
+  connexion.
+- **Propriété des ressources pendant la construction.** `connect`, `listen`, `connect_unix`, `listen_unix`,
   `accept` et `connect_tls` créent leur userdata Lua avant d'acquérir un FD ou
   un objet OpenSSL. Une erreur mémoire de Lua ne peut donc pas abandonner une
   ressource encore sans propriétaire. `starttls` emploie une garde séparée et

@@ -6,6 +6,45 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.20.0] - 2026-08-06
+
+### Résumé
+
+Babet 2.20.0 étend `babet.socket` aux sockets de flux Unix nommées. Les nouveaux
+constructeurs réutilisent les méthodes binary-safe, les deadlines monotones,
+les interruptions et la propriété RAII du module TCP, tout en ajoutant une
+politique prudente pour les pathnames locaux.
+
+### Sockets Unix
+
+- ajouter `babet.socket.connect_unix(path, timeout?)` avec connexion non
+  bloquante interne, deadline globale, interruption par les signaux gérés et
+  retour typé `timeout` ;
+- ajouter `babet.socket.listen_unix(path, opts?)` avec les options strictes
+  `backlog`, `permissions` et `unlink_on_close` ;
+- appliquer après `bind()` le mode final privé `0600` par défaut, sans suivre
+  un symlink, puis vérifier que le pathname désigne toujours l'inode créé ;
+  pendant ce bref intervalle, le mode initial reste filtré par l'`umask` du
+  processus, donc un service sensible doit utiliser un répertoire parent privé ;
+- refuser toute entrée préexistante, sans suppression automatique d'un socket
+  obsolète ou d'un fichier utilisateur ;
+- retirer le pathname à `close()` ou au GC uniquement s'il s'agit toujours du
+  même inode socket, afin de préserver tout remplacement concurrent ;
+- exposer `{ path = ... }` depuis `peer()` et `sockname()`, transmettre le
+  domaine aux sockets acceptés et identifier les flux Unix dans `tostring` ;
+- réserver STARTTLS aux sockets TCP, sans fermer un flux Unix lors du refus ;
+- conserver `CLOEXEC`, les timeouts, les lectures bloc/ligne/EOF et les chaînes
+  binaires sur les connexions locales.
+
+### Tests et documentation
+
+- ajouter une 44e suite couvrant validation stricte, limite `sockaddr_un`,
+  permissions, cycle de vie, refus des entrées existantes, protection d'un
+  pathname remplacé, GC, introspection d'adresse et échange avec un worker ;
+- ajouter un préflight de 13 contrats structurels consacré aux sockets Unix ;
+- mettre à jour les documentations française et anglaise et régénérer les deux
+  manuels PDF.
+
 ## [2.19.0] - 2026-08-06
 
 ### Résumé

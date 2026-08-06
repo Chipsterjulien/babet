@@ -1,15 +1,16 @@
 > **English** | [Français](../../fr/modules/socket.md)
 
-# SOCKET — TCP clients and servers, binary streams, lines, and timeouts
+# SOCKET — TCP and Unix sockets, binary streams, lines, and timeouts
 
-`babet.socket` provides synchronous TCP sockets for custom protocols: IRC,
-plain SMTP before STARTTLS, line-oriented services, binary streams, and small
-internal daemons.
+`babet.socket` provides synchronous stream sockets over TCP or the Unix
+domain (`AF_UNIX`) for custom protocols: IRC, plain SMTP before STARTTLS,
+line-oriented services, binary streams, and small local daemons.
 
 It covers:
 
 - connecting to a hostname or IP address;
-- listening on one interface or all interfaces;
+- connecting locally through a Unix socket pathname;
+- listening on a network interface or Unix pathname;
 - accepting clients;
 - sending a complete binary Lua string;
 - receiving chunks, lines, or everything until remote EOF;
@@ -18,8 +19,8 @@ It covers:
 - explicit close and garbage-collector cleanup;
 - interruption by signals handled through Babet.
 
-It does not expose UDP, Unix-domain sockets, asynchronous I/O, `select`/`poll`
-loops, or an application protocol. Use [`HTTP`](http.md) for web requests and
+It does not expose UDP, the Linux abstract Unix namespace, asynchronous I/O,
+`select`/`poll` loops, or an application protocol. Use [`HTTP`](http.md) for web requests and
 [`TLS`](tls.md) for direct TLS or STARTTLS.
 
 ## Module contents
@@ -27,7 +28,9 @@ loops, or an application protocol. Use [`HTTP`](http.md) for web requests and
 - [Core conventions](#socket-conventions)
 - [API overview](#socket-api-summary)
 - [Connecting a client](#socket-connect)
-- [Creating a server](#socket-listen)
+- [Creating a TCP server](#socket-listen)
+- [Connecting to a Unix socket](#socket-connect-unix)
+- [Creating a Unix server](#socket-listen-unix)
 - [Accepting a client](#socket-accept)
 - [Default timeout](#socket-set-timeout)
 - [Sending data](#socket-send)
@@ -45,10 +48,10 @@ loops, or an application protocol. Use [`HTTP`](http.md) for web requests and
 <a id="socket-conventions"></a>
 ## Core conventions
 
-### Synchronous TCP
+### Synchronous streams
 
-Every call runs in the current thread. Without a timeout, `connect`, `accept`,
-`send`, and receive methods can wait indefinitely. Use
+Every call runs in the current thread. Without a timeout, `connect`,
+`connect_unix`, `accept`, `send`, and receive methods can wait indefinitely. Use
 [`workers`](workers.md) for independent concurrent connections; Babet does not
 expose a Lua event loop.
 
@@ -62,7 +65,8 @@ local data = assert(sock:recv(5, 2))
 assert(#data == 5 and data:byte(3) == 0)
 ```
 
-Hostnames are passed to C/POSIX APIs and may not contain NUL.
+Hostnames and Unix pathnames are passed to C/POSIX APIs and may not contain
+NUL.
 
 ### Timeout rules
 
@@ -90,6 +94,8 @@ normally return `(nil, err)`.
 ```lua
 local sock, err = babet.socket.connect(host, port, timeout?)
 local server, err = babet.socket.listen(host, port, backlog?)
+local local_sock, err = babet.socket.connect_unix(path, timeout?)
+local local_server, err = babet.socket.listen_unix(path, opts?)
 
 local count, err = sock:send(data)
 local data, err = sock:recv(count, timeout?)
@@ -113,6 +119,14 @@ local client, err = server:accept(timeout?)
 
 Numeric strings such as `"443"` and floats such as `443.0` are rejected for
 integer fields.
+
+`listen_unix` accepts these strict options:
+
+| Option | Default | Contract |
+| --- | ---: | --- |
+| `backlog` | `16` | integer `1..INT_MAX` |
+| `permissions` | `0600` | exact final Unix mode `0000..0777`, applied after `bind()` |
+| `unlink_on_close` | `true` | remove the created pathname on close/GC |
 
 A listening socket rejects stream operations and `peer`; a connected socket
 rejects `accept`.
@@ -185,6 +199,55 @@ Backlog is a kernel request, not a maximum number of active clients:
 ```lua
 local server = assert(babet.socket.listen("127.0.0.1", 9000, 128))
 ```
+
+<a id="socket-connect-unix"></a>
+## `babet.socket.connect_unix(path, timeout?)`
+
+Connects to a pathname-based Unix stream socket:
+
+```lua
+local sock, err = babet.socket.connect_unix("/run/my-service.sock", 2)
+assert(sock, err)
+```
+
+The pathname must be a strict non-empty string without NUL and must fit in
+`sockaddr_un.sun_path` (107 useful bytes on Linux). The timeout uses the same
+global monotonic contract as TCP connect; zero means infinite. It is not kept
+as the socket's later I/O timeout.
+
+Linux abstract sockets are deliberately not exposed. `peer()` returns
+`{ path = ... }`; `sockname()` on an unbound Unix client normally returns
+`{ path = "" }`.
+
+<a id="socket-listen-unix"></a>
+## `babet.socket.listen_unix(path, opts?)`
+
+Creates an `AF_UNIX`/`SOCK_STREAM` listener:
+
+```lua
+local server = assert(babet.socket.listen_unix("/run/my-service.sock", {
+    backlog = 32,
+    permissions = tonumber("660", 8),
+    unlink_on_close = true,
+}))
+```
+
+Babet refuses **every pre-existing pathname**, including stale sockets,
+regular files, symlinks, FIFOs, and directories. It never silently removes an
+existing entry; stale sockets must be explicitly removed by the application
+after validation.
+
+After `bind()`, the final permissions are applied exactly without following a
+symlink. The final secure default is `0600`. Between `bind()` and that mode
+change, the pathname briefly has the kernel-created mode filtered by the
+process `umask`. Babet does not change that `umask` because it is process-global
+and the runtime is multithreaded. Sensitive services should therefore place
+the socket in a private parent directory, for example mode `0700`. The parent
+directory must already exist.
+
+With `unlink_on_close = true`, close and GC remove the pathname only when it is
+still the same socket inode created by this listener. A replacement file is
+never deleted. With `false`, the stale pathname remains for explicit cleanup.
 
 <a id="socket-accept"></a>
 ## `server:accept(timeout?)`
@@ -490,7 +553,15 @@ and method.
 - Bind loopback unless remote access is required.
 - TCP is a byte stream; `send` boundaries are not preserved.
 - DNS is synchronous and outside the controlled connection deadline.
-- No half-close, configurable keepalive, UDP, Unix sockets, or Lua event loop.
+- No half-close, configurable keepalive, UDP, or Lua event loop.
+- Unix support is pathname stream sockets only: no abstract namespace,
+  datagrams, `SCM_RIGHTS`, or credentials.
+- The requested final mode is applied after `bind()`. Before that mode change,
+  the pathname briefly inherits the process-`umask`-filtered mode. Babet does
+  not modify this process-global state in a multithreaded runtime; put sensitive
+  sockets in a private parent directory, ideally mode `0700`. Socket mode alone
+  does not secure a writable directory.
+- STARTTLS is TCP-only and is rejected on Unix streams without closing them.
 - One userdata should not be used concurrently; socket userdata cannot cross a
   WORKERS message boundary.
 - `connect`, `listen`, `accept`, and `connect_tls` create the Lua userdata owner

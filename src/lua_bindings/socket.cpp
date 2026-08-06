@@ -26,6 +26,7 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -45,18 +46,30 @@ namespace
     constexpr lua_Integer MAX_RECV_ALL_MAX_BYTES =
         2LL * 1024LL * 1024LL * 1024LL;
 
-    // État porté par l'userdata : descripteur, mode écoute, timeout,
+    enum class SockDomain : unsigned char
+    {
+        Internet,
+        UnixPath
+    };
+
+    // État porté par l'userdata : descripteur, mode écoute, domaine, timeout,
     // session TLS éventuelle et octets déjà consommés mais pas encore
-    // livrés à Lua. Le buffer `recv_pending` préserve l'ordre du flux
-    // lorsqu'un recv_line()/recv_all() est interrompu ou expire après
-    // avoir lu une partie des données. Les appels recv(), recv_line() et
-    // recv_all() le consultent tous avant de relire le socket.
+    // livrés à Lua. Pour un listener Unix, l'userdata mémorise aussi l'inode
+    // créé par bind() afin que close()/__gc ne supprime jamais un fichier qui
+    // aurait remplacé le socket entre-temps.
     struct Sock
     {
         int fd;         // -1 si fermé
         bool listening; // true si listen(), false si connect()/accept()
         int timeout_ms; // 0 = pas de timeout (bloquant infini)
         SSL *ssl;       // nullptr en TCP brut, non-null après TLS handshake
+        SockDomain domain;
+
+        std::string unix_path;
+        dev_t unix_dev;
+        ino_t unix_ino;
+        bool owns_unix_path;
+        bool unlink_unix_on_close;
 
         // Octets déjà retirés du socket mais pas encore rendus à Lua.
         // Ce buffer est commun aux trois méthodes de réception afin que
@@ -124,6 +137,11 @@ namespace
         s->listening = false;
         s->timeout_ms = 0;
         s->ssl = nullptr;
+        s->domain = SockDomain::Internet;
+        s->unix_dev = 0;
+        s->unix_ino = 0;
+        s->owns_unix_path = false;
+        s->unlink_unix_on_close = true;
         return s;
     }
 
@@ -140,10 +158,12 @@ namespace
         return userdata->get();
     }
 
-    void attach_plain_sock(Sock *s, int fd, bool listening) noexcept
+    void attach_plain_sock(Sock *s, int fd, bool listening,
+                           SockDomain domain = SockDomain::Internet) noexcept
     {
         s->fd = fd;
         s->listening = listening;
+        s->domain = domain;
     }
 
     // Helpers d'erreur format-friendly.
@@ -1052,6 +1072,38 @@ namespace
         ERR_clear_error();
     }
 
+    bool same_unix_entry(const struct stat &st, const Sock *s) noexcept
+    {
+        return S_ISSOCK(st.st_mode) && st.st_dev == s->unix_dev &&
+               st.st_ino == s->unix_ino;
+    }
+
+    // Supprime uniquement le pathname créé par CE listener et seulement si
+    // l'entrée actuelle est encore le même inode socket. Cette vérification
+    // empêche close()/__gc d'effacer un fichier homonyme posé après un rename
+    // ou un remplacement externe. Le nettoyage reste best-effort et noexcept.
+    void release_owned_unix_path(Sock *s, bool remove_path) noexcept
+    {
+        if (!s->owns_unix_path)
+        {
+            return;
+        }
+
+        if (remove_path && !s->unix_path.empty())
+        {
+            struct stat st;
+            if (::lstat(s->unix_path.c_str(), &st) == 0 &&
+                same_unix_entry(st, s))
+            {
+                (void)::unlink(s->unix_path.c_str());
+            }
+        }
+
+        s->owns_unix_path = false;
+        s->unix_dev = 0;
+        s->unix_ino = 0;
+    }
+
     void close_sock_resources(Sock *s) noexcept
     {
         if (s->ssl != nullptr)
@@ -1060,6 +1112,7 @@ namespace
             s->ssl = nullptr;
             ERR_clear_error();
         }
+        release_owned_unix_path(s, true);
         if (s->fd >= 0)
         {
             ::close(s->fd);
@@ -2018,7 +2071,7 @@ namespace
                                   SOCK_CLOEXEC);
             if (client_fd >= 0)
             {
-                attach_plain_sock(owner, client_fd, false);
+                attach_plain_sock(owner, client_fd, false, s->domain);
                 ensure_cloexec(client_fd); // ceinture + bretelles
                 break;
             }
@@ -2060,6 +2113,7 @@ namespace
             tls_close(s->ssl);
             s->ssl = nullptr;
         }
+        release_owned_unix_path(s, s->unlink_unix_on_close);
         if (s->fd >= 0)
         {
             ::close(s->fd);
@@ -2112,10 +2166,33 @@ namespace
         return push_ok_protected(L);
     }
 
-    // peer() / sockname() : renvoie une table { host, port }.
+    // peer() / sockname() : TCP renvoie { host, port }, tandis qu'un
+    // socket Unix renvoie { path }. Un client Unix non lié possède un chemin
+    // local vide, ce qui est l'état normal avant/pendant une connexion locale.
     int push_addr_table(lua_State *L, const struct sockaddr *sa,
                         socklen_t salen)
     {
+        if (sa->sa_family == AF_UNIX)
+        {
+            const auto *un = reinterpret_cast<const struct sockaddr_un *>(sa);
+            const size_t base = offsetof(struct sockaddr_un, sun_path);
+            size_t length = 0;
+            if (static_cast<size_t>(salen) > base)
+            {
+                length = std::min(static_cast<size_t>(salen) - base,
+                                  sizeof(un->sun_path));
+                if (length > 0 && un->sun_path[length - 1] == '\0')
+                {
+                    --length;
+                }
+            }
+
+            lua_newtable(L);
+            lua_pushlstring(L, un->sun_path, length);
+            lua_setfield(L, -2, "path");
+            return 1;
+        }
+
         char host[NI_MAXHOST];
         char port[NI_MAXSERV];
         int rc = ::getnameinfo(sa, salen, host, sizeof(host),
@@ -2190,12 +2267,13 @@ namespace
                 tls_close(s->ssl);
                 s->ssl = nullptr;
             }
+            release_owned_unix_path(s, s->unlink_unix_on_close);
             if (s->fd >= 0)
             {
                 ::close(s->fd);
                 s->fd = -1;
             }
-            s->~Sock(); // libère recv_pending
+            s->~Sock(); // libère recv_pending et unix_path
             userdata->constructed = false;
         }
         return 0;
@@ -2212,9 +2290,17 @@ namespace
         }
         else
         {
-            std::snprintf(buf, sizeof(buf),
-                          "socket (%s, fd=%d)",
-                          s->listening ? "listening" : "stream", s->fd);
+            const char *kind;
+            if (s->domain == SockDomain::UnixPath)
+            {
+                kind = s->listening ? "unix-listening" : "unix-stream";
+            }
+            else
+            {
+                kind = s->listening ? "listening" : "stream";
+            }
+            std::snprintf(buf, sizeof(buf), "socket (%s, fd=%d)",
+                          kind, s->fd);
         }
         lua_pushstring(L, buf);
         return 1;
@@ -2668,6 +2754,11 @@ int sock_starttls(lua_State *L)
         return push_fail_protected(L,
                          "socket: starttls: TLS already active on this socket");
     }
+    if (s->domain != SockDomain::Internet)
+    {
+        return push_fail_protected(L,
+                         "socket: starttls: TLS is supported only on TCP sockets");
+    }
     if (!s->recv_pending.empty())
     {
         return push_fail_protected(
@@ -2745,6 +2836,419 @@ int sock_starttls(lua_State *L)
 
     s->ssl = guard.release();
     return push_ok_protected(L);
+}
+
+namespace
+{
+    constexpr size_t UNIX_PATH_CAPACITY = sizeof(((sockaddr_un *)nullptr)->sun_path);
+
+    struct UnixListenOptions
+    {
+        int backlog = 16;
+        mode_t permissions = 0600;
+        bool unlink_on_close = true;
+    };
+
+    bool parse_unix_path(lua_State *L, int index, const char *operation,
+                         std::string &path, std::string &err)
+    {
+        if (!lua_string_without_nul(L, index, path, operation, err))
+        {
+            return false;
+        }
+        if (path.empty())
+        {
+            err = operation;
+            err += ": path must not be empty";
+            return false;
+        }
+        if (path.size() >= UNIX_PATH_CAPACITY)
+        {
+            err = operation;
+            err += ": path is too long for sockaddr_un";
+            return false;
+        }
+        return true;
+    }
+
+    bool parse_unix_listen_options(lua_State *L, int index,
+                                   UnixListenOptions &opts,
+                                   std::string &err)
+    {
+        if (lua_is_none_or_nil(L, index))
+        {
+            return true;
+        }
+        if (lua_type(L, index) != LUA_TTABLE)
+        {
+            err = "socket: listen_unix: opts must be a table";
+            return false;
+        }
+
+        index = lua_absindex(L, index);
+        lua_pushnil(L);
+        while (lua_next(L, index) != 0)
+        {
+            if (lua_type(L, -2) != LUA_TSTRING)
+            {
+                lua_pop(L, 2);
+                err = "socket: listen_unix: option names must be strings";
+                return false;
+            }
+            size_t key_len = 0;
+            const char *key_data = lua_tolstring(L, -2, &key_len);
+            std::string key(key_data, key_len);
+            if (key.find('\0') != std::string::npos)
+            {
+                lua_pop(L, 2);
+                err = "socket: listen_unix: option name contains NUL byte";
+                return false;
+            }
+
+            if (key == "backlog")
+            {
+                if (!lua_is_strict_integer(L, -1))
+                {
+                    lua_pop(L, 2);
+                    err = "socket: listen_unix: backlog must be an integer";
+                    return false;
+                }
+                const lua_Integer value = lua_tointeger(L, -1);
+                if (value <= 0)
+                {
+                    lua_pop(L, 2);
+                    err = "socket: listen_unix: backlog must be > 0";
+                    return false;
+                }
+                if (value > static_cast<lua_Integer>(INT_MAX))
+                {
+                    lua_pop(L, 2);
+                    err = "socket: listen_unix: backlog out of range";
+                    return false;
+                }
+                opts.backlog = static_cast<int>(value);
+            }
+            else if (key == "permissions")
+            {
+                if (!lua_is_strict_integer(L, -1))
+                {
+                    lua_pop(L, 2);
+                    err = "socket: listen_unix: permissions must be an integer";
+                    return false;
+                }
+                const lua_Integer value = lua_tointeger(L, -1);
+                if (value < 0 || value > 0777)
+                {
+                    lua_pop(L, 2);
+                    err = "socket: listen_unix: permissions must be in [0000, 0777]";
+                    return false;
+                }
+                opts.permissions = static_cast<mode_t>(value);
+            }
+            else if (key == "unlink_on_close")
+            {
+                if (lua_type(L, -1) != LUA_TBOOLEAN)
+                {
+                    lua_pop(L, 2);
+                    err = "socket: listen_unix: unlink_on_close must be a boolean";
+                    return false;
+                }
+                opts.unlink_on_close = lua_toboolean(L, -1) != 0;
+            }
+            else
+            {
+                lua_pop(L, 2);
+                err = "socket: listen_unix: unknown option '";
+                err += key;
+                err += "'";
+                return false;
+            }
+            lua_pop(L, 1);
+        }
+        return true;
+    }
+
+    void fill_unix_address(const std::string &path, sockaddr_un &address,
+                           socklen_t &length) noexcept
+    {
+        std::memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        std::memcpy(address.sun_path, path.data(), path.size());
+        address.sun_path[path.size()] = '\0';
+        length = static_cast<socklen_t>(
+            offsetof(sockaddr_un, sun_path) + path.size() + 1);
+    }
+
+    bool record_unix_listener_inode(Sock *owner, std::string &err)
+    {
+        struct stat st;
+        if (::lstat(owner->unix_path.c_str(), &st) != 0)
+        {
+            err = "socket: listen_unix: lstat after bind: ";
+            err += std::strerror(errno);
+            return false;
+        }
+        if (!S_ISSOCK(st.st_mode))
+        {
+            err = "socket: listen_unix: bound path was replaced unexpectedly";
+            return false;
+        }
+        owner->unix_dev = st.st_dev;
+        owner->unix_ino = st.st_ino;
+        owner->owns_unix_path = true;
+        return true;
+    }
+
+    bool apply_unix_listener_permissions(Sock *owner, mode_t permissions,
+                                         std::string &err)
+    {
+        if (::fchmodat(AT_FDCWD, owner->unix_path.c_str(), permissions,
+                       AT_SYMLINK_NOFOLLOW) != 0)
+        {
+            err = "socket: listen_unix: chmod: ";
+            err += std::strerror(errno);
+            return false;
+        }
+
+        struct stat st;
+        if (::lstat(owner->unix_path.c_str(), &st) != 0 ||
+            !same_unix_entry(st, owner))
+        {
+            err = "socket: listen_unix: socket path changed during setup";
+            return false;
+        }
+        if ((st.st_mode & 0777) != permissions)
+        {
+            err = "socket: listen_unix: permissions were not applied exactly";
+            return false;
+        }
+        return true;
+    }
+
+    bool unix_connect_owned(Sock *owner, const std::string &path,
+                            int timeout_ms, std::string &err,
+                            bool &timed_out)
+    {
+        timed_out = false;
+        int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0)
+        {
+            err = "socket: connect_unix: socket: ";
+            err += std::strerror(errno);
+            return false;
+        }
+        attach_plain_sock(owner, fd, false, SockDomain::UnixPath);
+        ensure_cloexec(fd);
+
+        int flags = ::fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)
+        {
+            err = "socket: connect_unix: fcntl: ";
+            err += std::strerror(errno);
+            close_sock_resources(owner);
+            return false;
+        }
+
+        sockaddr_un address;
+        socklen_t address_length = 0;
+        fill_unix_address(path, address, address_length);
+        Deadline deadline = make_deadline(timeout_ms);
+
+        int rc = ::connect(fd, reinterpret_cast<sockaddr *>(&address),
+                           address_length);
+        if (rc != 0)
+        {
+            if (errno == EINTR)
+            {
+                err = "interrupted";
+                close_sock_resources(owner);
+                return false;
+            }
+            if (errno != EINPROGRESS && errno != EAGAIN &&
+                errno != EWOULDBLOCK)
+            {
+                err = "socket: connect_unix: ";
+                err += std::strerror(errno);
+                close_sock_resources(owner);
+                return false;
+            }
+
+            int ready = wait_ready_deadline(fd, POLLOUT, deadline);
+            if (ready == WAIT_INTERRUPTED)
+            {
+                err = "interrupted";
+                close_sock_resources(owner);
+                return false;
+            }
+            if (ready < 0)
+            {
+                err = "socket: connect_unix: poll: ";
+                err += std::strerror(errno);
+                close_sock_resources(owner);
+                return false;
+            }
+            if (ready == 0)
+            {
+                timed_out = true;
+                close_sock_resources(owner);
+                return false;
+            }
+
+            int socket_error = 0;
+            socklen_t socket_error_length = sizeof(socket_error);
+            if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error,
+                             &socket_error_length) != 0)
+            {
+                err = "socket: connect_unix: getsockopt: ";
+                err += std::strerror(errno);
+                close_sock_resources(owner);
+                return false;
+            }
+            if (socket_error != 0)
+            {
+                err = "socket: connect_unix: ";
+                err += std::strerror(socket_error);
+                close_sock_resources(owner);
+                return false;
+            }
+        }
+
+        if (::fcntl(fd, F_SETFL, flags) != 0)
+        {
+            err = "socket: connect_unix: restore flags: ";
+            err += std::strerror(errno);
+            close_sock_resources(owner);
+            return false;
+        }
+        return true;
+    }
+}
+
+// babet.socket.connect_unix(path [, timeout]) -> socket | (nil, err)
+int lua_socket_connect_unix(lua_State *L)
+{
+    if (lua_gettop(L) > 2)
+    {
+        return luaL_error(L, "socket.connect_unix expects path and optional timeout");
+    }
+    luaL_checktype(L, 1, LUA_TSTRING);
+
+    std::string path;
+    std::string err;
+    if (!parse_unix_path(L, 1, "socket: connect_unix", path, err))
+    {
+        return push_fail_protected(L, err);
+    }
+
+    int timeout_ms = 0;
+    if (!parse_timeout_argument(L, 2, 0, &timeout_ms, err,
+                                "socket: connect_unix"))
+    {
+        return push_fail_protected(L, err);
+    }
+
+    Sock *owner = push_empty_sock_protected(L);
+    bool timed_out = false;
+    if (!unix_connect_owned(owner, path, timeout_ms, err, timed_out))
+    {
+        if (timed_out)
+        {
+            return push_fail_protected(L, "timeout");
+        }
+        if (err == "interrupted")
+        {
+            signal_dispatch_pending(L);
+        }
+        return push_fail_protected(L, err);
+    }
+    return 1;
+}
+
+// babet.socket.listen_unix(path [, opts]) -> socket | (nil, err)
+// opts: backlog=16, permissions=0600, unlink_on_close=true.
+int lua_socket_listen_unix(lua_State *L)
+{
+    if (lua_gettop(L) > 2)
+    {
+        return luaL_error(L, "socket.listen_unix expects path and optional options");
+    }
+    luaL_checktype(L, 1, LUA_TSTRING);
+
+    std::string path;
+    std::string err;
+    if (!parse_unix_path(L, 1, "socket: listen_unix", path, err))
+    {
+        return push_fail_protected(L, err);
+    }
+
+    UnixListenOptions opts;
+    if (!parse_unix_listen_options(L, 2, opts, err))
+    {
+        return push_fail_protected(L, err);
+    }
+
+    struct stat existing;
+    if (::lstat(path.c_str(), &existing) == 0)
+    {
+        return push_fail_protected(
+            L, "socket: listen_unix: path already exists; remove stale sockets explicitly");
+    }
+    if (errno != ENOENT)
+    {
+        err = "socket: listen_unix: lstat: ";
+        err += std::strerror(errno);
+        return push_fail_protected(L, err);
+    }
+
+    Sock *owner = push_empty_sock_protected(L);
+    owner->domain = SockDomain::UnixPath;
+    owner->unix_path = path;
+    owner->unlink_unix_on_close = opts.unlink_on_close;
+
+    int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+    {
+        return push_errno_fail(L, "listen_unix socket");
+    }
+    attach_plain_sock(owner, fd, true, SockDomain::UnixPath);
+    ensure_cloexec(fd);
+
+    sockaddr_un address;
+    socklen_t address_length = 0;
+    fill_unix_address(path, address, address_length);
+    if (::bind(fd, reinterpret_cast<sockaddr *>(&address),
+               address_length) != 0)
+    {
+        err = "socket: listen_unix: bind: ";
+        err += std::strerror(errno);
+        close_sock_resources(owner);
+        return push_fail_protected(L, err);
+    }
+
+    if (!record_unix_listener_inode(owner, err) ||
+        !apply_unix_listener_permissions(owner, opts.permissions, err))
+    {
+        close_sock_resources(owner);
+        return push_fail_protected(L, err);
+    }
+
+    if (::listen(fd, opts.backlog) != 0)
+    {
+        err = "socket: listen_unix: listen: ";
+        err += std::strerror(errno);
+        close_sock_resources(owner);
+        return push_fail_protected(L, err);
+    }
+
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0)
+    {
+        err = "socket: listen_unix: fcntl: ";
+        err += std::strerror(errno);
+        close_sock_resources(owner);
+        return push_fail_protected(L, err);
+    }
+    return 1;
 }
 
 // babet.socket.listen(host, port [, backlog]) -> socket | (nil, err)
@@ -2935,6 +3439,10 @@ void register_socket(lua_State *L)
     lua_setfield(L, -2, "connect");
     lua_pushcfunction(L, socket_lua_boundary<lua_socket_listen>);
     lua_setfield(L, -2, "listen");
+    lua_pushcfunction(L, socket_lua_boundary<lua_socket_connect_unix>);
+    lua_setfield(L, -2, "connect_unix");
+    lua_pushcfunction(L, socket_lua_boundary<lua_socket_listen_unix>);
+    lua_setfield(L, -2, "listen_unix");
     // TLS (Chantier 7) : connect_tls = variante TLS de connect.
     // Cohérent avec TLS-1 (pas de sous-module séparé).
     lua_pushcfunction(L, socket_lua_boundary<lua_socket_connect_tls>);
