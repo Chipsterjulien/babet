@@ -15,11 +15,11 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the **Babet 2.20.0** release candidate.
+Documentation for the **Babet 2.21.0** release candidate.
 
-Babet 2.20.0 modularizes the Lua test harness into 44 reachable suites and
-adds `db:backup()`, a coherent, bounded, atomically published SQLite backup,
-including WAL databases modified while the copy is running.
+Babet 2.21.0 adds `xdev = true` to `babet.find()`, keeping foreign mount
+points visible while pruning their contents. The harness remains split into 44
+reachable suites and exercises the same contract inside a worker.
 
 ## Getting started
 
@@ -29,13 +29,13 @@ including WAL databases modified while the copy is running.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.20.0 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.21.0 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 
 | I need to… | Chapter | What it contains |
 | --- | --- | --- |
-| create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find`, `copyTree`, permissions, and checksums |
+| create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find` with `xdev` confinement, `copyTree`, permissions, and checksums |
 | atomically publish configuration or binary data | [`writeFileAtomic — atomic writing`](modules/write-file-atomic.md) | default no-overwrite, permissions, durability, path confinement, concurrency, and workers |
 | parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversion |
 | run an external program | [`Exec — processes`](modules/exec.md) | shell-free arguments, complete capture with `exec`, streaming with `spawn`, environment, cwd, and process control |

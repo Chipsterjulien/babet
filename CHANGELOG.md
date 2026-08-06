@@ -6,6 +6,47 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.21.0] - 2026-08-06
+
+### Summary
+
+Babet 2.21.0 adds filesystem-boundary confinement to `babet.find()` through
+the strict `xdev` option. The traversal preserves every historical default,
+keeps foreign mount points visible, and prunes only their descendants.
+
+### Filesystem traversal
+
+- add `babet.find(path, { xdev = true })`, equivalent to the useful traversal
+  contract of `find -xdev`/`-mount` without launching an external command;
+- record the `st_dev` of the directory actually traversed, following a valid
+  final root symlink consistently with the existing root contract;
+- inspect candidate directories with `lstat()` so directory symlinks remain
+  non-followed while real mount points expose their mounted device;
+- ignore only `ENOENT` when an entry disappears between the directory read and
+  this xdev inspection, after cancelling pending recursion so the iterator
+  increment cannot try to open the vanished directory; every other inspection
+  error remains fatal;
+- call `disable_recursion_pending()` before advancing the iterator when a
+  directory belongs to another device;
+- keep the foreign mount point itself eligible for type, regex, glob, path,
+  `mindepth`, and `maxdepth` filters;
+- leave traversal unchanged when `xdev` is omitted or explicitly false;
+- reject non-boolean `xdev` values with `(nil, err)` and preserve the same
+  behavior in worker Lua states.
+
+### Tests and documentation
+
+- add a discriminating Linux regression based on the real `/dev` to
+  `/dev/pts` device boundary, proving both descendant pruning and mount-point
+  visibility;
+- verify explicit `xdev = false`, strict validation, filter composition, and
+  identical worker semantics;
+- add a dedicated 15-contract structural preflight and run it in every normal
+  and sanitizer validation pass, including the `ENOENT` race and the `st_dev`
+  behavior of Btrfs subvolumes and bind mounts;
+- update the French and English filesystem documentation, READMEs, release
+  notes, and regenerated PDF manuals with standalone and combined examples.
+
 ## [2.20.0] - 2026-08-06
 
 ### Summary

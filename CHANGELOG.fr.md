@@ -6,6 +6,50 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.21.0] - 2026-08-06
+
+### Résumé
+
+Babet 2.21.0 ajoute le confinement par système de fichiers à `babet.find()`
+avec l'option stricte `xdev`. Le parcours conserve tous les défauts historiques,
+laisse les points de montage étrangers visibles et élague uniquement leurs
+descendants.
+
+### Parcours du système de fichiers
+
+- ajouter `babet.find(path, { xdev = true })`, équivalent au contrat de
+  parcours utile de `find -xdev`/`-mount`, sans lancer de commande externe ;
+- mémoriser le `st_dev` du dossier réellement parcouru, en suivant un éventuel
+  symlink final valide de la racine conformément au contrat existant ;
+- inspecter les dossiers candidats avec `lstat()` afin de ne toujours pas
+  suivre les symlinks de dossiers, tout en observant le périphérique réel d'un
+  point de montage ;
+- ignorer uniquement `ENOENT` lorsqu'une entrée disparaît entre la lecture du
+  dossier et cette inspection `xdev`, après avoir annulé la récursion en attente
+  pour empêcher l'incrément de tenter d'ouvrir le dossier disparu ; toutes les
+  autres erreurs restent fatales ;
+- appeler `disable_recursion_pending()` avant l'avancement de l'itérateur
+  lorsqu'un dossier appartient à un autre périphérique ;
+- conserver le point de montage étranger lui-même comme candidat pour les
+  filtres de type, regex, glob, chemin, `mindepth` et `maxdepth` ;
+- ne rien changer au parcours lorsque `xdev` est absent ou explicitement faux ;
+- refuser les valeurs `xdev` non booléennes avec `(nil, err)` et conserver le
+  même comportement dans les états Lua des workers.
+
+### Tests et documentation
+
+- ajouter une régression Linux discriminante fondée sur la vraie frontière de
+  périphérique `/dev` vers `/dev/pts`, qui prouve à la fois l'élagage des
+  descendants et la visibilité du point de montage ;
+- vérifier `xdev = false`, la validation stricte, la combinaison avec les
+  filtres et le contrat identique dans un worker ;
+- ajouter un préflight structurel dédié de 15 contrats, exécuté à chaque passe
+  normale et sanitizer, couvrant aussi la course `ENOENT` et la sémantique
+  `st_dev` des sous-volumes Btrfs et bind mounts ;
+- mettre à jour les documentations FS française et anglaise, les README, les
+  notes de publication et les deux manuels PDF avec des exemples simples et
+  combinés.
+
 ## [2.20.0] - 2026-08-06
 
 ### Résumé

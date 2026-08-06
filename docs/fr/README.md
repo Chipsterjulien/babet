@@ -17,11 +17,11 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version candidate **Babet 2.20.0**.
+Documentation de la version candidate **Babet 2.21.0**.
 
-Babet 2.20.0 modularise le harnais de tests Lua en 44 suites atteignables et
-ajoute `db:backup()`, une sauvegarde SQLite cohérente, bornée et atomiquement
-publiée, y compris pour les bases en WAL modifiées pendant la copie.
+Babet 2.21.0 ajoute `xdev = true` à `babet.find()` pour conserver les
+points de montage étrangers visibles tout en élaguant leur contenu. Le harnais
+reste réparti en 44 suites atteignables et couvre aussi ce contrat dans un worker.
 
 ## Pour démarrer
 
@@ -31,13 +31,13 @@ publiée, y compris pour les bases en WAL modifiées pendant la copie.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.20.0 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.21.0 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 
 | Je cherche à… | Chapitre à consulter | Ce que j’y trouverai |
 | --- | --- | --- |
-| créer, supprimer, lister, rechercher, copier ou déplacer des fichiers | [`FS — système de fichiers`](modules/fs.md) | fichiers, dossiers, chemins, symlinks, `listFiles`, `find`, `copyTree`, permissions et checksums |
+| créer, supprimer, lister, rechercher, copier ou déplacer des fichiers | [`FS — système de fichiers`](modules/fs.md) | fichiers, dossiers, chemins, symlinks, `listFiles`, `find` avec confinement `xdev`, `copyTree`, permissions et checksums |
 | publier atomiquement une configuration ou un fichier binaire | [`writeFileAtomic — écriture atomique`](modules/write-file-atomic.md) | refus d’écrasement par défaut, permissions, durabilité, confinement des chemins, concurrence et workers |
 | lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |
 | lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, capture avec `exec`, streaming avec `spawn`, environnement, cwd et contrôle du processus |

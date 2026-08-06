@@ -17,6 +17,8 @@
 #include <optional>
 #include <functional>
 #include <utility>
+#include <cerrno>
+#include <sys/stat.h>
 
 namespace fs = std::filesystem;
 
@@ -40,6 +42,7 @@ namespace
         std::string iglob;      // idem, ASCII case-insensitive
         std::string path_glob;  // bounded glob on the complete generic path
         std::string path_iglob; // idem, ASCII case-insensitive
+        bool xdev = false;       // do not descend into another st_dev
     };
 
     constexpr std::size_t kMaxRegexPatternBytes = 4096;
@@ -266,6 +269,27 @@ namespace
             return ok;
         };
 
+        auto read_optional_boolean = [&](const char *field,
+                                         bool &destination) -> bool
+        {
+            lua_getfield(L, index, field);
+            if (lua_is_none_or_nil(L, -1))
+            {
+                lua_pop(L, 1);
+                return true;
+            }
+            if (!lua_isboolean(L, -1))
+            {
+                err = std::string("find: '") + field +
+                      "' must be a boolean";
+                lua_pop(L, 1);
+                return false;
+            }
+            destination = lua_toboolean(L, -1) != 0;
+            lua_pop(L, 1);
+            return true;
+        };
+
         // A non-integer depth must never be truncated silently by
         // lua_tointeger().  Both fields retain their documented lua_Integer
         // range and default values.
@@ -288,7 +312,8 @@ namespace
                read_optional_string("glob", out.glob) &&
                read_optional_string("iglob", out.iglob) &&
                read_optional_string("path_glob", out.path_glob) &&
-               read_optional_string("path_iglob", out.path_iglob);
+               read_optional_string("path_iglob", out.path_iglob) &&
+               read_optional_boolean("xdev", out.xdev);
     }
 
     std::optional<std::string> find(
@@ -316,6 +341,24 @@ namespace
         if (!root_is_directory)
         {
             return "path is not a directory: " + root.string();
+        }
+
+        dev_t root_device = 0;
+        if (options.xdev)
+        {
+            // stat() deliberately follows a final symlink accepted by the
+            // historical root-directory contract. The resulting st_dev is
+            // therefore the filesystem that recursive_directory_iterator
+            // will actually traverse.
+            struct stat root_stat{};
+            if (::stat(root.c_str(), &root_stat) != 0)
+            {
+                const int stat_errno = errno;
+                return "cannot inspect path '" + root.string() +
+                       "': " +
+                       std::generic_category().message(stat_errno);
+            }
+            root_device = root_stat.st_dev;
         }
 
         CompiledMatchers compiled;
@@ -372,7 +415,43 @@ namespace
                 // recursive_directory_iterator (comportement par défaut,
                 // inchangé) ; leur appliquer disable_recursion_pending
                 // est un no-op inoffensif.
-                if (depth >= options.maxdepth && it->is_directory())
+                const bool entry_is_directory = it->is_directory();
+                bool crosses_device = false;
+                if (options.xdev && entry_is_directory)
+                {
+                    // lstat() keeps directory symlinks non-followed, matching
+                    // recursive_directory_iterator's default traversal policy.
+                    // On a real mount point it observes the mounted inode and
+                    // therefore the foreign st_dev that must be pruned.
+                    struct stat entry_stat{};
+                    if (::lstat(it->path().c_str(), &entry_stat) != 0)
+                    {
+                        const int lstat_errno = errno;
+                        // A live tree may lose an entry between the iterator's
+                        // directory read and this xdev-specific lstat(). If the
+                        // iterator cached it as a directory, recursion may still
+                        // be pending: cancel it before continue so the following
+                        // increment does not try to open a path that vanished.
+                        // Every other error remains fatal so a partial traversal
+                        // is never mistaken for a complete one.
+                        if (lstat_errno == ENOENT)
+                        {
+                            it.disable_recursion_pending();
+                            continue;
+                        }
+                        return "cannot inspect path '" +
+                               it->path().string() + "': " +
+                               std::generic_category().message(lstat_errno);
+                    }
+                    crosses_device = entry_stat.st_dev != root_device;
+                }
+
+                // The mount point itself remains visible and can still match
+                // filters. Only the pending recursion into its children is
+                // disabled, exactly like GNU/POSIX find -xdev. maxdepth and
+                // xdev share the same single-increment pruning mechanism.
+                if (entry_is_directory &&
+                    (depth >= options.maxdepth || crosses_device))
                 {
                     it.disable_recursion_pending();
                 }

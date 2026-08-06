@@ -87,6 +87,13 @@ accidents and supply-chain tampering :
   memory budget, and cannot trigger catastrophic backtracking. Archive filter
   lists add cumulative count, byte, and matching-work ceilings. RE2-unsupported
   constructs fail before traversal.
+- **Device-boundary traversal confinement** lets
+  `babet.find(..., { xdev = true })` keep a foreign mount point observable
+  while skipping its children. This prevents a local search from accidentally
+  walking a mounted volume, network share, or pseudo-filesystem. The boundary
+  is the `st_dev` value, as with `find -xdev`: a Btrfs subvolume may be pruned,
+  while a bind mount of the same filesystem is not. It is not a sandbox: the
+  script may still call `babet.find()` directly on that other path.
 
 ## What it does *not* protect against
 

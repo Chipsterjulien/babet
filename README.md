@@ -16,11 +16,16 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.20.0**. See the
+Current release candidate: **2.21.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.20.0 adds pathname-based Unix-domain stream sockets with strict
+Babet 2.21.0 adds `xdev = true` to `babet.find()`. The traversal records
+the root filesystem device, keeps foreign mount points visible, and prunes
+their descendants without changing historical behavior when the option is
+absent or false. The contract is identical in workers.
+
+Babet 2.20.0 added pathname-based Unix-domain stream sockets with strict
 validation, an exact final mode, global connect deadlines, inode-sensitive
 listener cleanup, worker support, and the same binary-safe stream methods as
 TCP.
@@ -60,6 +65,22 @@ cd babet
 The build script vendors and compiles all its dependencies. The only
 prerequisites on your system are a C++23 compiler, CMake 3.22 or newer, `wget`, `unzip`,
 and `xz`.
+
+### Keep a recursive search on one filesystem
+
+```lua
+local entries = assert(babet.find("/srv", {
+    xdev = true,
+    type = "f",
+    path_iglob = "**/*.log",
+}))
+```
+
+A mount point belonging to another filesystem may still appear in the result,
+but Babet does not descend into it. This matches the useful traversal contract
+of `find -xdev` without invoking an external shell command. The decision is
+based on `st_dev`: a Btrfs subvolume may be pruned, while a bind mount of the
+same filesystem is not.
 
 ### Open SQLite with explicit connection policy
 

@@ -1,27 +1,29 @@
-Babet 2.20.0 - fichiers modifies par rapport a la 2.19.0
+Babet 2.21.0 - fichiers modifies par rapport a la 2.20.0
 Aucune suppression.
 
 MODIFIED_FILES.txt
 CHANGELOG.fr.md
 CHANGELOG.md
 CMakeLists.txt
-GITHUB_RELEASE_2.20.0.md
+GITHUB_RELEASE_2.21.0.md
 README.fr.md
 README.md
 RELEASING.md
 docs/en/README.md
 docs/en/getting-started.md
-docs/en/modules/socket.md
+docs/en/modules/fs.md
 docs/en/modules/sys.md
+docs/en/security.md
 docs/fr/README.md
 docs/fr/getting-started.md
-docs/fr/modules/socket.md
+docs/fr/modules/fs.md
 docs/fr/modules/sys.md
+docs/fr/security.md
 docs/manual-en.pdf
 docs/manual-fr.pdf
-examples/selftest/suites/network/init.lua
-examples/selftest/suites/network/unix_socket.lua
+examples/selftest/suites/filesystem/find_iterator.lua
 run_tests.sh
-src/lua_bindings/socket.cpp
-src/lua_bindings/socket.hpp
-tools/test_unix_socket_contracts.sh
+src/lua_bindings/find.cpp
+src/lua_bindings/find.hpp
+todo_find.txt
+tools/test_find_xdev_contracts.sh

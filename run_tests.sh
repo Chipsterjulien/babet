@@ -185,6 +185,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_unix_socket_contracts.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — confinement find xdev"
+if ! bash "${SCRIPT_DIR}/tools/test_find_xdev_contracts.sh"; then
+    echo "ÉCHEC : le préflight de babet.find xdev a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — orchestration de validation"
 if ! bash "${SCRIPT_DIR}/tools/test_release_fail_fast.sh"; then
     echo "ÉCHEC : le préflight de l'orchestration de validation a échoué."

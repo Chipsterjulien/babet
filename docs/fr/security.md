@@ -99,6 +99,14 @@ Le travail de durcissement dans Babet protège les usages
   sur le nombre, les octets et le travail de correspondance. Les références arrière
   et assertions d’anticipation/rétrospection ne font volontairement pas partie
   de la syntaxe RE2.
+- **Confinement de parcours par périphérique** : `babet.find(..., { xdev =
+  true })` conserve le point de montage étranger comme entrée observable mais
+  ne descend pas dans ses enfants. Cela évite qu'une recherche locale parcoure
+  accidentellement un volume monté, un partage réseau ou un pseudo-système de
+  fichiers. La frontière est celle de `st_dev`, comme avec `find -xdev` :
+  un sous-volume Btrfs peut être élagué, tandis qu'un bind mount du même
+  système de fichiers ne l'est pas. Ce n'est pas une sandbox : le script peut
+  toujours appeler `babet.find()` directement sur cet autre chemin.
 
 ## Ce contre quoi il *ne protège pas*
 

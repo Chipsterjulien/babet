@@ -403,6 +403,159 @@ do
         ok_raises("LOT 11 find rejects excess arguments",
             function() return babet.find(P, nil, "extra") end,
             "one or two arguments")
+
+        rv, ev = babet.find(P, { xdev = 1 })
+        ok_fail("find xdev is a strict boolean", rv, ev)
+        ok("  xdev error mentions boolean",
+            tostring(ev):find("boolean", 1, true) ~= nil,
+            "err=" .. tostring(ev))
+
+        local default_xdev, default_xdev_err = babet.find(P, {
+            type = "f",
+        })
+        local explicit_false, explicit_false_err = babet.find(P, {
+            type = "f",
+            xdev = false,
+        })
+        local function same_paths(left, right)
+            if type(left) ~= "table" or type(right) ~= "table"
+                or #left ~= #right then
+                return false
+            end
+            for i = 1, #left do
+                if left[i] ~= right[i] then return false end
+            end
+            return true
+        end
+        ok("find xdev=false preserves historical traversal",
+            default_xdev_err == nil and explicit_false_err == nil
+            and same_paths(default_xdev, explicit_false))
+
+        local same_device, same_device_err = babet.find(P, {
+            type = "f",
+            xdev = true,
+        })
+        ok("find xdev keeps same-device traversal unchanged",
+            default_xdev_err == nil and same_device_err == nil
+            and same_paths(default_xdev, same_device))
+    end
+
+    -- Babet 2.21.0 : test réellement discriminant de xdev sur le montage
+    -- devpts. /dev/pts est un système de fichiers distinct de /dev sur un
+    -- Linux normal, et /dev/pts/ptmx fournit une entrée stable à observer.
+    -- Le point de montage doit rester visible ; seul son contenu est élagué.
+    do
+        local function trim_stdout(result)
+            if type(result) ~= "table" or type(result.stdout) ~= "string" then
+                return nil
+            end
+            return (result.stdout:gsub("%s+$", ""))
+        end
+
+        local function device_id(path)
+            return trim_stdout(babet.exec("stat", { "-c", "%d", path }))
+        end
+
+        local function contains(list, expected)
+            if type(list) ~= "table" then return false end
+            for _, value in ipairs(list) do
+                if value == expected then return true end
+            end
+            return false
+        end
+
+        local dev_device = device_id("/dev")
+        local pts_device = device_id("/dev/pts")
+        ok("find xdev fixture uses a real foreign device",
+            type(dev_device) == "string" and dev_device ~= ""
+            and type(pts_device) == "string" and pts_device ~= ""
+            and dev_device ~= pts_device,
+            "dev=" .. tostring(dev_device)
+                .. " pts=" .. tostring(pts_device))
+
+        local unrestricted, unrestricted_err = babet.find("/dev", {
+            maxdepth = 1,
+            path_glob = "/dev/pts/*",
+        })
+        ok("find without xdev descends into devpts",
+            unrestricted_err == nil
+            and contains(unrestricted, "/dev/pts/ptmx"),
+            tostring(unrestricted_err))
+
+        local pruned, pruned_err = babet.find("/dev", {
+            maxdepth = 1,
+            path_glob = "/dev/pts/*",
+            xdev = true,
+        })
+        ok("find xdev prunes foreign-device children",
+            type(pruned) == "table" and pruned_err == nil and #pruned == 0,
+            tostring(pruned_err))
+
+        local mountpoint, mountpoint_err = babet.find("/dev", {
+            maxdepth = 0,
+            type = "d",
+            path_glob = "/dev/pts",
+            xdev = true,
+        })
+        ok("find xdev keeps the foreign mount point visible",
+            mountpoint_err == nil
+            and contains(mountpoint, "/dev/pts"),
+            tostring(mountpoint_err))
+
+        local linked_root = sb("find_xdev_root_link")
+        pcall(babet.remove, linked_root)
+        local linked = babet.exec("ln", { "-s", "/dev", linked_root })
+        local linked_children, linked_children_err = nil, "link failed"
+        local linked_point, linked_point_err = nil, "link failed"
+        if type(linked) == "table" and linked.code == 0 then
+            linked_children, linked_children_err = babet.find(linked_root, {
+                maxdepth = 1,
+                path_glob = linked_root .. "/pts/*",
+                xdev = true,
+            })
+            linked_point, linked_point_err = babet.find(linked_root, {
+                maxdepth = 0,
+                type = "d",
+                path_glob = linked_root .. "/pts",
+                xdev = true,
+            })
+        end
+        ok("find xdev uses the target device of a root symlink",
+            type(linked_children) == "table"
+            and linked_children_err == nil and #linked_children == 0
+            and linked_point_err == nil
+            and contains(linked_point, linked_root .. "/pts"),
+            tostring(linked_children_err or linked_point_err))
+        pcall(babet.remove, linked_root)
+
+        local worker_job = babet.workers.spawn([[
+            local children, children_err = babet.find("/dev", {
+                maxdepth = 1,
+                path_glob = "/dev/pts/*",
+                xdev = true,
+            })
+            local point, point_err = babet.find("/dev", {
+                maxdepth = 0,
+                type = "d",
+                path_glob = "/dev/pts",
+                xdev = true,
+            })
+            if not children then return { error = children_err } end
+            if not point then return { error = point_err } end
+            return { child_count = #children, point_count = #point }
+        ]])
+        ok("find xdev starts in a worker", worker_job ~= nil)
+        local worker_ok, worker_value = false, nil
+        if worker_job then
+            worker_ok, worker_value = worker_job:join()
+        end
+        ok("find xdev keeps identical worker semantics",
+            worker_ok == true and type(worker_value) == "table"
+            and worker_value.error == nil
+            and worker_value.child_count == 0
+            and worker_value.point_count == 1,
+            type(worker_value) == "table"
+                and tostring(worker_value.error) or tostring(worker_value))
     end
 
     -- Régression fs:: jetants (revue ChatGPT post-v2.2.0) : sur un

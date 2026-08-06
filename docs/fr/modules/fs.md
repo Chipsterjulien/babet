@@ -781,6 +781,7 @@ pas incluse.
 | `path` | string | absent | regex RE2 recherchée dans le chemin complet |
 | `mindepth` | integer | `0` | profondeur minimale incluse |
 | `maxdepth` | integer | sans limite pratique | profondeur maximale incluse |
+| `xdev` | boolean | `false` | ne descend pas dans un dossier dont `st_dev` diffère de celui de la racine |
 
 Toutes les options présentes sont combinées avec un **ET logique**. Un motif
 vide agit comme un filtre absent, conformément au comportement historique des
@@ -889,6 +890,51 @@ local one_level_below = assert(babet.find("src", {
 
 `mindepth` filtre uniquement les résultats ; les dossiers moins profonds sont
 tout de même traversés pour atteindre les niveaux demandés.
+
+#### Rester sur le système de fichiers de la racine
+
+`xdev = true` mémorise le champ Linux `st_dev` de la racine réellement
+parcourue, puis empêche la descente dans tout dossier appartenant à un autre
+périphérique. L'option est un booléen strict et vaut `false` par défaut : son
+absence ne change donc aucun parcours historique.
+
+```lua
+local local_entries = assert(babet.find("/srv/application", {
+    xdev = true,
+}))
+```
+
+Comme avec `find -xdev`, le point de montage étranger lui-même reste visible et
+peut correspondre à `type`, `name`, `path`, aux globs et aux limites de
+profondeur. Seuls ses enfants sont élagués. Par exemple, cette recherche peut
+renvoyer le dossier monté `/srv/application/cache`, mais aucun fichier placé
+sous ce montage :
+
+```lua
+local local_logs = assert(babet.find("/srv/application", {
+    xdev = true,
+    type = "f",
+    path_iglob = "**/*.log",
+    maxdepth = 8,
+}))
+```
+
+La comparaison porte sur le périphérique de la racine, même lorsque le chemin
+de racine est un symlink valide vers un dossier. Les symlinks rencontrés dans
+l'arborescence ne sont toujours pas suivis. La comparaison est strictement
+fondée sur `st_dev`, comme `find -xdev` : un sous-volume Btrfs peut donc être
+élagué, tandis qu'un bind mount du même système de fichiers conserve le même
+`st_dev` et n'est pas élagué.
+
+Si une entrée disparaît entre la lecture du dossier et l'inspection
+`xdev`, l'erreur `ENOENT` correspondante est ignorée : Babet annule d'abord la
+récursion encore en attente pour que l'incrément de l'itérateur ne tente pas
+d'ouvrir le dossier disparu, puis poursuit le parcours. Cette tolérance est
+spécifique à l'inspection supplémentaire de `xdev`. Sans `xdev`, le parcours
+historique peut encore échouer lorsqu'un dossier disparaît juste avant la
+descente de l'itérateur. Une erreur lors de l'inspection de la racine, ou toute
+autre erreur lors de l'inspection d'un point de descente, fait échouer l'appel
+avec `(nil, err)`.
 
 #### Symlinks et erreurs
 

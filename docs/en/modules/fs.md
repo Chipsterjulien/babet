@@ -744,7 +744,7 @@ Recursively searches the entries of a directory and returns an array of paths.
 
 `path` must be a strict Lua string. `opts` must be a table or `nil`, and the
 function accepts exactly one or two arguments. Option fields are also strict:
-depths are Lua integers, and every name/path/regex/glob field is a Lua string.
+depths are Lua integers, every name/path/regex/glob field is a Lua string, and `xdev` is a boolean.
 
 These calls are equivalent:
 
@@ -770,6 +770,7 @@ is not included.
 | `path` | string | absent | RE2 regex searched within the full path |
 | `mindepth` | integer | `0` | minimum included depth |
 | `maxdepth` | integer | practically unlimited | maximum included depth |
+| `xdev` | boolean | `false` | does not descend into a directory whose `st_dev` differs from the root |
 
 All supplied options are combined with logical **AND**. An empty pattern acts
 like an absent filter, matching the historical regex behavior.
@@ -871,6 +872,48 @@ local one_level_below = assert(babet.find("src", {
 
 `mindepth` filters results only; shallower directories are still traversed to
 reach requested depths.
+
+#### Stay on the root filesystem
+
+`xdev = true` records the Linux `st_dev` of the directory actually traversed,
+then prevents recursion into any directory on another device. The option is a
+strict boolean and defaults to `false`, so omitting it preserves every
+historical traversal.
+
+```lua
+local local_entries = assert(babet.find("/srv/application", {
+    xdev = true,
+}))
+```
+
+As with `find -xdev`, the foreign mount point itself remains visible and may
+match `type`, `name`, `path`, glob filters, and depth limits. Only its children
+are pruned. For example, this search may return the mounted directory
+`/srv/application/cache`, but no file stored below that mount:
+
+```lua
+local local_logs = assert(babet.find("/srv/application", {
+    xdev = true,
+    type = "f",
+    path_iglob = "**/*.log",
+    maxdepth = 8,
+}))
+```
+
+The comparison uses the target device of a valid root-directory symlink.
+Directory symlinks encountered below the root remain non-followed. The check is
+strictly based on `st_dev`, like `find -xdev`: a Btrfs subvolume may therefore
+be pruned, while a bind mount of the same filesystem keeps the same `st_dev`
+and is not pruned.
+
+If an entry disappears between the directory read and the xdev inspection, the
+corresponding `ENOENT` is ignored: Babet first cancels any pending recursion so
+the iterator increment cannot try to open the vanished directory, then resumes
+traversal. This tolerance is specific to the extra xdev inspection. Without
+`xdev`, the historical traversal may still fail when a directory disappears
+just before the iterator descends into it. An error while inspecting the root,
+or any other error while inspecting a candidate descent point, fails the entire
+call with `(nil, err)`.
 
 #### Symlinks and errors
 

@@ -17,11 +17,17 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.20.0**. Voir le
+Version candidate actuelle : **2.21.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.20.0 ajoute les sockets de flux Unix nommées avec validation
+Babet 2.21.0 ajoute `xdev = true` à `babet.find()`. Le parcours mémorise
+le périphérique de la racine, conserve les points de montage étrangers dans
+les résultats possibles et élague leurs descendants, sans modifier le
+comportement historique lorsque l'option est absente ou fausse. Le contrat est
+identique dans les workers.
+
+Babet 2.20.0 a ajouté les sockets de flux Unix nommées avec validation
 stricte, mode final exact, deadline globale de connexion, nettoyage du
 listener vérifié par inode, support des workers et les mêmes méthodes
 binary-safe que TCP.
@@ -59,6 +65,22 @@ cd babet
 
 Le premier build télécharge et compile les dépendances. Il faut un compilateur
 C++23, CMake 3.22 ou plus récent, `wget`, `unzip` et `xz`.
+
+### Confiner une recherche récursive à un système de fichiers
+
+```lua
+local entries = assert(babet.find("/srv", {
+    xdev = true,
+    type = "f",
+    path_iglob = "**/*.log",
+}))
+```
+
+Un point de montage appartenant à un autre système de fichiers peut encore
+apparaître dans le résultat, mais Babet ne descend pas dans son contenu. Le
+contrat correspond à l'usage utile de `find -xdev`, sans lancer de commande
+shell externe. La décision repose sur `st_dev` : un sous-volume Btrfs peut être
+élagué, contrairement à un bind mount du même système de fichiers.
 
 ### Ouvrir SQLite avec une politique de connexion explicite
 
