@@ -137,8 +137,33 @@ Babet 2.16.0 process terminal lifecycle and limited job control
 [x] Synchronise French/English documentation, changelogs, release notes and
     PDF manuals.
 
-Possible later hardening retained in notes.md:
-- parent-side PATH resolution followed by execve;
+Babet 2.17.0 process launch hardening
+-----------------------------------------
+
+[x] Upgrade the embedded runtime to Lua 5.5.1.
+[x] Prepare the effective environment, PATH candidates, argv and envp in the
+    parent, then use execve only after fork.
+[x] Preserve ENOENT/ENOTDIR/EACCES lookup precedence and document the explicit
+    ENOEXEC no-shell migration.
+[x] Bound interactive terminal reservations and split launch/terminal internals.
+[x] Close the remaining raw Lua table-access and PreparedCommand lifetime risks.
+
+Babet 2.18.0 persistent bounded worker pool
+--------------------------------------------
+
+[x] Add workers.cpu_count() and non-consuming job:done().
+[x] Add a fixed reusable worker pool with bounded queue and outstanding count.
+[x] Add task handles, monotonic timeouts, FIFO close, retryable join and
+    cooperative whole-pool cancellation.
+[x] Isolate ordinary task globals while reusing each persistent Lua state and
+    its package.loaded cache.
+[x] Support explicitly shared channels and keep forced task termination out.
+[x] Synchronise tests, French/English documentation, release notes and PDFs.
+
+Possible later work retained outside 2.18:
+- native SQLite backup through sqlite3_backup_*;
+- small Linux-only additions such as find(..., {xdev = true}), Unix sockets,
+  or narrowly justified signal helpers;
 - forced worker termination remains intentionally excluded without a safe
   cooperative design.
 

@@ -1274,6 +1274,10 @@ bash "${SCRIPT_DIR}/tools/embed_lua_module.sh" \
     "${SCRIPT_DIR}/vendor/logging.lua" \
     "${GENERATED_DIR}/embedded_logging.hpp" \
     "logging"
+bash "${SCRIPT_DIR}/tools/embed_lua_module.sh" \
+    "${SCRIPT_DIR}/vendor/workers_pool.lua" \
+    "${GENERATED_DIR}/embedded_workers_pool.hpp" \
+    "workers_pool"
 
 if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
     echo "Configuration pré-release : ASan + UBSan activés."

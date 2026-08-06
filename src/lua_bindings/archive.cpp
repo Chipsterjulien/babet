@@ -3909,7 +3909,7 @@ bool collect_explicit_create_sources(lua_State *L, int idx,
     sources.reserve(count);
     for (std::size_t i = 1; i <= count; ++i)
     {
-        lua_geti(L, idx, static_cast<lua_Integer>(i));
+        lua_rawgeti(L, idx, static_cast<lua_Integer>(i));
         if (!lua_is_strict_string(L, -1))
         {
             lua_pop(L, 1);

@@ -81,6 +81,10 @@ Le premier argument accepte deux contrats distincts :
   est acceptée, mais aucun composant du chemin hôte n’est exposé dans
   l’archive.
 
+La liste explicite est lue par accès brut à sa partie tableau. Les métaméthodes
+`__len` et `__index` ne sont pas appelées : seuls les chemins réellement
+stockés aux indices `1..n` sont validés puis archivés.
+
 Dans le mode liste, le dernier composant doit être stable : `.` et la racine du
 système de fichiers sont refusés, ainsi que tout composant `..`. Deux sources
 ayant le même dernier composant sont une collision et font échouer l’opération,

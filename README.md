@@ -16,26 +16,23 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.17.0**. See the
+Current release candidate: **2.18.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.17.0 hardens process launch on Linux and updates the embedded runtime
-to Lua 5.5.1. `exec`, `spawn`, `pipeline`, and `spawnPipeline` now build the
-final environment, resolve `PATH`, and prepare `argv`/`envp` entirely in the
-parent. A replacement `opts.env.PATH` therefore controls the initial lookup,
-including empty and relative components interpreted from the child's effective
-working directory. After `fork()`, children traverse that prepared candidate
-list using only `execve()`, without rebuilding the environment or parsing
-`PATH`.
+Babet 2.18.0 adds a bounded pool of persistent workers. A fixed number of
+pthreads and Lua states can now process several successive tasks through
+`babet.workers.pool()`, with a bounded queue, monotonic timeouts, per-task
+results, FIFO shutdown, and cooperative cancellation. Every task receives a
+fresh global environment, while libraries and `package.loaded` remain reused
+inside the worker's persistent Lua state.
 
-Interactive terminal handoff reservations are now bounded: a competing
-`spawn()` waits for at most two seconds, or the remaining `launch_timeout`, and
-fails before `fork()` with `terminal handoff is busy` rather than blocking
-indefinitely or launching without the terminal. The launch and terminal
-internals have also been separated from `process_common.cpp` while preserving
-the 2.16 process-state, Ctrl+Z/resume, asynchronous terminal reclamation, and
-successive-spawn guarantees. Babet remains Linux-only.
+The module also exposes `babet.workers.cpu_count()`, which respects Linux CPU
+affinity, and `job:done()` for observing completion without consuming the
+result. Pools reuse the already-audited channel and JSON transport primitives;
+no `pthread_cancel()` or forced termination is introduced. Babet remains
+Linux-only.
+
 Can be used in three modes:
 
 1. **As a Lua interpreter** : `babet script.lua` or `babet folder/`

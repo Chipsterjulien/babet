@@ -18,11 +18,12 @@ The module covers:
 - timeouts and capacity-based backpressure;
 - closing with drainage and wake-up of blocked calls;
 - loading Babet, bundled, and user modules in each state;
-- Lua-memory isolation between threads.
+- Lua-memory isolation between threads;
+- a bounded pool of persistent workers that reuses pthreads and Lua states
+  across several tasks.
 
-It does not provide shared Lua memory, forced termination, a global pool, or
-channels between distinct OS processes. Available cancellation is strictly
-cooperative.
+It does not provide shared Lua memory, forced termination, or channels between
+distinct OS processes. Available cancellation is strictly cooperative.
 
 ## Module contents
 
@@ -41,6 +42,7 @@ cooperative.
   - [Copies, identity, depth, and budgets](#workers-transfer-copy)
 - [Final worker result](#workers-result)
   - [`status()` — observe without consuming](#workers-status)
+  - [`done()` — non-consuming boolean test](#workers-done)
   - [`join(timeout?)` — wait and consume](#workers-join)
   - [`poll()` — check and consume](#workers-poll)
   - [Do not call `join()` after completed `poll()`](#workers-consumption)
@@ -56,6 +58,14 @@ cooperative.
 - [`close()` and queue lifecycle](#workers-close)
 - [`cancel()` and cooperative cancellation](#workers-cancel)
 - [Module loading and worker environment](#workers-state)
+- [Available CPU count](#workers-cpu-count)
+- [Reusable bounded pool](#workers-pool)
+  - [Creation and options](#workers-pool-create)
+  - [Submission and tasks](#workers-pool-submit)
+  - [State isolation and reuse](#workers-pool-isolation)
+  - [Backpressure and timeouts](#workers-pool-backpressure)
+  - [Close, cancellation, and join](#workers-pool-lifecycle)
+  - [Shared channels in tasks](#workers-pool-channels)
 - [Complete examples](#workers-examples)
   - [Simple calculation with `join`](#workers-example-join)
   - [Structured arguments](#workers-example-args)
@@ -68,7 +78,7 @@ cooperative.
   - [Worker to worker without parent relay](#workers-example-channel-worker-worker)
   - [Multiple producers and consumers](#workers-example-channel-mpmc)
   - [Cooperative cancellation](#workers-example-cancel)
-  - [Correct bounded pool](#workers-example-pool)
+  - [Native pool for many tasks](#workers-example-pool)
 - [Deadlocks to avoid](#workers-deadlocks)
 - [Error contract](#workers-errors)
 - [Garbage collection and destruction](#workers-gc)
@@ -135,8 +145,11 @@ As soon as `join()` retrieves the result, or `poll()` returns `"done"` or
 ```lua
 local job, err = babet.workers.spawn(code, args?, opts?)
 local channel, err = babet.workers.channel(opts?)
+local cpu_count = babet.workers.cpu_count()
+local pool, err = babet.workers.pool(opts?)
 
 local state = job:status()
+local finished = job:done()
 local ok, value_or_reason = job:join(timeout?)
 local state, value = job:poll()
 local ok, err = job:cancel()
@@ -155,6 +168,7 @@ local closed = channel:is_closed()
 | --- | --- | --- |
 | `spawn` | `job` or `(nil, err)` | creation only |
 | `job:status()` | `"running"`, `"done"`, or `"error"` | no, never consumes |
+| `job:done()` | boolean | no, never consumes |
 | `job:join(t?)` | `(true, result)`, `(false, err)`, or `(nil, "timeout")` | depends on `t` |
 | `job:poll()` | `("running", nil)`, `("done", result)`, or `("error", err)` | no |
 | `job:cancel()` | `(true, nil)` | no |
@@ -166,6 +180,17 @@ local closed = channel:is_closed()
 | `channel:recv(t?)` | `(true, value)`, `(false, reason)`, or `(nil, err)` | depends on `t` |
 | `channel:close()` | `(true, nil)` | no |
 | `channel:is_closed()` | boolean | no |
+| `workers.cpu_count()` | positive integer | no |
+| `workers.pool(opts?)` | `pool` or `(nil, err)` | creates persistent workers |
+| `pool:submit(code, args?, t?)` | `task` or `(nil, reason)` | depends on `t` |
+| `task:done()` | boolean | no, never consumes |
+| `task:status()` | `"running"`, `"done"`, or `"error"` | no |
+| `task:join(t?)` | `(true, result)`, `(false, err)`, or `(nil, "timeout")` | depends on `t` |
+| `task:poll()` | `("running", nil)`, `("done", result)`, or `("error", err)` | no |
+| `pool:close(t?)` | `(true, nil)` or `(false, reason)` | depends on `t` |
+| `pool:cancel()` | `(true, nil)` | no; cooperative cancellation |
+| `pool:join(t?)` | `(true, nil)`, `(false, err)`, or `(nil, "timeout")` | depends on `t` |
+| `pool:stats()` | `(table, nil)` or `(nil, err)` | no |
 
 ### Worker side
 
@@ -565,6 +590,20 @@ assert(job:status() == "done")
 
 `status()` intentionally does not expose a separate cancelling state: until the
 chunk ends, it remains `"running"`.
+
+<a id="workers-done"></a>
+### `done()` — non-consuming boolean test
+
+```lua
+if job:done() then
+    print("the worker has finished")
+end
+```
+
+`done()` returns `false` while the internal status is `"running"`, then `true`
+for both `"done"` and `"error"`. It does not join the pthread, deserialize the
+result, or consume it. It is suitable for event loops that only need to know
+whether a final `join()` or `poll()` can now be attempted.
 
 <a id="workers-join"></a>
 ### `join(timeout?)` — wait and consume
@@ -1061,6 +1100,207 @@ Lua states are isolated, but threads belong to the same process:
 Babet rejects cwd and environment mutations after the first `spawn`, stabilizing
 those two global states.
 
+<a id="workers-cpu-count"></a>
+## Available CPU count
+
+```lua
+local count = babet.workers.cpu_count()
+assert(math.type(count) == "integer" and count >= 1)
+```
+
+`cpu_count()` returns the number of CPUs available to the current process. On
+Linux, Babet first reads the effective affinity with `sched_getaffinity()`, so
+CPU sets imposed on the process are respected. If that information is
+unavailable, `_SC_NPROCESSORS_ONLN` is used, with a final fallback to `1`.
+
+The function accepts no arguments. It is also the default size source for
+`workers.pool()`.
+
+<a id="workers-pool"></a>
+## Reusable bounded pool
+
+`workers.pool()` creates a fixed number of persistent workers. Each worker
+creates one pthread and one `lua_State`, then processes several tasks received
+through an internal channel. The pool avoids a complete `workers.spawn()` for
+every small operation while keeping strict bounds on concurrency and
+outstanding tasks.
+
+The pool is implemented as embedded Lua on top of the native `workers.spawn()`
+and `workers.channel()` primitives. It therefore keeps the same serialization,
+depth, memory-budget, and cooperative-cancellation limits.
+
+<a id="workers-pool-create"></a>
+### Creation and options
+
+```lua
+local pool, err = babet.workers.pool({
+    size = math.min(babet.workers.cpu_count(), 8),
+    queue_capacity = 64,
+    channels = {
+        progress = progress_channel,
+    },
+})
+assert(pool, err)
+```
+
+Accepted options:
+
+| Option | Default | Contract |
+| --- | ---: | --- |
+| `size` | `min(cpu_count(), 1024)` | integer from `1` to `1024` |
+| `queue_capacity` | `max(64, size * 4)` | integer from `1` to `1,000,000` |
+| `channels` | none | name-to-channel table shared with every task |
+
+`__babet_pool_tasks` and `__babet_pool_results` are reserved for the two
+internal channels. Unknown options and invalid names are rejected immediately.
+
+The maximum number of accepted but not yet collected tasks is:
+
+```text
+min(queue_capacity + size, 1,000,000)
+```
+
+This bound includes running tasks and tasks still waiting in the queue.
+
+<a id="workers-pool-submit"></a>
+### Submission and tasks
+
+```lua
+local task, err = pool:submit([[
+    return worker.args.left + worker.args.right
+]], { left = 20, right = 22 }, 1.0)
+assert(task, err)
+
+local ok, result = task:join(2)
+assert(ok and result == 42)
+```
+
+`submit(code, args?, timeout?)` accepts the same text chunk and serializable
+argument table as `workers.spawn()`. The timeout applies to admission into the
+pool: submission may need to wait for a slot in the outstanding-task bound or
+in the work channel.
+
+A task exposes:
+
+- `task:done()`: non-consuming boolean;
+- `task:status()`: `"running"`, `"done"`, or `"error"`;
+- `task:poll()`: non-blocking check that consumes a completed result;
+- `task:join(timeout?)`: wait for and consume the result.
+
+As with a normal job, only the first return value crosses the state boundary and
+the result can be consumed once. A task load error or Lua exception becomes an
+error for that task without stopping the persistent worker. An unserializable
+return value is also converted into a task error, after which the worker keeps
+processing later tasks.
+
+<a id="workers-pool-isolation"></a>
+### State isolation and reuse
+
+Each task receives a fresh global table whose `_G` points to itself. Ordinary
+global assignment therefore does not leak to the next task:
+
+```lua
+local first = assert(pool:submit("temporary = 42; return temporary"))
+local second = assert(pool:submit("return temporary"))
+
+assert(select(2, first:join()) == 42)
+assert(select(2, second:join()) == nil)
+```
+
+Libraries and the `package.loaded` cache still belong to the persistent worker
+state. Explicitly mutating a shared module table, `package.loaded`, a C module's
+registry state, or an external resource can therefore be visible to a later
+task on the same worker. The pool isolates ordinary globals; it does not create
+a complete Lua state per task.
+
+Inside a pool task, `worker` intentionally exposes only:
+
+```lua
+worker.args
+worker.channels
+worker.cancelled()
+```
+
+The private `worker.send()` and `worker.recv()` inbox/outbox APIs are not part
+of the pool-task contract. Use `opts.channels` for additional persistent
+communication.
+
+<a id="workers-pool-backpressure"></a>
+### Backpressure and timeouts
+
+```lua
+local pool = assert(babet.workers.pool({
+    size = 1,
+    queue_capacity = 1,
+}))
+
+local a = assert(pool:submit("babet.sleep(1); return 'a'"))
+local b = assert(pool:submit("babet.sleep(1); return 'b'"))
+local c, reason = pool:submit("return 'c'", nil, 0)
+assert(c == nil and reason == "timeout")
+```
+
+With one worker and one queue slot, at most two tasks are outstanding: one
+running and one waiting. A zero timeout is non-blocking. A positive value up to
+`86400` uses a monotonic deadline and may return `"timeout"`. An omitted timeout
+waits while the workers remain healthy.
+
+The pool collects results while waiting to submit or close. The result channel
+capacity matches the outstanding-task bound, so a worker does not remain
+blocked merely because the parent has not joined every task yet.
+
+<a id="workers-pool-lifecycle"></a>
+### Close, cancellation, and `join`
+
+`pool:close(timeout?)` rejects new submissions and enqueues one stop marker per
+worker **after** all accepted tasks. FIFO ordering therefore guarantees normal
+processing before thread shutdown.
+
+`pool:join(timeout?)` automatically calls `close()` when needed, collects all
+pending results, and joins every persistent worker. A timeout consumes neither
+pending task results nor already completed worker joins; the same pool can be
+joined again to finish the cleanup:
+
+```lua
+local task = assert(pool:submit("return 42"))
+assert(pool:join(5))
+assert(select(2, task:join(0)) == 42)
+```
+
+`pool:cancel()` immediately closes admission, marks outstanding tasks as
+`"cancelled"`, closes the work channel, and requests cancellation of every
+worker. A running task can stop only by returning or checking
+`worker.cancelled()`. There is no `pthread_cancel()` and no forced shutdown.
+
+A joined pool cannot be joined a second time. `pool:stats()` reports `size`,
+`queue_capacity`, `max_pending`, `pending`, `accepting`, `closing`, `cancelled`,
+and `joined`.
+
+<a id="workers-pool-channels"></a>
+### Shared channels in tasks
+
+```lua
+local progress = assert(babet.workers.channel({ capacity = 16 }))
+local pool = assert(babet.workers.pool({
+    size = 2,
+    channels = { progress = progress },
+}))
+
+local task = assert(pool:submit([[
+    assert(worker.channels.progress:send({ percent = 100 }))
+    return "done"
+]]))
+
+local received, message = progress:recv(2)
+assert(received and message.percent == 100)
+assert(task:join(2))
+assert(pool:join(2))
+```
+
+Handles are shared with all pool workers and keep the normal bounded FIFO
+multi-producer/multi-consumer channel contract. The pool never automatically
+closes user-provided channels.
+
 <a id="workers-examples"></a>
 ## Complete examples
 
@@ -1387,57 +1627,37 @@ Cancellation remains cooperative: it does not arbitrarily interrupt a system
 call or code that never checks the flag.
 
 <a id="workers-example-pool"></a>
-### Correct bounded pool
-
-This loop bounds simultaneous pthreads and directly uses the `poll()` result,
-without calling `join()` afterward.
+### Native pool for many tasks
 
 ```lua
-local function map_parallel(items, code, max_concurrent)
-    max_concurrent = max_concurrent or 4
+local pool = assert(babet.workers.pool({
+    size = math.min(4, babet.workers.cpu_count()),
+    queue_capacity = 16,
+}))
 
-    local next_index = 1
-    local active = {}
-    local results = {}
-
-    while next_index <= #items or #active > 0 do
-        while next_index <= #items and #active < max_concurrent do
-            local job, err = babet.workers.spawn(code, {
-                item = items[next_index],
-            })
-            assert(job, err)
-
-            active[#active + 1] = {
-                index = next_index,
-                job = job,
-            }
-            next_index = next_index + 1
-        end
-
-        for i = #active, 1, -1 do
-            local entry = active[i]
-            local state, value = entry.job:poll()
-
-            if state == "done" then
-                results[entry.index] = value
-                table.remove(active, i)
-            elseif state == "error" then
-                results[entry.index] = { error = value }
-                table.remove(active, i)
-            end
-        end
-
-        if #active > 0 then
-            babet.sleep(10, "ms")
-        end
-    end
-
-    return results
+local tasks = {}
+for index = 1, 100 do
+    tasks[index] = assert(pool:submit([[
+        return worker.args.value * worker.args.value
+    ]], { value = index }))
 end
+
+assert(pool:close(5))
+
+local results = {}
+for index, task in ipairs(tasks) do
+    local ok, value = task:join(5)
+    assert(ok, value)
+    results[index] = value
+end
+
+assert(pool:join(5))
+assert(results[10] == 100)
 ```
 
-Every `spawn` still creates a new thread and Lua state. This pattern bounds
-concurrency; it does not reuse persistent workers.
+The pthread count remains fixed across all one hundred tasks. `close()` may be
+called before collecting results: the pool processes every accepted submission,
+while each `task:join()` retrieves its result by identifier.
 
 <a id="workers-deadlocks"></a>
 ## Deadlocks to avoid
@@ -1572,6 +1792,12 @@ when the worker cannot terminate.
 Do not use GC as the normal synchronization mechanism. Keep the job, finish
 the protocol, then call `join()` or consume the result through `poll()`.
 
+A pool is a Lua object that owns several worker userdata values. Dropping the
+last pool and task references without `pool:join()` eventually delegates every
+thread to those userdata finalizers and can therefore block collection or Lua
+state shutdown. Normal code should explicitly `close()` or `cancel()`, then
+retry `pool:join()` until it completes.
+
 Channel handles also have a `__gc`, but its scope is local: it only releases
 the reference owned by that Lua state. It never replaces `channel:close()` and
 does not close the resource while other handles remain.
@@ -1635,15 +1861,14 @@ when the protocol allows it.
 The module currently does not provide:
 
 - forced worker termination;
-- `job:done()` — use `poll()`;
-- `babet.workers.cpu_count()`;
-- a reusable global pool;
+- individual forced cancellation of a pool task;
+- dynamic resizing of a pool after creation;
 - channels between distinct OS processes;
 - shared Lua memory;
 - transfer of functions, userdata, or coroutines;
 - a binary message format;
 - automatic transfer of multiple return values.
 
-Cooperative cancellation and a bounded pool can be built in Lua using the
-examples on this page. CPU count can be queried through an external program
-such as `babet.exec("nproc")`, after checking its result table.
+The 2.18 pool is local to the Lua state that created it. It is not a global
+scheduler shared by separate Babet processes, and it does not migrate a task
+that has already started from one worker to another.

@@ -17,28 +17,23 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.17.0**. Voir le
+Version candidate actuelle : **2.18.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.17.0 durcit le lancement des processus sous Linux et passe le runtime
-embarqué à Lua 5.5.1. `exec`, `spawn`, `pipeline` et `spawnPipeline`
-construisent désormais l'environnement final, résolvent `PATH` et préparent
-`argv`/`envp` entièrement dans le parent. Un `opts.env.PATH` remplacé contrôle
-donc réellement la recherche initiale, y compris les composantes vides ou
-relatives interprétées depuis le répertoire de travail effectif de l'enfant.
-Après `fork()`, les enfants parcourent cette liste de candidats préparée en
-n'appelant que `execve()`, sans reconstruire l'environnement ni reparcourir
-`PATH`.
+Babet 2.18.0 ajoute un pool borné de workers persistants. Un nombre fixe de
+pthreads et d'états Lua peut désormais traiter plusieurs tâches successives via
+`babet.workers.pool()`, avec une file bornée, des timeouts monotones, des
+résultats associés à chaque tâche, une fermeture FIFO et une annulation
+coopérative. Chaque tâche reçoit un environnement global frais, tandis que les
+bibliothèques et `package.loaded` restent réutilisés dans l'état Lua du worker.
 
-Les réservations de transfert du terminal interactif sont maintenant bornées :
-un `spawn()` concurrent attend au plus deux secondes, ou le temps restant de
-`launch_timeout`, puis échoue avant `fork()` avec `terminal handoff is busy` au
-lieu de rester bloqué ou de lancer silencieusement l'enfant sans terminal. Les
-internes de lancement et de terminal ont aussi été séparés de
-`process_common.cpp`, sans modifier les garanties 2.16 sur les états,
-Ctrl+Z/reprise, la restitution asynchrone et les spawns successifs. Babet reste
-limité à Linux.
+Le module expose également `babet.workers.cpu_count()`, qui tient compte de
+l'affinité CPU Linux, ainsi que `job:done()` pour observer la fin d'un worker
+sans consommer son résultat. Les pools utilisent les channels et le transport
+JSON déjà audités ; aucun `pthread_cancel()` ni arrêt forcé n'est introduit.
+Babet reste limité à Linux.
+
 Babet s’utilise de trois façons :
 
 1. **Interpréteur Lua** : `babet script.lua` ou `babet dossier/`

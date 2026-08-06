@@ -19,6 +19,8 @@
  *          Toute option inconnue est refusée.
  *
  *   channel, err = babet.workers.channel({ capacity = 64 })
+ *   count = babet.workers.cpu_count()
+ *   pool, err = babet.workers.pool({ size = math.min(count, 1024), queue_capacity = 64 })
  *
  * Méthodes du channel :
  *
@@ -32,6 +34,7 @@
  *   job:join(t?)      -> (true, result) | (false, err) |
  *                        (nil, "timeout")
  *   job:status()      -> "running" | "done" | "error"
+ *   job:done()        -> bool ; non consommant
  *   job:cancel()      -> (true, nil) ; annulation coopérative
  *   job:poll()        -> ("running", nil) |
  *                        ("done", result) | ("error", err)

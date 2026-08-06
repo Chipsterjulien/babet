@@ -15,11 +15,12 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the **Babet 2.17.0** release candidate.
+Documentation for the **Babet 2.18.0** release candidate.
 
-Babet 2.17.0 updates the embedded runtime to Lua 5.5.1 and hardens Linux
-process launch with parent-side `PATH` resolution, child-side `execve()`, and a
-bounded interactive-terminal reservation.
+Babet 2.18.0 adds a bounded pool of persistent workers, available CPU counting,
+and a non-consuming `job:done()` test. Pools reuse a fixed number of pthreads
+and Lua states with backpressure, timeouts, clean shutdown, and cooperative
+cancellation.
 
 ## Getting started
 
@@ -29,7 +30,7 @@ bounded interactive-terminal reservation.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.17.0 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.18.0 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 
@@ -52,7 +53,7 @@ bounded interactive-terminal reservation.
 | read TOML configuration | [`TOML — configuration`](modules/toml.md) | decoding, TOML types, arrays, sections, dates, and parse errors |
 | watch a directory | [`Inotify — file events`](modules/inotify.md) | watches, events, timeout reads, moves, cookies, and closing |
 | handle Unix signals | [`SIGNAL — clean shutdown and reload`](modules/signal.md) | `TERM`/`INT`/`HUP`/`USR1`/`USR2`/`PIPE`, deferred callbacks, fixed order, coalescing, interruptible calls, and workers |
-| parallelise Lua work | [`WORKERS — OS threads, messages, and channels`](modules/workers.md) | isolated Lua states, `spawn`, bounded lifecycle, inbox/outbox, and direct MPMC channels |
+| parallelise Lua work | [`WORKERS — OS threads, messages, and channels`](modules/workers.md) | isolated Lua states, `spawn`, a persistent bounded pool, `cpu_count`, inbox/outbox, and direct MPMC channels |
 | obtain or format time | [`Time — clocks and durations`](modules/time.md) | realtime and monotonic clocks, sleep, ISO-8601, parsing, and duration formatting |
 | look up a system account by name or UID | [`USER — system accounts`](modules/user.md) | NSS, `get`, `exists`, UID, primary GID, GECOS, home, shell, and resolution errors |
 | split or transform strings | [`Strings`](modules/strings.md) | `split`, separators, limits, character mode, and binary strings |
@@ -88,7 +89,7 @@ names below define each chapter's scope before you open it.
 | [`TLS — encrypted connections`](modules/tls.md) | Direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, deadlines, and fail-closed behaviour. |
 | [`TOML — configuration files`](modules/toml.md) | TOML decoding, scalars, arrays, tables, arrays of tables, dates/times, and diagnostics. |
 | [`USER — NSS system users`](modules/user.md) | Lookup by name or UID, existence, absence vs NSS errors, passwd fields, workers, and security limits. |
-| [`WORKERS — OS threads, queues, and channels`](modules/workers.md) | Isolated Lua states, JSON transport, `status`, `join(timeout)`, cooperative cancellation, inbox/outbox, direct MPMC channels, closing, GC, and deadlock traps. |
+| [`WORKERS — OS threads, queues, and channels`](modules/workers.md) | Isolated Lua states, JSON transport, `status`, `done`, a persistent bounded pool, cooperative cancellation, inbox/outbox, direct MPMC channels, closing, GC, and deadlock traps. |
 
 ## Structure of a module page
 

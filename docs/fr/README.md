@@ -17,11 +17,12 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version candidate **Babet 2.17.0**.
+Documentation de la version candidate **Babet 2.18.0**.
 
-Babet 2.17.0 passe le runtime embarqué à Lua 5.5.1 et durcit le lancement des
-processus Linux avec résolution de `PATH` dans le parent, `execve()` dans
-l'enfant et réservation bornée du terminal interactif.
+Babet 2.18.0 ajoute un pool borné de workers persistants, le comptage des CPU
+disponibles et un test `job:done()` non consommant. Les pools réutilisent un
+nombre fixe de pthreads et d'états Lua, avec contre-pression, timeouts,
+fermeture propre et annulation coopérative.
 
 ## Pour démarrer
 
@@ -31,7 +32,7 @@ l'enfant et réservation bornée du terminal interactif.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.17.0 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.18.0 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 
@@ -54,7 +55,7 @@ l'enfant et réservation bornée du terminal interactif.
 | lire un fichier de configuration TOML | [`TOML — configuration`](modules/toml.md) | décodage, types TOML, tableaux, sections, dates et erreurs de parsing |
 | surveiller un dossier | [`Inotify — événements fichiers`](modules/inotify.md) | watchers, événements, lectures avec timeout, moves, cookies et fermeture |
 | gérer les signaux Unix | [`SIGNAL — arrêt propre et rechargement`](modules/signal.md) | `TERM`/`INT`/`HUP`/`USR1`/`USR2`/`PIPE`, callbacks différés, ordre fixe, coalescence, appels interruptibles et workers |
-| paralléliser du Lua | [`WORKERS — threads OS, messages et channels`](modules/workers.md) | états Lua isolés, `spawn`, cycle de vie borné, inbox/outbox et channels directs MPMC |
+| paralléliser du Lua | [`WORKERS — threads OS, messages et channels`](modules/workers.md) | états Lua isolés, `spawn`, pool persistant borné, `cpu_count`, inbox/outbox et channels directs MPMC |
 | obtenir ou formater le temps | [`Time — horloges et durées`](modules/time.md) | temps réel, monotone, sleep, ISO-8601, parsing et formatage de durées |
 | rechercher un compte système par nom ou UID | [`USER - comptes système`](modules/user.md) | NSS, `get`, `exists`, UID, GID principal, GECOS, home, shell et erreurs de résolution |
 | découper ou transformer des chaînes | [`Strings — chaînes`](modules/strings.md) | `split`, séparateurs, limites et chaînes binaires |
@@ -91,7 +92,7 @@ avoir à ouvrir chaque fichier.
 | [`TLS — connexions chiffrées`](modules/tls.md) | Connexion TLS directe, STARTTLS, vérification, CA, hostname, SNI, versions, deadlines et comportement fail-closed. |
 | [`TOML — fichiers de configuration`](modules/toml.md) | Décodage TOML, scalaires, tableaux, tables, tableaux de tables, dates/heures et diagnostics. |
 | [`USER - utilisateurs système via NSS`](modules/user.md) | Recherche par nom ou UID, existence, distinction absence/erreur NSS, champs passwd, workers et limites de sécurité. |
-| [`WORKERS — threads OS, files et channels`](modules/workers.md) | États Lua isolés, transport JSON, `status`, `join(timeout)`, annulation coopérative, inbox/outbox, channels directs MPMC, fermeture, GC et interblocages. |
+| [`WORKERS — threads OS, files et channels`](modules/workers.md) | États Lua isolés, transport JSON, `status`, `done`, pool persistant borné, annulation coopérative, inbox/outbox, channels directs MPMC, fermeture, GC et interblocages. |
 
 ## Organisation d’une page de module
 

@@ -6,6 +6,73 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.18.0] - 2026-08-06
+
+### Summary
+
+Babet 2.18.0 extends the workers API with a bounded pool of persistent pthreads
+and Lua states. Tasks use the same channels and serialized transport as
+`workers.spawn`, while avoiding a complete Lua-state rebuild for every small
+operation. The release also adds available-CPU counting and a non-consuming
+completion test for existing jobs.
+
+### Persistent worker pool
+
+- add `babet.workers.pool(opts?)` with a fixed worker count, bounded task queue,
+  and a separate bound covering all running or queued tasks;
+- support strictly validated `size`, `queue_capacity`, and `channels` options,
+  CPU-derived defaults, and reserved internal channel names;
+- add `pool:submit(code, args?, timeout?)`, returning a task handle with
+  `done`, `status`, `poll`, and `join`;
+- associate results by task identifier so tasks may finish out of order without
+  losing their result;
+- keep `_tasks_by_id` and `_pending` synchronized throughout submission and
+  roll both changes back together when the task message cannot be sent;
+- turn task load, runtime, and result-serialization failures into per-task
+  errors without stopping the persistent worker;
+- provide FIFO `pool:close`, complete collection and joining through
+  `pool:join`, fully retryable timed joins, non-blocking statistics, and
+  cooperative `pool:cancel`;
+- never use `pthread_cancel()` or forced termination.
+
+### Isolation and reuse
+
+- create a fresh global environment for every task and point `_G` back to that
+  environment, preventing ordinary global assignments from leaking across
+  tasks;
+- intentionally reuse libraries, `package.loaded`, and native module state in
+  each persistent worker;
+- expose only `worker.args`, `worker.channels`, and `worker.cancelled()` inside
+  pool tasks;
+- support user-provided channels shared by every pool task without closing
+  those handles automatically.
+
+### Additional workers API
+
+- add `babet.workers.cpu_count()`, preferring `sched_getaffinity()` and then
+  `_SC_NPROCESSORS_ONLN`, with a guaranteed fallback to `1`;
+- add `job:done()`, a non-blocking and non-consuming boolean for jobs created by
+  `workers.spawn()`;
+- embed the internal Lua pool implementation in the binary and regenerate its
+  header on every build.
+
+### Tests and documentation
+
+- cover pool creation, capacities, saturation, timeouts, results, task errors,
+  unserializable values, failed-submission rollback, close, join, cancellation,
+  shared channels, global isolation, and actual Lua-state reuse;
+- reuse the common raw dense-array parser for `babet.exec()` arguments,
+  preventing `__len`/`__index` metamethods from changing stored argv values;
+- finish the raw sequence-reader sweep in `joinPath()` and explicit
+  `archive.create()` source lists, preventing `__len`/`__index` from
+  manufacturing path segments or source paths;
+- add a global structural guard that rejects any future `luaL_len()` or
+  `lua_geti()` call in the Lua binding sources;
+- extend the C++/Lua structural audit to the new `cpu_count` binding,
+  `job:done`, pool invariants, and the shared `exec` argument parser;
+- update the detailed French and English documentation and regenerate both PDF
+  manuals.
+
 ## [2.17.0] - 2026-08-05
 
 ### Summary

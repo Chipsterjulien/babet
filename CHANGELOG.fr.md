@@ -6,6 +6,78 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.18.0] - 2026-08-06
+
+### Résumé
+
+Babet 2.18.0 complète l'API workers avec un pool borné de pthreads et d'états
+Lua persistants. Les tâches utilisent les mêmes channels et le même transport
+sérialisé que `workers.spawn`, mais évitent de recréer un état Lua complet pour
+chaque petite opération. La version ajoute également le comptage des CPU
+disponibles et un test de fin non consommant pour les jobs existants.
+
+### Pool de workers persistants
+
+- ajout de `babet.workers.pool(opts?)` avec un nombre fixe de workers, une file
+  de tâches bornée et une borne distincte sur l'ensemble des tâches en cours ou
+  en attente ;
+- options `size`, `queue_capacity` et `channels`, avec validation stricte,
+  valeurs par défaut dérivées du nombre de CPU et noms internes réservés ;
+- ajout de `pool:submit(code, args?, timeout?)`, qui renvoie un handle de tâche
+  possédant `done`, `status`, `poll` et `join` ;
+- association des résultats par identifiant afin que plusieurs tâches puissent
+  terminer dans un ordre différent sans perdre leur résultat ;
+- synchronisation permanente de `_tasks_by_id` et `_pending` pendant la
+  soumission, avec annulation conjointe des deux modifications si le message ne
+  peut pas être envoyé ;
+- conversion des erreurs de chargement, d'exécution et de sérialisation du
+  résultat en erreurs locales à la tâche, sans arrêter le worker persistant ;
+- fermeture FIFO par `pool:close`, collecte et jointure complètes par
+  `pool:join`, jointures avec timeout entièrement rejouables, statistiques non
+  bloquantes et annulation coopérative par `pool:cancel` ;
+- aucune utilisation de `pthread_cancel()` ni terminaison forcée.
+
+### Isolation et réutilisation
+
+- création d'un environnement global frais pour chaque tâche, avec `_G`
+  redirigé vers cet environnement afin que les affectations globales ordinaires
+  ne fuient pas entre tâches ;
+- réutilisation volontaire des bibliothèques, du cache `package.loaded` et de
+  l'état natif des modules dans chaque worker persistant ;
+- exposition dans les tâches de `worker.args`, `worker.channels` et
+  `worker.cancelled()` uniquement ;
+- prise en charge des channels utilisateurs partagés entre toutes les tâches du
+  pool, sans fermeture automatique de ces handles.
+
+### API workers complémentaire
+
+- ajout de `babet.workers.cpu_count()`, fondé en priorité sur
+  `sched_getaffinity()` puis `_SC_NPROCESSORS_ONLN`, avec repli garanti à `1` ;
+- ajout de `job:done()`, booléen non bloquant et non consommant pour les jobs
+  créés par `workers.spawn()` ;
+- embarquement du code Lua interne du pool dans le binaire et régénération
+  automatique de son header à chaque build.
+
+### Tests et documentation
+
+- couverture du pool : création, capacités, saturation, timeouts, résultats,
+  erreurs de tâches, valeur non sérialisable, rollback d’une soumission échouée,
+  fermeture, jointure, annulation, channels partagés, isolation des globales
+  et réutilisation réelle de l'état
+  Lua ;
+- réutilisation par `babet.exec()` du parseur commun de séquences denses en
+  accès brut, afin que `__len` et `__index` ne puissent pas modifier `argv` ;
+- achèvement du balayage des lecteurs de séquences brutes dans `joinPath()` et
+  les listes de sources explicites d’`archive.create()`, afin que `__len` et
+  `__index` ne puissent fabriquer ni segments de chemin ni chemins sources ;
+- ajout d’un garde structurel global qui refuse tout futur appel à
+  `luaL_len()` ou `lua_geti()` dans les sources des bindings Lua ;
+- extension de l'audit structurel C++/Lua au nouveau binding `cpu_count`, à
+  `job:done`, aux invariants du pool et au parseur partagé des arguments
+  d'`exec` ;
+- documentation française et anglaise détaillée, exemples combinés et
+  régénération des deux manuels PDF.
+
 ## [2.17.0] - 2026-08-05
 
 ### Résumé

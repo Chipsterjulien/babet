@@ -1,4 +1,9 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "workers.hpp"
+#include "embedded_workers_pool.hpp"
 #include "lua_utils.hpp"
 #include "sqlite.hpp"
 #include "workers_serialization_budget.hpp"
@@ -7,8 +12,12 @@
 
 #include <pthread.h>
 #include <signal.h>
+#include <sched.h>
+#include <unistd.h>
 
 #include <atomic>
+#include <bit>
+#include <cerrno>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -2594,6 +2603,19 @@ namespace
         return 1;
     }
 
+    int worker_done(lua_State *L)
+    {
+        Worker *w = check_worker(L, 1);
+        if (lua_gettop(L) != 1)
+        {
+            return luaL_error(L, "workers.done: expected only self");
+        }
+
+        lua_pushboolean(
+            L, w->status.load(std::memory_order_acquire) != WORKER_RUNNING);
+        return 1;
+    }
+
     int worker_cancel(lua_State *L)
     {
         Worker *w = check_worker(L, 1);
@@ -3264,6 +3286,69 @@ namespace
         return 1;
     }
 
+    long available_cpu_count_from_affinity()
+    {
+        // cpu_set_t est une taille d'interface historique (CPU_SETSIZE). Sur
+        // une machine dont le masque noyau est plus grand, sched_getaffinity
+        // répond EINVAL tant que le buffer est trop petit. On l'agrandit donc
+        // sans borne liée à CPU_SETSIZE, tout en gardant un plafond défensif.
+        constexpr std::size_t max_affinity_bytes = 1024 * 1024;
+        std::size_t word_count =
+            (sizeof(cpu_set_t) + sizeof(unsigned long) - 1) /
+            sizeof(unsigned long);
+
+        while (word_count <=
+               max_affinity_bytes / sizeof(unsigned long))
+        {
+            std::vector<unsigned long> mask(word_count, 0);
+            const std::size_t mask_bytes =
+                mask.size() * sizeof(unsigned long);
+            if (::sched_getaffinity(
+                    0, mask_bytes,
+                    reinterpret_cast<cpu_set_t *>(mask.data())) == 0)
+            {
+                std::size_t count = 0;
+                for (const unsigned long word : mask)
+                {
+                    count += static_cast<std::size_t>(std::popcount(word));
+                }
+                return static_cast<long>(count);
+            }
+
+            if (errno != EINVAL)
+            {
+                break;
+            }
+            word_count *= 2;
+        }
+        return 0;
+    }
+
+    int lua_workers_cpu_count(lua_State *L)
+    {
+        if (lua_gettop(L) != 0)
+        {
+            return luaL_error(L, "workers.cpu_count: expected no arguments");
+        }
+
+        long count = available_cpu_count_from_affinity();
+        if (count < 1)
+        {
+            const long online = ::sysconf(_SC_NPROCESSORS_ONLN);
+            if (online > 0)
+            {
+                count = online;
+            }
+        }
+        if (count < 1)
+        {
+            count = 1;
+        }
+
+        lua_pushinteger(L, static_cast<lua_Integer>(count));
+        return 1;
+    }
+
 } // namespace
 
 // Voir le contrat détaillé dans workers.hpp. fn ne doit faire aucune
@@ -3312,6 +3397,8 @@ void register_workers(lua_State *L)
         lua_setfield(L, -2, "join");
         lua_pushcfunction(L, workers_lua_boundary<worker_status>);
         lua_setfield(L, -2, "status");
+        lua_pushcfunction(L, workers_lua_boundary<worker_done>);
+        lua_setfield(L, -2, "done");
         lua_pushcfunction(L, workers_lua_boundary<worker_cancel>);
         lua_setfield(L, -2, "cancel");
         lua_pushcfunction(L, workers_lua_boundary<worker_poll>);
@@ -3331,6 +3418,24 @@ void register_workers(lua_State *L)
     lua_setfield(L, -2, "spawn");
     lua_pushcfunction(L, workers_lua_boundary<lua_workers_channel>);
     lua_setfield(L, -2, "channel");
+    lua_pushcfunction(L, workers_lua_boundary<lua_workers_cpu_count>);
+    lua_setfield(L, -2, "cpu_count");
+
+    // Le pool est écrit en Lua pur au-dessus des primitives natives. Le
+    // chunk retourne un installateur(workers, babet) qui ajoute pool() sans
+    // exposer le module interne via require(). register_workers est toujours
+    // appelé sous une frontière lua_pcall pendant l'initialisation du runtime.
+    if (luaL_loadbuffer(L, WORKERS_POOL_LUA_SOURCE,
+                        sizeof(WORKERS_POOL_LUA_SOURCE) - 1,
+                        "@babet/workers_pool.lua") != LUA_OK)
+    {
+        lua_error(L);
+    }
+    lua_call(L, 0, 1);   // -> installateur
+    lua_pushvalue(L, -2); // workers
+    lua_pushvalue(L, -4); // babet
+    lua_call(L, 2, 0);
+
     lua_setfield(L, -2, "workers");
 }
 

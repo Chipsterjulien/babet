@@ -18,20 +18,22 @@ std::optional<std::string> get_segments(lua_State *L, std::vector<std::string> &
 {
     if (lua_istable(L, 1))
     {
-        // Itération ordonnée via luaL_len + lua_geti.
-        // lua_next ne garantit PAS l'ordre, même pour la partie array
-        // d'une table — pour un chemin de fichier, ça peut donner
-        // "sous_dossier/fichier.txt/dossier" au lieu de l'ordre
-        // attendu. luaL_len + lua_geti garantit i = 1, 2, ..., n.
-        lua_Integer n = luaL_len(L, 1);
-        if (n < 2)
+        // Iterate over the raw array part in deterministic 1..n order.
+        // lua_next does not guarantee array order, while raw access also
+        // prevents __len/__index from manufacturing path segments.
+        const std::size_t raw_n = lua_rawlen(L, 1);
+        if (raw_n > static_cast<std::size_t>(LUA_MAXINTEGER))
+        {
+            return "Table contains too many path segments";
+        }
+        if (raw_n < 2)
         {
             return "Table must contain at least two strings";
         }
-        segments.reserve(static_cast<size_t>(n));
-        for (lua_Integer i = 1; i <= n; ++i)
+        segments.reserve(raw_n);
+        for (std::size_t i = 1; i <= raw_n; ++i)
         {
-            lua_geti(L, 1, i); // pousse t[i] au sommet
+            lua_rawgeti(L, 1, static_cast<lua_Integer>(i));
             if (!lua_is_strict_string(L, -1))
             {
                 lua_pop(L, 1);

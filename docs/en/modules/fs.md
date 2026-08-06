@@ -392,6 +392,11 @@ local path = babet.joinPath({ "var", "lib", "my-app", "data.db" })
 At least two non-empty segments are required. On success, `joinPath` returns
 **one value**, the joined string. On failure it returns `(nil, err)`.
 
+In the table form, Babet reads the stored array entries directly in raw `1..n`
+order. `__len` and `__index` metamethods are not invoked and cannot manufacture
+path segments. A missing raw entry is therefore rejected instead of being
+supplied through `__index`. Non-array keys are not path segments and are ignored.
+
 The function only adjusts the `/` separator at segment boundaries:
 
 ```lua

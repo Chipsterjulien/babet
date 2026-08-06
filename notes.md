@@ -6,10 +6,13 @@ behavior, the remaining risk, and the reason it is deferred.
 
 ## 1. Forced worker termination
 
-**Current state**: there is no `worker:kill()`. A worker stops cooperatively
-through `job:cancel()` / `worker.cancelled()`, after `close()` wakes its inbox,
-or after a bounded operation returns. Cancellation also wakes a channel wait
-owned by that worker without closing the shared channel for other participants.
+**Current state**: there is no `worker:kill()`. A standalone worker stops
+cooperatively through `job:cancel()` / `worker.cancelled()`, after `close()`
+wakes its inbox, or after a bounded operation returns. A 2.18 pool uses the same
+model through `pool:cancel()` and `worker.cancelled()`; cancellation applies to
+the pool as a whole rather than forcibly killing one task. Cancellation also
+wakes a channel wait owned by that worker without closing the shared channel
+for other participants.
 
 **Limitation**: a worker blocked forever in an external operation without a
 timeout cannot be safely stopped from another thread. Garbage collection or a
@@ -20,9 +23,10 @@ mutexes, file descriptors, Lua state, and OpenSSL objects in inconsistent
 states. A safe design would require explicit cancellation points throughout the
 runtime.
 
-**Mitigation**: use bounded socket/process operations, call `job:cancel()`, and
-make worker loops check `worker.cancelled()` or return to cancellation-aware
-`worker.recv()` / channel operations when they must remain externally stoppable.
+**Mitigation**: use bounded socket/process operations, call `job:cancel()` or
+`pool:cancel()`, and make worker or pool-task loops check `worker.cancelled()`
+or return to cancellation-aware `worker.recv()` / channel operations when they
+must remain externally stoppable.
 
 ## 2. Linear-time or otherwise bounded pattern matching
 

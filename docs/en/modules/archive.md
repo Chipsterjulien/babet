@@ -81,6 +81,10 @@ The first argument supports two distinct contracts:
   Absolute sources are accepted, but host path prefixes are never exposed in
   the archive.
 
+The explicit list is read through raw array access. `__len` and `__index`
+metamethods are not invoked, so only the paths actually stored at indices
+`1..n` are validated and archived.
+
 In list mode, the final component must be stable: `.` and the filesystem root
 are rejected, as is every `..` component. Two sources with the same final
 component collide and fail, even when their descendants would differ. Repeating

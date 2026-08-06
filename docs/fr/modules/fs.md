@@ -398,6 +398,13 @@ Il faut au moins deux segments non vides. En cas de succès, `joinPath` renvoie
 **une seule valeur**, la chaîne assemblée. En cas d’échec, elle renvoie
 `(nil, err)`.
 
+Dans la forme table, Babet lit directement les entrées réellement stockées dans
+la partie tableau, dans l’ordre brut `1..n`. Les métaméthodes `__len` et
+`__index` ne sont pas appelées et ne peuvent donc pas fabriquer de segments.
+Une entrée brute manquante est refusée au lieu d’être fournie par `__index`. Les
+clés qui n’appartiennent pas à la partie tableau ne constituent pas des
+segments et sont ignorées.
+
 La fonction ne fait qu’ajuster le séparateur `/` à la jonction des segments :
 
 ```lua

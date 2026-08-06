@@ -40,46 +40,6 @@ namespace
     // arrondit au-dessus et laisserait passer un dépassement).
     constexpr size_t MAX_MAX_OUTPUT = 2ull * 1024 * 1024 * 1024; // 2 Gio
 
-    // Construit argv depuis cmd + la table Lua à l'index `idx`.
-    // argv[0] = cmd. Renvoie false et remplit `err` en cas d'argument invalide.
-    bool collect_args(lua_State *L, int idx, const std::string &cmd,
-                      std::vector<std::string> &out, std::string &err)
-    {
-        out.push_back(cmd); // argv[0] = nom du programme
-
-        if (lua_is_none_or_nil(L, idx))
-        {
-            return true; // pas d'arguments, valide
-        }
-        if (!lua_istable(L, idx))
-        {
-            err = "args must be a table";
-            return false;
-        }
-
-        lua_Integer n = luaL_len(L, idx);
-        for (lua_Integer i = 1; i <= n; ++i)
-        {
-            lua_geti(L, idx, i);
-            if (!lua_is_strict_string(L, -1))
-            {
-                lua_pop(L, 1);
-                err = "args must contain only strings";
-                return false;
-            }
-            std::string arg;
-            std::string label = "args[" + std::to_string(i) + "]";
-            if (!lua_string_without_nul(L, -1, arg, label, err))
-            {
-                lua_pop(L, 1);
-                return false;
-            }
-            out.push_back(std::move(arg));
-            lua_pop(L, 1);
-        }
-        return true;
-    }
-
     // Lit opts.cwd, opts.env, opts.stdin et opts.timeout depuis la table `idx`.
     bool collect_opts(lua_State *L, int idx,
                       std::string &cwd, bool &has_cwd,
@@ -562,7 +522,7 @@ static int lua_exec_impl(lua_State *L)
     bool args_ok = false;
     auto args_parser = [&](lua_State *Ls)
     {
-        args_ok = collect_args(Ls, 2, cmd, args, err);
+        args_ok = babet_process::collect_args(Ls, 2, cmd, args, err);
     };
     lua_run_protected(L, args_parser);
     if (!args_ok)
