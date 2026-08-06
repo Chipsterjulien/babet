@@ -17,9 +17,9 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version candidate **Babet 2.21.0**.
+Documentation de la version candidate **Babet 2.21.1**.
 
-Babet 2.21.0 ajoute `xdev = true` à `babet.find()` pour conserver les
+Babet 2.21.1 ajoute `xdev = true` à `babet.find()` pour conserver les
 points de montage étrangers visibles tout en élaguant leur contenu. Le harnais
 reste réparti en 44 suites atteignables et couvre aussi ce contrat dans un worker.
 
@@ -31,7 +31,7 @@ reste réparti en 44 suites atteignables et couvre aussi ce contrat dans un work
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.21.0 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.21.1 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 

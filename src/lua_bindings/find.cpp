@@ -164,13 +164,15 @@ namespace
     }
 
     bool matches_options(const fs::directory_entry &entry,
+                         bool entry_is_regular,
+                         bool entry_is_directory,
                          const FindOptions &options,
                          const CompiledMatchers &compiled)
     {
         if (!options.type.empty())
         {
-            if ((options.type == "f" && !fs::is_regular_file(entry)) ||
-                (options.type == "d" && !fs::is_directory(entry)))
+            if ((options.type == "f" && !entry_is_regular) ||
+                (options.type == "d" && !entry_is_directory))
             {
                 return false;
             }
@@ -320,23 +322,28 @@ namespace
         const fs::path &root, const FindOptions &options,
         const std::function<void(const fs::path &)> &callback)
     {
+        auto path_error = [](const char *operation, const fs::path &path,
+                             const std::error_code &ec)
+        {
+            return std::string(operation) + " '" + path.string() +
+                   "': " + ec.message();
+        };
+
         std::error_code check_ec;
-        bool root_exists = fs::exists(root, check_ec);
+        const bool root_exists = fs::exists(root, check_ec);
         if (check_ec)
         {
-            return "cannot inspect path '" + root.string() +
-                   "': " + check_ec.message();
+            return path_error("cannot inspect path", root, check_ec);
         }
         if (!root_exists)
         {
             return "path does not exist: " + root.string();
         }
 
-        bool root_is_directory = fs::is_directory(root, check_ec);
+        const bool root_is_directory = fs::is_directory(root, check_ec);
         if (check_ec)
         {
-            return "cannot inspect path '" + root.string() +
-                   "': " + check_ec.message();
+            return path_error("cannot inspect path", root, check_ec);
         }
         if (!root_is_directory)
         {
@@ -348,14 +355,13 @@ namespace
         {
             // stat() deliberately follows a final symlink accepted by the
             // historical root-directory contract. The resulting st_dev is
-            // therefore the filesystem that recursive_directory_iterator
-            // will actually traverse.
+            // therefore the filesystem that directory_iterator will actually
+            // traverse.
             struct stat root_stat{};
             if (::stat(root.c_str(), &root_stat) != 0)
             {
                 const int stat_errno = errno;
-                return "cannot inspect path '" + root.string() +
-                       "': " +
+                return "cannot inspect path '" + root.string() + "': " +
                        std::generic_category().message(stat_errno);
             }
             root_device = root_stat.st_dev;
@@ -371,99 +377,164 @@ namespace
             return glob_error;
         }
 
+        struct DirectoryFrame
+        {
+            fs::directory_iterator current;
+            fs::directory_iterator end;
+            lua_Integer depth = 0;
+        };
+
         try
         {
-            for (auto it = fs::recursive_directory_iterator(root);
-                 it != fs::recursive_directory_iterator(); ++it)
+            std::error_code root_iter_ec;
+            fs::directory_iterator root_iterator(root, root_iter_ec);
+            if (root_iter_ec)
             {
-                // lua_Integer pour comparer sans narrowing avec les
-                // bornes (it.depth() rend un int, l'élargissement est
-                // sans perte).
-                lua_Integer depth = it.depth();
+                return path_error("cannot traverse directory", root,
+                                  root_iter_ec);
+            }
 
-                // CORRECTIF (audit v21) : élagage maxdepth par PRÉVENTION
-                // de la descente, plus par pop().
-                //
-                // L'ancien code faisait `it.pop(); continue;` quand
-                // depth > maxdepth. Or pop() avance DÉJÀ l'itérateur sur
-                // l'entrée suivante du parent ; le ++it du for avançait
-                // une SECONDE fois. Deux symptômes reproduits :
-                //   1. Dossier élagué non vide suivi d'un frère : le
-                //      frère était silencieusement absent du résultat
-                //      (root/{sub/x.txt, a.txt, b.txt}, maxdepth=0 ->
-                //      a.txt manquant).
-                //   2. Dossier élagué non vide en DERNIÈRE position :
-                //      pop() rendait l'itérateur end, et ++it sur end
-                //      jetait filesystem_error ("cannot increment
-                //      recursive directory iterator") -> find retournait
-                //      une erreur parasite au lieu du résultat.
-                //
-                // Nouvelle stratégie : ne JAMAIS descendre au-delà de
-                // maxdepth. Si l'entrée courante est un dossier situé à
-                // depth >= maxdepth, ses enfants seraient à depth+1 >
-                // maxdepth : on annule la récursion en attente AVANT
-                // l'incrément via disable_recursion_pending(). Ainsi
-                // aucune entrée ne dépasse maxdepth (hors maxdepth < 0,
-                // couvert par le filtre ci-dessous), pop() disparaît, et
-                // l'incrément du for reste le SEUL à faire avancer
-                // l'itérateur.
-                //
-                // Ce test est fait AVANT le filtre mindepth : un dossier
-                // sous mindepth doit quand même être traversé (mindepth
-                // filtre les RÉSULTATS, pas la descente). NB : les
-                // symlinks vers des dossiers ne sont pas suivis par
-                // recursive_directory_iterator (comportement par défaut,
-                // inchangé) ; leur appliquer disable_recursion_pending
-                // est un no-op inoffensif.
-                const bool entry_is_directory = it->is_directory();
-                bool crosses_device = false;
-                if (options.xdev && entry_is_directory)
+            std::vector<DirectoryFrame> stack;
+            stack.push_back(
+                DirectoryFrame{std::move(root_iterator), {}, 0});
+
+            while (!stack.empty())
+            {
+                DirectoryFrame &frame = stack.back();
+                if (frame.current == frame.end)
                 {
-                    // lstat() keeps directory symlinks non-followed, matching
-                    // recursive_directory_iterator's default traversal policy.
-                    // On a real mount point it observes the mounted inode and
-                    // therefore the foreign st_dev that must be pruned.
+                    stack.pop_back();
+                    continue;
+                }
+
+                // Copy the current entry and advance the parent iterator before
+                // any descent. The parent therefore already points at the next
+                // sibling when a child frame is pushed. A disappearing child
+                // can then be skipped without losing the remaining siblings,
+                // unlike recursive_directory_iterator whose failed increment
+                // becomes end after an ENOENT descent race.
+                const fs::directory_entry entry = *frame.current;
+                const lua_Integer depth = frame.depth;
+                const fs::path parent_path = entry.path().parent_path();
+
+                std::error_code advance_ec;
+                frame.current.increment(advance_ec);
+                if (advance_ec)
+                {
+                    if (advance_ec == std::errc::no_such_file_or_directory)
+                    {
+                        // The directory represented by this frame disappeared.
+                        // Its remaining entries no longer exist, but the parent
+                        // frame (if any) is still valid and can continue.
+                        stack.pop_back();
+                        continue;
+                    }
+                    else
+                    {
+                        return path_error("cannot continue traversal in",
+                                          parent_path, advance_ec);
+                    }
+                }
+
+                std::error_code link_status_ec;
+                const fs::file_status link_status =
+                    entry.symlink_status(link_status_ec);
+                if (link_status_ec)
+                {
+                    if (link_status_ec ==
+                        std::errc::no_such_file_or_directory)
+                    {
+                        continue;
+                    }
+                    return path_error("cannot inspect path", entry.path(),
+                                      link_status_ec);
+                }
+                const bool entry_is_symlink = fs::is_symlink(link_status);
+
+                std::error_code target_status_ec;
+                const fs::file_status target_status =
+                    entry.status(target_status_ec);
+                if (target_status_ec)
+                {
+                    if (target_status_ec ==
+                        std::errc::no_such_file_or_directory)
+                    {
+                        if (!entry_is_symlink)
+                        {
+                            // The directory entry itself vanished after
+                            // readdir. A dangling symlink remains a visible
+                            // path, but a vanished non-symlink has nothing left
+                            // to match or descend into.
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        return path_error("cannot inspect path", entry.path(),
+                                          target_status_ec);
+                    }
+                }
+
+                const bool entry_is_directory =
+                    !target_status_ec && fs::is_directory(target_status);
+                const bool entry_is_regular =
+                    !target_status_ec && fs::is_regular_file(target_status);
+                const bool may_descend =
+                    entry_is_directory && !entry_is_symlink;
+
+                bool crosses_device = false;
+                if (options.xdev && may_descend)
+                {
+                    // lstat() observes the mounted inode of a real mount point
+                    // while keeping directory symlinks non-followed. Only real
+                    // directories can reach this branch because may_descend is
+                    // false for symlinks.
                     struct stat entry_stat{};
-                    if (::lstat(it->path().c_str(), &entry_stat) != 0)
+                    if (::lstat(entry.path().c_str(), &entry_stat) != 0)
                     {
                         const int lstat_errno = errno;
-                        // A live tree may lose an entry between the iterator's
-                        // directory read and this xdev-specific lstat(). If the
-                        // iterator cached it as a directory, recursion may still
-                        // be pending: cancel it before continue so the following
-                        // increment does not try to open a path that vanished.
-                        // Every other error remains fatal so a partial traversal
-                        // is never mistaken for a complete one.
                         if (lstat_errno == ENOENT)
                         {
-                            it.disable_recursion_pending();
                             continue;
                         }
                         return "cannot inspect path '" +
-                               it->path().string() + "': " +
+                               entry.path().string() + "': " +
                                std::generic_category().message(lstat_errno);
                     }
                     crosses_device = entry_stat.st_dev != root_device;
                 }
 
-                // The mount point itself remains visible and can still match
-                // filters. Only the pending recursion into its children is
-                // disabled, exactly like GNU/POSIX find -xdev. maxdepth and
-                // xdev share the same single-increment pruning mechanism.
-                if (entry_is_directory &&
-                    (depth >= options.maxdepth || crosses_device))
+                if (depth >= options.mindepth &&
+                    depth <= options.maxdepth &&
+                    matches_options(entry, entry_is_regular,
+                                    entry_is_directory, options, compiled))
                 {
-                    it.disable_recursion_pending();
+                    callback(entry.path());
                 }
 
-                if (depth < options.mindepth || depth > options.maxdepth)
+                // The entry itself remains visible. Only descent into its
+                // children is suppressed by maxdepth or xdev. Opening each
+                // child through the error_code overload makes ENOENT a local
+                // disappearance race: siblings remain available in the parent
+                // frame and every other error stays fatal.
+                if (may_descend && depth < options.maxdepth &&
+                    !crosses_device)
                 {
-                    continue;
-                }
+                    std::error_code child_ec;
+                    fs::directory_iterator child(entry.path(), child_ec);
+                    if (child_ec)
+                    {
+                        if (child_ec ==
+                            std::errc::no_such_file_or_directory)
+                        {
+                            continue;
+                        }
+                        return path_error("cannot traverse directory",
+                                          entry.path(), child_ec);
+                    }
 
-                if (matches_options(*it, options, compiled))
-                {
-                    callback(it->path());
+                    stack.push_back(DirectoryFrame{
+                        std::move(child), {}, depth + 1});
                 }
             }
         }

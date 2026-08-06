@@ -16,9 +16,15 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.21.0**. See the
+Current release candidate: **2.21.1**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
+
+Babet 2.21.1 hardens `babet.find()` on live directory trees. The traversal
+now keeps an explicit stack of directory iterators, advances each parent before
+opening a child, and treats only `ENOENT` disappearance races as local. A child
+that vanishes no longer aborts the whole search or hides surviving siblings;
+all other inspection and traversal errors remain fatal.
 
 Babet 2.21.0 adds `xdev = true` to `babet.find()`. The traversal records
 the root filesystem device, keeps foreign mount points visible, and prunes

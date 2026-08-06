@@ -9,11 +9,11 @@ semantics. Babet 2.21.0 adds the remaining filesystem-boundary control as
 `xdev = true`, with the same useful traversal contract as `find -xdev`: the
 mount point remains visible, while its descendants are pruned. The boundary is
 `st_dev` (so Btrfs subvolumes and same-filesystem bind mounts follow the same
-semantics as `find -xdev`), and an entry that disappears during the additional
-xdev inspection is skipped only for `ENOENT`, after cancelling pending recursion
-so iterator advancement cannot try to open the vanished path. This tolerance is
-specific to `xdev`; the historical traversal without it may still fail on a
-directory disappearing immediately before descent.
+semantics as `find -xdev`), and Babet 2.21.1 closes the remaining live-tree disappearance race for all
+find traversals. The implementation now uses an explicit stack of directory
+iterators, advances the parent before opening a child, and skips only `ENOENT`
+when an entry or active directory frame disappears. All other traversal errors
+remain fatal, so a partial result is never mistaken for a complete search.
 
 TsT> Chipster find a une tonne d'option mais dans celles les plus utiles a ré-implementer je dirais qu'il y a
 <TsT> 1) le parcours d'arborescence avec limite de profondeur (-mindepth et -maxdepth)

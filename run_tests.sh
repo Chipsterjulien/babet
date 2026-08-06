@@ -191,6 +191,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_find_xdev_contracts.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — robustesse find sur arborescence vivante"
+if ! bash "${SCRIPT_DIR}/tools/test_find_disappearance_contracts.sh"; then
+    echo "ÉCHEC : le préflight de robustesse de babet.find a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — orchestration de validation"
 if ! bash "${SCRIPT_DIR}/tools/test_release_fail_fast.sh"; then
     echo "ÉCHEC : le préflight de l'orchestration de validation a échoué."
@@ -275,6 +281,13 @@ babet_test_preload() {
     fi
     printf '%s' "${value}"
 }
+
+print_preflight_stage "Régression — disparition concurrente dans babet.find"
+if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
+    bash "${SCRIPT_DIR}/tools/test_find_disappearing_directory.sh" "${BINARY}"; then
+    echo "ÉCHEC : le test de disparition concurrente dans babet.find a échoué."
+    exit 1
+fi
 
 modes_ok=0
 modes_total=0

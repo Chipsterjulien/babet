@@ -6,6 +6,35 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.21.1] - 2026-08-06
+
+### Fixed
+
+- Reworked `babet.find()` traversal around an explicit stack of
+  `std::filesystem::directory_iterator` frames. Each parent iterator advances
+  before a child directory is opened, so a child disappearing between `readdir`
+  and descent no longer turns the iterator into `end` or loses later siblings.
+- Treats only `ENOENT` disappearance races as local: a vanished child is
+  skipped, and a vanished active directory frame returns to its parent. Every
+  other status, enumeration, and child-open error still fails the complete call
+  with `(nil, err)`.
+- Preserves pre-order results, `mindepth`, `maxdepth`, type/regex/glob filters,
+  non-followed directory symlinks, root-symlink semantics, `xdev`, and worker
+  behavior.
+- Adds a deterministic `LD_PRELOAD` regression that removes a selected child
+  exactly when libstdc++ opens it through `openat`, proving that both surviving
+  siblings remain visible and the vanished child is absent.
+- Adds a dedicated structural preflight for the explicit stack, parent-before-
+  child advancement, local `ENOENT` handling, symlink policy, runtime injection,
+  and French/English documentation.
+
+### Documentation
+
+- Documents the live-tree disappearance contract in the French and English
+  filesystem manuals and regenerates both PDF manuals.
+- Updates `todo_find.txt`: the historical non-`xdev` disappearance race tracked
+  after 2.21.0 is closed by this release.
+
 ## [2.21.0] - 2026-08-06
 
 ### Summary

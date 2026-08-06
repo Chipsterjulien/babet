@@ -1,29 +1,23 @@
-Babet 2.21.0 - fichiers modifies par rapport a la 2.20.0
-Aucune suppression.
-
-MODIFIED_FILES.txt
 CHANGELOG.fr.md
 CHANGELOG.md
 CMakeLists.txt
-GITHUB_RELEASE_2.21.0.md
+GITHUB_RELEASE_2.21.1.md
+MODIFIED_FILES.txt
 README.fr.md
 README.md
-RELEASING.md
 docs/en/README.md
 docs/en/getting-started.md
 docs/en/modules/fs.md
 docs/en/modules/sys.md
-docs/en/security.md
 docs/fr/README.md
 docs/fr/getting-started.md
 docs/fr/modules/fs.md
 docs/fr/modules/sys.md
-docs/fr/security.md
 docs/manual-en.pdf
 docs/manual-fr.pdf
-examples/selftest/suites/filesystem/find_iterator.lua
 run_tests.sh
 src/lua_bindings/find.cpp
-src/lua_bindings/find.hpp
 todo_find.txt
+tools/test_find_disappearance_contracts.sh
+tools/test_find_disappearing_directory.sh
 tools/test_find_xdev_contracts.sh

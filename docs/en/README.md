@@ -15,9 +15,9 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the **Babet 2.21.0** release candidate.
+Documentation for the **Babet 2.21.1** release candidate.
 
-Babet 2.21.0 adds `xdev = true` to `babet.find()`, keeping foreign mount
+Babet 2.21.1 adds `xdev = true` to `babet.find()`, keeping foreign mount
 points visible while pruning their contents. The harness remains split into 44
 reachable suites and exercises the same contract inside a worker.
 
@@ -29,7 +29,7 @@ reachable suites and exercises the same contract inside a worker.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.21.0 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.21.1 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 

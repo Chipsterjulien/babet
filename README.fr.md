@@ -17,9 +17,16 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.21.0**. Voir le
+Version candidate actuelle : **2.21.1**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
+
+Babet 2.21.1 renforce `babet.find()` sur les arborescences vivantes. Le
+parcours utilise désormais une pile explicite d'itérateurs, avance chaque parent
+avant d'ouvrir un enfant et ne traite localement que les courses de disparition
+`ENOENT`. Un enfant disparu ne fait plus échouer toute la recherche et ne masque
+plus les frères encore présents ; toute autre erreur d'inspection ou de parcours
+reste fatale.
 
 Babet 2.21.0 ajoute `xdev = true` à `babet.find()`. Le parcours mémorise
 le périphérique de la racine, conserve les points de montage étrangers dans

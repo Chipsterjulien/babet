@@ -6,6 +6,36 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.21.1] - 2026-08-06
+
+### Corrections
+
+- Refonte le parcours de `babet.find()` autour d'une pile explicite de cadres
+  `std::filesystem::directory_iterator`. Chaque itérateur parent avance avant
+  l'ouverture d'un dossier enfant : un enfant supprimé entre `readdir` et la
+  descente ne transforme donc plus l'itérateur en `end` et ne fait plus perdre
+  les frères suivants.
+- Ne traite localement que les courses de disparition `ENOENT` : un enfant
+  disparu est ignoré et un cadre de dossier actif disparu revient à son parent.
+  Toute autre erreur de statut, d'énumération ou d'ouverture d'un enfant fait
+  toujours échouer l'appel complet avec `(nil, err)`.
+- Préserve l'ordre préfixe, `mindepth`, `maxdepth`, les filtres de type/regex/glob,
+  les symlinks de dossiers non suivis, la sémantique d'une racine symlinkée,
+  `xdev` et le comportement dans les workers.
+- Ajoute une régression déterministe par `LD_PRELOAD` qui supprime un enfant au
+  moment exact où libstdc++ l'ouvre via `openat`, et prouve que les deux frères
+  survivants restent visibles tandis que l'enfant disparu est absent.
+- Ajoute un préflight structurel dédié à la pile explicite, à l'avancement du
+  parent avant l'enfant, au traitement local d'`ENOENT`, à la politique des
+  symlinks, à l'injection d'exécution et aux documentations française/anglaise.
+
+### Documentation
+
+- Documente le contrat des disparitions sur arborescence vivante dans les
+  manuels de système de fichiers français et anglais, puis régénère les deux PDF.
+- Met à jour `todo_find.txt` : la course historique sans `xdev`, tracée après la
+  2.21.0, est fermée par cette version.
+
 ## [2.21.0] - 2026-08-06
 
 ### Résumé

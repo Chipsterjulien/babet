@@ -891,6 +891,22 @@ local one_level_below = assert(babet.find("src", {
 `mindepth` filtre uniquement les résultats ; les dossiers moins profonds sont
 tout de même traversés pour atteindre les niveaux demandés.
 
+#### Arborescences vivantes et dossiers disparus
+
+`babet.find()` parcourt l'arborescence avec une pile explicite d'itérateurs de
+dossiers. Avant d'ouvrir un dossier enfant, Babet avance l'itérateur du parent
+vers le frère suivant. Si le dossier disparaît dans cet intervalle, son
+`ENOENT` reste local à ce sous-arbre disparu : la recherche l'ignore et reprend
+depuis le parent déjà positionné.
+
+La même règle s'applique lorsqu'un dossier en cours d'énumération disparaît :
+ce cadre devenu inutilisable est retiré et le parcours reprend dans son parent.
+Ce comportement vaut avec ou sans `xdev`, conserve l'ordre préfixe pour les
+entrées encore présentes et ne transforme pas les autres erreurs en succès
+partiel. Les erreurs de permission, d'entrée/sortie, les boucles de symlinks et
+toute erreur autre qu'`ENOENT` font toujours échouer l'appel complet avec
+`(nil, err)`.
+
 #### Rester sur le système de fichiers de la racine
 
 `xdev = true` mémorise le champ Linux `st_dev` de la racine réellement
@@ -926,15 +942,10 @@ fondée sur `st_dev`, comme `find -xdev` : un sous-volume Btrfs peut donc être
 élagué, tandis qu'un bind mount du même système de fichiers conserve le même
 `st_dev` et n'est pas élagué.
 
-Si une entrée disparaît entre la lecture du dossier et l'inspection
-`xdev`, l'erreur `ENOENT` correspondante est ignorée : Babet annule d'abord la
-récursion encore en attente pour que l'incrément de l'itérateur ne tente pas
-d'ouvrir le dossier disparu, puis poursuit le parcours. Cette tolérance est
-spécifique à l'inspection supplémentaire de `xdev`. Sans `xdev`, le parcours
-historique peut encore échouer lorsqu'un dossier disparaît juste avant la
-descente de l'itérateur. Une erreur lors de l'inspection de la racine, ou toute
-autre erreur lors de l'inspection d'un point de descente, fait échouer l'appel
-avec `(nil, err)`.
+Si un candidat disparaît pendant l'inspection supplémentaire de `xdev`, la
+même règle limitée à `ENOENT` s'applique et le sous-arbre disparu est ignoré.
+Une erreur lors de l'inspection de la racine, ou toute autre erreur lors de
+l'inspection d'un point de descente, fait échouer l'appel avec `(nil, err)`.
 
 #### Symlinks et erreurs
 

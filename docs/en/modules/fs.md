@@ -873,6 +873,21 @@ local one_level_below = assert(babet.find("src", {
 `mindepth` filters results only; shallower directories are still traversed to
 reach requested depths.
 
+#### Live trees and disappearing directories
+
+`babet.find()` traverses with an explicit stack of directory iterators. Before
+opening a child directory, Babet advances the parent iterator to the next
+sibling. If the child directory disappears in that interval, its `ENOENT` is
+local to that vanished subtree: the search skips it and continues from the
+already-positioned parent.
+
+The same rule applies if a directory currently being enumerated disappears:
+that exhausted frame is discarded and traversal resumes in its parent. This
+behavior applies with or without `xdev`, preserves pre-order results for entries
+that still exist, and does not turn other failures into partial success.
+Permission errors, I/O errors, symlink loops, and every error other than
+`ENOENT` still fail the complete call with `(nil, err)`.
+
 #### Stay on the root filesystem
 
 `xdev = true` records the Linux `st_dev` of the directory actually traversed,
@@ -906,14 +921,10 @@ strictly based on `st_dev`, like `find -xdev`: a Btrfs subvolume may therefore
 be pruned, while a bind mount of the same filesystem keeps the same `st_dev`
 and is not pruned.
 
-If an entry disappears between the directory read and the xdev inspection, the
-corresponding `ENOENT` is ignored: Babet first cancels any pending recursion so
-the iterator increment cannot try to open the vanished directory, then resumes
-traversal. This tolerance is specific to the extra xdev inspection. Without
-`xdev`, the historical traversal may still fail when a directory disappears
-just before the iterator descends into it. An error while inspecting the root,
-or any other error while inspecting a candidate descent point, fails the entire
-call with `(nil, err)`.
+If a candidate disappears during the additional `xdev` inspection, the same
+`ENOENT`-only live-tree rule applies and the vanished subtree is skipped. An
+error while inspecting the root, or any other error while inspecting a
+candidate descent point, fails the entire call with `(nil, err)`.
 
 #### Symlinks and errors
 
