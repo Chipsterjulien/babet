@@ -17,22 +17,22 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.18.0**. Voir le
+Version candidate actuelle : **2.19.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.18.0 ajoute un pool borné de workers persistants. Un nombre fixe de
-pthreads et d'états Lua peut désormais traiter plusieurs tâches successives via
-`babet.workers.pool()`, avec une file bornée, des timeouts monotones, des
-résultats associés à chaque tâche, une fermeture FIFO et une annulation
-coopérative. Chaque tâche reçoit un environnement global frais, tandis que les
-bibliothèques et `package.loaded` restent réutilisés dans l'état Lua du worker.
+Babet 2.19.0 modularise entièrement le harnais de régression Lua :
+`examples/main.lua` devient un orchestrateur léger, tandis que 43 suites
+thématiques restent exécutées dans le même ordre en mode dossier, embarqué et
+embarqué via `PATH`. Un préflight empêche le retour d'un fichier monolithique
+et vérifie que toutes les suites restent atteignables.
 
-Le module expose également `babet.workers.cpu_count()`, qui tient compte de
-l'affinité CPU Linux, ainsi que `job:done()` pour observer la fin d'un worker
-sans consommer son résultat. Les pools utilisent les channels et le transport
-JSON déjà audités ; aucun `pthread_cancel()` ni arrêt forcé n'est introduit.
-Babet reste limité à Linux.
+La version ajoute aussi `db:backup(path, opts?)`, une sauvegarde SQLite
+synchrone fondée sur `sqlite3_backup`. Elle prend en charge les sources WAL,
+les écritures concurrentes, les deadlines monotones globales, les tentatives
+réellement non bloquantes et la publication atomique d'une destination complète.
+Une erreur conserve la destination existante et nettoie les fichiers
+temporaires. Babet reste limité à Linux.
 
 Babet s’utilise de trois façons :
 
@@ -103,6 +103,22 @@ assert(ok, err)
 Le `RELEASE` réussi d'un savepoint interne ne valide jamais la transaction
 externe. Une erreur Lua du callback revient au savepoint généré, le retire et
 renvoie `(nil, err)`.
+
+### Sauvegarder SQLite sans copie de fichier incohérente
+
+```lua
+assert(db:backup("state-backup.db", {
+    timeout = 10,
+    pages_per_step = 64,
+    sleep = 0.005,
+}))
+```
+
+`db:backup()` utilise `sqlite3_backup`, accepte les sources WAL et publie la
+destination atomiquement seulement après une copie complète. Les timeouts sont
+basés sur une deadline monotone globale ; une erreur ne laisse pas de base
+partielle. Utilise `overwrite = true` uniquement pour remplacer explicitement
+une ancienne sauvegarde fermée.
 
 ### Télécharger une grosse réponse HTTP sans la garder en mémoire
 

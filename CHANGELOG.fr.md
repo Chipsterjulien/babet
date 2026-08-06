@@ -6,6 +6,72 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.19.0] - 2026-08-06
+
+### Résumé
+
+Babet 2.19.0 remplace le gigantesque `examples/main.lua` par un harnais de
+régression modulaire, puis ajoute une sauvegarde SQLite cohérente fondée sur
+l'API native `sqlite3_backup`. La sauvegarde est synchrone, bornée par une
+unique deadline monotone et publiée atomiquement uniquement après finalisation,
+fermeture et synchronisation du fichier temporaire.
+
+### Harnais Lua modulaire
+
+- réduire `examples/main.lua` de 21 567 lignes à un orchestrateur de 15 lignes ;
+- répartir les tests existants dans 43 suites thématiques, avec un harnais
+  commun conservant les compteurs, le sandbox et les helpers réellement
+  partagés ;
+- préserver l'ordre d'exécution et les diagnostics historiques dans les modes
+  dossier, embarqué et embarqué via `PATH` ;
+- isoler les environnements des suites et refuser les globals accidentels sans
+  empêcher le remplacement volontaire et restauré de `arg` ;
+- ajouter un préflight qui vérifie les suites atteignables, les limites
+  anti-monolithe et les séparateurs explicites devant les instructions Lua
+  parenthésées.
+
+### Sauvegarde SQLite
+
+- ajouter `db:backup(path, opts?)`, qui sauvegarde la base `main` de la
+  connexion ouverte vers un chemin de fichier ;
+- exposer les options strictes `timeout`, `pages_per_step`, `sleep` et
+  `overwrite`, avec `timeout = 0` défini comme un seul appel non bloquant à
+  `sqlite3_backup_step()` ;
+- utiliser une deadline globale `steady_clock`, désactiver temporairement le
+  busy handler de la source, traiter `SQLITE_BUSY` et `SQLITE_LOCKED`, puis
+  restaurer le `busy_timeout` initial sur tous les chemins ;
+- garantir `sqlite3_backup_finish()` par RAII et fermer systématiquement la
+  connexion SQLite temporaire ;
+- écrire dans un temporaire privé du même dossier, épingler le parent validé
+  par descripteur Linux, synchroniser le fichier, puis publier par renommage
+  atomique ou par lien sans écrasement, avec un mode final privé `0600` ;
+- refuser par défaut une destination existante, réserver son remplacement à
+  `overwrite = true`, et refuser les symlinks, fichiers spéciaux, parents
+  symlinkés, destinations identiques à la source et fichiers compagnons SQLite
+  déjà présents ;
+- préserver toute destination existante et supprimer le temporaire ainsi que
+  ses éventuels fichiers `-journal`, `-wal` et `-shm` après une erreur ou un
+  timeout.
+
+### Tests et documentation
+
+- couvrir les bases vides, les données, schémas, index et triggers, la
+  réouverture, la restauration, les sources WAL, une écriture concurrente
+  validée pendant la copie, `SQLITE_BUSY`, `SQLITE_LOCKED` lorsque SQLite le
+  reproduit, les deadlines nulles ou expirées et les chemins de destination
+  invalides ;
+- vérifier le nettoyage après erreur, la conservation du `busy_timeout`, la
+  publication atomique et l'absence de fichier partiel ;
+- ajouter un préflight structurel consacré aux contrats de sauvegarde SQLite ;
+- corriger le type du pointeur de sortie du garde RAII des statements SQLite
+  et le couvrir dans le préflight structurel de sauvegarde ;
+- interrompre immédiatement la validation pré-release après un échec de
+  compilation, tout en conservant le build normal après un simple échec de
+  test propre aux sanitizers ;
+- mettre à jour les documentations française et anglaise avec la signature,
+  les options, les retours, les erreurs, le comportement WAL, le remplacement
+  explicite et plusieurs exemples, puis régénérer les deux manuels PDF.
+
 ## [2.18.0] - 2026-08-06
 
 ### Résumé

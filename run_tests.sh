@@ -2,7 +2,8 @@
 # run_tests.sh — compile le projet puis teste les deux modes d'exécution
 # (mode dossier et mode exécutable embarqué), avec un bilan global.
 #
-# Code de sortie : 0 si les deux modes passent, 1 sinon.
+# Codes de sortie : 0 si les tests passent, 1 pour un échec de validation,
+# 2 pour un échec de compilation ou un binaire manquant après build.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME="babet"
@@ -10,6 +11,7 @@ TEST_DIR="${SCRIPT_DIR}/test"
 EXAMPLES_DIR="${SCRIPT_DIR}/examples"
 ENABLE_SANITIZERS=0
 RELEASE_VALIDATION=0
+BUILD_FAILURE_EXIT_CODE=2
 
 # Exécute la validation pré-release dans un pseudo-terminal afin que les
 # outils qui colorent uniquement leur sortie interactive conservent leurs
@@ -147,6 +149,12 @@ print_preflight_stage() {
     echo "============================================================"
 }
 
+print_preflight_stage "Préflight — modularisation du harnais Lua"
+if ! bash "${SCRIPT_DIR}/tools/test_selftest_layout.sh"; then
+    echo "ÉCHEC : le préflight de modularisation du harnais Lua a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — bootstrap Zstandard"
 if ! bash "${SCRIPT_DIR}/tools/test_zstd_bootstrap.sh"; then
     echo "ÉCHEC : le préflight du bootstrap Zstandard a échoué."
@@ -162,6 +170,18 @@ fi
 print_preflight_stage "Préflight — budgets de sérialisation workers"
 if ! bash "${SCRIPT_DIR}/tools/test_workers_serialization_budget.sh"; then
     echo "ÉCHEC : le préflight des budgets workers a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — sauvegarde SQLite"
+if ! bash "${SCRIPT_DIR}/tools/test_sqlite_backup_contracts.sh"; then
+    echo "ÉCHEC : le préflight de sauvegarde SQLite a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — orchestration de validation"
+if ! bash "${SCRIPT_DIR}/tools/test_release_fail_fast.sh"; then
+    echo "ÉCHEC : le préflight de l'orchestration de validation a échoué."
     exit 1
 fi
 
@@ -193,14 +213,14 @@ else
 fi
 if ! bash "${SCRIPT_DIR}/build_local.sh" "${BUILD_ARGS[@]}"; then
     echo "ÉCHEC : la compilation a échoué."
-    exit 1
+    exit "${BUILD_FAILURE_EXIT_CODE}"
 fi
 echo ""
 
 BINARY="${TEST_DIR}/${PROJECT_NAME}"
 if [ ! -f "${BINARY}" ]; then
     echo "ÉCHEC : binaire introuvable après compilation (${BINARY})."
-    exit 1
+    exit "${BUILD_FAILURE_EXIT_CODE}"
 fi
 
 print_preflight_stage "Régression — nettoyage OOM Lua / RAII C++"

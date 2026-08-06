@@ -6,6 +6,66 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.19.0] - 2026-08-06
+
+### Summary
+
+Babet 2.19.0 replaces the oversized `examples/main.lua` with a modular
+regression harness, then adds coherent SQLite backups based on the native
+`sqlite3_backup` API. Backups are synchronous, bounded by one global monotonic
+deadline, and atomically published only after the temporary database has been
+finished, closed, and synchronized.
+
+### Modular Lua harness
+
+- reduce `examples/main.lua` from 21,567 lines to a 15-line orchestrator;
+- distribute the existing tests across 43 thematic suites with a shared
+  harness for counters, the sandbox, and genuinely common helpers;
+- preserve historical execution order and diagnostics in folder, embedded,
+  and embedded-via-`PATH` modes;
+- isolate suite environments and reject accidental globals while retaining the
+  deliberate, restored replacement of `arg`;
+- add a preflight that checks reachable suites, anti-monolith limits, and
+  explicit separators before parenthesized Lua statements.
+
+### SQLite backup
+
+- add `db:backup(path, opts?)`, which backs up the open connection's `main`
+  database to a filesystem path;
+- expose strict `timeout`, `pages_per_step`, `sleep`, and `overwrite` options,
+  with `timeout = 0` defined as exactly one non-blocking
+  `sqlite3_backup_step()` call;
+- use one global `steady_clock` deadline, temporarily disable the source busy
+  handler, handle `SQLITE_BUSY` and `SQLITE_LOCKED`, and restore the original
+  `busy_timeout` on every path;
+- guarantee `sqlite3_backup_finish()` through RAII and always close the private
+  destination connection;
+- write to a private same-directory temporary, pin the validated parent through
+  a Linux file descriptor, synchronize the file, then publish it by atomic
+  rename or race-safe no-overwrite linking, with a private final `0600` mode;
+- refuse an existing destination by default, require `overwrite = true` for
+  replacement, and reject symlinks, special files, symlinked parents,
+  destinations that are the source database, and existing SQLite sidecars;
+- preserve any existing destination and remove the temporary database plus its
+  possible `-journal`, `-wal`, and `-shm` files after an error or timeout.
+
+### Tests and documentation
+
+- cover empty databases, data, schema, indexes and triggers, reopening,
+  restoration, WAL sources, a committed concurrent write during the copy,
+  `SQLITE_BUSY`, `SQLITE_LOCKED` when reproducible by SQLite, zero and expired
+  deadlines, and invalid destination paths;
+- verify cleanup after errors, busy-timeout restoration, atomic publication,
+  and the absence of partial output;
+- add a structural preflight dedicated to SQLite backup contracts;
+- correct the SQLite statement RAII guard's output-pointer type and cover it
+  in the backup structural preflight;
+- make pre-release validation stop immediately after a compilation failure,
+  while still running the normal build after sanitizer-only test failures;
+- update the French and English documentation with the exact signature,
+  options, returns, errors, WAL behavior, explicit replacement, and multiple
+  examples, then regenerate both PDF manuals.
+
 ## [2.18.0] - 2026-08-06
 
 ### Summary

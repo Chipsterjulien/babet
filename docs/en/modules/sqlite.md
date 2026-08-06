@@ -5,13 +5,15 @@
 `babet.sqlite` embeds SQLite 3.53.1 and exposes a compact but complete Lua API:
 read/write or read-only connections, per-connection foreign keys, change
 counters, direct SQL execution, lazy iterators, reusable prepared statements,
-managed transactions, nested savepoints, and explicit BLOB and `NULL` binding.
+managed transactions, nested savepoints, coherent online backups, and
+explicit BLOB and `NULL` binding.
 
 ## Module contents
 
 - [API](#sqlite-api)
   - [Opening and closing](#sqlite-open-close)
   - [Connection counters](#sqlite-counters)
+  - [Coherent backups](#sqlite-backup)
   - [Direct execution](#sqlite-direct)
   - [Reusable prepared statements](#sqlite-prepared)
   - [Managed transactions](#sqlite-transactions)
@@ -44,6 +46,7 @@ managed transactions, nested savepoints, and explicit BLOB and `NULL` binding.
 | `db:last_insert_rowid()` | integer \| `(nil, err)` |
 | `db:changes()` | integer \| `(nil, err)` |
 | `db:total_changes()` | integer \| `(nil, err)` |
+| `db:backup(path, opts?)` | `(true, nil)` \| `(nil, err)` |
 
 By default, `open` opens or creates a read/write database. With
 `readonly = true`, it opens an existing database without creating it and
@@ -211,6 +214,154 @@ These values belong only to the current `db` handle: another connection,
 including one in a different worker, has independent counters. After
 `db:close()`, all three methods return
 `(nil, "sqlite: connection closed")`.
+
+<a id="sqlite-backup"></a>
+### Coherent backups
+
+```lua
+local ok, err = db:backup(path, opts?)
+```
+
+`db:backup()` creates a coherent backup of the open connection's main
+database. It uses the native
+`sqlite3_backup_init` / `sqlite3_backup_step` / `sqlite3_backup_finish` API; it
+never copies the SQLite file directly with a filesystem copy primitive.
+
+The method is synchronous and returns:
+
+- `(true, nil)` after the backup has been copied, closed, synchronized, and
+  published;
+- `(nil, err)` for operational failures, persistent locks, timeouts, or an
+  invalid destination;
+- a Lua error for invalid arity, types, or options.
+
+The destination must be a file inside an existing directory. It must be a
+non-empty strict Lua string without a NUL byte or a `..` component. `":memory:"`
+is not accepted as a destination. To persist an in-memory database, call
+`backup()` on that connection with a real filesystem path.
+
+#### Options
+
+| Field | Type | Default | Contract |
+| --- | --- | --- | --- |
+| `timeout` | finite number from `0` to `86400` seconds | `5.0` | one global monotonic deadline |
+| `pages_per_step` | integer from `1` to `INT_MAX` | `128` | maximum pages copied by each SQLite call |
+| `sleep` | finite number from `0` to `60` seconds | `0.01` | pause between steps or retries |
+| `overwrite` | boolean | `false` | atomically replaces an existing regular destination |
+
+The options table is strict and read with raw accesses. Unknown fields,
+non-string keys, non-finite numbers, and out-of-range values raise a Lua error.
+An `__index` metamethod cannot supply an option.
+
+The deadline is computed once with a monotonic clock. It is never reset after a
+successful step, `SQLITE_BUSY`, or `SQLITE_LOCKED`. The source connection's
+`busy_timeout` is temporarily disabled during the backup and restored
+afterwards, preventing SQLite's busy handler from silently exceeding the
+global deadline.
+
+`timeout = 0` performs a genuine non-blocking attempt: Babet calls
+`sqlite3_backup_step()` once, with no sleep or retry. A small database may
+therefore complete immediately; a database requiring another step returns a
+timeout and publishes no partial file.
+
+The deadline is checked **between** `sqlite3_backup_step()` calls. SQLite does
+not provide a safe interruption point in the middle of one call. A large
+`pages_per_step` value reduces call count but also reduces deadline check
+frequency. Keep it moderate when responsiveness matters.
+
+#### Atomic publication and an existing destination
+
+The database is never written directly to `path`. Babet:
+
+1. opens the parent directory without following symbolic links;
+2. creates a private neighboring `.babet-sqlite-backup-*` file;
+3. runs the native backup into that file;
+4. always calls `sqlite3_backup_finish()`;
+5. closes SQLite, synchronizes the file, and atomically publishes it.
+
+The published file keeps the private `0600` mode used by the temporary. This
+mode does not depend on the process `umask` and also replaces the permissions of
+an older destination when `overwrite = true`. A script may explicitly broaden
+permissions afterwards with `babet.setMode()` when its sharing model requires
+it.
+
+On failure or timeout, the temporary file and any `-journal`, `-wal`, or `-shm`
+companions are removed. An existing destination remains unchanged.
+
+An existing destination is refused by default. With `overwrite = true`, it is
+atomically replaced only when it is a regular file that is neither the source
+database, a symbolic link, nor a hard link to the source. Publication is also
+refused when `path-journal`, `path-wal`, or `path-shm` exists: those files may
+indicate an open connection or WAL state that must not be replaced underneath
+its users. Close and checkpoint the destination before retrying.
+
+Symbolic-link directory components are refused. Missing directories are not
+created. A directory, FIFO, or other special file is never replaced.
+
+If publication succeeded but the final directory synchronization fails, the
+error says so explicitly. In that exceptional case the published database is
+complete and readable, but persistence across an immediate system crash is not
+confirmed.
+
+#### WAL and concurrent writes
+
+A WAL source is supported without special Lua-side handling. SQLite holds the
+source read lock only while reading the required pages, so other connections
+may continue to read or write. If another connection changes the source during
+the copy, SQLite automatically restarts the backup on a later step to produce a
+coherent database. The final backup represents one complete transactional
+state; it does not mix pages from two commits.
+
+The published destination is self-contained. Open it normally with
+`babet.sqlite.open()`; there is no need to copy the source `-wal` file.
+
+#### Examples
+
+Simple backup without replacement:
+
+```lua
+local db = assert(babet.sqlite.open("state.db"))
+assert(db:backup("state-backup.db"))
+assert(db:close())
+```
+
+Bounded WAL backup with small steps:
+
+```lua
+local db = assert(babet.sqlite.open("state.db", {
+    wal = true,
+    busy_timeout = 2000,
+}))
+
+local ok, err = db:backup("state-backup.db", {
+    timeout = 10,
+    pages_per_step = 64,
+    sleep = 0.005,
+})
+assert(ok, err)
+```
+
+Explicitly replace a closed older backup:
+
+```lua
+assert(db:backup("state-backup.db", {
+    overwrite = true,
+    timeout = 5,
+}))
+```
+
+Restore into a new file by opening the backup as a source and backing it up
+again:
+
+```lua
+local snapshot = assert(babet.sqlite.open("state-backup.db", {
+    readonly = true,
+}))
+assert(snapshot:backup("state-restored.db"))
+assert(snapshot:close())
+
+local restored = assert(babet.sqlite.open("state-restored.db"))
+```
 
 <a id="sqlite-direct"></a>
 ### Direct execution
@@ -925,7 +1076,6 @@ The following are intentionally not implemented:
 - URI mode and other advanced `sqlite3_open_v2` flags;
 - progress-handler and interrupt APIs;
 - the `sqlite3_blob_open` streaming BLOB API;
-- the `sqlite3_backup_init` backup API.
 
 Raw SQL savepoints and `VACUUM INTO` remain available. FTS5 and R-Tree are not
 enabled in the current embedded build.

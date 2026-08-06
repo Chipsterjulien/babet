@@ -15,12 +15,11 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the **Babet 2.18.0** release candidate.
+Documentation for the **Babet 2.19.0** release candidate.
 
-Babet 2.18.0 adds a bounded pool of persistent workers, available CPU counting,
-and a non-consuming `job:done()` test. Pools reuse a fixed number of pthreads
-and Lua states with backpressure, timeouts, clean shutdown, and cooperative
-cancellation.
+Babet 2.19.0 modularizes the Lua test harness into 43 reachable suites and
+adds `db:backup()`, a coherent, bounded, atomically published SQLite backup,
+including WAL databases modified while the copy is running.
 
 ## Getting started
 
@@ -30,7 +29,7 @@ cancellation.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.18.0 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.19.0 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 
@@ -48,7 +47,7 @@ cancellation.
 | send an HTTP request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic downloads, redirects, TLS, timeout, and size limits |
 | open a TCP connection | [`Socket — TCP`](modules/socket.md) | client, server, accept, binary streams, lines, EOF reads, timeouts, buffers, and limits |
 | encrypt TCP or perform STARTTLS | [`TLS — secure sockets`](modules/tls.md) | direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, timeout, and fail-closed state |
-| store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | read/write or read-only opening, foreign-key enforcement, change counters, strict parameters, explicit `NULL` and BLOB values, prepared statements, and assisted transactions |
+| store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | read/write or read-only opening, foreign-key enforcement, change counters, strict parameters, coherent atomic backups, explicit `NULL` and BLOB values, prepared statements, and assisted transactions |
 | encode or decode JSON | [`JSON — structured data`](modules/json.md) | scalars, arrays, objects, `null`, empty arrays, pretty printing, and errors |
 | read TOML configuration | [`TOML — configuration`](modules/toml.md) | decoding, TOML types, arrays, sections, dates, and parse errors |
 | watch a directory | [`Inotify — file events`](modules/inotify.md) | watches, events, timeout reads, moves, cookies, and closing |
@@ -81,7 +80,7 @@ names below define each chapter's scope before you open it.
 | [`Logging`](modules/logging.md) | Levels, filtering, destination, colours, and variadic calls. |
 | [`SIGNAL — POSIX signals and clean shutdown`](modules/signal.md) | Install, replace, or remove callbacks; ignore/restore; dispatch order, coalescing, interruptions, and multithread restrictions. |
 | [`Socket — TCP client and server`](modules/socket.md) | Connect, listen, accept, binary streams, block/line/EOF reads, shared buffers, addresses, closing, and timeouts. |
-| [`SQLite — embedded database`](modules/sqlite.md) | Read/write and read-only connections, WAL/timeout, foreign keys, row/change counters, direct SQL, reusable prepared statements, explicit BLOBs, iteration, and assisted transactions. |
+| [`SQLite — embedded database`](modules/sqlite.md) | Read/write and read-only connections, WAL/timeout, foreign keys, row/change counters, direct SQL, reusable prepared statements, explicit BLOBs, coherent WAL backups, iteration, and assisted transactions. |
 | [`Strings`](modules/strings.md) | Splitting, character mode, separators, split limits, and binary content. |
 | [`SYS — process, machine, environment, and Lua memory`](modules/sys.md) | Version constants, PID, hostname, `uname`, executable lookup, environment reads/writes, worker interaction, and Lua-state memory. |
 | [`Tables`](modules/tables.md) | Deterministic merging, list/map keys, deep copy, cycles, and shared subtables. |

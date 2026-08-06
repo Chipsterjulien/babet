@@ -107,7 +107,7 @@ dont le nom commence légitimement par `-` peuvent toujours être
 passés via `./-dirname` (convention POSIX).
 
 ```sh
-babet --version    # babet 2.18.0
+babet --version    # babet 2.19.0
 babet --help       # usage complet
 babet --bogus      # Unknown option: --bogus
                       # Try 'babet --help' for more information.

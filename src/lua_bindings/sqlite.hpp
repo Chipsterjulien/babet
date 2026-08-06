@@ -9,6 +9,7 @@
 //   ok, err = db:exec(sql, params?)
 //   for row in db:query(sql, params?) do ... end
 //   stmt, err = db:prepare(sql)
+//   ok, err = db:backup(path, opts?)
 //   rowid, err = db:last_insert_rowid()
 //   count, err = db:changes()
 //   total, err = db:total_changes()
@@ -43,6 +44,15 @@
 //          INTEGER → integer Lua
 //          REAL → number Lua (float)
 //          TEXT / BLOB → string Lua (binary-safe)
+//
+// Options backup :
+//   timeout        : number 0..86400 s (default 5.0), global monotonic deadline
+//   pages_per_step : integer 1..INT_MAX (default 128)
+//   sleep          : number 0..60 s (default 0.01) between attempts
+//   overwrite      : bool (default false), atomic replacement when true
+//
+// The destination is populated in a private neighboring file and atomically
+// published only after sqlite3_backup_finish(), close() and fsync succeed.
 //
 // Options open :
 //   wal           : bool (par défaut false) — demande journal_mode=WAL

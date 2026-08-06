@@ -16,22 +16,21 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.18.0**. See the
+Current release candidate: **2.19.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.18.0 adds a bounded pool of persistent workers. A fixed number of
-pthreads and Lua states can now process several successive tasks through
-`babet.workers.pool()`, with a bounded queue, monotonic timeouts, per-task
-results, FIFO shutdown, and cooperative cancellation. Every task receives a
-fresh global environment, while libraries and `package.loaded` remain reused
-inside the worker's persistent Lua state.
+Babet 2.19.0 fully modularizes the Lua regression harness:
+`examples/main.lua` is now a lightweight orchestrator, while 43 thematic suites
+remain executed in the same order in folder, embedded, and embedded-via-`PATH`
+modes. A preflight prevents the main script from becoming monolithic again and
+checks that every suite remains reachable.
 
-The module also exposes `babet.workers.cpu_count()`, which respects Linux CPU
-affinity, and `job:done()` for observing completion without consuming the
-result. Pools reuse the already-audited channel and JSON transport primitives;
-no `pthread_cancel()` or forced termination is introduced. Babet remains
-Linux-only.
+The release also adds `db:backup(path, opts?)`, a synchronous SQLite backup
+based on `sqlite3_backup`. It supports WAL sources, concurrent writes, one
+global monotonic deadline, genuinely non-blocking attempts, and atomic
+publication of a complete destination. Failures preserve an existing
+destination and clean temporary files. Babet remains Linux-only.
 
 Can be used in three modes:
 
@@ -105,6 +104,21 @@ assert(ok, err)
 A successful inner `RELEASE` never commits an outer transaction. A Lua error
 in the callback rolls back only to the generated savepoint, removes it, and
 returns `(nil, err)`.
+
+### Back up SQLite without an inconsistent file copy
+
+```lua
+assert(db:backup("state-backup.db", {
+    timeout = 10,
+    pages_per_step = 64,
+    sleep = 0.005,
+}))
+```
+
+`db:backup()` uses `sqlite3_backup`, supports WAL sources, and atomically
+publishes the destination only after a complete copy. Timeouts use one global
+monotonic deadline, and failures leave no partial database. Use
+`overwrite = true` only to explicitly replace a closed older backup.
 
 ### Download a large HTTP response without buffering it
 

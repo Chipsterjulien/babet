@@ -8,6 +8,7 @@
 
 #include "sqlite.hpp"
 #include "lua_utils.hpp"
+#include "sqlite_backup_file.hpp"
 
 extern "C"
 {
@@ -17,6 +18,8 @@ extern "C"
 
 #include "sqlite3.h"
 
+#include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
@@ -24,6 +27,7 @@ extern "C"
 #include <exception>
 #include <new>
 #include <string>
+#include <thread>
 
 namespace
 {
@@ -107,6 +111,16 @@ namespace
         return push_fail_protected(L, full);
     }
 
+    std::string strip_sqlite_backup_prefix(const std::string &message)
+    {
+        static constexpr const char prefix[] = "sqlite.backup: ";
+        if (message.compare(0, sizeof(prefix) - 1, prefix) == 0)
+        {
+            return message.substr(sizeof(prefix) - 1);
+        }
+        return message;
+    }
+
     // Toute fonction SQLite normale exposée à Lua passe par cette
     // frontière. Lua 5.5 est compilé en C dans Babet : une exception C++
     // ne doit jamais traverser une lua_CFunction. Les diagnostics restent
@@ -153,6 +167,24 @@ namespace
         // étendus de la connexion. Le masque compare donc les codes
         // primaires quel que soit ce réglage. sqlite3_errstr() reçoit en
         // revanche le code complet, car il peut fournir un texte plus précis.
+        if ((rc & primary_code_mask) != (db_rc & primary_code_mask))
+        {
+            return sqlite3_errstr(rc);
+        }
+
+        const char *message = sqlite3_errmsg(db);
+        return message ? message : sqlite3_errstr(rc);
+    }
+
+    std::string sqlite_connection_error(sqlite3 *db, int rc)
+    {
+        if (!db)
+        {
+            return sqlite3_errstr(rc);
+        }
+
+        constexpr int primary_code_mask = 0xff;
+        const int db_rc = sqlite3_errcode(db);
         if ((rc & primary_code_mask) != (db_rc & primary_code_mask))
         {
             return sqlite3_errstr(rc);
@@ -385,6 +417,177 @@ namespace
                 L,
                 "sqlite.open: readonly=true cannot be combined with wal=true");
         }
+
+        return opts;
+    }
+
+    struct BackupOpts
+    {
+        double timeout_seconds;
+        int pages_per_step;
+        double sleep_seconds;
+        bool overwrite;
+
+        BackupOpts()
+            : timeout_seconds(5.0), pages_per_step(128),
+              sleep_seconds(0.01), overwrite(false) {}
+    };
+
+    BackupOpts parse_backup_opts(lua_State *L, int idx)
+    {
+        BackupOpts opts;
+        const int type = lua_type(L, idx);
+        if (type == LUA_TNONE || type == LUA_TNIL)
+        {
+            return opts;
+        }
+        if (type != LUA_TTABLE)
+        {
+            luaL_error(L,
+                       "sqlite.backup: opts must be a table or nil, got %s",
+                       lua_typename(L, type));
+        }
+
+        idx = lua_absindex(L, idx);
+        lua_pushnil(L);
+        while (lua_next(L, idx) != 0)
+        {
+            if (lua_type(L, -2) != LUA_TSTRING)
+            {
+                lua_pop(L, 2);
+                luaL_error(L,
+                           "sqlite.backup: option keys must be strings");
+            }
+
+            size_t key_len = 0;
+            const char *key = lua_tolstring(L, -2, &key_len);
+            const bool known =
+                (key_len == 7 &&
+                 std::memcmp(key, "timeout", 7) == 0) ||
+                (key_len == 14 &&
+                 std::memcmp(key, "pages_per_step", 14) == 0) ||
+                (key_len == 5 &&
+                 std::memcmp(key, "sleep", 5) == 0) ||
+                (key_len == 9 &&
+                 std::memcmp(key, "overwrite", 9) == 0);
+            if (!known)
+            {
+                char key_text[160];
+                const size_t copy_len =
+                    key_len < sizeof(key_text) - 1
+                        ? key_len
+                        : sizeof(key_text) - 1;
+                std::memcpy(key_text, key, copy_len);
+                key_text[copy_len] = '\0';
+                lua_pop(L, 2);
+                luaL_error(L, "sqlite.backup: unknown option '%s'",
+                           key_text);
+            }
+            lua_pop(L, 1);
+        }
+
+        lua_pushliteral(L, "timeout");
+        lua_rawget(L, idx);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_number(L, -1))
+            {
+                lua_pop(L, 1);
+                luaL_error(L,
+                           "sqlite.backup: opts.timeout must be a number");
+            }
+            const double value = lua_tonumber(L, -1);
+            if (!std::isfinite(value) || value < 0.0)
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.timeout must be a finite number >= 0");
+            }
+            if (value > 86400.0)
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.timeout too large (max 86400 seconds)");
+            }
+            opts.timeout_seconds = value;
+        }
+        lua_pop(L, 1);
+
+        lua_pushliteral(L, "pages_per_step");
+        lua_rawget(L, idx);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_integer(L, -1))
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.pages_per_step must be an integer");
+            }
+            const lua_Integer value = lua_tointeger(L, -1);
+            if (value <= 0)
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.pages_per_step must be > 0");
+            }
+            if (value > INT_MAX)
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.pages_per_step exceeds INT_MAX");
+            }
+            opts.pages_per_step = static_cast<int>(value);
+        }
+        lua_pop(L, 1);
+
+        lua_pushliteral(L, "sleep");
+        lua_rawget(L, idx);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_number(L, -1))
+            {
+                lua_pop(L, 1);
+                luaL_error(L,
+                           "sqlite.backup: opts.sleep must be a number");
+            }
+            const double value = lua_tonumber(L, -1);
+            if (!std::isfinite(value) || value < 0.0)
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.sleep must be a finite number >= 0");
+            }
+            if (value > 60.0)
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.sleep too large (max 60 seconds)");
+            }
+            opts.sleep_seconds = value;
+        }
+        lua_pop(L, 1);
+
+        lua_pushliteral(L, "overwrite");
+        lua_rawget(L, idx);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_boolean(L, -1))
+            {
+                lua_pop(L, 1);
+                luaL_error(
+                    L,
+                    "sqlite.backup: opts.overwrite must be a boolean");
+            }
+            opts.overwrite = lua_toboolean(L, -1) != 0;
+        }
+        lua_pop(L, 1);
 
         return opts;
     }
@@ -2648,6 +2851,405 @@ namespace
         return db_savepoint_impl(L);
     }
 
+    class SqliteHandleGuard
+    {
+    public:
+        ~SqliteHandleGuard()
+        {
+            if (handle_)
+            {
+                sqlite3_close_v2(handle_);
+            }
+        }
+
+        sqlite3 **out() noexcept { return &handle_; }
+        sqlite3 *get() const noexcept { return handle_; }
+
+        bool close(std::string &error)
+        {
+            if (!handle_)
+            {
+                return true;
+            }
+            const int rc = sqlite3_close(handle_);
+            if (rc == SQLITE_OK)
+            {
+                handle_ = nullptr;
+                return true;
+            }
+            error = sqlite_connection_error(handle_, rc);
+            sqlite3_close_v2(handle_);
+            handle_ = nullptr;
+            return false;
+        }
+
+    private:
+        sqlite3 *handle_ = nullptr;
+    };
+
+    class BackupHandleGuard
+    {
+    public:
+        explicit BackupHandleGuard(sqlite3_backup *handle) noexcept
+            : handle_(handle) {}
+
+        ~BackupHandleGuard()
+        {
+            if (handle_)
+            {
+                sqlite3_backup_finish(handle_);
+            }
+        }
+
+        sqlite3_backup *get() const noexcept { return handle_; }
+
+        int finish() noexcept
+        {
+            if (!handle_)
+            {
+                return SQLITE_OK;
+            }
+            sqlite3_backup *handle = handle_;
+            handle_ = nullptr;
+            return sqlite3_backup_finish(handle);
+        }
+
+    private:
+        sqlite3_backup *handle_;
+    };
+
+    class SqliteStatementGuard
+    {
+    public:
+        ~SqliteStatementGuard()
+        {
+            if (handle_)
+            {
+                sqlite3_finalize(handle_);
+            }
+        }
+
+        sqlite3_stmt **out() noexcept { return &handle_; }
+
+        int finalize() noexcept
+        {
+            if (!handle_)
+            {
+                return SQLITE_OK;
+            }
+            sqlite3_stmt *handle = handle_;
+            handle_ = nullptr;
+            return sqlite3_finalize(handle);
+        }
+
+        sqlite3_stmt *get() const noexcept { return handle_; }
+
+    private:
+        sqlite3_stmt *handle_ = nullptr;
+    };
+
+    bool read_busy_timeout_ms(sqlite3 *handle, int &timeout_ms,
+                              std::string &error)
+    {
+        SqliteStatementGuard statement;
+        int rc = sqlite3_prepare_v2(handle, "PRAGMA busy_timeout", -1,
+                                    statement.out(), nullptr);
+        if (rc != SQLITE_OK)
+        {
+            error = sqlite_connection_error(handle, rc);
+            return false;
+        }
+
+        rc = sqlite3_step(statement.get());
+        if (rc != SQLITE_ROW)
+        {
+            error = sqlite_connection_error(handle, rc);
+            return false;
+        }
+
+        const sqlite3_int64 value = sqlite3_column_int64(statement.get(), 0);
+        if (value < 0 || value > INT_MAX)
+        {
+            error = "active PRAGMA busy_timeout is outside the supported "
+                    "integer range";
+            return false;
+        }
+        timeout_ms = static_cast<int>(value);
+
+        rc = statement.finalize();
+        if (rc != SQLITE_OK)
+        {
+            error = sqlite_connection_error(handle, rc);
+            return false;
+        }
+        return true;
+    }
+
+    std::string backup_timeout_error(int rc)
+    {
+        std::string reason = "backup timed out before completion";
+        if (rc == SQLITE_BUSY)
+        {
+            reason += " (SQLITE_BUSY)";
+        }
+        else if (rc == SQLITE_LOCKED)
+        {
+            reason += " (SQLITE_LOCKED)";
+        }
+        return reason;
+    }
+
+    class BusyTimeoutGuard
+    {
+    public:
+        BusyTimeoutGuard(sqlite3 *handle, int restore_ms) noexcept
+            : handle_(handle), restore_ms_(restore_ms) {}
+
+        ~BusyTimeoutGuard()
+        {
+            if (active_)
+            {
+                sqlite3_busy_timeout(handle_, restore_ms_);
+            }
+        }
+
+        bool disable(std::string &error)
+        {
+            const int rc = sqlite3_busy_timeout(handle_, 0);
+            if (rc != SQLITE_OK)
+            {
+                error = sqlite_connection_error(handle_, rc);
+                return false;
+            }
+            active_ = true;
+            return true;
+        }
+
+        bool restore(std::string &error)
+        {
+            if (!active_)
+            {
+                return true;
+            }
+            const int rc = sqlite3_busy_timeout(handle_, restore_ms_);
+            if (rc != SQLITE_OK)
+            {
+                error = sqlite_connection_error(handle_, rc);
+                return false;
+            }
+            active_ = false;
+            return true;
+        }
+
+    private:
+        sqlite3 *handle_;
+        int restore_ms_;
+        bool active_ = false;
+    };
+
+    // db:backup(path, opts?) -> (true, nil) | (nil, err)
+    //
+    // The source is always the main database of the current connection. A
+    // private same-directory file is populated with sqlite3_backup, closed,
+    // synchronized and only then published atomically. Failed and timed-out
+    // backups therefore leave the requested destination unchanged.
+    int db_backup(lua_State *L)
+    {
+        if (!lua_arity_between(L, 2, 3))
+        {
+            return luaL_error(
+                L, "sqlite.backup: expected db, destination and optional opts");
+        }
+
+        Db *db = check_db(L, 1);
+        luaL_checktype(L, 2, LUA_TSTRING);
+
+        // Parse every option before owning C++ strings. Contract errors use
+        // luaL_error and must not jump over non-trivial owners.
+        const BackupOpts opts = parse_backup_opts(L, 3);
+
+        if (!db->handle)
+        {
+            return push_sqlite_fail(L, "connection closed");
+        }
+
+        std::string destination_path;
+        std::string error;
+        if (!lua_string_without_nul(L, 2, destination_path,
+                                    "sqlite.backup: destination", error))
+        {
+            return push_fail_protected(L, error);
+        }
+
+        babet_sqlite_backup::Destination destination;
+        const char *source_filename =
+            sqlite3_db_filename(db->handle, "main");
+        if (!destination.prepare(destination_path, opts.overwrite,
+                                 source_filename, error))
+        {
+            return push_sqlite_fail(
+                L, strip_sqlite_backup_prefix(error));
+        }
+
+        int active_busy_timeout_ms = 0;
+        if (!read_busy_timeout_ms(db->handle, active_busy_timeout_ms, error))
+        {
+            return push_sqlite_fail(
+                L, "backup could not read the source busy timeout: " + error);
+        }
+
+        BusyTimeoutGuard source_busy_timeout(db->handle,
+                                             active_busy_timeout_ms);
+        if (!source_busy_timeout.disable(error))
+        {
+            return push_sqlite_fail(
+                L, "backup could not disable the source busy handler: " +
+                       error);
+        }
+
+        SqliteHandleGuard destination_db;
+        int rc = sqlite3_open_v2(destination.sqlite_path().c_str(),
+                                 destination_db.out(),
+                                 SQLITE_OPEN_READWRITE, nullptr);
+        if (rc != SQLITE_OK)
+        {
+            return push_sqlite_fail(
+                L, "backup destination open failed: " +
+                       sqlite_connection_error(destination_db.get(), rc));
+        }
+        rc = sqlite3_extended_result_codes(destination_db.get(), 1);
+        if (rc != SQLITE_OK)
+        {
+            return push_sqlite_fail(
+                L, "backup destination could not enable extended result "
+                   "codes: " +
+                       sqlite_connection_error(destination_db.get(), rc));
+        }
+
+        rc = sqlite3_busy_timeout(destination_db.get(), 0);
+        if (rc != SQLITE_OK)
+        {
+            return push_sqlite_fail(
+                L, "backup destination could not disable its busy handler: " +
+                       sqlite_connection_error(destination_db.get(), rc));
+        }
+
+        char *pragma_error = nullptr;
+        rc = sqlite3_exec(destination_db.get(),
+                          "PRAGMA journal_mode=OFF;"
+                          "PRAGMA synchronous=OFF;",
+                          nullptr, nullptr, &pragma_error);
+        if (rc != SQLITE_OK)
+        {
+            std::string message = pragma_error
+                                      ? pragma_error
+                                      : sqlite_connection_error(
+                                            destination_db.get(), rc);
+            sqlite3_free(pragma_error);
+            return push_sqlite_fail(
+                L, "backup destination setup failed: " + message);
+        }
+        sqlite3_free(pragma_error);
+
+        sqlite3_backup *raw_backup = sqlite3_backup_init(
+            destination_db.get(), "main", db->handle, "main");
+        if (!raw_backup)
+        {
+            return push_sqlite_fail(
+                L, "backup initialization failed: " +
+                       sqlite_connection_error(
+                           destination_db.get(),
+                           sqlite3_errcode(destination_db.get())));
+        }
+        BackupHandleGuard backup(raw_backup);
+
+        using Clock = std::chrono::steady_clock;
+        const auto timeout = std::chrono::duration<double>(
+            opts.timeout_seconds);
+        const auto deadline = Clock::now() +
+                              std::chrono::duration_cast<Clock::duration>(
+                                  timeout);
+
+        for (;;)
+        {
+            rc = sqlite3_backup_step(backup.get(), opts.pages_per_step);
+            if (rc == SQLITE_DONE)
+            {
+                break;
+            }
+
+            if (rc != SQLITE_OK && rc != SQLITE_BUSY &&
+                rc != SQLITE_LOCKED)
+            {
+                const std::string message = sqlite_connection_error(
+                    destination_db.get(), rc);
+                return push_sqlite_fail(
+                    L, "backup step failed: " + message);
+            }
+
+            const auto now = Clock::now();
+            if (opts.timeout_seconds == 0.0 || now >= deadline)
+            {
+                return push_sqlite_fail(L, backup_timeout_error(rc));
+            }
+
+            const auto remaining = deadline - now;
+            const auto requested_sleep =
+                std::chrono::duration_cast<Clock::duration>(
+                    std::chrono::duration<double>(opts.sleep_seconds));
+            const auto actual_sleep = std::min(requested_sleep, remaining);
+            if (actual_sleep > Clock::duration::zero())
+            {
+                std::this_thread::sleep_for(actual_sleep);
+            }
+            else
+            {
+                std::this_thread::yield();
+            }
+
+            // sleep_for() may wake slightly after the requested duration. Do
+            // not begin another SQLite step once the global deadline passed.
+            if (Clock::now() >= deadline)
+            {
+                return push_sqlite_fail(L, backup_timeout_error(rc));
+            }
+        }
+
+        rc = backup.finish();
+        if (rc != SQLITE_OK)
+        {
+            return push_sqlite_fail(
+                L, "backup finalization failed: " +
+                       sqlite_connection_error(destination_db.get(), rc));
+        }
+
+        if (!source_busy_timeout.restore(error))
+        {
+            return push_sqlite_fail(
+                L, "backup completed but could not restore the source busy "
+                   "handler: " + error);
+        }
+
+        if (!destination_db.close(error))
+        {
+            return push_sqlite_fail(
+                L, "backup destination close failed: " + error);
+        }
+
+        if (!destination.synchronize(error))
+        {
+            return push_sqlite_fail(
+                L, strip_sqlite_backup_prefix(error));
+        }
+        if (!destination.publish(error))
+        {
+            return push_sqlite_fail(
+                L, strip_sqlite_backup_prefix(error));
+        }
+
+        return push_ok(L);
+    }
+
     // ============================================================
     // API du module : babet.sqlite.open
     // ============================================================
@@ -2804,6 +3406,9 @@ namespace
 
         lua_pushcfunction(L, sqlite_lua_boundary<db_prepare>);
         lua_setfield(L, -2, "prepare");
+
+        lua_pushcfunction(L, sqlite_lua_boundary<db_backup>);
+        lua_setfield(L, -2, "backup");
 
         lua_pushcfunction(L, sqlite_lua_boundary<db_transaction>);
         lua_setfield(L, -2, "transaction");
