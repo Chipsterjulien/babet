@@ -375,11 +375,18 @@ for specification in \
     "src/lua_bindings/process_terminal_internal.cpp|pthread_condattr_setclock|terminal reservation deadline prefers a monotonic condition clock" \
     "src/lua_bindings/process_terminal_internal.cpp|TerminalReservationResult::busy|terminal reservation timeout has a typed result" \
     "tools/test_spawn_pty.sh|TERMINAL_BUSY_NO_CHILD_OK|PTY regression covers bounded busy reservation without child leak" \
-    "tools/test_spawn_pty.sh|TERMINAL_BUSY_RECOVERY_OK|PTY regression covers terminal recovery after busy timeout"
+    "tools/test_spawn_pty.sh|TERMINAL_BUSY_RECOVERY_OK|PTY regression covers terminal recovery after busy timeout" \
+    "tools/test_spawn_pty.sh|subprocess\.run\(|sudo PTY availability is probed inside the fresh PTY" \
+    "tools/test_spawn_pty.sh|BABET_SUDO_PTY_PROBE=auth-required|sudo PTY regression reports password-required skips explicitly"
 do
     IFS='|' read -r file pattern label <<< "${specification}"
     require_pattern "${file}" "${pattern}" "${label} is missing"
 done
+
+forbid_pattern \
+    'if command -v sudo.*sudo -n true' \
+    'sudo PTY availability must not be probed from the caller terminal' \
+    "${ROOT_DIR}/tools/test_spawn_pty.sh"
 
 if [ "${FAILURES}" -ne 0 ]; then
     echo "Exception boundary structural checks: ${FAILURES} failure(s)"

@@ -21,11 +21,6 @@ if command -v sha256sum >/dev/null 2>&1; then
     printf 'SHA-256     : %s\n' "$(sha256sum "${BINARY}" | awk '{print $1}')"
 fi
 
-SUDO_PTY_TEST=0
-if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
-    SUDO_PTY_TEST=1
-fi
-
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/babet-spawn-pty.XXXXXX") || exit 1
 trap 'rm -rf -- "${ROOT}"' EXIT
 
@@ -565,24 +560,46 @@ print("TERMINAL_BUSY_RECOVERY_OK")
 print("PTY_SPAWN_OK")
 LUA
 
-python3 - "${BINARY}" "${ROOT}" "${SUDO_PTY_TEST}" <<'PY'
+python3 - "${BINARY}" "${ROOT}" <<'PY'
 import errno
 import os
 import pty
 import select
 import signal
+import subprocess
 import sys
 import time
 
-binary, project, sudo_enabled = sys.argv[1:4]
+binary, project = sys.argv[1:3]
 environment = os.environ.copy()
-environment["BABET_TEST_SUDO_PTY"] = sudo_enabled
 environment["BABET_TEST_TERMINAL_BUSY_MARKER"] = os.path.join(
     project, "terminal-busy-reserved.marker")
 environment["BABET_TEST_TERMINAL_BUSY_PARASITE"] = os.path.join(
     project, "terminal-busy-parasite.marker")
 pid, master = pty.fork()
 if pid == 0:
+    # Probe sudo from the exact fresh PTY that will host Babet. sudo normally
+    # keys its authentication timestamp to the terminal, so probing from the
+    # caller's terminal can produce both false positives and misleading skips.
+    sudo_probe = "missing"
+    try:
+        probe = subprocess.run(
+            ["sudo", "-n", "true"],
+            stdin=None,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        sudo_probe = "enabled" if probe.returncode == 0 else "auth-required"
+    except FileNotFoundError:
+        sudo_probe = "missing"
+    except OSError:
+        sudo_probe = "unavailable"
+
+    environment["BABET_TEST_SUDO_PTY"] = (
+        "1" if sudo_probe == "enabled" else "0"
+    )
+    os.write(1, f"BABET_SUDO_PTY_PROBE={sudo_probe}\n".encode("ascii"))
     os.execve(binary, [binary, project], environment)
 
 os.set_blocking(master, False)
@@ -602,6 +619,7 @@ sent_race_child = False
 sent_status_restored = False
 sent_busy_recovery = False
 sent_sudo_child = False
+sudo_probe = "unknown"
 status = None
 
 try:
@@ -617,6 +635,14 @@ try:
                     raise
             if chunk:
                 output.extend(chunk)
+                if b"BABET_SUDO_PTY_PROBE=enabled" in output:
+                    sudo_probe = "enabled"
+                elif b"BABET_SUDO_PTY_PROBE=auth-required" in output:
+                    sudo_probe = "auth-required"
+                elif b"BABET_SUDO_PTY_PROBE=missing" in output:
+                    sudo_probe = "missing"
+                elif b"BABET_SUDO_PTY_PROBE=unavailable" in output:
+                    sudo_probe = "unavailable"
 
         if not sent_parent and b"PARENT_PROMPT" in output:
             os.write(master, b"parent\n")
@@ -658,7 +684,7 @@ try:
                 and b"RACE_B_PROMPT" in output):
             os.write(master, b"race-child\n")
             sent_race_child = True
-        if (sudo_enabled == "1" and not sent_sudo_child
+        if (sudo_probe == "enabled" and not sent_sudo_child
                 and b"SUDO_CHILD_PROMPT" in output):
             os.write(master, b"sudo-child\n")
             sent_sudo_child = True
@@ -746,7 +772,11 @@ required = (
     "TERMINAL_BUSY_RECOVERY_OK",
     "PTY_SPAWN_OK",
 )
-if sudo_enabled == "1":
+if sudo_probe == "unknown":
+    sys.stderr.write(text)
+    sys.stderr.write("Missing sudo PTY probe result\n")
+    sys.exit(1)
+if sudo_probe == "enabled":
     required += ("SUDO_CHILD_PROMPT", "SUDO_CHILD_ACCEPTED", "SUDO_PTY_OK")
 
 missing = [marker for marker in required if marker not in text]
@@ -755,8 +785,22 @@ if missing:
     sys.stderr.write("Missing PTY markers: " + ", ".join(missing) + "\n")
     sys.exit(1)
 
-if sudo_enabled == "1":
+if sudo_probe == "enabled":
     print("spawn inherited-terminal PTY regression: 2 PASS / 0 FAIL")
+elif sudo_probe == "auth-required":
+    print(
+        "spawn inherited-terminal PTY regression: "
+        "1 PASS / 0 FAIL / 1 SKIP "
+        "(sudo requires non-interactive authorization in the fresh PTY)"
+    )
+elif sudo_probe == "missing":
+    print(
+        "spawn inherited-terminal PTY regression: "
+        "1 PASS / 0 FAIL / 1 SKIP (sudo command not installed)"
+    )
 else:
-    print("spawn inherited-terminal PTY regression: 1 PASS / 0 FAIL / 1 SKIP (sudo -n unavailable)")
+    print(
+        "spawn inherited-terminal PTY regression: "
+        "1 PASS / 0 FAIL / 1 SKIP (sudo could not be executed in the fresh PTY)"
+    )
 PY

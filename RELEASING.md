@@ -37,8 +37,12 @@ Each build first runs the network-free modular-harness, Zstandard,
 inotify-buffer, worker-serialization, SQLite-backup, Unix-socket, find-xdev, parent-side
 process-launch, and Lua/C++ exception-boundary preflights. After
 compilation it also runs the inherited-terminal `babet.spawn` regression under
-a real pseudo-terminal before the broader execution modes. The complete
-release command then runs its three stages and must finish with:
+a real pseudo-terminal before the broader execution modes. Its optional `sudo`
+layer is enabled only when `sudo -n true` succeeds from that exact fresh PTY.
+A normal password-based sudo configuration is therefore expected to report one
+SKIP; this is not a release failure and does not justify weakening sudoers with
+`NOPASSWD` solely for the test. The complete release command then runs its three
+stages and must finish with:
 
 ```text
 ASan + UBSan           : OK
