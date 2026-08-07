@@ -90,6 +90,51 @@ for i, job in ipairs(jobs) do
 end
 ```
 
+## Use WebSocket as a WebDriver BiDi transport
+
+Once a WebDriver session has returned its `webSocketUrl`, Babet can carry the
+BiDi JSON messages without knowing anything Selenium-specific. This minimal
+sequential dispatcher resolves one command at a time and surfaces unsolicited
+events separately:
+
+```lua
+local ws = assert(babet.websocket.connect(webSocketUrl, {
+    timeout = 5,
+    max_message_bytes = 8 * 1024 * 1024,
+}))
+
+local next_id = 0
+local function bidi_command(method, params)
+    next_id = next_id + 1
+    local id = next_id
+    assert(ws:send_text(assert(babet.json.encode({
+        id = id,
+        method = method,
+        params = params or {},
+    }))))
+
+    while true do
+        local message = assert(ws:recv())
+        assert(message.type == "text", "BiDi expects text JSON messages")
+        local packet = assert(babet.json.decode(message.data))
+        if packet.id == id then
+            return packet
+        end
+        if packet.method then
+            print("BiDi event:", packet.method)
+        end
+    end
+end
+
+local status = bidi_command("session.status", {})
+print(assert(babet.json.encode(status)))
+assert(ws:close())
+```
+
+A complete Selenium binding should replace this sequential loop with its own
+pending-command table and event dispatcher. The WebSocket transport stays
+generic.
+
 ## Graceful shutdown of a long-running script
 
 Catch `SIGTERM` / `SIGINT` so the script can close resources

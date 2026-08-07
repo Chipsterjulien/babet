@@ -103,7 +103,7 @@ directory name. Folders whose name legitimately starts with `-`
 can still be passed via `./-dirname` (POSIX convention).
 
 ```sh
-babet --version    # babet 2.21.1
+babet --version    # babet 2.22.0
 babet --help       # full usage
 babet --bogus      # Unknown option: --bogus
                       # Try 'babet --help' for more information.

@@ -87,6 +87,13 @@ Le travail de durcissement dans Babet protège les usages
   CR/LF, et les noms de headers doivent respecter la grammaire HTTP `token`.
   Une valeur contrôlée par un utilisateur ne peut donc pas injecter un header
   ou une seconde ligne de requête via ces champs.
+- **Durcissement WebSocket** : chaque frame cliente RFC 6455 utilise une
+  nouvelle clé de masquage cryptographique ; les frames serveur masquées, bits
+  RSV/opcodes réservés, UTF-8/codes Close invalides et octets de contrôle/espace
+  dans l'autorité URL sont refusés. Les tailles de données sont bornées avant
+  grosse allocation tandis que les frames de contrôle gardent leur plafond RFC
+  indépendant de 125 octets. `wss://` vérifie les certificats par défaut et
+  aucune extension de compression n'est négociée.
 - **Limites réseau en mémoire** : `socket:recv_line`, `socket:recv_all` et
   `http.max_body_size` bornent les accumulations principales. Après un timeout
   de lecture socket, les octets déjà consommés restent dans un buffer commun

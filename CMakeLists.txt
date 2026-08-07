@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(babet VERSION 2.21.1 LANGUAGES CXX C)
+project(babet VERSION 2.22.0 LANGUAGES CXX C)
 
 # Génère src/generated/version.hpp depuis src/version.hpp.in,
 # en injectant les composants de version définis dans project().

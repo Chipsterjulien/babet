@@ -6,6 +6,52 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.22.0] - 2026-08-07
+
+### Client WebSocket
+
+- ajoute `babet.websocket.connect(url, opts?)`, client RFC 6455 natif pour
+  `ws://` et `wss://` ;
+- valide strictement la réponse HTTP/1.1 Upgrade : statut 101, `Upgrade`,
+  `Connection`, `Sec-WebSocket-Accept`, extensions non sollicitées et
+  sous-protocoles non sollicités ;
+- génère chaque clé de masquage cliente avec `RAND_bytes` d'OpenSSL, y compris
+  sous TLS, et fragmente les gros messages applicatifs en frames de continuation
+  bornées ;
+- réassemble les messages texte/binaires fragmentés en acceptant les frames de
+  contrôle intercalées ; répond automatiquement aux Ping par Pong et consomme
+  les Pong ;
+- valide UTF-8, codes Close, bits RSV, opcodes, encodage minimal des longueurs,
+  limites des frames de contrôle et interdiction du masquage côté serveur ;
+- impose des plafonds indépendants `max_frame_bytes` et `max_message_bytes`
+  avant qu'une longueur contrôlée par le pair puisse provoquer une grosse
+  allocation ; les erreurs de protocole utilisent 1002, UTF-8 invalide 1007 et
+  dépassement de taille 1009 lorsque possible ;
+- les limites applicatives `max_frame_bytes` ne bloquent jamais les frames de
+  contrôle RFC, qui conservent leur plafond indépendant de 125 octets ;
+- ajoute `send_text`, `send_binary`, `recv`, `ping`, `set_timeout` et une
+  négociation `close` complète ; le GC ferme TCP/TLS sans lancer de négociation
+  potentiellement bloquante ;
+- conserve les contrats réseau Babet : deadline monotone absolue, interruption
+  par signaux gérés, CLOEXEC, TLS 1.2 minimum, vérification certificats, CA
+  explicites, vérification hostname/IP et connexions propres à chaque worker.
+
+### Tests et documentation
+
+- ajoute une 45e suite d'auto-test pour les URL, options brutes strictes,
+  plafonds et disponibilité dans les workers ;
+- ajoute un préflight WebSocket dédié de 25 contrats ;
+- ajoute un serveur Python local déterministe couvrant masquage client,
+  fragmentation sortante/entrante, Ping/Pong intercalé, binaire, fermeture,
+  `Sec-WebSocket-Accept` invalide, frame serveur masquée, refus avant allocation
+  d'une frame surdimensionnée, frame de contrôle au-dessus d'un plafond de données
+  volontairement bas, raison Close UTF-8 invalide et `wss://` local vérifié ;
+- documente l'API complète en français et anglais avec un exemple de transport
+  WebDriver BiDi, les précautions pour les boucles événementielles synchrones et
+  les extensions/proxies/sous-protocoles/en-têtes personnalisés volontairement
+  non exposés ;
+- régénère les deux manuels PDF.
+
 ## [2.21.1] - 2026-08-06
 
 ### Corrections

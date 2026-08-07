@@ -32,6 +32,7 @@ docs/fr/modules/json.md
 docs/fr/modules/logging.md
 docs/fr/modules/signal.md
 docs/fr/modules/socket.md
+docs/fr/modules/websocket.md
 docs/fr/modules/sqlite.md
 docs/fr/modules/strings.md
 docs/fr/modules/sys.md

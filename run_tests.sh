@@ -185,6 +185,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_unix_socket_contracts.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — WebSocket RFC 6455"
+if ! bash "${SCRIPT_DIR}/tools/test_websocket_contracts.sh"; then
+    echo "ÉCHEC : le préflight WebSocket a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — confinement find xdev"
 if ! bash "${SCRIPT_DIR}/tools/test_find_xdev_contracts.sh"; then
     echo "ÉCHEC : le préflight de babet.find xdev a échoué."
@@ -254,6 +260,12 @@ fi
 print_preflight_stage "Régression — spawn interactif sous pseudo-terminal"
 if ! bash "${SCRIPT_DIR}/tools/test_spawn_pty.sh" "${BINARY}"; then
     echo "ÉCHEC : le test PTY de babet.spawn a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — client WebSocket RFC 6455"
+if ! bash "${SCRIPT_DIR}/tools/test_websocket_runtime.sh" "${BINARY}"; then
+    echo "ÉCHEC : le test runtime WebSocket a échoué."
     exit 1
 fi
 

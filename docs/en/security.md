@@ -77,6 +77,12 @@ accidents and supply-chain tampering :
 - **HTTP line validation** rejects CR/LF in URLs and header values, and header
   names must follow the HTTP `token` grammar. User-controlled values cannot
   inject an extra header or request line through those fields.
+- **WebSocket protocol hardening** keeps RFC 6455 client frames masked with a
+  fresh cryptographic key, rejects masked/RSV/reserved server frames, validates
+  UTF-8 and close codes, rejects control/space bytes in the URL authority, and
+  checks advertised data-frame/message sizes before large allocations. RFC
+  control frames retain their separate 125-byte ceiling. `wss://` verifies
+  certificates by default and negotiates no compression extensions.
 - **Network memory limits** bound `socket:recv_line`, `socket:recv_all`, and
   `http.max_body_size`. After a socket-read timeout, already consumed bytes
   stay in one shared pending buffer so switching receive methods cannot lose or

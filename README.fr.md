@@ -17,9 +17,16 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.21.1**. Voir le
+Version candidate actuelle : **2.22.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
+
+Babet 2.22.0 ajoute un client WebSocket RFC 6455 natif via
+`babet.websocket`. Il prend en charge `ws://` et `wss://` vérifié, la
+validation stricte de l'Upgrade, le masquage client cryptographiquement
+aléatoire, les messages texte/binaires fragmentés, Ping/Pong automatique, des
+plafonds de frame/message et une fermeture complète. Le transport reste
+générique et peut servir directement à un binding WebDriver BiDi.
 
 Babet 2.21.1 renforce `babet.find()` sur les arborescences vivantes. Le
 parcours utilise désormais une pile explicite d'itérateurs, avance chaque parent
@@ -53,7 +60,7 @@ Babet s’utilise de trois façons :
 2. **Créateur d’exécutable** : `babet --create-exe ./monprojet application`
    produit un exécutable autonome contenant le script et ses modules `require`.
 3. **Bibliothèque de bindings** : les scripts disposent notamment de
-   `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`,
+   `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`, `babet.websocket`,
    `babet.inotify`, `babet.workers`, `babet.user`, `babet.exec`,
    `babet.writeFileAtomic`, le streaming `babet.spawn`, les pipelines `babet.pipeline` / `babet.spawnPipeline`, les
    archives ZIP et TAR sécurisées `babet.archive`, les flux autonomes

@@ -16,9 +16,16 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.21.1**. See the
+Current release candidate: **2.22.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
+
+Babet 2.22.0 adds a native RFC 6455 WebSocket client through
+`babet.websocket`. It supports `ws://` and verified `wss://`, strict Upgrade
+validation, cryptographically random client masking, fragmented text/binary
+messages, automatic Ping/Pong, bounded frame/message sizes, and a complete
+closing handshake. The transport is generic and can be used directly by a
+WebDriver BiDi binding.
 
 Babet 2.21.1 hardens `babet.find()` on live directory trees. The traversal
 now keeps an explicit stack of directory iterators, advances each parent before
@@ -51,7 +58,7 @@ Can be used in three modes:
    embedded as a ZIP appended to the binary.
 3. **As a library of bindings** : Lua scripts get
    `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`,
-   `babet.socket`, `babet.inotify`, `babet.workers`,
+   `babet.socket`, `babet.websocket`, `babet.inotify`, `babet.workers`,
    `babet.user`, `babet.exec`, `babet.writeFileAtomic`, the streaming
    `babet.spawn`,
    `babet.pipeline` / `babet.spawnPipeline`, secure ZIP and TAR handling through

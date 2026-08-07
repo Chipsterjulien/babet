@@ -6,6 +6,51 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.22.0] - 2026-08-07
+
+### WebSocket client
+
+- add `babet.websocket.connect(url, opts?)` as a native RFC 6455 client for
+  `ws://` and `wss://`;
+- validate the HTTP/1.1 Upgrade response strictly, including status 101,
+  `Upgrade`, `Connection`, `Sec-WebSocket-Accept`, unsolicited extensions, and
+  unsolicited subprotocols;
+- derive every client masking key from OpenSSL `RAND_bytes`, including over
+  TLS, and fragment outgoing application messages into bounded continuation
+  frames;
+- reassemble fragmented text/binary messages while accepting interleaved
+  control frames; automatically answer Ping with Pong and consume Pong frames;
+- validate UTF-8 text and close reasons, close codes, RSV bits, opcodes,
+  minimal payload-length encodings, control-frame limits, and the server-side
+  no-mask rule;
+- enforce independent `max_frame_bytes` and `max_message_bytes` ceilings before
+  peer-controlled lengths can trigger large allocations; protocol failures use
+  close 1002, invalid UTF-8 uses 1007, and size failures use 1009 when possible;
+  application `max_frame_bytes` limits never suppress RFC control frames, which
+  retain their independent 125-byte ceiling;
+- add `send_text`, `send_binary`, `recv`, `ping`, `set_timeout`, and a complete
+  `close` handshake; forgotten userdata close TCP/TLS resources without doing a
+  blocking protocol handshake from `__gc`;
+- reuse Babet's network doctrine for absolute monotonic deadlines, handled
+  signal interruption, CLOEXEC, TLS 1.2 minimum, certificate verification,
+  explicit CA files/directories, hostname/IP verification, and worker-local
+  connections.
+
+### Tests and documentation
+
+- add a 45th self-test suite for URL parsing, strict raw options, limits, and
+  worker registration;
+- add a dedicated 25-contract WebSocket structural preflight;
+- add a deterministic local Python server regression covering client masking,
+  outgoing and incoming fragmentation, interleaved Ping/Pong, binary payloads,
+  close handshake, invalid `Sec-WebSocket-Accept`, masked server frames,
+  pre-allocation frame-size rejection, control frames above a deliberately small
+  data-frame cap, invalid UTF-8 Close reasons, and verified local `wss://`;
+- document the complete API in French and English, including a WebDriver BiDi
+  transport example, synchronous/event-loop caveats, and the intentionally
+  unsupported extension/proxy/subprotocol/custom-header surface;
+- regenerate both PDF manuals.
+
 ## [2.21.1] - 2026-08-06
 
 ### Fixed

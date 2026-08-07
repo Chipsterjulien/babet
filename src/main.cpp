@@ -46,6 +46,7 @@
 #include "lua_bindings/sleep.hpp"
 #include "lua_bindings/signal.hpp"
 #include "lua_bindings/socket.hpp"
+#include "lua_bindings/websocket.hpp"
 #include "lua_bindings/split.hpp"
 #include "lua_bindings/sqlite.hpp"
 #include "lua_bindings/sys.hpp"
@@ -300,6 +301,11 @@ void register_babet(lua_State *L)
     // (table babet au sommet) ; register_socket pose en passant
     // la métatable dans le registry, mais laisse la pile inchangée.
     register_socket(L);
+
+    // Sous-table babet.websocket : client RFC 6455 ws:// / wss://.
+    // Le protocole reste générique ; Selenium/WebDriver BiDi se construit
+    // au-dessus côté Lua sans dépendance spécifique dans Babet.
+    register_websocket(L);
 
     // Sous-table babet.inotify (new + métatable LuapilotInotify
     // dans le registry). Surveillance de système de fichiers via

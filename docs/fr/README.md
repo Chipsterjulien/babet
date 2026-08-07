@@ -17,11 +17,12 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version candidate **Babet 2.21.1**.
+Documentation de la version candidate **Babet 2.22.0**.
 
-Babet 2.21.1 ajoute `xdev = true` à `babet.find()` pour conserver les
-points de montage étrangers visibles tout en élaguant leur contenu. Le harnais
-reste réparti en 44 suites atteignables et couvre aussi ce contrat dans un worker.
+Babet 2.22.0 ajoute un client RFC 6455 natif via `babet.websocket`, avec
+`ws://` et `wss://` vérifié, négociation stricte, framing borné, Ping/Pong
+automatique, fragmentation, fermeture propre et disponibilité dans les workers.
+Le harnais d'auto-test contient désormais 45 suites atteignables.
 
 ## Pour démarrer
 
@@ -31,7 +32,7 @@ reste réparti en 44 suites atteignables et couvre aussi ce contrat dans un work
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.21.1 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.22.0 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 
@@ -48,6 +49,7 @@ reste réparti en 44 suites atteignables et couvre aussi ce contrat dans un work
 | manipuler l’environnement, identifier le processus ou mesurer la VM Lua | [`SYS - processus et machine`](modules/sys.md) | version du runtime, PID, hostname, `uname`, `PATH`, `env`, `setenv` et mémoire de l’état Lua |
 | envoyer une requête web | [`HTTP — client web`](modules/http.md) | GET/POST et autres méthodes, query, headers validés, corps binaires, téléchargement atomique vers fichier, redirections, TLS, timeout et limites de taille |
 | ouvrir une connexion TCP ou un socket Unix local | [`Socket — TCP et Unix`](modules/socket.md) | clients et serveurs TCP/Unix, acceptation, permissions locales, flux binaires, lignes, EOF, timeouts et nettoyage |
+| utiliser WebSocket ou le transport WebDriver BiDi | [`WebSocket — client RFC 6455`](modules/websocket.md) | `ws://`, `wss://` vérifié, masquage, fragmentation, Ping/Pong, fermeture, timeouts et limites mémoire strictes |
 | chiffrer une connexion TCP ou faire STARTTLS | [`TLS — sockets sécurisées`](modules/tls.md) | TLS direct, STARTTLS, vérification, CA, hostname, SNI, versions, timeout et état après échec |
 | stocker des données SQL localement | [`SQLite — base embarquée`](modules/sqlite.md) | ouverture en lecture/écriture ou lecture seule, clés étrangères, compteurs de changements, paramètres stricts, sauvegarde atomique cohérente, valeurs `NULL` et BLOB explicites, statements préparés et transactions assistées |
 | encoder ou décoder du JSON | [`JSON — données structurées`](modules/json.md) | scalaires, tableaux, objets, `null`, tableaux vides, pretty-print et erreurs |
@@ -83,6 +85,7 @@ avoir à ouvrir chaque fichier.
 | [`Logging — journalisation`](modules/logging.md) | Niveaux, filtrage, destination, couleurs et appels variadiques. |
 | [`SIGNAL — signaux POSIX et arrêt propre`](modules/signal.md) | Installer, remplacer ou retirer un callback ; ignorer/restaurer ; ordre de dispatch, coalescence, interruptions et restrictions multithread. |
 | [`Socket — TCP et sockets Unix`](modules/socket.md) | Connexion et écoute TCP/Unix, acceptation, permissions et nettoyage inode-sensible, flux binaires, lectures bloc/ligne/EOF, adresses et timeouts. |
+| [`WebSocket — client RFC 6455`](modules/websocket.md) | Connexions clientes `ws://`/`wss://`, validation stricte de l’Upgrade, masquage client, fragmentation texte/binaire, Ping/Pong, Close, TLS, timeouts et plafonds de ressources. |
 | [`SQLite — base de données embarquée`](modules/sqlite.md) | Connexions en lecture/écriture ou lecture seule, WAL/timeout, clés étrangères, compteurs de lignes, SQL direct, statements préparés réutilisables, BLOB explicites, sauvegardes WAL cohérentes, itération et transactions assistées. |
 | [`Strings — manipulation de chaînes`](modules/strings.md) | Découpage, mode caractères, séparateurs, limite de splits et contenu binaire. |
 | [`SYS - processus, machine, environnement et mémoire Lua`](modules/sys.md) | Constantes de version, PID, hostname, `uname`, recherche d’exécutables, lecture/modification de l’environnement, interaction avec les workers et mémoire de l’état Lua. |

@@ -15,11 +15,12 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the **Babet 2.21.1** release candidate.
+Documentation for the **Babet 2.22.0** release candidate.
 
-Babet 2.21.1 adds `xdev = true` to `babet.find()`, keeping foreign mount
-points visible while pruning their contents. The harness remains split into 44
-reachable suites and exercises the same contract inside a worker.
+Babet 2.22.0 adds a native RFC 6455 client through `babet.websocket`, with
+`ws://` and verified `wss://`, strict handshakes, bounded framing, automatic
+Ping/Pong, fragmentation, close semantics, and worker registration. The
+self-test harness now contains 45 reachable suites.
 
 ## Getting started
 
@@ -29,7 +30,7 @@ reachable suites and exercises the same contract inside a worker.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.21.1 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.22.0 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 
@@ -46,6 +47,7 @@ reachable suites and exercises the same contract inside a worker.
 | inspect the process, environment, machine, or Lua VM memory | [`SYS — process and machine`](modules/sys.md) | runtime version, PID, hostname, `uname`, `PATH`, `env`, `setenv`, and Lua-state memory |
 | send an HTTP request | [`HTTP — web client`](modules/http.md) | GET/POST and other methods, query, validated headers, binary bodies, atomic downloads, redirects, TLS, timeout, and size limits |
 | open a TCP connection or local Unix socket | [`Socket — TCP and Unix`](modules/socket.md) | TCP/Unix clients and servers, accept, local permissions, binary streams, lines, EOF, timeouts, and cleanup |
+| speak WebSocket or WebDriver BiDi transport | [`WebSocket — RFC 6455 client`](modules/websocket.md) | `ws://`, verified `wss://`, masking, fragmentation, Ping/Pong, close handshake, timeouts, and strict memory limits |
 | encrypt TCP or perform STARTTLS | [`TLS — secure sockets`](modules/tls.md) | direct TLS, STARTTLS, verification, CA, hostname, SNI, versions, timeout, and fail-closed state |
 | store SQL data locally | [`SQLite — embedded database`](modules/sqlite.md) | read/write or read-only opening, foreign-key enforcement, change counters, strict parameters, coherent atomic backups, explicit `NULL` and BLOB values, prepared statements, and assisted transactions |
 | encode or decode JSON | [`JSON — structured data`](modules/json.md) | scalars, arrays, objects, `null`, empty arrays, pretty printing, and errors |
@@ -80,6 +82,7 @@ names below define each chapter's scope before you open it.
 | [`Logging`](modules/logging.md) | Levels, filtering, destination, colours, and variadic calls. |
 | [`SIGNAL — POSIX signals and clean shutdown`](modules/signal.md) | Install, replace, or remove callbacks; ignore/restore; dispatch order, coalescing, interruptions, and multithread restrictions. |
 | [`Socket — TCP and Unix sockets`](modules/socket.md) | TCP/Unix connect and listen, accept, permissions and inode-sensitive cleanup, binary streams, block/line/EOF reads, addresses, and timeouts. |
+| [`WebSocket — RFC 6455 client`](modules/websocket.md) | `ws://`/`wss://` client connections, strict Upgrade validation, client masking, text/binary fragmentation, Ping/Pong, Close, TLS, timeouts, and resource ceilings. |
 | [`SQLite — embedded database`](modules/sqlite.md) | Read/write and read-only connections, WAL/timeout, foreign keys, row/change counters, direct SQL, reusable prepared statements, explicit BLOBs, coherent WAL backups, iteration, and assisted transactions. |
 | [`Strings`](modules/strings.md) | Splitting, character mode, separators, split limits, and binary content. |
 | [`SYS — process, machine, environment, and Lua memory`](modules/sys.md) | Version constants, PID, hostname, `uname`, executable lookup, environment reads/writes, worker interaction, and Lua-state memory. |
