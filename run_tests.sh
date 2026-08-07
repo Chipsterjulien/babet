@@ -209,6 +209,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_release_fail_fast.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — cohérence du builder de release"
+if ! bash "${SCRIPT_DIR}/tools/test_release_builder_contracts.sh"; then
+    echo "ÉCHEC : le préflight du builder de release a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — frontières d'exception C++/Lua"
 if ! bash "${SCRIPT_DIR}/tools/test_exception_boundaries.sh"; then
     echo "ÉCHEC : le préflight des frontières d'exception a échoué."

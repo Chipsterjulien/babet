@@ -6,6 +6,29 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.22.2] - 2026-08-07
+
+### Release consistency and tooling
+
+- bump the CMake source-of-truth version to 2.22.2;
+- make `release.sh` derive its version exclusively from `CMakeLists.txt`;
+- turn `--version` into a fail-fast assertion instead of a compiled-version override;
+- fix the misleading binary-version mismatch diagnostic;
+- add structural release-builder regression coverage;
+- remove tracked `GITHUB_RELEASE_*.md` scratch files and `MODIFIED_FILES.txt`;
+- ignore transient release-note and packaging files;
+- modernize the maintainer release procedure;
+- regenerate the French and English manuals.
+
+### Supersedes 2.22.1
+
+Tag `v2.22.1` remains immutable history. Its source tree still compiled a
+runtime identifying itself as 2.22.0. Babet 2.22.2 restores consistency
+between source, binary, documentation, tag and generated artifacts.
+
+There is no WebSocket API or runtime-behaviour change relative to the validated
+2.22 runtime.
+
 ## [2.22.0] - 2026-08-07
 
 ### WebSocket client

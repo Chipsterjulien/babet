@@ -2,134 +2,127 @@
 
 This checklist freezes the exact tree that will be tagged and published.
 
-## 1. Set and verify the release version
+## 1. Set the release version
 
-Update `CMakeLists.txt`, user-facing version examples, both changelogs, and the
-stable-release wording in the README files. Rebuild both PDF manuals after the
-last documentation change, not before it:
+`CMakeLists.txt` is the single source of truth:
 
-```sh
+~~~cmake
+project(babet VERSION X.Y.Z LANGUAGES CXX C)
+~~~
+
+Update that line first.
+
+Then update both changelogs, the current-release wording in `README.md` and
+`README.fr.md`, and the French/English manual landing pages.
+
+`release.sh --version X.Y.Z` does not override the compiled version.
+It is only an assertion and must match `CMakeLists.txt`.
+
+## 2. Regenerate documentation
+
+After the final Markdown change:
+
+~~~sh
 cd docs
-./build_doc.sh
+./build_doc.sh en fr
 cd ..
-```
+~~~
 
-Confirm that `docs/manual-en.pdf` and `docs/manual-fr.pdf` were both regenerated
-and render them for a final visual check before validating the release tree.
+Confirm both PDFs were regenerated:
 
-For 2.21.0, the expected source line is:
+~~~sh
+ls -lh docs/manual-en.pdf docs/manual-fr.pdf
+~~~
 
-```cmake
-project(babet VERSION 2.21.0 LANGUAGES CXX C)
-```
+## 3. Validate the exact release tree
 
-## 2. Validate the exact release tree
-
-```sh
+~~~sh
 ./run_tests.sh --release
-```
+~~~
 
-This command always replaces `babet-tests.txt` at the project root with the
-complete validation output stripped of terminal colors. Keep that file as the
-validation record and provide it for review when requested.
+The optional sudo PTY layer is enabled only when `sudo -n true` succeeds from
+the same fresh PTY used by the regression.
 
-Each build first runs the network-free modular-harness, Zstandard,
-inotify-buffer, worker-serialization, SQLite-backup, Unix-socket, find-xdev, parent-side
-process-launch, and Lua/C++ exception-boundary preflights. After
-compilation it also runs the inherited-terminal `babet.spawn` regression under
-a real pseudo-terminal before the broader execution modes. Its optional `sudo`
-layer is enabled only when `sudo -n true` succeeds from that exact fresh PTY.
-A normal password-based sudo configuration is therefore expected to report one
-SKIP; this is not a release failure and does not justify weakening sudoers with
-`NOPASSWD` solely for the test. The complete release command then runs its three
-stages and must finish with:
+A normal password-based sudo configuration may therefore report one SKIP.
+This is not a release failure.
 
-```text
-ASan + UBSan           : OK
-Build normal final     : OK
-Smoke tests réseau     : OK
-Validation pré-release : OK
-```
+Verify the compiled runtime explicitly:
 
-The blocking TLS checks are local. Public HTTPS probes are advisory by default.
-To make those external probes blocking:
-
-```sh
-BABET_SMOKE_STRICT_EXTERNAL=1 ./run_tests.sh --release
-```
-
-Then verify the compiled version explicitly:
-
-```sh
+~~~sh
 ./test/babet --version
-# expected: babet 2.21.0
-```
+~~~
 
-## 3. Review the Git tree
+It must match the version declared in `CMakeLists.txt`.
 
-```sh
+## 4. Review the Git tree
+
+~~~sh
 git status --short
 git diff --check
 git diff --stat
-git diff
-```
+~~~
 
-Review every untracked file. Build products, `dist/`, local downloads,
-temporary archives, and test binaries must not be staged.
+Build products, `dist/`, temporary archives, release-note scratch files and
+packaging inventories must not be staged.
 
-## 4. Commit the validated tree
+`GITHUB_RELEASE_*.md` and `MODIFIED_FILES.txt` are intentionally ignored.
 
-```sh
+## 5. Commit the validated tree
+
+~~~sh
 git add -A
-git commit -m "Release Babet 2.21.0"
-git status --short
-```
+git diff --cached --check
+git diff --cached --stat
+git commit
+~~~
 
-`git status --short` must print nothing.
+The working tree must then be clean.
 
-## 5. Create the annotated tag
+## 6. Create the annotated tag
 
-```sh
-git tag -a v2.21.0 -m "Babet 2.21.0"
-git show --stat --oneline v2.21.0
-```
+~~~sh
+git tag -a vX.Y.Z -m "Babet X.Y.Z"
+git show --stat --oneline vX.Y.Z
+~~~
 
-## 6. Build and verify release artifacts
+## 7. Build release artifacts
 
-Run the release builder while `HEAD` is the tagged commit:
+Run the builder from the exact tagged commit:
 
-```sh
-./release.sh --build --version 2.21.0
-```
+~~~sh
+./release.sh --build --version X.Y.Z
+~~~
 
-The script refuses a version that does not match the compiled binary. Verify all
-generated checksums:
+The explicit version is only an assertion against the CMake source version.
 
-```sh
+Verify checksums:
+
+~~~sh
 cd dist
-sha256sum -c babet-2.21.0-linux-*.sha256
+sha256sum -c babet-X.Y.Z-linux-*.sha256
 cd ..
-```
+~~~
 
-## 7. Push the commit and tag
+## 8. Push commit and tag
 
-```sh
+Prefer an atomic push:
+
+~~~sh
 branch="$(git branch --show-current)"
-git push origin "$branch"
-git push origin v2.21.0
-```
+git push --atomic origin "$branch" vX.Y.Z
+~~~
 
-## 8. Publish the GitHub release
+## 9. Publish the GitHub release
 
-With GitHub CLI:
+Release notes are publishing material, not tracked source files.
 
-```sh
-gh release create v2.21.0 \
-  dist/babet-2.21.0-linux-* \
-  --title "Babet 2.21.0" \
-  --notes-file GITHUB_RELEASE_2.21.0.md
-```
+If a temporary notes file is useful, create it under the ignored `dist/`
+directory:
 
-Otherwise create release `v2.21.0` in the GitHub web interface and upload the
-four files from `dist/`: the tarball, its checksum, the standalone binary, and
-its checksum.
+~~~sh
+$EDITOR dist/release-notes.md
+~~~
+
+Then publish with GitHub CLI or the GitHub web interface.
+
+Do not add versioned `GITHUB_RELEASE_*.md` files to the repository.

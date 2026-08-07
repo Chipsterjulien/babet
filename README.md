@@ -16,11 +16,11 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.22.0**. See the
+Current release candidate: **2.22.2**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.22.0 adds a native RFC 6455 WebSocket client through
+Babet 2.22.2 adds a native RFC 6455 WebSocket client through
 `babet.websocket`. It supports `ws://` and verified `wss://`, strict Upgrade
 validation, cryptographically random client masking, fragmented text/binary
 messages, automatic Ping/Pong, bounded frame/message sizes, and a complete

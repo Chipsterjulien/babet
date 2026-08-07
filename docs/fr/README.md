@@ -17,9 +17,9 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version candidate **Babet 2.22.0**.
+Documentation de la version candidate **Babet 2.22.2**.
 
-Babet 2.22.0 ajoute un client RFC 6455 natif via `babet.websocket`, avec
+Babet 2.22.2 ajoute un client RFC 6455 natif via `babet.websocket`, avec
 `ws://` et `wss://` vérifié, négociation stricte, framing borné, Ping/Pong
 automatique, fragmentation, fermeture propre et disponibilité dans les workers.
 Le harnais d'auto-test contient désormais 45 suites atteignables.
@@ -32,7 +32,7 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.22.0 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.22.2 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 

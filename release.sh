@@ -18,11 +18,12 @@
 # Usage :
 #   ./release.sh                  # utilise le binaire existant
 #   ./release.sh --build          # rebuild d'abord (recommandé pour release)
-#   ./release.sh --version 1.2.0  # définit explicitement la version
+#   ./release.sh --version 1.2.0  # affirme explicitement la version attendue
 #   ./release.sh -h               # aide
 #
-# Si --version n'est pas fourni, le script utilise le dernier tag git
-# (ex. "v1.2.0" -> "1.2.0"). En l'absence de tag, version = "unversioned".
+# CMakeLists.txt est l'unique source de vérité pour la version.
+# --version ne modifie jamais la version compilée : il sert uniquement
+# d'assertion et doit correspondre à project(babet VERSION ...).
 # =====================================================================
 
 set -euo pipefail
@@ -42,7 +43,7 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             # Strip leading 'v' si présent : --version v1.3.4 -> 1.3.4
-            # Cohérent avec la détection auto depuis git tag.
+            # Le préfixe v est accepté uniquement pour l'assertion de version.
             VERSION="${2#v}"
             shift 2
             ;;
@@ -74,25 +75,36 @@ case "${ARCH}" in
     *) ARCH_TAG="linux-${ARCH}" ;;
 esac
 
-# --- Détection de la version -----------------------------------------
-if [[ -z "${VERSION}" ]]; then
-    # Tentative : dernier tag git de la forme vX.Y.Z
-    if command -v git &>/dev/null && [[ -d "${SCRIPT_DIR}/.git" ]]; then
-        GIT_TAG="$(git -C "${SCRIPT_DIR}" describe --tags --abbrev=0 2>/dev/null || true)"
-        if [[ -n "${GIT_TAG}" ]]; then
-            # Strip leading 'v' si présent : "v1.2.0" -> "1.2.0"
-            VERSION="${GIT_TAG#v}"
-        fi
-    fi
-    if [[ -z "${VERSION}" ]]; then
-        VERSION="unversioned"
-    fi
-fi
+# --- Version : CMakeLists.txt est l'unique source de vérité ----------
+mapfile -t CMAKE_VERSIONS < <(
+    sed -nE \
+        's/^[[:space:]]*project\([[:space:]]*babet[[:space:]]+VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p' \
+        "${SCRIPT_DIR}/CMakeLists.txt"
+)
 
-if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "ERREUR: version invalide '${VERSION}' (format attendu: X.Y.Z)" >&2
+if [[ "${#CMAKE_VERSIONS[@]}" -ne 1 ]]; then
+    echo "ERREUR: impossible de déterminer une version Babet unique dans CMakeLists.txt." >&2
     exit 1
 fi
+
+CMAKE_VERSION="${CMAKE_VERSIONS[0]}"
+
+if [[ ! "${CMAKE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERREUR: version CMake invalide '${CMAKE_VERSION}'." >&2
+    exit 1
+fi
+
+REQUESTED_VERSION="${VERSION}"
+
+if [[ -n "${REQUESTED_VERSION}" && "${REQUESTED_VERSION}" != "${CMAKE_VERSION}" ]]; then
+    echo "ERREUR: la version demandée ne correspond pas à la version source." >&2
+    echo "  CMakeLists.txt : ${CMAKE_VERSION}" >&2
+    echo "  --version      : ${REQUESTED_VERSION}" >&2
+    echo "Modifie d'abord project(babet VERSION ...) dans CMakeLists.txt." >&2
+    exit 1
+fi
+
+VERSION="${CMAKE_VERSION}"
 
 echo "=========================================="
 echo "  Babet release builder"
@@ -135,7 +147,8 @@ if [[ "${ACTUAL_VERSION_OUTPUT}" != "${EXPECTED_VERSION_OUTPUT}" ]]; then
     echo "ERREUR: le binaire ne correspond pas à la version de release." >&2
     echo "  attendu : ${EXPECTED_VERSION_OUTPUT}" >&2
     echo "  obtenu  : ${ACTUAL_VERSION_OUTPUT:-<aucune sortie>}" >&2
-    echo "  Recompile avec ./release.sh --build --version ${VERSION}." >&2
+    echo "  Version source CMake : ${CMAKE_VERSION}" >&2
+    echo "  Reconstruis avec ./release.sh --build." >&2
     exit 1
 fi
 

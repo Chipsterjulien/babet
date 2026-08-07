@@ -6,6 +6,29 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.22.2] - 2026-08-07
+
+### Cohérence de release et outillage
+
+- passage de la version source CMake à 2.22.2 ;
+- `release.sh` tire désormais sa version exclusivement de `CMakeLists.txt` ;
+- `--version` devient une assertion fail-fast et non une surcharge fictive ;
+- correction du diagnostic de version du binaire ;
+- ajout d'un préflight structurel du builder de release ;
+- suppression des `GITHUB_RELEASE_*.md` et de `MODIFIED_FILES.txt` suivis ;
+- ajout de ces artefacts temporaires au `.gitignore` ;
+- modernisation de la procédure de release ;
+- régénération des manuels français et anglais.
+
+### Remplace 2.22.1
+
+Le tag `v2.22.1` reste conservé comme historique immuable. Son arbre source
+compilait encore un runtime s'identifiant comme 2.22.0. Babet 2.22.2 rétablit
+la cohérence entre source, binaire, documentation, tag et artefacts générés.
+
+Aucun changement d'API WebSocket ni de comportement runtime n'est introduit
+par rapport au runtime 2.22 déjà validé.
+
 ## [2.22.0] - 2026-08-07
 
 ### Client WebSocket

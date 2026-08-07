@@ -15,9 +15,9 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for the **Babet 2.22.0** release candidate.
+Documentation for the **Babet 2.22.2** release candidate.
 
-Babet 2.22.0 adds a native RFC 6455 client through `babet.websocket`, with
+Babet 2.22.2 adds a native RFC 6455 client through `babet.websocket`, with
 `ws://` and verified `wss://`, strict handshakes, bounded framing, automatic
 Ping/Pong, fragmentation, close semantics, and worker registration. The
 self-test harness now contains 45 reachable suites.
@@ -30,7 +30,7 @@ self-test harness now contains 45 reachable suites.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
-- [`Changelog`](../../CHANGELOG.md) — complete 2.22.0 release notes and the history of earlier releases, migration, validation, and known limitations.
+- [`Changelog`](../../CHANGELOG.md) — complete 2.22.2 release notes and the history of earlier releases, migration, validation, and known limitations.
 
 ## Find a feature
 

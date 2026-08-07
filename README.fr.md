@@ -17,11 +17,11 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.22.0**. Voir le
+Version candidate actuelle : **2.22.2**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.22.0 ajoute un client WebSocket RFC 6455 natif via
+Babet 2.22.2 ajoute un client WebSocket RFC 6455 natif via
 `babet.websocket`. Il prend en charge `ws://` et `wss://` vérifié, la
 validation stricte de l'Upgrade, le masquage client cryptographiquement
 aléatoire, les messages texte/binaires fragmentés, Ping/Pong automatique, des

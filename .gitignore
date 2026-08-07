@@ -14,3 +14,5 @@ test/
 .DS_Store
 test/luapilot
 babet-tests.txt
+GITHUB_RELEASE_*.md
+MODIFIED_FILES.txt
