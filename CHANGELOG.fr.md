@@ -8,12 +8,19 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+### Build / nettoyage local
+
+- `clear_code.sh --all` supprime désormais tout l’état local généré connu et reconstruisible sans risque : `downloads/`, `dist/`, `babet-tests.txt`, `babet-fltk-tests.txt`, `MODIFIED_FILES.txt` et `GITHUB_RELEASE_*.md`, en plus des arbres normaux de build/test ;
+- le nettoyage par défaut reste volontairement limité aux artefacts d’un rebuild rapide, tandis que le reset complet préserve explicitement les archives/documents utilisateur sans employer de glob générique dangereux ;
+- ajout d’une régression isolée de `clear_code.sh` au préflight normal afin qu’un futur artefact généré ne puisse plus sortir silencieusement du contrat de nettoyage.
+
 ### Documentation embedding / utilisation du SDK
 
 - ajoute un guide pratique bilingue pour l'embedding `libbabet` à côté du contrat architectural, couvrant cycle de vie, racine de modules, marshalling scalaire, durée de vie des chaînes binaires, appels Lua directs, diagnostics, règles de thread/processus, hôtes C++ et fonctionnalités volontairement différées ;
 - fournit six petits exemples C exécutables et un projet CMake autonome pour create/run/destroy, racine de recherche, valeurs scalaires/binaires, appels directs, reprise après erreur Lua et règles de cycle de vie BUSY/WRONG_THREAD ;
 - embarque les guides et exemples dans le SDK d'embedding déplaçable lui-même et étend la validation runtime pour configurer, compiler et exécuter ces exemples après déplacement du SDK hors de l'arborescence source ;
 - documente correctement la compatibilité Linux/glibc sans confondre la métadonnée ELF `GNU/Linux 3.2.0` avec une baseline glibc, et affiche pendant la validation embedding la plus haute exigence `GLIBC_*` mesurée pour le CLI maintenu et l'hôte SDK externe fraîchement lié.
+- la validation mainteneur finale du Lot 8 du 25/08/2026 passe le préflight embedding à 199 contrats, la régression du builder SDK à 7/7 et les six exemples documentaires du SDK déplacé ; le bloc runtime embedding atteint 14 PASS / 0 FAIL, le binaire Babet maintenu reconstruit et l'hôte SDK fraîchement lié mesurent tous deux `GLIBC_2.38` comme plus haut symbole glibc versionné requis dans cet environnement, et la campagne normale complète reste verte à 9/9 modes.
 
 ### Architecture / GUI optionnelle
 
@@ -2384,3 +2391,23 @@ des conversions implicites ou des arguments ignorés :
 - Les helpers Lua ZIP/TAR ne font pas encore partie de l’API publique.
 - Valgrind est facultatif ; ASan et UBSan sont les validations mémoire et
   comportement indéfini principales de la release.
+
+### Lot 9 — prototype FLTK séparé
+
+- Ajout d'un minuscule hôte compagnon optionnel FLTK 1.4.5 consommant le SDK
+  autonome `libbabet` ; le CLI/build Babet normal reste totalement sans GUI.
+- Le prototype à un bouton exerce FLTK -> Lua via le chemin scalaire existant
+  `babet_context_call_global()`, contient volontairement une erreur de callback
+  Lua sans sortir de la boucle FLTK, puis vérifie la récupération au callback
+  suivant.
+- Ajout d'un ordre explicite callbacks/destruction, d'un auto-test GUI utilisable
+  en headless, d'un bootstrap FLTK optionnel épinglé, de mesures taille/`ldd` et
+  de la liste des capacités Lua -> hôte manquantes qui définira le Lot 10.
+- Validation mainteneur verte : la campagne normale reste à 9/9 modes OK et
+  l'auto-test FLTK récupère après l'erreur volontaire de callback. Le prototype
+  strippé mesure 15 288 072 octets avec FLTK statique et la fermeture dynamique
+  X11/runtime système attendue.
+- La validation FLTK séparée publie désormais atomiquement son journal complet
+  dans `babet-fltk-tests.txt`, y compris en cas d'échec, sans toucher à
+  `babet-tests.txt`.
+- La validation mainteneur finale du 25/08/2026 confirme la bonne publication du journal FLTK dédié et maintient le prototype au vert : récupération après erreur de callback Lua, désactivation des callbacks avant destruction, absence de `libfltk.so` dynamique et aucune dépendance GUI ajoutée au CLI Babet normal.

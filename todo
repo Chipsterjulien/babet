@@ -384,32 +384,64 @@ Lot 8 — developer documentation for libbabet
 [x] Lot 8 design result: writing real examples did not require widening or
     correcting the public embedding runtime API; keep the API experimental and
     proceed only after complete maintainer validation.
-[~] Re-run the complete maintainer harness. Close Lot 8 only after the enriched
-    SDK builder regression, 199-contract embedding structural preflight, moved
-    SDK example build/run and the existing complete normal campaign are green.
+[x] Final maintainer validation on 2026-08-25 closes Lot 8: embedding structural
+    contracts 199 PASS / 0 FAIL, SDK builder regression 7 PASS / 0 FAIL, moved
+    SDK examples build and execute 6/6, embedding runtime regression 14 PASS /
+    0 FAIL, measured highest GLIBC_* requirement GLIBC_2.38 for both the rebuilt
+    maintained Babet binary and freshly linked SDK host, and the complete normal
+    campaign remains green at 3810/0 folder, 3796/0 embedded, 3796/0 embedded
+    via PATH and 9/9 modes OK.
 
 Lot 9 — separate FLTK prototype
 -------------------------------
 
-[ ] Build a deliberately tiny FLTK 1.4.x companion host on the standalone
+[x] Build a deliberately tiny FLTK 1.4.5 companion host on the standalone
     libbabet SDK; add no FLTK dependency to the normal Babet CLI/build.
-[ ] Keep the first prototype intentionally limited (one window, one button, one
-    simple counter/state transition) and use existing call_global() for the
-    host -> Lua direction.
-[ ] Do not hide the missing Lua -> host direction with polling, shared globals or
-    other workarounds. Record every operation the prototype cannot express; this
-    missing-capability list becomes the Lot 10 requirements.
-[ ] Define callback failure policy: a Lua callback error is caught/logged by the
-    host and must not unwind through or kill the FLTK event loop.
-[ ] Test destruction ordering explicitly so no FLTK callback can observe a dead
-    babet_context and no context is destroyed while callbacks can still fire.
-[ ] Keep every FLTK/widget operation on the GUI/main thread. Cross-thread work
-    must notify the GUI thread rather than manipulating widgets directly.
-[ ] Document that GUI callbacks run on the event-loop thread and should stay
+[x] Keep the first prototype intentionally limited to one window, one button and
+    one counter/state transition, using existing call_global() for host -> Lua.
+[x] Do not hide the missing Lua -> host direction with polling, shared globals or
+    other workarounds. `FLTK_PROTOTYPE.md` records the concrete missing-capability
+    list that becomes the Lot 10 requirements.
+[x] Define and implement callback failure policy: a deliberate Lua failure on the
+    second callback is logged/contained by the host, `Fl::run()` continues, and
+    the third callback must recover successfully.
+[x] Make the C++ FLTK callback itself a no-throw boundary so an unexpected host
+    exception is contained before returning to the toolkit event loop.
+[x] Define and test destruction ordering in the prototype: disable callbacks,
+    detach/destroy FLTK objects retaining host state, then destroy babet_context;
+    callback guards remain safe after context destruction.
+[x] Keep every FLTK/widget operation on the GUI/main thread. Record Fl::awake()
+    notification as the future worker-to-GUI direction instead of allowing
+    direct worker widget manipulation.
+[x] Document that GUI callbacks run on the event-loop thread and should stay
     short; long/blocking work must be moved away from that loop.
-[ ] Measure the real stripped prototype and its ldd/runtime display dependency
-    closure. A GUI requires a compatible graphical environment; the normal
-    one-file CLI autonomy contract is not redefined as headless GUI support.
+[x] Pin the optional prototype bootstrap to FLTK 1.4.5 with SHA-256 verification.
+    The normal build and normal run_tests never download or configure FLTK.
+[x] Add a separate self-test that drives real FLTK callbacks through Fl::run(),
+    verifies Lua-error recovery, measures the stripped prototype and prints its
+    ldd closure while rejecting a dynamic libfltk runtime.
+[x] Run the complete normal Babet campaign plus `./prototypes/fltk/test.sh` on the
+    maintainer Linux desktop: normal Babet remains 9/9 modes OK; the FLTK
+    self-test recovers after the intentional Lua callback failure; the stripped
+    prototype measures 15,288,072 bytes and links FLTK statically while its
+    measured dynamic closure is the expected system X11/C/C++ runtime stack.
+[x] Re-run the optional FLTK validation after adding its dedicated complete
+    `babet-fltk-tests.txt` transcript: maintainer validation on 2026-08-25
+    confirms the separate transcript is published correctly, the event-loop
+    self-test remains green, static FLTK has no dynamic runtime dependency,
+    and the normal Babet CLI still has zero GUI runtime dependency.
+
+Inter-lot maintenance — complete local cleanup
+----------------------------------------------
+
+[x] Keep the default `clear_code.sh` mode focused on fast rebuild artefacts:
+    `build/`, `test/` and the legacy `src/third_party/` tree.
+[x] Make `clear_code.sh --all` a real reset of known generated project state by
+    additionally removing `downloads/`, `dist/`, `babet-tests.txt`,
+    `babet-fltk-tests.txt`, `MODIFIED_FILES.txt` and `GITHUB_RELEASE_*.md`.
+[x] Never implement the full reset with broad archive/document globs: unrelated
+    user ZIP/Markdown files at the project root must survive `--all`.
+[x] Add an isolated cleanup regression and run it from the normal preflight.
 
 Lot 10 — narrow Lua -> host C/C++ function API
 -----------------------------------------------

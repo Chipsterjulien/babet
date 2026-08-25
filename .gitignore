@@ -16,3 +16,5 @@ test/luapilot
 babet-tests.txt
 GITHUB_RELEASE_*.md
 MODIFIED_FILES.txt
+
+babet-fltk-tests.txt

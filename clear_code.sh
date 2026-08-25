@@ -1,21 +1,23 @@
 #!/bin/bash
 # Usage:
-#   ./clear.sh           # nettoie build/ et test/ (rebuild rapide)
-#   ./clear.sh --all     # nettoie aussi downloads/ (vraie reset)
+#   ./clear_code.sh           # nettoie les artefacts de build/test rapides
+#   ./clear_code.sh --all     # reset complet des artefacts générés connus
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-REMOVE_DOWNLOADS=0
+REMOVE_ALL=0
 
 for arg in "$@"; do
     case "$arg" in
         --all)
-            REMOVE_DOWNLOADS=1
+            REMOVE_ALL=1
             ;;
         --help|-h)
             echo "Usage: $0 [--all]"
-            echo "  (par défaut)   Nettoie build/ et test/"
-            echo "  --all          Nettoie aussi downloads/ (force le re-téléchargement)"
+            echo "  (par défaut)   Nettoie build/, test/ et l'ancien src/third_party/"
+            echo "  --all          Ajoute downloads/, dist/, journaux de tests et scratch release"
             exit 0
             ;;
         *)
@@ -26,28 +28,51 @@ for arg in "$@"; do
     esac
 done
 
-# Artefacts de compilation
-if [ -d "${SCRIPT_DIR}/build" ]; then
-    echo "Suppression de build/..."
-    rm -rf "${SCRIPT_DIR}/build"
-fi
+remove_dir_if_present() {
+    local path="$1"
+    local label="$2"
 
-# Dossier de test (recréé à chaque build)
-if [ -d "${SCRIPT_DIR}/test" ]; then
-    echo "Suppression de test/..."
-    rm -rf "${SCRIPT_DIR}/test"
-fi
+    if [ -d "$path" ]; then
+        echo "Suppression de ${label}..."
+        rm -rf -- "$path"
+    fi
+}
 
-# Hérité de l'ancien emplacement de miniz, au cas où il traîne encore
-if [ -d "${SCRIPT_DIR}/src/third_party" ]; then
-    echo "Suppression de src/third_party/ (legacy)..."
-    rm -rf "${SCRIPT_DIR}/src/third_party"
-fi
+remove_file_if_present() {
+    local path="$1"
+    local label="$2"
 
-# Archives téléchargées (optionnel)
-if [ "$REMOVE_DOWNLOADS" -eq 1 ] && [ -d "${SCRIPT_DIR}/downloads" ]; then
-    echo "Suppression de downloads/..."
-    rm -rf "${SCRIPT_DIR}/downloads"
+    if [ -f "$path" ] || [ -L "$path" ]; then
+        echo "Suppression de ${label}..."
+        rm -f -- "$path"
+    fi
+}
+
+# Artefacts de compilation et de tests locaux. Le prototype FLTK et le SDK
+# généré vivent sous build/ et sont donc couverts ici sans règle spécifique.
+remove_dir_if_present "${SCRIPT_DIR}/build" "build/"
+remove_dir_if_present "${SCRIPT_DIR}/test" "test/"
+
+# Hérité de l'ancien emplacement de miniz, au cas où il traîne encore.
+remove_dir_if_present "${SCRIPT_DIR}/src/third_party" "src/third_party/ (legacy)"
+
+if [ "$REMOVE_ALL" -eq 1 ]; then
+    # Sources et artefacts reconstruisibles explicitement connus du projet.
+    remove_dir_if_present "${SCRIPT_DIR}/downloads" "downloads/"
+    remove_dir_if_present "${SCRIPT_DIR}/dist" "dist/"
+
+    # Journaux stables publiés par les validations normales et FLTK.
+    remove_file_if_present "${SCRIPT_DIR}/babet-tests.txt" "babet-tests.txt"
+    remove_file_if_present "${SCRIPT_DIR}/babet-fltk-tests.txt" "babet-fltk-tests.txt"
+
+    # Scratch files de release historiques/locaux explicitement ignorés par Git.
+    remove_file_if_present "${SCRIPT_DIR}/MODIFIED_FILES.txt" "MODIFIED_FILES.txt"
+    shopt -s nullglob
+    release_notes=("${SCRIPT_DIR}"/GITHUB_RELEASE_*.md)
+    shopt -u nullglob
+    for release_note in "${release_notes[@]}"; do
+        remove_file_if_present "$release_note" "$(basename "$release_note")"
+    done
 fi
 
 echo "Terminé."

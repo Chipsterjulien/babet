@@ -8,12 +8,19 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+### Build / local cleanup
+
+- `clear_code.sh --all` now removes all known generated local state that is safe to recreate: `downloads/`, `dist/`, `babet-tests.txt`, `babet-fltk-tests.txt`, `MODIFIED_FILES.txt` and `GITHUB_RELEASE_*.md`, in addition to the normal build/test trees;
+- the default cleanup remains intentionally limited to fast rebuild artefacts, while the full reset explicitly preserves unrelated user archives/documents instead of using dangerous broad globs;
+- add an isolated `clear_code.sh` regression to the normal preflight so future generated artefacts cannot silently fall outside the cleanup contract.
+
 ### Embedding documentation / SDK usability
 
 - add a practical bilingual `libbabet` embedding guide alongside the architectural design contract, covering lifecycle, module roots, scalar marshalling, binary-string lifetime, direct Lua calls, diagnostics, thread/process rules, C++ hosts and intentionally deferred features;
 - ship six small executable C examples plus a standalone CMake project for create/run/destroy, search roots, scalar/binary values, direct calls, Lua-error recovery and BUSY/WRONG_THREAD lifecycle behaviour;
 - include the guides and examples inside the relocatable embedding SDK itself and extend runtime validation so those SDK-shipped examples configure, build and run after the SDK has been moved out of the source tree;
 - document Linux/glibc compatibility without confusing ELF `GNU/Linux 3.2.0` metadata with a glibc baseline, and report the highest measured `GLIBC_*` requirement for the maintained CLI and freshly linked external SDK host during embedding validation.
+- final Lot 8 maintainer validation on 2026-08-25 passes the 199-contract embedding preflight, 7/7 SDK-builder regression and all six relocated SDK documentation examples; the embedding runtime block reaches 14 PASS / 0 FAIL, both the rebuilt maintained Babet binary and freshly linked SDK host measure `GLIBC_2.38` as their highest required versioned glibc symbol in that environment, and the complete normal campaign remains 9/9 modes green.
 
 ### Architecture / optional GUI
 
@@ -2245,3 +2252,22 @@ ignored arguments:
   closing.
 - ZIP/TAR convenience bindings are not yet part of the public Lua API.
 - Valgrind is optional; ASan and UBSan are the primary release checks.
+
+### Lot 9 — separate FLTK prototype
+
+- Added a deliberately tiny optional FLTK 1.4.5 companion host consuming the
+  standalone `libbabet` SDK; the normal Babet CLI/build remains GUI-free.
+- The one-button prototype exercises FLTK -> Lua through the existing scalar
+  `babet_context_call_global()` path, intentionally contains one Lua callback
+  failure without leaving the FLTK event loop, and verifies recovery on a later
+  callback.
+- Added explicit callback/destruction ordering, a headless-capable GUI self-test,
+  pinned optional FLTK bootstrap, size/`ldd` reporting, and a documented list of
+  missing Lua -> host capabilities that will define Lot 10.
+- Maintainer validation is green: the normal campaign remains 9/9 modes OK and
+  the FLTK self-test recovers after the intentional callback error. The stripped
+  prototype measured 15,288,072 bytes with static FLTK and the expected dynamic
+  X11/system runtime closure.
+- The separate FLTK validation now atomically publishes its complete transcript
+  to `babet-fltk-tests.txt`, including failures, without touching `babet-tests.txt`.
+- Final maintainer validation on 2026-08-25 confirms the dedicated FLTK transcript is published correctly and the prototype remains green: Lua callback failure recovery succeeds, callbacks are disabled before teardown, static FLTK adds no dynamic `libfltk.so`, and the normal Babet CLI retains zero GUI runtime dependency.

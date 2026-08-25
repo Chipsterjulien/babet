@@ -454,12 +454,14 @@ static SDK path first. Process-wide Babet APIs
 (`chdir`, environment, signals, children, terminal) remain real host-process
 side effects rather than sandboxed state. The practical developer guide is [`EMBEDDING.md`](EMBEDDING.md), with small executable C examples under [`examples/embedding/`](examples/embedding/). The detailed architectural contract and rationale remain in [`EMBEDDING_DESIGN.md`](EMBEDDING_DESIGN.md).
 
-Lot 7 deliberately keeps optional GUI support outside the CLI. A future GUI is
-a separate host built on the standalone libbabet SDK, with FLTK 1.4.x selected
-as the preferred first prototype and wxWidgets 3.2.x as the first fallback if
-native widget integration becomes the stronger requirement. GTK 4 and Qt 6
-were compared but are not selected as Babet's default host. The existing
-`--create-exe` contract is unchanged. See [`GUI_STUDY.md`](GUI_STUDY.md).
+Lot 7 deliberately keeps optional GUI support outside the CLI. Lot 9 now adds
+a deliberately tiny **separate** FLTK 1.4.5 companion prototype consuming the
+standalone libbabet SDK; it is not part of the normal Babet build and does not
+change `--create-exe`. The prototype uses only the existing host -> Lua call
+path and records the missing Lua -> host capabilities that will define Lot 10.
+wxWidgets 3.2.x remains the first fallback if the real prototype shows FLTK is
+not suitable. See [`GUI_STUDY.md`](GUI_STUDY.md) and
+[`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md).
 
 ## Pre-release validation
 
@@ -507,6 +509,7 @@ behaviour checks used by the project.
 
 - Project invariants and architectural guardrails: [`INVARIANTS.md`](INVARIANTS.md)
 - Optional GUI architecture study: [`GUI_STUDY.md`](GUI_STUDY.md)
+- Separate FLTK companion prototype (Lot 9): [`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md)
 - Current development roadmap: [`todo`](todo)
 
 - **English** : [`docs/en/README.md`](docs/en/README.md)

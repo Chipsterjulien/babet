@@ -219,3 +219,21 @@ Primary upstream documentation consulted:
 
 Versions and upstream deployment/licensing details are time-sensitive; recheck
 these sources when a real GUI implementation starts.
+
+## 12. Lot 9 sequencing refinement
+
+The Lot 7 study originally expected the Lua -> host function boundary to be
+added before the first GUI implementation. Before starting Lot 9, that order was
+refined deliberately: the first FLTK consumer is smaller and more informative
+if it uses only the already validated host -> Lua `babet_context_call_global()`
+path.
+
+Lot 9 therefore builds a one-window/one-button companion and records exactly
+what cannot be expressed without Lua -> host calls. It must not hide those
+limits behind polled globals or other temporary bridges. That concrete missing-
+capability list becomes the Lot 10 design input, after which the FLTK prototype
+will be rewritten on the public host-function API.
+
+This refinement does not change the Lot 7 architecture decision: FLTK remains
+outside the normal CLI and the future Lua -> host boundary remains narrow and
+independent from generic native-plugin loading.

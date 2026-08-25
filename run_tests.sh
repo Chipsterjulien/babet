@@ -171,6 +171,12 @@ if ! bash "${SCRIPT_DIR}/tests/test_packaging.sh" --structural-only; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — nettoyage des artefacts locaux"
+if ! bash "${SCRIPT_DIR}/tools/test_clear_code_contracts.sh"; then
+    echo "ÉCHEC : le préflight de nettoyage des artefacts locaux a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — contrat d'embedding C/libbabet"
 if ! bash "${SCRIPT_DIR}/tools/test_embedding_contracts.sh"; then
     echo "ÉCHEC : le préflight du contrat d'embedding C/libbabet a échoué."
@@ -186,6 +192,12 @@ fi
 print_preflight_stage "Préflight — étude GUI optionnelle"
 if ! bash "${SCRIPT_DIR}/tools/test_gui_study_contract.sh"; then
     echo "ÉCHEC : le préflight de l'étude GUI optionnelle a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — prototype FLTK séparé"
+if ! bash "${SCRIPT_DIR}/tools/test_fltk_prototype_contracts.sh"; then
+    echo "ÉCHEC : le préflight structurel du prototype FLTK a échoué."
     exit 1
 fi
 
