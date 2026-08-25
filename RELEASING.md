@@ -40,6 +40,10 @@ ls -lh docs/manual-en.pdf docs/manual-fr.pdf
 ./run_tests.sh --release
 ~~~
 
+`run_tests.sh` writes the complete color-free output of every top-level run
+(normal, `--sanitizers`, or `--release`) to `babet-tests.txt`, replacing the
+previous log. Keep that file when sharing a validation result.
+
 The optional sudo PTY layer is enabled only when `sudo -n true` succeeds from
 the same fresh PTY used by the regression.
 

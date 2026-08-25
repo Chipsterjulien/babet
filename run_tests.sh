@@ -13,31 +13,32 @@ ENABLE_SANITIZERS=0
 RELEASE_VALIDATION=0
 BUILD_FAILURE_EXIT_CODE=2
 
-# Exécute la validation pré-release dans un pseudo-terminal afin que les
+# Exécute toute invocation top-level dans un pseudo-terminal afin que les
 # outils qui colorent uniquement leur sortie interactive conservent leurs
 # couleurs à l'écran. Le flux brut est enregistré temporairement, puis les
 # séquences ANSI et les retours chariot du pseudo-terminal sont retirés avant
-# la publication atomique du journal texte.
-run_release_with_log() {
-    local release_log=""
+# la publication atomique du journal texte. Les appels internes de --release
+# héritent de BABET_TEST_LOG_ACTIVE et ne créent donc pas de journaux imbriqués.
+run_with_log() {
+    local test_log=""
     local raw_log=""
     local clean_log=""
-    local release_command=""
+    local test_command=""
     local -a pipeline_status=()
-    local release_rc=1
+    local test_rc=1
     local tee_rc=1
     local clean_rc=0
 
-    # Le nom reste volontairement identique d'une version à l'autre afin que
-    # le journal à transmettre soit toujours évident. Chaque validation
-    # --release remplace atomiquement le journal précédent.
-    release_log="${SCRIPT_DIR}/${PROJECT_NAME}-tests.txt"
-    raw_log=$(mktemp "${TMPDIR:-/tmp}/${PROJECT_NAME}-release-log.XXXXXX") || {
+    # Le nom reste volontairement identique afin que le journal à transmettre
+    # soit toujours évident. Chaque invocation top-level de run_tests.sh
+    # remplace atomiquement le journal précédent.
+    test_log="${SCRIPT_DIR}/${PROJECT_NAME}-tests.txt"
+    raw_log=$(mktemp "${TMPDIR:-/tmp}/${PROJECT_NAME}-tests-log.XXXXXX") || {
         echo "ÉCHEC : impossible de créer le journal temporaire."
         return 1
     }
-    clean_log=$(mktemp "${release_log}.tmp.XXXXXX") || {
-        echo "ÉCHEC : impossible de préparer ${release_log}."
+    clean_log=$(mktemp "${test_log}.tmp.XXXXXX") || {
+        echo "ÉCHEC : impossible de préparer ${test_log}."
         rm -f -- "${raw_log}"
         return 1
     }
@@ -45,28 +46,28 @@ run_release_with_log() {
 
     # %q protège le chemin du script et tous les arguments lors du passage par
     # l'option --command de util-linux script.
-    printf -v release_command '%q ' bash "${BASH_SOURCE[0]}" "$@"
+    printf -v test_command '%q ' bash "${BASH_SOURCE[0]}" "$@"
 
-    echo "Journal sans couleurs : ${release_log}"
+    echo "Journal sans couleurs : ${test_log}"
     echo
 
-    export BABET_RELEASE_LOG_ACTIVE=1
+    export BABET_TEST_LOG_ACTIVE=1
     if command -v script >/dev/null 2>&1; then
         script --quiet --return --flush \
-            --command "${release_command}" /dev/null \
+            --command "${test_command}" /dev/null \
             | tee "${raw_log}"
         pipeline_status=("${PIPESTATUS[@]}")
-        release_rc=${pipeline_status[0]}
+        test_rc=${pipeline_status[0]}
         tee_rc=${pipeline_status[1]}
     else
         echo "AVERTISSEMENT : commande 'script' introuvable ; " \
              "les couleurs automatiques peuvent être désactivées."
         bash "${BASH_SOURCE[0]}" "$@" 2>&1 | tee "${raw_log}"
         pipeline_status=("${PIPESTATUS[@]}")
-        release_rc=${pipeline_status[0]}
+        test_rc=${pipeline_status[0]}
         tee_rc=${pipeline_status[1]}
     fi
-    unset BABET_RELEASE_LOG_ACTIVE
+    unset BABET_TEST_LOG_ACTIVE
 
     # Retire les séquences OSC (notamment les hyperliens), les séquences CSI
     # (dont les couleurs SGR) et les CR ajoutés par le pseudo-terminal.
@@ -77,7 +78,7 @@ run_release_with_log() {
         "${raw_log}" > "${clean_log}" || clean_rc=$?
 
     if [ ${clean_rc} -eq 0 ]; then
-        if ! mv -f -- "${clean_log}" "${release_log}"; then
+        if ! mv -f -- "${clean_log}" "${test_log}"; then
             clean_rc=1
         fi
     fi
@@ -90,13 +91,13 @@ run_release_with_log() {
 
     echo
     if [ ${clean_rc} -eq 0 ]; then
-        echo "Journal sans couleurs enregistré : ${release_log}"
+        echo "Journal sans couleurs enregistré : ${test_log}"
     else
         echo "ÉCHEC : impossible d'enregistrer le journal sans couleurs."
     fi
 
-    if [ ${release_rc} -ne 0 ]; then
-        return "${release_rc}"
+    if [ ${test_rc} -ne 0 ]; then
+        return "${test_rc}"
     fi
     if [ ${tee_rc} -ne 0 ]; then
         echo "ÉCHEC : la copie du flux de validation a échoué."
@@ -115,9 +116,9 @@ for arg in "$@"; do
             ;;
         --help|-h)
             echo "Usage: $0 [--sanitizers|--release]"
-            echo "  (par défaut)   Build normal + tests complets"
-            echo "  --sanitizers   Build ASan/UBSan + tests compatibles avec les sanitizers"
-            echo "  --release      Validation pré-release complète + journal texte sans couleurs"
+            echo "  (par défaut)   Build normal + tests complets + babet-tests.txt"
+            echo "  --sanitizers   Build ASan/UBSan + tests compatibles + babet-tests.txt"
+            echo "  --release      Validation pré-release complète + babet-tests.txt"
             exit 0
             ;;
         *)
@@ -128,17 +129,20 @@ for arg in "$@"; do
     esac
 done
 
+if [ "${RELEASE_VALIDATION}" -eq 1 ] && [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    echo "Les options --release et --sanitizers ne peuvent pas être combinées."
+    exit 1
+fi
+
+# Tous les modes top-level produisent le même journal texte complet.
+# En --release, validate_release.sh rappelle run_tests.sh avec cette variable
+# héritée, ce qui évite tout wrapper/journal imbriqué.
+if [ "${BABET_TEST_LOG_ACTIVE:-0}" -ne 1 ]; then
+    run_with_log "$@"
+    exit $?
+fi
+
 if [ "${RELEASE_VALIDATION}" -eq 1 ]; then
-    if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-        echo "Les options --release et --sanitizers ne peuvent pas être combinées."
-        exit 1
-    fi
-
-    if [ "${BABET_RELEASE_LOG_ACTIVE:-0}" -ne 1 ]; then
-        run_release_with_log "$@"
-        exit $?
-    fi
-
     exec bash "${SCRIPT_DIR}/validate_release.sh"
 fi
 
@@ -152,6 +156,54 @@ print_preflight_stage() {
 print_preflight_stage "Préflight — modularisation du harnais Lua"
 if ! bash "${SCRIPT_DIR}/tools/test_selftest_layout.sh"; then
     echo "ÉCHEC : le préflight de modularisation du harnais Lua a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — comptage explicite des auto-tests"
+if ! bash "${SCRIPT_DIR}/tools/test_selftest_accounting.sh"; then
+    echo "ÉCHEC : le préflight de comptage des auto-tests a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — identité des exécutables packagés"
+if ! bash "${SCRIPT_DIR}/tests/test_packaging.sh" --structural-only; then
+    echo "ÉCHEC : le préflight d'identité des exécutables packagés a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — contrat d'embedding C/libbabet"
+if ! bash "${SCRIPT_DIR}/tools/test_embedding_contracts.sh"; then
+    echo "ÉCHEC : le préflight du contrat d'embedding C/libbabet a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — builder SDK embedding"
+if ! bash "${SCRIPT_DIR}/tools/test_embedding_sdk_builder.sh"; then
+    echo "ÉCHEC : le préflight du builder SDK embedding a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — étude GUI optionnelle"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_study_contract.sh"; then
+    echo "ÉCHEC : le préflight de l'étude GUI optionnelle a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — contrat de conception ncursesw"
+if ! bash "${SCRIPT_DIR}/tools/test_ncurses_design_contract.sh"; then
+    echo "ÉCHEC : le préflight du contrat de conception ncursesw a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — implémentation ncursesw"
+if ! bash "${SCRIPT_DIR}/tools/test_ncurses_runtime_contracts.sh"; then
+    echo "ÉCHEC : le préflight de l'implémentation ncursesw a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — bootstrap ncursesw"
+if ! bash "${SCRIPT_DIR}/tools/test_ncurses_bootstrap.sh"; then
+    echo "ÉCHEC : le préflight du bootstrap ncursesw a échoué."
     exit 1
 fi
 
@@ -253,6 +305,22 @@ if [ ! -f "${BINARY}" ]; then
     exit "${BUILD_FAILURE_EXIT_CODE}"
 fi
 
+print_preflight_stage "Régression — packaging --create-exe"
+if ! bash "${SCRIPT_DIR}/tests/test_packaging.sh" "${BINARY}"; then
+    echo "ÉCHEC : les contrats de packaging --create-exe ont échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — embedding C/libbabet"
+EMBEDDING_ARGS=("${BINARY}")
+if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+    EMBEDDING_ARGS+=(--sanitizers)
+fi
+if ! bash "${SCRIPT_DIR}/tools/test_embedding_runtime.sh" "${EMBEDDING_ARGS[@]}"; then
+    echo "ÉCHEC : la régression runtime d'embedding C/libbabet a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — nettoyage OOM Lua / RAII C++"
 OOM_ARGS=()
 if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
@@ -269,9 +337,21 @@ if ! bash "${SCRIPT_DIR}/tools/test_spawn_pty.sh" "${BINARY}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — ncursesw sous pseudo-terminal"
+if ! bash "${SCRIPT_DIR}/tools/test_curses_pty.sh" "${BINARY}"; then
+    echo "ÉCHEC : le test PTY/runtime ncursesw a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — client WebSocket RFC 6455"
 if ! bash "${SCRIPT_DIR}/tools/test_websocket_runtime.sh" "${BINARY}"; then
     echo "ÉCHEC : le test runtime WebSocket a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — module inspect.lua embarqué"
+if ! "${BINARY}" "${SCRIPT_DIR}/tools/test_inspect_runtime.lua"; then
+    echo "ÉCHEC : les contrats runtime du module inspect.lua ont échoué."
     exit 1
 fi
 
@@ -309,6 +389,137 @@ fi
 
 modes_ok=0
 modes_total=0
+
+selftest_total_pass() {
+    printf '%s\n' "$1" | awk '
+        /^Résultat : [0-9]+ PASS \/ [0-9]+ FAIL$/ { print $3; exit }
+    '
+}
+
+selftest_category_pass() {
+    local output="$1"
+    local category="$2"
+    printf '%s\n' "${output}" | awk -v marker="[${category}]" '
+        $1 == marker {
+            for (i = 2; i <= NF; ++i) {
+                if ($i == "PASS") { print $(i - 1); exit }
+            }
+        }
+    '
+}
+
+selftest_category_pass_or_zero() {
+    local value
+    value=$(selftest_category_pass "$1" "$2")
+    if [ -z "${value}" ]; then
+        value=0
+    fi
+    printf '%s' "${value}"
+}
+
+validate_selftest_accounting() {
+    local output="$1"
+    local label="$2"
+    local total common folder embedded single_run accounted
+
+    total=$(selftest_total_pass "${output}")
+    common=$(selftest_category_pass "${output}" "common")
+    folder=$(selftest_category_pass_or_zero "${output}" "folder")
+    embedded=$(selftest_category_pass_or_zero "${output}" "embedded")
+    single_run=$(selftest_category_pass_or_zero "${output}" "single-run")
+
+    if [ -z "${total}" ] || [ -z "${common}" ]; then
+        echo "  -> comptage ${label} : ÉCHEC (résumé de catégories absent)"
+        return 1
+    fi
+
+    accounted=$((common + folder + embedded + single_run))
+    if [ "${accounted}" -ne "${total}" ]; then
+        echo "  -> comptage ${label} : ÉCHEC (${accounted} tests classés pour ${total} PASS)"
+        return 1
+    fi
+
+    return 0
+}
+
+validate_cross_mode_selftest_accounting() {
+    local folder_output="$1"
+    local embedded_output="$2"
+    local embedded_path_output="$3"
+    local accounting_ok=1
+    local folder_common embedded_common embedded_path_common
+    local folder_specific folder_embedded folder_single
+    local embedded_folder embedded_specific embedded_single
+    local embedded_path_folder embedded_path_specific embedded_path_single
+
+    validate_selftest_accounting "${folder_output}" "dossier" \
+        || accounting_ok=0
+    validate_selftest_accounting "${embedded_output}" "embarqué" \
+        || accounting_ok=0
+    validate_selftest_accounting "${embedded_path_output}" "embarqué via PATH" \
+        || accounting_ok=0
+
+    folder_common=$(selftest_category_pass "${folder_output}" "common")
+    embedded_common=$(selftest_category_pass "${embedded_output}" "common")
+    embedded_path_common=$(
+        selftest_category_pass "${embedded_path_output}" "common")
+
+    folder_specific=$(selftest_category_pass_or_zero \
+        "${folder_output}" "folder")
+    folder_embedded=$(selftest_category_pass_or_zero \
+        "${folder_output}" "embedded")
+    folder_single=$(selftest_category_pass_or_zero \
+        "${folder_output}" "single-run")
+
+    embedded_folder=$(selftest_category_pass_or_zero \
+        "${embedded_output}" "folder")
+    embedded_specific=$(selftest_category_pass_or_zero \
+        "${embedded_output}" "embedded")
+    embedded_single=$(selftest_category_pass_or_zero \
+        "${embedded_output}" "single-run")
+
+    embedded_path_folder=$(selftest_category_pass_or_zero \
+        "${embedded_path_output}" "folder")
+    embedded_path_specific=$(selftest_category_pass_or_zero \
+        "${embedded_path_output}" "embedded")
+    embedded_path_single=$(selftest_category_pass_or_zero \
+        "${embedded_path_output}" "single-run")
+
+    if [ -z "${folder_common}" ] || [ -z "${embedded_common}" ] \
+        || [ -z "${embedded_path_common}" ] \
+        || [ "${folder_common}" -ne "${embedded_common}" ] \
+        || [ "${embedded_common}" -ne "${embedded_path_common}" ]; then
+        echo "  -> tests communs : ÉCHEC " \
+             "(dossier=${folder_common:-absent}, " \
+             "embarqué=${embedded_common:-absent}, " \
+             "PATH=${embedded_path_common:-absent})"
+        accounting_ok=0
+    else
+        echo "  -> tests communs : ${folder_common} PASS dans les trois exécutions"
+    fi
+
+    if [ "${folder_embedded}" -ne 0 ] \
+        || [ "${embedded_folder}" -ne 0 ] \
+        || [ "${embedded_single}" -ne 0 ] \
+        || [ "${embedded_path_folder}" -ne 0 ] \
+        || [ "${embedded_path_single}" -ne 0 ]; then
+        echo "  -> catégories spécifiques : ÉCHEC " \
+             "(catégorie exécutée dans le mauvais mode)"
+        accounting_ok=0
+    else
+        echo "  -> spécifiques dossier : ${folder_specific} PASS"
+        echo "  -> spécifiques embarqués : ${embedded_specific} PASS"
+        echo "  -> une seule exécution : ${folder_single} PASS"
+    fi
+
+    if [ "${embedded_specific}" -ne "${embedded_path_specific}" ]; then
+        echo "  -> embarqué direct/PATH : ÉCHEC " \
+             "(${embedded_specific} vs ${embedded_path_specific})"
+        accounting_ok=0
+    fi
+
+    [ ${accounting_ok} -eq 1 ]
+}
 
 # --- 2. Test mode dossier ------------------------------------------
 echo "### Test 1/2 : mode dossier ###"
@@ -401,6 +612,26 @@ else
             # Annule le succès du test embarqué précédent : si le PATH ne
             # marche pas, le mode embarqué n'est pas vraiment fonctionnel.
             if [ ${emb_rc} -eq 0 ]; then
+                modes_ok=$((modes_ok - 1))
+            fi
+        fi
+
+        # Le nombre total de PASS peut légitimement différer entre le runner
+        # de dossier et l'application embarquée. On ne compare donc jamais un
+        # delta numérique figé : chaque test s'enregistre dans une catégorie,
+        # puis on vérifie que les tests communs sont identiques et que chaque
+        # total est entièrement expliqué par ses catégories.
+        if [ ${dir_rc} -eq 0 ] && [ ${emb_rc} -eq 0 ] \
+            && [ ${emb_path_rc} -eq 0 ]; then
+            echo ""
+            echo "### Comptage explicite des auto-tests ###"
+            if validate_cross_mode_selftest_accounting \
+                "${dir_output}" "${emb_output}" "${emb_path_output}"; then
+                echo "  -> comptage explicite : OK"
+            else
+                echo "  -> comptage explicite : ÉCHEC"
+                # Le comptage fait partie du contrat du Test 2. Ne décrémente
+                # qu'une fois le succès déjà enregistré du mode embarqué.
                 modes_ok=$((modes_ok - 1))
             fi
         fi

@@ -65,26 +65,26 @@ do
 
         local main_ok, main_err = write_text(project .. "/main.lua",
             'local v = require("huge")\nprint(v)\n')
-        ok("LOT 3 ZIP limit: main.lua created", main_ok == true, main_err)
+        ok_in("folder", "LOT 3 ZIP limit: main.lua created", main_ok == true, main_err)
 
         local huge_ok, huge_err = write_oversized_module(project .. "/huge.lua")
-        ok("LOT 3 ZIP limit: oversized module created",
+        ok_in("folder", "LOT 3 ZIP limit: oversized module created",
             huge_ok == true, huge_err)
 
         if not current_exe or current_exe == "" then
-            ok("LOT 3 ZIP limit: current executable resolved", false,
+            ok_in("folder", "LOT 3 ZIP limit: current executable resolved", false,
                 "readlink failed")
         else
             local built = babet.exec(current_exe, {
                 "--create-exe", project, output,
             }, { timeout = 60 })
-            ok("LOT 3 ZIP limit: executable built",
+            ok_in("folder", "LOT 3 ZIP limit: executable built",
                 type(built) == "table" and built.code == 0,
                 "code=" .. tostring(built and built.code)
                 .. " stderr=" .. tostring(built and built.stderr))
 
             local launched = babet.exec(output, {}, { timeout = 15 })
-            ok("LOT 3 ZIP limit: oversized embedded module rejected",
+            ok_in("folder", "LOT 3 ZIP limit: oversized embedded module rejected",
                 type(launched) == "table" and launched.code ~= 0
                 and type(launched.stderr) == "string"
                 and launched.stderr:find(

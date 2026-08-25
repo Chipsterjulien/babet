@@ -36,6 +36,20 @@ if(NOT MINIZ_SRC OR NOT MINIZ_INCLUDE)
     message(FATAL_ERROR "miniz paths not set (MINIZ_SRC, MINIZ_INCLUDE)")
 endif()
 
+# ncursesw : bibliothèque statique wide-character compilée localement par
+# build_local.sh. Les fallbacks terminfo sont incorporés à cette archive ;
+# aucun .so ni répertoire runtime n'est requis sur la machine cible.
+if(NOT NCURSES_LIB OR NOT NCURSES_INCLUDE)
+    message(FATAL_ERROR
+        "ncursesw paths not set (NCURSES_LIB, NCURSES_INCLUDE)")
+endif()
+if(NOT EXISTS "${NCURSES_LIB}" OR
+   NOT EXISTS "${NCURSES_INCLUDE}/curses.h" OR
+   NOT EXISTS "${NCURSES_INCLUDE}/term.h")
+    message(FATAL_ERROR
+        "local ncursesw static library/headers are incomplete")
+endif()
+
 # libarchive : bibliothèque C statique compilée localement et épinglée par
 # build_local.sh. La 2.8.0 l'utilise pour créer, inspecter et extraire les TAR
 # non compressés, gzip, xz, bzip2 et zstd. Toutes les bibliothèques de
@@ -216,17 +230,30 @@ if(NOT GENERATED_INCLUDE)
 endif()
 
 # Sources
-file(GLOB_RECURSE PROJECT_SOURCES
+#
+# Lot 6 introduces the first exercised embedding boundary.  All runtime and
+# project-core implementation code (including the experimental C API) lives in
+# a static archive.  The official `babet` executable links that archive into
+# itself, so the distributed CLI remains one autonomous file and never gains a
+# runtime libbabet.so dependency.
+file(GLOB_RECURSE BABET_RUNTIME_SOURCES
     src/lua_bindings/*.cpp
     src/project_core/*.cpp
+    src/embedding/*.cpp
 )
-list(APPEND PROJECT_SOURCES
-    src/main.cpp
+
+set(BABET_RUNTIME_TARGET babet_runtime_static)
+add_library(${BABET_RUNTIME_TARGET} STATIC
+    ${BABET_RUNTIME_SOURCES}
     ${MINIZ_SRC}
     ${SQLITE_SRC}
 )
+set_target_properties(${BABET_RUNTIME_TARGET} PROPERTIES
+    OUTPUT_NAME babet
+)
 
-add_executable(${PROJECT_NAME} ${PROJECT_SOURCES})
+add_executable(${PROJECT_NAME} src/main.cpp)
+target_link_libraries(${PROJECT_NAME} PRIVATE ${BABET_RUNTIME_TARGET})
 
 # Compile-time options for sqlite3.c.
 # SQLITE_DQS=0           : refuse les "double-quoted strings as identifiers"
@@ -247,18 +274,19 @@ set_source_files_properties(${SQLITE_SRC} PROPERTIES
                    -DSQLITE_OMIT_LOAD_EXTENSION"
 )
 
-# BEFORE garantit que les en-têtes zlib, liblzma, libbz2, libzstd et RE2
-# proviennent des versions épinglées, même si d’autres versions sont installées
-# dans /usr/include.
-target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
+# BEFORE garantit que les en-têtes zlib, liblzma, libbz2, libzstd, RE2 et
+# ncurses proviennent des versions épinglées, même si d’autres versions sont
+# installées dans /usr/include.
+target_include_directories(${BABET_RUNTIME_TARGET} BEFORE PRIVATE
     ${ZLIB_INCLUDE}
     ${LZMA_INCLUDE}
     ${BZIP2_INCLUDE}
     ${ZSTD_INCLUDE}
     ${RE2_INCLUDE}
+    ${NCURSES_INCLUDE}
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(${BABET_RUNTIME_TARGET} PRIVATE
     ${LUA_INCLUDE}
     ${MINIZ_INCLUDE}
     ${LIBARCHIVE_INCLUDE}
@@ -269,22 +297,35 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${PROJECT_SOURCE_DIR}/src
 )
 
+# The embedding C header is the only include surface propagated to host code.
+target_include_directories(${BABET_RUNTIME_TARGET} PUBLIC
+    ${PROJECT_SOURCE_DIR}/include
+)
+
+# main.cpp still uses Lua/runtime-private helpers internally, but those paths
+# are not part of the host-facing C API.
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${LUA_INCLUDE}
+    ${PROJECT_SOURCE_DIR}/src
+)
+
 # toml++ est une dépendance externe header-only. GCC 16 signale dans sa
 # release épinglée 3.4.0 les anciens opérateurs littéraux `operator"" _toml`
 # et `operator"" _tpath` comme dépréciés en C++23. Le chemin SYSTEM produit
 # un include `-isystem` : les diagnostics du code tiers sont masqués, tandis
 # que les avertissements provenant du code Babet restent pleinement actifs.
-target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE
+target_include_directories(${BABET_RUNTIME_TARGET} SYSTEM PRIVATE
     ${TOMLPP_INCLUDE}
 )
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE
+target_compile_definitions(${BABET_RUNTIME_TARGET} PRIVATE
     LIBARCHIVE_STATIC
     BABET_BZIP2_EXPECTED_VERSION="${BZIP2_VERSION}"
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE
+target_link_libraries(${BABET_RUNTIME_TARGET} PRIVATE
     ${LUA_LIB}
+    ${NCURSES_LIB}
     ${OPENSSL_LIB}
     ${CRYPTO_LIB}
     ${LIBARCHIVE_LIB}
@@ -299,49 +340,55 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 # libatomic : nécessaire sur les architectures 32-bit (ARMv6 / ARMv7 /
 # i386) qui n'ont pas d'instructions atomiques 64-bit en hardware.
-# OpenSSL 3.x utilise des __atomic_load_8 / __atomic_fetch_or_8 dans
-# son crypto/threads_pthread.c, ce qui déclenche des appels à des
-# builtins software fournis par libatomic. Sans cette lib au link,
-# on a des erreurs comme :
-# référence indéfinie vers « __atomic_is_lock_free »
-# référence indéfinie vers « __atomic_load_8 »
-#
-# CMAKE_SIZEOF_VOID_P EQUAL 4 = plateforme 32-bit. On laisse le linker
-# (GCC/ld) résoudre -latomic lui-même : il connaît les paths
-# multi-arch Debian (/usr/lib/arm-linux-gnueabihf/, etc.) que
-# find_library peut rater. Sur les systèmes Linux modernes, libatomic
-# est fournie par gcc-runtime, donc présente partout où gcc est
-# installé.
-#
-# Sur x86_64 et aarch64 (64-bit), le CPU fait l'atomique 64-bit
-# nativement, pas besoin de cette lib.
 if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-    target_link_libraries(${PROJECT_NAME} PRIVATE atomic)
+    target_link_libraries(${BABET_RUNTIME_TARGET} PRIVATE atomic)
     message(STATUS "32-bit platform detected, linking libatomic")
 endif()
 
+# Small C host used only by the embedding regression.  EXCLUDE_FROM_ALL keeps
+# the normal build focused on the real product; run_tests.sh builds this target
+# explicitly after Babet itself is ready.
+add_executable(babet_embedding_smoke EXCLUDE_FROM_ALL
+    tests/embedding_smoke.c
+)
+target_link_libraries(babet_embedding_smoke PRIVATE
+    ${BABET_RUNTIME_TARGET}
+    pthread
+)
+set_target_properties(babet_embedding_smoke PROPERTIES
+    LINKER_LANGUAGE CXX
+)
+
+function(babet_enable_sanitizers target)
+    target_compile_options(${target} PRIVATE
+        -O1
+        -g
+        -fno-omit-frame-pointer
+        -fno-sanitize-recover=all
+        -fsanitize=address,undefined
+    )
+    target_link_options(${target} PRIVATE
+        -fno-sanitize-recover=all
+        -fsanitize=address,undefined
+    )
+endfunction()
+
 if(BABET_ENABLE_SANITIZERS)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(${PROJECT_NAME} PRIVATE
-            -O1
-            -g
-            -fno-omit-frame-pointer
-            -fno-sanitize-recover=all
-            -fsanitize=address,undefined
-        )
-        target_link_options(${PROJECT_NAME} PRIVATE
-            -fno-sanitize-recover=all
-            -fsanitize=address,undefined
-        )
+        # The static runtime contains almost all implementation TUs; the two
+        # executables need sanitizer link flags as final link drivers.
+        babet_enable_sanitizers(${BABET_RUNTIME_TARGET})
+        babet_enable_sanitizers(${PROJECT_NAME})
+        babet_enable_sanitizers(babet_embedding_smoke)
         message(STATUS "Babet sanitizers enabled: ASan + UBSan")
     else()
         message(FATAL_ERROR
             "BABET_ENABLE_SANITIZERS requires GCC or Clang")
     endif()
 else()
-    # Les runtimes statiques sont conservés pour les builds normaux.
-    # Ils sont volontairement désactivés avec les sanitizers, dont les
-    # runtimes doivent rester disponibles dynamiquement pendant les tests.
+    # Le binaire officiel conserve ses runtimes GCC/libstdc++ statiques. La
+    # bibliothèque d'embedding reste une archive statique et n'impose donc
+    # aucune politique de runtime C++ au programme hôte.
     target_link_options(${PROJECT_NAME} PRIVATE
         -static-libgcc
         -static-libstdc++

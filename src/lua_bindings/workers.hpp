@@ -91,8 +91,8 @@ void register_workers(lua_State *L);
  * exePath permet d'enregistrer le searcher ZIP. Si les deux sont vides, seuls
  * stdlib, babet.* et les modules bundle/preload restent disponibles.
  */
-void set_workers_init_context(const std::string &projectDir,
-                              const std::string &exePath,
+void set_workers_init_context(std::string projectDir,
+                              std::string exePath,
                               bool embedded);
 
 /**

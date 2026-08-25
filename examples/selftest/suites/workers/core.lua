@@ -340,7 +340,7 @@ do
             end
 
             local job, err = W.spawn("return true", flat)
-            ok("workers budget: spawn args hits node limit",
+            ok_in("single-run", "workers budget: spawn args hits node limit",
                 job == nil and type(err) == "string"
                 and err:find("serialization node budget", 1, true) ~= nil,
                 tostring(err))

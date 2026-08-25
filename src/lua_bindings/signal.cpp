@@ -5,6 +5,8 @@
 // Voir signal.hpp pour le design global et les invariants de sécurité.
 
 #include "signal.hpp"
+#include "main_thread.hpp"
+#include "curses.hpp"
 
 extern "C"
 {
@@ -25,38 +27,13 @@ namespace
     // Restriction au thread principal
     // ============================================================
     //
-    // Les handlers de signaux POSIX sont **process-wide**, jamais
-    // thread-wide. Si un worker installe un handler via sigaction(),
-    // celui-ci s'applique à tout le process — mais le callback Lua
-    // qu'on stocke dans la registry est dans le state du worker.
-    // Comme les workers ont pthread_sigmask(SIG_BLOCK) sur tous les
-    // signaux supportés (cf. workers.cpp), le signal est délivré au
-    // main thread, qui n'a pas le callback du worker. Résultat : le
-    // callback ne se déclenche jamais. Bug latent silencieux.
-    //
-    // Solution : refuser handle/ignore/default depuis tout autre
-    // thread que le principal. main.cpp doit appeler
-    // register_main_thread() au tout début, avant le register_signal
-    // ou le spawn de workers.
-
-    pthread_t g_main_thread{};
-    bool g_main_thread_set = false;
-
-    bool is_main_thread()
-    {
-        // Avant l'appel à register_main_thread, on accepte par
-        // défaut (cas du démarrage). Ce point est rendu sûr par
-        // le fait que workers.cpp n'est utilisable qu'après le
-        // register_signal (et donc après que main.cpp ait appelé
-        // register_main_thread).
-        if (!g_main_thread_set)
-            return true;
-        return pthread_equal(pthread_self(), g_main_thread) != 0;
-    }
+    // L'identité du thread principal est partagée avec curses/process dans
+    // main_thread.cpp. Les dispositions POSIX sont process-wide : la règle
+    // historique de babet.signal reste donc strictement main-thread-only.
 
     int check_main_thread(lua_State *L, const char *fn_name)
     {
-        if (!is_main_thread())
+        if (!babet_runtime::is_main_thread())
         {
             return luaL_error(L,
                               "signal.%s: signal handlers can only be configured "
@@ -184,10 +161,11 @@ namespace
     // Conserve la signature exacte attendue par lua_sethook.
     void hook_dispatch(lua_State *L, lua_Debug *)
     {
+        babet_curses::service_terminal_events();
         signal_dispatch_pending(L);
     }
 
-    void ensure_hook_installed(lua_State *L)
+    void ensure_hook_installed_impl(lua_State *L)
     {
         pthread_mutex_lock(&g_hook_mutex);
         if (!g_hook_installed)
@@ -252,11 +230,13 @@ namespace
         // les interrompre proprement. C'est essentiel à la phase B.
         sa.sa_flags = 0;
 
-        if (sigaction(signum, &sa, nullptr) != 0)
+        const int action_error =
+            babet_curses::install_logical_signal_action(signum, sa);
+        if (action_error != 0)
         {
-            int e = errno;
             lua_pushnil(L);
-            lua_pushfstring(L, "signal: sigaction failed: %s", strerror(e));
+            lua_pushfstring(L, "signal: sigaction failed: %s",
+                            strerror(action_error));
             return false;
         }
         return true;
@@ -316,7 +296,7 @@ namespace
         // hook continue à tourner mais ne fait rien (coût négligeable).
         if (t == LUA_TFUNCTION)
         {
-            ensure_hook_installed(L);
+            ensure_hook_installed_impl(L);
         }
 
         lua_pushboolean(L, 1);
@@ -393,7 +373,7 @@ void signal_dispatch_pending(lua_State *L)
     // sont bloqués dans les workers), mais l'invariant doit être
     // garanti : les flags g_pending n'appartiennent qu'au main
     // thread. No-op partout ailleurs.
-    if (!is_main_thread())
+    if (!babet_runtime::is_main_thread())
     {
         return;
     }
@@ -445,10 +425,20 @@ bool signal_any_handled_pending()
     // consommer les flags du main thread : après un EINTR étranger,
     // ses attentes (sleep/socket/inotify) reprennent simplement,
     // sans "interrupted" parasite.
-    if (!is_main_thread())
+    if (!babet_runtime::is_main_thread())
     {
         return false;
     }
+
+    // Lot 5 : quand curses protège un SIGINT/SIGTERM/SIGHUP resté à
+    // l'action par défaut, le handler POSIX ne peut plus tuer le processus
+    // immédiatement puisqu'il doit d'abord rendre le terminal. Les boucles
+    // d'attente C++ appellent déjà ce helper à leurs points EINTR/sûrs :
+    // profiter de ce chemin commun pour traiter aussi les événements terminal
+    // différés évite qu'un wait/sleep/socket bloque indéfiniment une
+    // terminaison par défaut pendant une session curses.
+    babet_curses::service_terminal_events();
+
     for (size_t i = 0; i < NUM_SUPPORTED; ++i)
     {
         if (g_pending[SUPPORTED_SIGNALS[i].signum])
@@ -459,18 +449,10 @@ bool signal_any_handled_pending()
     return false;
 }
 
-// ============================================================
-// Fonctions exportées (déclarées dans signal.hpp)
-// ============================================================
-
-// À appeler une fois au tout début du main(), avant tout autre
-// register_* et avant le spawn de workers. Capture le pthread_t
-// du thread courant pour permettre à is_main_thread() de
-// fonctionner ensuite.
-void register_main_thread()
+void signal_ensure_dispatch_hook(lua_State *L)
 {
-    g_main_thread = pthread_self();
-    g_main_thread_set = true;
+    if (babet_runtime::is_main_thread())
+        ensure_hook_installed_impl(L);
 }
 
 void register_signal(lua_State *L)

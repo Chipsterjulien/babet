@@ -28,15 +28,6 @@ struct lua_State;
 void register_signal(lua_State *L);
 
 /**
- * @brief Capture le pthread courant comme thread principal.
- *
- * À appeler une fois depuis main(), avant l'enregistrement des modules et
- * avant tout worker. Les dispositions POSIX étant process-wide, cette garde
- * permet à handle/ignore/default de refuser les états Lua workers.
- */
-void register_main_thread(void);
-
-/**
  * @brief Dispatche les signaux supportés actuellement pending.
  *
  * No-op hors du thread principal. Pour chaque flag posé, le flag est remis à
@@ -44,6 +35,15 @@ void register_main_thread(void);
  * callback puisse être traitée lors d'un dispatch ultérieur.
  */
 void signal_dispatch_pending(lua_State *L);
+
+/**
+ * @brief Installe le hook main-thread partagé signal/terminal.
+ *
+ * Idempotent. Le binding curses l'utilise même sans callback babet.signal afin
+ * que SIGWINCH/SIGTSTP et les terminaisons différées soient servis pendant une
+ * boucle Lua pure.
+ */
+void signal_ensure_dispatch_hook(lua_State *L);
 
 /**
  * @brief Indique si le thread principal possède un signal géré pending.

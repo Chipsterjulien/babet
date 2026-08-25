@@ -67,6 +67,17 @@ run_fixture() {
     printf '%s\n%s\n%s\n' "${rc}" "${flow}" "${output}"
 }
 
+# Toute invocation top-level de run_tests.sh doit produire le journal stable
+# babet-tests.txt, tandis que les appels internes d'une campagne --release
+# héritent du garde et ne créent pas de journal imbriqué.
+if grep -q 'test_log="${SCRIPT_DIR}/${PROJECT_NAME}-tests.txt"' "${SCRIPT_DIR}/run_tests.sh" \
+    && grep -q 'BABET_TEST_LOG_ACTIVE' "${SCRIPT_DIR}/run_tests.sh" \
+    && grep -q 'run_with_log "\$@"' "${SCRIPT_DIR}/run_tests.sh"; then
+    pass "all top-level run_tests modes publish the stable text log"
+else
+    fail "all top-level run_tests modes publish the stable text log"
+fi
+
 # run_tests.sh doit exposer un code distinct pour les échecs de build.
 if grep -q '^BUILD_FAILURE_EXIT_CODE=2$' "${SCRIPT_DIR}/run_tests.sh" \
     && grep -q 'exit "${BUILD_FAILURE_EXIT_CODE}"' "${SCRIPT_DIR}/run_tests.sh"; then

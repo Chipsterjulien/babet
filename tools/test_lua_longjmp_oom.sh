@@ -30,6 +30,7 @@ fi
     "${ROOT_DIR}/src/lua_bindings/process_common.cpp" \
     "${ROOT_DIR}/src/lua_bindings/process_launch_internal.cpp" \
     "${ROOT_DIR}/src/lua_bindings/process_terminal_internal.cpp" \
+    "${SCRIPT_DIR}/lua_longjmp_oom_curses_stubs.cpp" \
     "${LUA_LIB}" -ldl -lm -pthread \
     -o "${TMP_ROOT}/lua_longjmp_oom_selftest"
 "${TMP_ROOT}/lua_longjmp_oom_selftest"

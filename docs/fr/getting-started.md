@@ -67,7 +67,9 @@ En interne, Babet append un ZIP à son propre binaire et lit
 `main.lua` (plus tous les modules `require`) depuis ce ZIP au
 runtime. Le `myapp` résultant est totalement autonome — pas
 besoin d'avoir Babet installé sur la machine cible, juste
-glibc.
+glibc. Une application générée est un artefact final : un lancement avec
+`--create-exe` ou `-c` est refusé avant l'exécution de son `main.lua`. Il faut
+utiliser le binaire Babet original pour créer un autre exécutable.
 
 ### 3. Embarqué via PATH (dossier + auto-détection)
 

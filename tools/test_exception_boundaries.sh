@@ -282,11 +282,11 @@ forbid_pattern 'std::string newpath' \
     "${ROOT_DIR}/src/lua_bindings/workers.cpp"
 
 forbid_pattern 'lua_pushcfunction\(L,[[:space:]]*lua_' \
-    "main.cpp still registers a historical binding without babet_lua_boundary" \
-    "${ROOT_DIR}/src/main.cpp"
+    "runtime registration still exposes a historical binding without babet_lua_boundary" \
+    "${ROOT_DIR}/src/project_core/runtime_registration.cpp"
 
 for specification in \
-    "src/main.cpp|babet_lua_boundary|generic boundary for historical main registrations" \
+    "src/project_core/runtime_registration.cpp|babet_lua_boundary|generic boundary for historical runtime registrations" \
     "src/lua_bindings/lua_utils.hpp|lua_run_protected|protected Lua parser runner" \
     "src/lua_bindings/lua_utils.hpp|lua_rotate\(Ls, 1, -1\)|protected parser moves internal context out of the argument range" \
     "src/lua_bindings/lua_utils.hpp|lua_pop\(Ls, 1\)|protected parser removes internal context" \
@@ -294,7 +294,7 @@ for specification in \
     "src/lua_bindings/lua_utils.hpp|lua_run_setup_protected|protected Lua runtime setup runner" \
     "src/lua_bindings/lua_utils.hpp|push_action_result_protected|protected action result helper" \
     "src/main.cpp|lua_run_setup_protected|main Lua runtime initialization under pcall" \
-    "src/main.cpp|prepend_package_path\(state, package_prefix\)|main package.path emission inside protected setup" \
+    "src/main.cpp|prepend_babet_package_path\(state, package_prefix\)|main package.path emission inside protected setup" \
     "src/lua_bindings/exec.cpp|lua_cfunction_exception_boundary<lua_exec_impl>|exec public exception boundary" \
     "src/lua_bindings/exec.cpp|push_exec_result_protected|exec protected result table" \
     "src/lua_bindings/exec.cpp|lua_run_protected\(L, args_parser\)|exec protected argument parser" \

@@ -1,8 +1,8 @@
 # Third-party notices — statically linked dependencies
 
-Babet 2.16.0 links libarchive 3.8.8, zlib 1.3.2, XZ Utils/liblzma
+Babet 2.22.2 links libarchive 3.8.8, zlib 1.3.2, XZ Utils/liblzma
 5.8.3, bzip2/libbz2 1.0.8, Zstandard/libzstd 1.5.7, RE2 2025-11-05,
-and Abseil 20250814.2 statically. The notices below accompany binary
+Abseil 20250814.2, and ncursesw 6.6 statically. The notices below accompany binary
 distributions of Babet. Notices in the individual upstream source files remain
 controlling.
 
@@ -431,3 +431,32 @@ APPENDIX: How to apply the Apache License to your work.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+## ncursesw licence
+
+Babet uses ncurses 6.6 in wide-character (`ncursesw`) mode.
+
+Copyright 2018-2024,2025 Thomas E. Dickey
+Copyright 1998-2017,2018 Free Software Foundation, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to deal in the Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, distribute
+with modifications, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ABOVE COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Except as contained in this notice, the name(s) of the above copyright
+holders shall not be used in advertising or otherwise to promote the sale,
+use or other dealings in this Software without prior written authorization.

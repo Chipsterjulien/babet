@@ -39,6 +39,7 @@ self-test harness now contains 45 reachable suites.
 | create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find` with `xdev` confinement, `copyTree`, permissions, and checksums |
 | atomically publish configuration or binary data | [`writeFileAtomic — atomic writing`](modules/write-file-atomic.md) | default no-overwrite, permissions, durability, path confinement, concurrency, and workers |
 | parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversion |
+| build a terminal UI | [`CURSES — terminal user interfaces`](modules/curses.md) | UTF-8 screen drawing, symbolic keyboard input, resize/suspend, interactive child handoff, workers, and self-contained terminfo fallbacks |
 | run an external program | [`Exec — processes`](modules/exec.md) | shell-free arguments, complete capture with `exec`, streaming with `spawn`, environment, cwd, and process control |
 | chain several commands | [`Process pipelines`](modules/pipeline.md) | complete capture or streaming, separate stderr streams, per-stage statuses, and process-group cleanup |
 | create or inspect/extract ZIP or TAR archives | [`Archive — secure multi-format archives`](modules/archive.md) | deterministic ZIP and plain/gzip/xz/bzip2/zstd TAR creation, listing, full testing, selective extraction, `dry_run` preview, anti-bomb limits, and atomic file publication |

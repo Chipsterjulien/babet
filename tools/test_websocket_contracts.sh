@@ -4,23 +4,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SOURCE="${PROJECT_DIR}/src/lua_bindings/websocket.cpp"
 HEADER="${PROJECT_DIR}/src/lua_bindings/websocket.hpp"
-MAIN="${PROJECT_DIR}/src/main.cpp"
+RUNTIME_REGISTRATION="${PROJECT_DIR}/src/project_core/runtime_registration.cpp"
 SUITE="${PROJECT_DIR}/examples/selftest/suites/network/websocket.lua"
 REGISTRY="${PROJECT_DIR}/examples/selftest/suites/network/init.lua"
 RUNTIME="${PROJECT_DIR}/tools/test_websocket_runtime.sh"
 SERVER="${PROJECT_DIR}/tools/websocket_test_server.py"
 
-python3 - "${SOURCE}" "${HEADER}" "${MAIN}" "${SUITE}" "${REGISTRY}" "${RUNTIME}" "${SERVER}" <<'PY'
+python3 - "${SOURCE}" "${HEADER}" "${RUNTIME_REGISTRATION}" "${SUITE}" "${REGISTRY}" "${RUNTIME}" "${SERVER}" <<'PY'
 from pathlib import Path
 import re
 import sys
 
-source, header, main, suite, registry, runtime, server = [Path(p).read_text(encoding="utf-8") for p in sys.argv[1:]]
+source, header, runtime_registration, suite, registry, runtime, server = [Path(p).read_text(encoding="utf-8") for p in sys.argv[1:]]
 checks = []
 def check(name, condition): checks.append((name, bool(condition)))
 
 check("WebSocket module is declared and registered",
-      "register_websocket" in header and "register_websocket(L);" in main
+      "register_websocket" in header and "register_websocket(L);" in runtime_registration
       and 'lua_setfield(L, -2, "websocket")' in source)
 check("all public WebSocket Lua calls use the C++ exception boundary",
       all(f"websocket_lua_boundary<{name}>" in source for name in [

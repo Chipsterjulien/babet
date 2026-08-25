@@ -6,6 +6,81 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [Non publié]
+
+### Documentation embedding / utilisation du SDK
+
+- ajoute un guide pratique bilingue pour l'embedding `libbabet` à côté du contrat architectural, couvrant cycle de vie, racine de modules, marshalling scalaire, durée de vie des chaînes binaires, appels Lua directs, diagnostics, règles de thread/processus, hôtes C++ et fonctionnalités volontairement différées ;
+- fournit six petits exemples C exécutables et un projet CMake autonome pour create/run/destroy, racine de recherche, valeurs scalaires/binaires, appels directs, reprise après erreur Lua et règles de cycle de vie BUSY/WRONG_THREAD ;
+- embarque les guides et exemples dans le SDK d'embedding déplaçable lui-même et étend la validation runtime pour configurer, compiler et exécuter ces exemples après déplacement du SDK hors de l'arborescence source ;
+- documente correctement la compatibilité Linux/glibc sans confondre la métadonnée ELF `GNU/Linux 3.2.0` avec une baseline glibc, et affiche pendant la validation embedding la plus haute exigence `GLIBC_*` mesurée pour le CLI maintenu et l'hôte SDK externe fraîchement lié.
+
+### Architecture / GUI optionnelle
+
+- consigne la décision d’architecture du Lot 7 sans ajouter de code GUI au runtime Babet normal : une future GUI sera un hôte compagnon séparé consommant le SDK `libbabet` autonome, afin que le CLI, le bootstrap normal et le contrat `--create-exe` existant conservent zéro dépendance GUI ;
+- retient FLTK 1.4.x comme premier backend à prototyper, avec wxWidgets 3.2.x comme premier repli si l’intégration de widgets natifs devient plus importante que le déploiement minimal ; GTK 4 et Qt 6 sont comparés explicitement mais ne sont pas retenus comme hôte GUI Babet par défaut ;
+- impose de mesurer la taille et la fermeture des dépendances d’un vrai prototype avant de transformer la préférence FLTK en dépendance produit durable, tout en gardant les plugins `.so` génériques, l’exposition de `lua_State *` et une ABI large de callbacks hors périmètre ; ajoute `GUI_STUDY.md` et un préflight structurel protégeant ces décisions.
+
+### Packaging
+
+- corrige le fixture de smoke test des appels d’embedding afin que les fonctions Lua exercées par `babet_context_call_global()` soient réellement définies avant leur invocation ; ajoute des garde-fous structurels pour chaque fixture d’appel direct.
+- étend le marshalling scalaire expérimental de `libbabet` avec `babet_context_call_global()` : appelle une fonction globale Lua de l’état principal avec des arguments scalaires binaires sûrs et exactement un résultat scalaire, tout en conservant les erreurs Lua protégées, le rejet hors thread et le refus explicite des résultats structurés.
+- les applications générées refusent désormais `--create-exe` / `-c` avant l'exécution de leur `main.lua` embarqué ; il faut utiliser le binaire Babet original pour créer un autre exécutable ;
+- le refus réutilise directement la détection existante du `main.lua` embarqué et n'introduit aucun marqueur parallèle d'exécutable généré ;
+- ajoute des régressions de packaging ciblées couvrant le builder copié/renommé, l'exécution autonome avec un seul fichier, le refus dans une application générée et le fonctionnement du builder avec un `PATH` vide pour protéger le contrat d'absence de toolchain externe à l'usage.
+
+### Modules Lua embarqués
+
+- mise à jour du `inspect.lua` embarqué depuis le `master` courant de kikito/inspect.lua, incluant les correctifs postérieurs à 3.1.3 pour les clés correspondant à des mots-clés Lua et le parcours des cycles borné par `depth`, sans modifier localement la source amont ;
+- ajout d’une régression runtime ciblée pour le module `inspect` embarqué.
+
+### Embedding / libbabet
+
+- la validation mainteneur finale du Lot 6 le 25/08/2026 passe le smoke de déplacement/compilation/exécution du SDK autonome avec 12 PASS / 0 FAIL et toute la campagne normale avec 3810/0 en mode dossier, 3796/0 en mode embarqué, 3796/0 en mode embarqué via PATH et 9/9 modes ; le CLI stripé mesure 15 440 712 octets (+443 584, +2,96 % par rapport à la base 2.22.2 publiée) et ne dépend toujours d'aucun `libbabet.so` au runtime.
+- ajoute un SDK d’embedding statique déplaçable sous `build/embedding-sdk/` pour les builds normaux : header C public et unique `libbabet.a` aplati contenant les archives de dépendances épinglées ; ajoute un smoke C hors arborescence qui déplace le SDK dans un chemin avec espaces et le lie uniquement via un driver C++ et les bibliothèques système Linux ; corrige la validation embedding sous sanitizers afin de viser `project_build_sanitizers` plutôt qu’un ancien build normal.
+- ajoute le premier échange de valeurs scalaires C ↔ Lua sans exposer `lua_State` : un `babet_value` tagué et `babet_context_set_global()` / `babet_context_get_global()` pour nil, booléens, entiers signés 64 bits, doubles et chaînes binaires ; les valeurs Lua structurées non supportées échouent explicitement et les workers restent isolés ;
+- classe les racines de recherche d’embedding absentes ou non répertoires en `BABET_STATUS_INVALID_ARGUMENT`, tout en conservant les vraies erreurs d’inspection du système de fichiers comme erreurs internes ; étend le smoke test C aux chemins absents et aux fichiers ordinaires existants.
+- ajoute un répertoire explicite de recherche de modules pour l'embedding, configuré une seule fois avant la première exécution, résolu en chemin absolu et partagé entre l'état Lua principal et les workers ; mutualise le helper protégé `package.path` entre CLI, workers et embedding.
+- ajoute la première API C expérimentale d'embedding côté hôte avec `babet_context` opaque, statuts, helpers de version/statut, exécution de chunk, diagnostics appartenant au contexte et destruction avec nettoyage terminal ;
+- construit d'abord le runtime réutilisable sous forme de `libbabet.a` statique, tout en gardant le binaire officiel `babet` autonome et sans dépendance runtime vers `libbabet.so` ;
+- déplace l'implémentation exacte de `register_babet()` et le teardown Lua/curses partagé hors de `main.cpp`, afin que CLI, workers et embedding utilisent un seul runtime sans refactor architectural général ;
+- limite explicitement le premier contrat exercé à un contexte d'embedding vivant par processus et à un seul thread hôte, en cohérence avec l'état process-wide des signaux, du terminal et du main thread Babet ;
+- ajoute un vrai hôte de smoke test écrit en C couvrant bindings Babet, modules embarqués, workers, récupération après erreur Lua, rejet d'un second contexte, rejet du mauvais thread et recréation séquentielle, ainsi que des préflights structurels dédiés ; le contrôle du module embarqué `inspect` exerce désormais son API de table callable au lieu de supposer que la valeur du module est elle-même une fonction Lua.
+
+### Tests et outillage
+
+- `run_tests.sh` enregistre désormais automatiquement la sortie complète sans couleurs de chaque invocation top-level (mode normal, `--sanitizers` ou `--release`) dans le fichier stable `babet-tests.txt`, afin qu’un long journal ne dépende plus de la capacité de défilement du terminal ;
+- valide tous les fixtures Lua générés des tests PTY ncurses avec `loadfile()` avant tout scénario pseudo-terminal et utilise des chaînes longues `[=[...]=]` sans collision pour les commandes shell embarquées ;
+- sérialise la régression PTY timeout clavier/resize ncurses afin que SIGWINCH ne soit injecté qu’après le marqueur de timeout, supprimant une course du driver qui pouvait légitimement renvoyer `"resize"` pendant le contrôle du timeout ;
+- rend déterministe la régression PTY ncurses sur le redimensionnement : sous Linux, `TIOCSWINSZ` envoie déjà `SIGWINCH` au groupe de processus au premier plan ; le driver n’envoie donc plus un second `SIGWINCH` manuel qui pouvait être observé séparément et produire un doublon logique de resize ;
+- conserve Babet comme unique propriétaire des événements de redimensionnement : désactive le handler SIGWINCH interne de ncurses et utilise `resize_term()` plutôt que `resizeterm()`, car ncurses injecte volontairement un `KEY_RESIZE` avec cette dernière même sans son handler de signal interne ;
+- exécute la régression PTY Ctrl-Z ncurses sous un superviseur de type shell restant dans la même session, au lieu de lancer Babet directement comme chef de session de `pty.fork()` ; cela évite un groupe de processus orphelin et valide réellement `SIGTSTP`/`SIGCONT` avec une topologie de job control comparable à celle d’un shell ;
+- adapte le test OOM/RAII autonome aux nouveaux points sûrs curses avec des stubs curses neutres dédiés au test, afin de conserver l’isolation du test sans lier ncurses une seconde fois ;
+- remplace le différentiel implicite entre les totaux du mode dossier et du mode embarqué par un comptage explicite des auto-tests en catégories `common`, `folder`, `embedded` et `single-run` ;
+- `run_tests.sh` vérifie désormais dynamiquement que tous les PASS sont classés, que les tests communs ont le même compte dans les trois exécutions et qu’aucune catégorie spécifique ne fuit dans le mauvais mode ;
+- ajoute un préflight structurel dédié au contrat de comptage, sans figer un nouvel écart numérique magique.
+
+### Interface terminal / ncursesw
+
+- durcit la suspension Ctrl-Z différée mise en évidence pendant la validation du Lot 7 Candidate 1 : le chemin SIGTSTP contrôlé met désormais le stop en attente pendant que SIGTSTP est bloqué, le débloque explicitement sous `SIG_DFL`, puis restaure le masque de signaux exact du thread après SIGCONT avant de réactiver curses ; cela supprime le timeout où le PTY atteignait `CURSES_TSTP_READY` sans jamais observer WIFSTOPPED.
+- durcit `babet.curses.readKey()` bloquant contre la course signal-juste-avant-blocage en interrogeant ncurses par tranches internes bornées et en servant les signaux/événements terminal entre les tranches, tout en conservant les timeouts publics monotones et `readKey(0)` non bloquant.
+
+- ajoute une petite API UTF-8 `babet.curses` basée sur ncursesw 6.6 lié statiquement : `start`, `stop`, `clear`, `refresh`, `size`, `move`, `write` et `readKey` avec touches symboliques ;
+- intègre curses au handoff terminal existant des processus : un enfant interactif ou une reprise au premier plan suspend curses, possède seul le TTY, puis la restauration ncurses est différée sur le thread principal ; les appels curses et handoffs interactifs depuis un worker sont refusés, tandis que les processus workers non interactifs restent supportés ;
+- conserve Babet comme autorité pour `SIGWINCH`, `SIGTSTP`/`SIGCONT` et `SIGINT`/`SIGTERM`/`SIGHUP`, avec restauration du terminal avant une terminaison contrôlée et aucun appel ncurses depuis un handler de signal ou le moniteur de fin d'enfant ;
+- compile ncursesw statiquement avec checksum épinglé, sans intégration GPM runtime, et avec des fallbacks terminfo embarqués pour les terminaux Linux/xterm/screen/tmux courants afin de préserver les exécutables générés en un seul fichier ;
+- fiabilise le bootstrap ncurses lorsque le chemin du checkout Babet contient des espaces en validant les auxiliaires Autoconf, en lançant le `configure` de bootstrap via un chemin relatif, en compilant d’abord les `tic`/`infocmp` ncurses 6.6, puis en générant les fallbacks depuis un workspace `/tmp` sans espaces afin que le chemin terminfo temporaire non quoté de `MKfallback.sh` ne soit jamais découpé ;
+- utilise un `LC_CTYPE` UTF-8 propre au thread, `setupterm(..., &errret)` et `newterm()` pour qu'un `TERM` absent/inconnu ou un terminfo inutilisable devienne une erreur Lua au lieu d'une sortie imposée par la bibliothèque ;
+- ajoute des régressions structurelles et PTY couvrant UTF-8, timeout clavier/resize, sessions répétées, fallback terminfo, erreurs Lua, restauration terminal, spawn/stop/resume interactifs, workers, Ctrl-Z/reprise, signaux contrôlés, exécutable généré autonome et absence de dépendance dynamique ncurses/tinfo.
+- la validation mainteneur finale du 24/08/2026 passe la matrice PTY/runtime ncurses déterministe et toute la campagne normale (3810/0 dossier, 3796/0 embarqué, 3796/0 embarqué via PATH, 9/9 modes), avec un binaire stripé de 15 436 616 octets (+439 488, +2,93 %) et aucune dépendance dynamique ncurses/tinfo.
+
+### Architecture / conception ncurses
+
+- fige avant implémentation le contrat terminal ncursesw autour du registre de handoff process/spawn existant, avec un seul propriétaire du terminal, des appels curses uniquement sur le thread principal et des états explicites de restauration après enfant ;
+- définit la politique Babet pour SIGWINCH/SIGTSTP/SIGCONT/SIGINT/SIGTERM/SIGHUP, le nettoyage contrôlé, la locale UTF-8 propre au thread et les limites sur les signaux fatals avant l'ajout du binding ;
+- impose `setupterm(..., &errret)` + `newterm()` (jamais `initscr()`), des fallbacks terminfo communs compilés pour préserver le déploiement en un fichier et une matrice de tests PTY/intégration dédiée au Lot 5 ;
+- ajoute un préflight structurel protégeant le contrat de conception ncursesw accepté.
+
 ## [2.22.2] - 2026-08-07
 
 ### Cohérence de release et outillage

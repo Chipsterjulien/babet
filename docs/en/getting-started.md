@@ -65,7 +65,9 @@ automatically excluded at any depth.
 Internally, Babet appends a ZIP to its own binary, and reads
 `main.lua` (plus any `require`d module) from that ZIP at runtime.
 The resulting `myapp` is fully self-contained — no Babet install
-needed on the target machine, just glibc.
+needed on the target machine, just glibc. A generated application is a final
+artifact: invoking it with `--create-exe` or `-c` is rejected before its
+`main.lua` runs. Use the original Babet binary to create another executable.
 
 ### 3. Embedded via PATH (folder + auto-detect)
 

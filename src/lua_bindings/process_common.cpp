@@ -3,6 +3,7 @@
 #endif
 
 #include "process_common.hpp"
+#include "curses.hpp"
 #include "process_launch_internal.hpp"
 #include "process_terminal_internal.hpp"
 #include "lua_utils.hpp"
@@ -660,6 +661,7 @@ LaunchResult launch(const LaunchSpec &spec)
     LaunchedProcess process;
 
     auto close_prepared = [&]() noexcept {
+        babet_curses::cancel_reserved_terminal_handoff(terminal_reservation_token);
         detail::cancel_terminal_reservation(terminal_reservation_token);
         terminal_reservation_token = 0;
         close_pair(pipe_in);
@@ -792,6 +794,45 @@ LaunchResult launch(const LaunchSpec &spec)
                 terminal_attributes_valid = true;
                 terminal_restore_pgid = parent_pgid;
                 use_terminal_handoff = true;
+
+                std::string curses_error;
+                const auto curses_prepare =
+                    babet_curses::prepare_reserved_terminal_handoff(
+                        terminal_reservation_token, curses_error);
+                if (curses_prepare ==
+                    babet_curses::HandoffPrepareResult::error)
+                {
+                    result.error = prefixed(spec.error_prefix, curses_error);
+                    close_prepared();
+                    return result;
+                }
+                if (curses_prepare ==
+                    babet_curses::HandoffPrepareResult::suspended)
+                {
+                    // La réservation a capturé les attributs pendant que
+                    // curses était encore en mode programme. Après endwin(),
+                    // mémoriser le vrai mode shell : c'est celui que le
+                    // moniteur doit restaurer avant une reprise curses, et
+                    // surtout celui qui doit rester si curses.stop() est
+                    // demandé pendant que l'enfant possède le TTY.
+                    int attr_rc = -1;
+                    do
+                    {
+                        attr_rc = ::tcgetattr(terminal_fd,
+                                              &terminal_restore_attributes);
+                    } while (attr_rc != 0 && errno == EINTR);
+                    if (attr_rc != 0)
+                    {
+                        const int saved = errno;
+                        result.error = prefixed(
+                            spec.error_prefix,
+                            std::string("cannot snapshot terminal after curses suspension: ") +
+                                std::strerror(saved));
+                        close_prepared();
+                        return result;
+                    }
+                }
+
                 detail::delay_terminal_reservation_for_test();
                 if (!make_stream_pipe(pipe_terminal, "terminal-handoff"))
                 {
@@ -967,12 +1008,16 @@ LaunchResult launch(const LaunchSpec &spec)
             process.terminal.restore_attributes = terminal_restore_attributes;
             process.terminal.attributes_valid = terminal_attributes_valid;
             process.terminal.active = true;
+            const unsigned long committed_reservation_token =
+                terminal_reservation_token;
             const bool terminal_committed = detail::commit_terminal_handoff(
-                process.terminal.fd, terminal_reservation_token, pid,
+                process.terminal.fd, committed_reservation_token, pid,
                 terminal_restore_pgid, terminal_restore_attributes);
             terminal_reservation_token = 0;
             if (!terminal_committed)
             {
+                babet_curses::cancel_reserved_terminal_handoff(
+                    committed_reservation_token);
                 result.error = prefixed(
                     spec.error_prefix,
                     std::string("cannot give terminal to child: ") +
@@ -985,6 +1030,7 @@ LaunchResult launch(const LaunchSpec &spec)
                     process.pid = -1;
                 }
                 restore_terminal(process.terminal);
+                babet_curses::service_terminal_events();
                 close_fd(pipe_exec[0]);
                 return result;
             }
@@ -1007,6 +1053,7 @@ LaunchResult launch(const LaunchSpec &spec)
                     process.pid = -1;
                 }
                 restore_terminal(process.terminal);
+                babet_curses::service_terminal_events();
                 close_fd(pipe_exec[0]);
                 return result;
             }
@@ -1025,6 +1072,7 @@ LaunchResult launch(const LaunchSpec &spec)
                 process.pid = -1;
             }
             restore_terminal(process.terminal);
+            babet_curses::service_terminal_events();
             return result;
         }
 
@@ -1108,6 +1156,7 @@ LaunchResult launch(const LaunchSpec &spec)
                     " (child could not be reaped within cleanup deadline)";
             }
             restore_terminal(process.terminal);
+            babet_curses::service_terminal_events();
             return result;
         }
 
@@ -1132,6 +1181,7 @@ LaunchResult launch(const LaunchSpec &spec)
                 std::string("cannot launch '") + spec.command + "': " +
                     std::strerror(launch_errno));
             restore_terminal(process.terminal);
+            babet_curses::service_terminal_events();
             return result;
         }
 
@@ -1153,6 +1203,7 @@ LaunchResult launch(const LaunchSpec &spec)
                 process.pid = -1;
             }
             restore_terminal(process.terminal);
+            babet_curses::service_terminal_events();
             return result;
         }
 

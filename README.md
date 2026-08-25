@@ -55,10 +55,12 @@ Can be used in three modes:
    (looks for `main.lua` inside).
 2. **As a packager** : `babet --create-exe ./myproject app` produces a
    self-contained executable with the script and its `require`d modules
-   embedded as a ZIP appended to the binary.
+   embedded as a ZIP appended to the binary. A generated application is final:
+   it refuses `--create-exe` / `-c`; use the original Babet binary to package
+   another application.
 3. **As a library of bindings** : Lua scripts get
    `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`,
-   `babet.socket`, `babet.websocket`, `babet.inotify`, `babet.workers`,
+   `babet.socket`, `babet.websocket`, `babet.inotify`, `babet.curses`, `babet.workers`,
    `babet.user`, `babet.exec`, `babet.writeFileAtomic`, the streaming
    `babet.spawn`,
    `babet.pipeline` / `babet.spawnPipeline`, secure ZIP and TAR handling through
@@ -74,6 +76,9 @@ cd babet
 ./run_tests.sh          # offline harness — should finish with 0 FAIL
 ./test/babet --help
 ```
+
+Every top-level `run_tests.sh` invocation also writes the complete color-free
+output to `babet-tests.txt`, replacing the previous log.
 
 The build script vendors and compiles all its dependencies. The only
 prerequisites on your system are a C++23 compiler, CMake 3.22 or newer, `wget`, `unzip`,
@@ -420,6 +425,42 @@ is rejected until an index explicitly disambiguates the occurrence. No name is
 cleaned and no write occurs: an unsafe path may be read as data while remaining
 reported as `list().entries[i].safe_path = false` and forbidden for extraction.
 
+## Experimental C embedding / libbabet
+
+Lot 6 introduces the first exercised host embedding boundary.  C and C++ hosts
+can target the small C header [`include/babet/babet.h`](include/babet/babet.h)
+and the in-tree static `libbabet.a` runtime produced by CMake. A normal build
+also creates a relocatable static SDK under `build/embedding-sdk/` containing
+only the public header, one flattened `libbabet.a` with Babet's pinned static
+third-party libraries folded in, and a short linking note. An external C host
+can therefore compile against that moved SDK without knowing the dependency
+build tree; the final executable is linked with a C++ linker driver plus the
+normal Linux system libraries (`-ldl -pthread -lm`, and `-latomic` on 32-bit).
+The public surface is deliberately narrow and experimental: an opaque context,
+create/search-root/run/error/destroy
+lifecycle, version/status helpers, one active context per process, and
+same-thread use. An explicit on-disk Lua search root can be configured once
+before the first run; it feeds both the parent `package.path` and workers. A
+small `babet_value` API also exchanges scalar globals (`nil`, boolean, signed
+64-bit integer, double and binary string) without exposing `lua_State`, and can
+call one Lua global function with scalar arguments and one scalar result.
+Structured tables, host callbacks, dotted method lookup and multi-result calls
+remain deferred. Lua/C++ internals are not public ABI.
+
+The official `babet` executable still contains the runtime in its own binary;
+it does **not** require a `libbabet.so` at runtime. Shared-library packaging and
+multiple concurrent contexts remain deferred; Lot 6 intentionally validates the
+static SDK path first. Process-wide Babet APIs
+(`chdir`, environment, signals, children, terminal) remain real host-process
+side effects rather than sandboxed state. The practical developer guide is [`EMBEDDING.md`](EMBEDDING.md), with small executable C examples under [`examples/embedding/`](examples/embedding/). The detailed architectural contract and rationale remain in [`EMBEDDING_DESIGN.md`](EMBEDDING_DESIGN.md).
+
+Lot 7 deliberately keeps optional GUI support outside the CLI. A future GUI is
+a separate host built on the standalone libbabet SDK, with FLTK 1.4.x selected
+as the preferred first prototype and wxWidgets 3.2.x as the first fallback if
+native widget integration becomes the stronger requirement. GTK 4 and Qt 6
+were compared but are not selected as Babet's default host. The existing
+`--create-exe` contract is unchanged. See [`GUI_STUDY.md`](GUI_STUDY.md).
+
 ## Pre-release validation
 
 Before tagging a release, run the complete validation with one command:
@@ -428,9 +469,10 @@ Before tagging a release, run the complete validation with one command:
 ./run_tests.sh --release
 ```
 
-The complete output is also saved without colors to `babet-tests.txt`. The
-filename never changes between releases, and each run replaces the previous
-log. This is the file to provide when a validation result must be reviewed.
+Like the normal and `--sanitizers` modes, `--release` saves the complete
+color-free output to `babet-tests.txt`. The filename is stable and each
+top-level run replaces the previous log. This is the file to provide when a
+validation result must be reviewed.
 
 Babet's blocking HTTP-framing and TLS checks use local HTTP/HTTPS fixtures
 generated at runtime. Public HTTPS probes are advisory by default, so a
@@ -462,6 +504,10 @@ Valgrind is optional; ASan and UBSan are the primary memory and undefined
 behaviour checks used by the project.
 
 ## Documentation
+
+- Project invariants and architectural guardrails: [`INVARIANTS.md`](INVARIANTS.md)
+- Optional GUI architecture study: [`GUI_STUDY.md`](GUI_STUDY.md)
+- Current development roadmap: [`todo`](todo)
 
 - **English** : [`docs/en/README.md`](docs/en/README.md)
 - **Français** : [`docs/fr/README.md`](docs/fr/README.md)

@@ -78,6 +78,11 @@ struct TerminalHandoffRegistry
     struct termios restore_attributes{};
     bool attributes_valid = false;
     TerminalIdentity terminal;
+    detail::TerminalOwnerState state = detail::TerminalOwnerState::normal;
+    bool curses_session_active = false;
+    bool curses_handoff_prepared = false;
+    unsigned long curses_handoff_token = 0;
+    bool curses_foreground_resume_prepared = false;
 };
 
 TerminalHandoffRegistry terminal_handoff_registry{
@@ -92,6 +97,11 @@ TerminalHandoffRegistry terminal_handoff_registry{
     {},
     false,
     {},
+    detail::TerminalOwnerState::normal,
+    false,
+    false,
+    0,
+    false,
 };
 
 pthread_once_t terminal_registry_once = PTHREAD_ONCE_INIT;
@@ -172,6 +182,13 @@ void clear_terminal_owner_locked() noexcept
     terminal_handoff_registry.restore_pgid = -1;
     terminal_handoff_registry.attributes_valid = false;
     terminal_handoff_registry.terminal = {};
+    terminal_handoff_registry.curses_handoff_prepared = false;
+    terminal_handoff_registry.curses_handoff_token = 0;
+    terminal_handoff_registry.curses_foreground_resume_prepared = false;
+    terminal_handoff_registry.state =
+        terminal_handoff_registry.curses_session_active
+            ? detail::TerminalOwnerState::terminal_reclaimed_curses_pending
+            : detail::TerminalOwnerState::normal;
     notify_terminal_registry();
 }
 
@@ -426,6 +443,19 @@ bool commit_terminal_handoff_impl(
         return false;
     }
 
+    if (terminal_handoff_registry.curses_session_active &&
+        terminal_handoff_registry.state == detail::TerminalOwnerState::curses &&
+        (!terminal_handoff_registry.curses_handoff_prepared ||
+         terminal_handoff_registry.curses_handoff_token != token))
+    {
+        terminal_handoff_registry.reservation_active = false;
+        terminal_handoff_registry.reservation_token = 0;
+        notify_terminal_registry();
+        unlock_terminal_registry();
+        errno = EBUSY;
+        return false;
+    }
+
     const bool foreground_set =
         set_terminal_foreground_group(fd, child_pgid);
     if (foreground_set)
@@ -434,12 +464,16 @@ bool commit_terminal_handoff_impl(
         terminal_handoff_registry.restore_pgid = restore_pgid;
         terminal_handoff_registry.restore_attributes = restore_attributes;
         terminal_handoff_registry.attributes_valid = true;
+        terminal_handoff_registry.state = detail::TerminalOwnerState::child_process;
     }
     terminal_handoff_registry.reservation_active = false;
     terminal_handoff_registry.reservation_token = 0;
+    terminal_handoff_registry.curses_handoff_prepared = false;
+    terminal_handoff_registry.curses_handoff_token = 0;
     if (!foreground_set)
     {
-        terminal_handoff_registry.terminal = {};
+        if (!terminal_handoff_registry.curses_session_active)
+            terminal_handoff_registry.terminal = {};
     }
     notify_terminal_registry();
     unlock_terminal_registry();
@@ -850,6 +884,18 @@ bool foreground_terminal_impl(TerminalHandoff &terminal,
         return false;
     }
 
+    if (terminal_handoff_registry.curses_session_active &&
+        !terminal_handoff_registry.curses_foreground_resume_prepared)
+    {
+        if (foreground_pgid != child_pgid && terminal.restore_pgid > 0)
+            set_terminal_foreground_group(terminal.fd, terminal.restore_pgid);
+        if (terminal.attributes_valid)
+            set_terminal_attributes(terminal.fd, terminal.restore_attributes);
+        unlock_terminal_registry();
+        errno = EBUSY;
+        return false;
+    }
+
     if (terminal_handoff_registry.owner_pgid > 0 &&
         terminal_handoff_registry.owner_pgid != child_pgid)
     {
@@ -861,12 +907,159 @@ bool foreground_terminal_impl(TerminalHandoff &terminal,
         terminal.restore_attributes;
     terminal_handoff_registry.attributes_valid = terminal.attributes_valid;
     terminal_handoff_registry.terminal = identity;
+    terminal_handoff_registry.state = detail::TerminalOwnerState::child_process;
+    terminal_handoff_registry.curses_foreground_resume_prepared = false;
     notify_terminal_registry();
 
     terminal.owner_pgid = child_pgid;
     terminal.active = true;
     unlock_terminal_registry();
     return true;
+}
+
+bool begin_curses_session_impl(int fd, pid_t parent_pgid) noexcept
+{
+    if (fd < 0 || parent_pgid <= 0 || !lock_terminal_registry())
+        return false;
+    if (terminal_handoff_registry.reservation_active ||
+        terminal_handoff_registry.state != detail::TerminalOwnerState::normal ||
+        terminal_handoff_registry.owner_pgid > 0 ||
+        terminal_handoff_registry.curses_session_active)
+    {
+        unlock_terminal_registry();
+        errno = EBUSY;
+        return false;
+    }
+    TerminalIdentity identity;
+    const pid_t foreground = get_terminal_foreground_group(fd);
+    if (!terminal_identity(fd, identity) || foreground < 0)
+    {
+        unlock_terminal_registry();
+        return false;
+    }
+    if (foreground != parent_pgid)
+    {
+        unlock_terminal_registry();
+        errno = EBUSY;
+        return false;
+    }
+    terminal_handoff_registry.terminal = identity;
+    terminal_handoff_registry.restore_pgid = parent_pgid;
+    terminal_handoff_registry.curses_session_active = true;
+    terminal_handoff_registry.state = detail::TerminalOwnerState::curses;
+    notify_terminal_registry();
+    unlock_terminal_registry();
+    return true;
+}
+
+void end_curses_session_impl() noexcept
+{
+    if (!lock_terminal_registry())
+        return;
+    terminal_handoff_registry.curses_session_active = false;
+    terminal_handoff_registry.curses_handoff_prepared = false;
+    terminal_handoff_registry.curses_handoff_token = 0;
+    terminal_handoff_registry.curses_foreground_resume_prepared = false;
+    if (terminal_handoff_registry.state == detail::TerminalOwnerState::curses ||
+        terminal_handoff_registry.state ==
+            detail::TerminalOwnerState::terminal_reclaimed_curses_pending)
+    {
+        terminal_handoff_registry.state = detail::TerminalOwnerState::normal;
+        terminal_handoff_registry.restore_pgid = -1;
+        terminal_handoff_registry.terminal = {};
+    }
+    notify_terminal_registry();
+    unlock_terminal_registry();
+}
+
+bool curses_session_active_impl() noexcept
+{
+    if (!lock_terminal_registry())
+        return true; // conservateur: ne jamais autoriser un handoff ambigu
+    const bool active = terminal_handoff_registry.curses_session_active;
+    unlock_terminal_registry();
+    return active;
+}
+
+detail::TerminalOwnerState terminal_owner_state_impl() noexcept
+{
+    if (!lock_terminal_registry())
+        return detail::TerminalOwnerState::child_process;
+    const auto state = terminal_handoff_registry.state;
+    unlock_terminal_registry();
+    return state;
+}
+
+bool mark_curses_handoff_prepared_impl(unsigned long token) noexcept
+{
+    if (token == 0 || !lock_terminal_registry())
+        return false;
+    const bool ok = terminal_handoff_registry.curses_session_active &&
+                    terminal_handoff_registry.state == detail::TerminalOwnerState::curses &&
+                    terminal_handoff_registry.reservation_active &&
+                    terminal_handoff_registry.reservation_token == token;
+    if (ok)
+    {
+        terminal_handoff_registry.curses_handoff_prepared = true;
+        terminal_handoff_registry.curses_handoff_token = token;
+    }
+    unlock_terminal_registry();
+    if (!ok)
+        errno = EBUSY;
+    return ok;
+}
+
+void cancel_curses_handoff_prepared_impl(unsigned long token) noexcept
+{
+    if (!lock_terminal_registry())
+        return;
+    if (terminal_handoff_registry.curses_handoff_prepared &&
+        terminal_handoff_registry.curses_handoff_token == token)
+    {
+        terminal_handoff_registry.curses_handoff_prepared = false;
+        terminal_handoff_registry.curses_handoff_token = 0;
+    }
+    unlock_terminal_registry();
+}
+
+bool complete_curses_restore_impl() noexcept
+{
+    if (!lock_terminal_registry())
+        return false;
+    const bool ok = terminal_handoff_registry.curses_session_active &&
+                    terminal_handoff_registry.state ==
+                        detail::TerminalOwnerState::terminal_reclaimed_curses_pending;
+    if (ok)
+    {
+        terminal_handoff_registry.state = detail::TerminalOwnerState::curses;
+        notify_terminal_registry();
+    }
+    unlock_terminal_registry();
+    if (!ok)
+        errno = EBUSY;
+    return ok;
+}
+
+bool mark_curses_foreground_resume_prepared_impl() noexcept
+{
+    if (!lock_terminal_registry())
+        return false;
+    const bool ok = terminal_handoff_registry.curses_session_active &&
+                    terminal_handoff_registry.state == detail::TerminalOwnerState::curses;
+    if (ok)
+        terminal_handoff_registry.curses_foreground_resume_prepared = true;
+    unlock_terminal_registry();
+    if (!ok)
+        errno = EBUSY;
+    return ok;
+}
+
+void cancel_curses_foreground_resume_prepared_impl() noexcept
+{
+    if (!lock_terminal_registry())
+        return;
+    terminal_handoff_registry.curses_foreground_resume_prepared = false;
+    unlock_terminal_registry();
 }
 
 void restore_terminal_impl(TerminalHandoff &terminal) noexcept
@@ -888,6 +1081,51 @@ void restore_terminal_impl(TerminalHandoff &terminal) noexcept
 
 namespace detail
 {
+
+bool begin_curses_session(int fd, pid_t parent_pgid) noexcept
+{
+    return begin_curses_session_impl(fd, parent_pgid);
+}
+
+void end_curses_session() noexcept
+{
+    end_curses_session_impl();
+}
+
+bool curses_session_active() noexcept
+{
+    return curses_session_active_impl();
+}
+
+TerminalOwnerState terminal_owner_state() noexcept
+{
+    return terminal_owner_state_impl();
+}
+
+bool mark_curses_handoff_prepared(unsigned long token) noexcept
+{
+    return mark_curses_handoff_prepared_impl(token);
+}
+
+void cancel_curses_handoff_prepared(unsigned long token) noexcept
+{
+    cancel_curses_handoff_prepared_impl(token);
+}
+
+bool complete_curses_restore() noexcept
+{
+    return complete_curses_restore_impl();
+}
+
+bool mark_curses_foreground_resume_prepared() noexcept
+{
+    return mark_curses_foreground_resume_prepared_impl();
+}
+
+void cancel_curses_foreground_resume_prepared() noexcept
+{
+    cancel_curses_foreground_resume_prepared_impl();
+}
 
 TerminalReservationResult reserve_terminal_handoff(
     int fd, pid_t parent_pgid, unsigned long &token,

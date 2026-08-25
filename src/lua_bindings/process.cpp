@@ -1,3 +1,4 @@
+#include "curses.hpp"
 #include "process.hpp"
 #include "process_common.hpp"
 #include "lua_utils.hpp"
@@ -456,12 +457,14 @@ bool apply_wait_status(Process *process, int status)
         process->stopped = false;
         babet_process::close_fd(process->stdin_fd);
         restore_process_terminal(process);
+        babet_curses::service_terminal_events();
         return true;
     }
     if (WIFSTOPPED(status))
     {
         process->stopped = true;
         reclaim_process_terminal(process);
+        babet_curses::service_terminal_events();
         return true;
     }
 #ifdef WIFCONTINUED
@@ -1042,9 +1045,20 @@ int process_resume(lua_State *L)
         return push_fail_protected(L, "not_interactive");
     }
 
+    babet_curses::HandoffPrepareResult curses_prepare =
+        babet_curses::HandoffPrepareResult::not_active;
+    if (foreground)
+    {
+        std::string curses_error;
+        curses_prepare = babet_curses::prepare_foreground_resume(curses_error);
+        if (curses_prepare == babet_curses::HandoffPrepareResult::error)
+            return push_fail_protected(L, curses_error);
+    }
+
     if (foreground &&
         !babet_process::foreground_terminal(process->terminal, process->pid))
     {
+        babet_curses::cancel_foreground_resume();
         const std::string terminal_error =
             std::string("process: cannot foreground child: ") +
             std::strerror(errno);
@@ -1057,6 +1071,7 @@ int process_resume(lua_State *L)
         if (foreground)
         {
             reclaim_process_terminal(process);
+            babet_curses::service_terminal_events();
         }
         const std::string signal_error =
             std::string("process: cannot continue child: ") +
@@ -1119,6 +1134,7 @@ int terminate_process(lua_State *L, Process *process, int signal,
     process->status_valid = true;
     babet_process::close_fd(process->stdin_fd);
     restore_process_terminal(process);
+    babet_curses::service_terminal_events();
     return push_process_result_protected(L, process);
 }
 
@@ -1192,6 +1208,7 @@ void cleanup_process(Process *process) noexcept
     }
 
     restore_process_terminal(process);
+    babet_curses::service_terminal_events();
     babet_process::close_fd(process->stdin_fd);
     babet_process::close_fd(process->stdout_fd);
     babet_process::close_fd(process->stderr_fd);

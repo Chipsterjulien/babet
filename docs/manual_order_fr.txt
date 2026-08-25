@@ -21,6 +21,7 @@ docs/fr/security.md
 docs/fr/modules/archive.md
 docs/fr/modules/base64.md
 docs/fr/modules/compression.md
+docs/fr/modules/curses.md
 docs/fr/modules/argparse.md
 docs/fr/modules/exec.md
 docs/fr/modules/pipeline.md

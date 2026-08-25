@@ -140,7 +140,8 @@ verify_sha256() {
 # incrémental réutiliserait alors un objet obsolète malgré un contenu modifié.
 #
 # On calcule donc une empreinte du contenu et des noms de tous les fichiers de
-# src/ ainsi que de CMakeLists.txt. Si elle diffère de celle du dernier build
+# src/, du header public include/ et de CMakeLists.txt. Si elle diffère de celle
+# du dernier build
 # réussi (ou si le cache est antérieur à ce mécanisme), seul le build CMake de
 # Babet est nettoyé. Les dépendances coûteuses restent en cache.
 compute_project_sources_sha256() {
@@ -173,6 +174,9 @@ compute_project_sources_sha256() {
         {
             printf '%s\0' "CMakeLists.txt"
             find src -type f -print0
+            if [ -d include ]; then
+                find include -type f -print0
+            fi
         } | sort -z
     )
 
@@ -405,6 +409,30 @@ RE2_INCLUDE="${RE2_INSTALL_DIR}/include"
 RE2_CMAKE_DIR="${RE2_INSTALL_DIR}/lib/cmake/re2"
 RE2_PROFILE_FILE="${RE2_CMAKE_BUILD_DIR}/.babet-build-profile"
 RE2_BUILD_PROFILE="re2=${RE2_VERSION};abseil=${ABSL_VERSION};icu=OFF;shared=OFF;tests=OFF"
+#
+# ncursesw : interface terminal plein écran. La bibliothèque est compilée
+# localement en statique et en mode wide-character. Un petit jeu d'entrées
+# terminfo de secours est compilé directement dans libncursesw afin que le
+# binaire Babet reste autonome lorsqu'une base terminfo système est absente.
+NCURSES_VERSION="6.6"
+NCURSES_DIR="ncurses-${NCURSES_VERSION}"
+NCURSES_TAR="${NCURSES_DIR}.tar.gz"
+NCURSES_URLS=(
+    "https://invisible-island.net/archives/ncurses/${NCURSES_TAR}"
+    "https://ftp.gnu.org/gnu/ncurses/${NCURSES_TAR}"
+)
+NCURSES_SHA256="355b4cbbed880b0381a04c46617b7656e362585d52e9cf84a67e2009b749ff11"
+NCURSES_ROOT="${BUILD_DIR}/ncurses"
+NCURSES_SOURCE_DIR="${NCURSES_ROOT}/${NCURSES_DIR}"
+NCURSES_BOOTSTRAP_DIR="${NCURSES_ROOT}/bootstrap-tools"
+NCURSES_BOOTSTRAP_TIC="${NCURSES_BOOTSTRAP_DIR}/progs/tic"
+NCURSES_BOOTSTRAP_INFOCMP="${NCURSES_BOOTSTRAP_DIR}/progs/infocmp"
+NCURSES_BUILD_DIR="${NCURSES_ROOT}/build"
+NCURSES_LIB="${NCURSES_BUILD_DIR}/lib/libncursesw.a"
+NCURSES_INCLUDE="${NCURSES_BUILD_DIR}/include"
+NCURSES_FALLBACKS="linux,vt100,xterm,xterm-256color,screen,screen-256color,tmux,tmux-256color"
+NCURSES_PROFILE_FILE="${NCURSES_BUILD_DIR}/.babet-build-profile"
+NCURSES_BUILD_PROFILE="ncurses=${NCURSES_VERSION};widec=ON;static=ON;gpm=OFF;sigwinch=OFF;cxx_binding=OFF;fallback_tools=self-built;fallback_workdir=space-free;fallbacks=${NCURSES_FALLBACKS}"
 #
 # libarchive : backend multi-format introduit en 2.6.0 et
 # réutilisé dans les versions 2.7.0 et 2.8.0. Il est compilé avec les
@@ -925,6 +953,141 @@ else
     echo "RE2 ${RE2_VERSION} est déjà compilé."
 fi
 
+# Compiler ncursesw localement. Les programmes auxiliaires éventuellement
+# construits (tic/infocmp) ne sont que des outils de build nécessaires à la
+# génération des fallbacks ; ils ne sont jamais installés ni embarqués à côté
+# de Babet.
+NCURSES_REBUILD=0
+if [ ! -f "${NCURSES_LIB}" ] || \
+   [ ! -f "${NCURSES_INCLUDE}/curses.h" ] || \
+   [ ! -f "${NCURSES_INCLUDE}/term.h" ] || \
+   [ ! -f "${NCURSES_PROFILE_FILE}" ] || \
+   [ "$(cat "${NCURSES_PROFILE_FILE}" 2>/dev/null || true)" != \
+     "${NCURSES_BUILD_PROFILE}" ]; then
+    NCURSES_REBUILD=1
+fi
+
+if [ "${NCURSES_REBUILD}" -eq 1 ]; then
+    echo "Compilation de ncursesw ${NCURSES_VERSION} (statique, UTF-8, terminfo fallback)..."
+    mkdir -p "${NCURSES_ROOT}" "${DOWNLOAD_DIR}"
+    if [ ! -f "${DOWNLOAD_DIR}/${NCURSES_TAR}" ]; then
+        if ! download_with_fallback "${DOWNLOAD_DIR}/${NCURSES_TAR}" \
+                "ncurses ${NCURSES_VERSION}" "${NCURSES_URLS[@]}"; then
+            echo "Échec du téléchargement de ncurses ${NCURSES_VERSION}."
+            echo "Place ${NCURSES_TAR} dans ${DOWNLOAD_DIR}/ puis relance le script."
+            exit 1
+        fi
+    fi
+    verify_sha256 "${DOWNLOAD_DIR}/${NCURSES_TAR}" \
+        "${NCURSES_SHA256}" "ncurses"
+
+    # Une extraction interrompue ne doit jamais devenir un faux cache valide.
+    # configure dépend aussi de ses auxiliaires Autoconf (install-sh,
+    # config.guess et config.sub) : un arbre qui en manque un est ré-extrait
+    # atomiquement au lieu d'être réutilisé comme faux cache complet.
+    if ! babet_prepare_ncurses_source "${NCURSES_SOURCE_DIR}" \
+            "${NCURSES_ROOT}" "${DOWNLOAD_DIR}/${NCURSES_TAR}" \
+            "${NCURSES_DIR}"; then
+        echo "Échec : archive ncurses invalide, incomplète ou extraction interrompue."
+        exit 1
+    fi
+
+    # ncurses génère fallback.c avant que les tic/infocmp du build final ne
+    # soient disponibles. S'appuyer sur /usr/bin/tic rendrait le résultat
+    # dépendant de la version ncurses de la machine de build (et les versions
+    # anciennes ne savent pas forcément traiter terminfo.src 6.6). Construire
+    # donc d'abord les outils 6.6 sans fallbacks, puis les utiliser explicitement
+    # pour le build final.
+    rm -rf "${NCURSES_BOOTSTRAP_DIR}" "${NCURSES_BUILD_DIR}"
+    mkdir -p "${NCURSES_BOOTSTRAP_DIR}"
+    (
+        cd "${NCURSES_BOOTSTRAP_DIR}" || exit 1
+        "../${NCURSES_DIR}/configure" \
+            --enable-widec \
+            --with-normal \
+            --without-shared \
+            --without-debug \
+            --without-ada \
+            --without-cxx-binding \
+            --without-gpm \
+            --disable-sigwinch \
+            --without-tests
+        make -j"$(nproc)"
+    )
+
+    if [ ! -x "${NCURSES_BOOTSTRAP_TIC}" ] || \
+       [ ! -x "${NCURSES_BOOTSTRAP_INFOCMP}" ]; then
+        echo "Échec : outils ncurses 6.6 de bootstrap (tic/infocmp) absents."
+        exit 1
+    fi
+
+    # MKfallback.sh 6.6 construit son répertoire terminfo temporaire à
+    # partir de `pwd`, puis transmet encore ce chemin à tic sans guillemets.
+    # Il ne suffit donc pas que tic/infocmp aient un chemin sans espace : le
+    # répertoire de build final lui-même doit être hors du checkout. Construire
+    # la phase avec fallbacks entièrement sous /tmp, avec des liens sans espace
+    # vers la source et les outils 6.6, puis publier seulement lib/ + include/
+    # dans le cache Babet après succès complet.
+    NCURSES_FINAL_WORKSPACE="$(babet_prepare_ncurses_final_workspace \
+        "${NCURSES_SOURCE_DIR}" "${NCURSES_BOOTSTRAP_TIC}" \
+        "${NCURSES_BOOTSTRAP_INFOCMP}")" || {
+        echo "Échec : impossible de préparer l'espace de travail ncurses final."
+        exit 1
+    }
+    trap 'rm -rf "${NCURSES_FINAL_WORKSPACE:-}"' EXIT
+    trap 'rm -rf "${NCURSES_FINAL_WORKSPACE:-}"; exit 1' HUP INT TERM
+
+    if ! (
+        cd "${NCURSES_FINAL_WORKSPACE}/build" || exit 1
+        ../source/configure \
+            --enable-widec \
+            --with-normal \
+            --without-shared \
+            --without-debug \
+            --without-ada \
+            --without-cxx-binding \
+            --without-gpm \
+            --disable-sigwinch \
+            --without-tests \
+            --with-tic-path="${NCURSES_FINAL_WORKSPACE}/tools/tic" \
+            --with-infocmp-path="${NCURSES_FINAL_WORKSPACE}/tools/infocmp" \
+            --with-fallbacks="${NCURSES_FALLBACKS}"
+        make -j"$(nproc)"
+    ); then
+        rm -rf "${NCURSES_FINAL_WORKSPACE}"
+        trap - EXIT HUP INT TERM
+        echo "Échec : compilation finale de ncursesw avec fallbacks."
+        exit 1
+    fi
+
+    NCURSES_PUBLISH_DIR="${NCURSES_ROOT}/.build-publish-$$"
+    rm -rf "${NCURSES_PUBLISH_DIR}"
+    mkdir -p "${NCURSES_PUBLISH_DIR}/lib"
+    cp "${NCURSES_FINAL_WORKSPACE}/build/lib/libncursesw.a" \
+       "${NCURSES_PUBLISH_DIR}/lib/libncursesw.a"
+    cp -aL "${NCURSES_FINAL_WORKSPACE}/build/include" \
+        "${NCURSES_PUBLISH_DIR}/include"
+    printf '%s\n' "${NCURSES_BUILD_PROFILE}" > \
+        "${NCURSES_PUBLISH_DIR}/.babet-build-profile"
+
+    if [ ! -f "${NCURSES_PUBLISH_DIR}/lib/libncursesw.a" ] || \
+       [ ! -f "${NCURSES_PUBLISH_DIR}/include/curses.h" ] || \
+       [ ! -f "${NCURSES_PUBLISH_DIR}/include/term.h" ]; then
+        rm -rf "${NCURSES_PUBLISH_DIR}" "${NCURSES_FINAL_WORKSPACE}"
+        trap - EXIT HUP INT TERM
+        echo "Échec : build ncursesw statique incomplet."
+        exit 1
+    fi
+
+    rm -rf "${NCURSES_BUILD_DIR}"
+    mv "${NCURSES_PUBLISH_DIR}" "${NCURSES_BUILD_DIR}"
+    rm -rf "${NCURSES_FINAL_WORKSPACE}"
+    trap - EXIT HUP INT TERM
+    echo "ncursesw ${NCURSES_VERSION} est compilé avec fallbacks terminfo."
+else
+    echo "ncursesw ${NCURSES_VERSION} est déjà compilé avec fallbacks terminfo."
+fi
+
 # Installer et compiler libarchive si nécessaire.
 #
 # La configuration est volontairement minimale : bibliothèque statique,
@@ -1304,6 +1467,8 @@ cmake "$SCRIPT_DIR" \
     -DABSL_CMAKE_DIR="${ABSL_CMAKE_DIR}" \
     -DRE2_CMAKE_DIR="${RE2_CMAKE_DIR}" \
     -DRE2_INCLUDE="${RE2_INCLUDE}" \
+    -DNCURSES_LIB="${NCURSES_LIB}" \
+    -DNCURSES_INCLUDE="${NCURSES_INCLUDE}" \
     -DJSON_INCLUDE="${JSON_INSTALL_DIR}" \
     -DHTTPLIB_INCLUDE="${HTTPLIB_INSTALL_DIR}" \
     -DTOMLPP_INCLUDE="${TOMLPP_INSTALL_DIR}" \
@@ -1349,6 +1514,47 @@ if [ -d "${SCRIPT_DIR}/examples" ]; then
 fi
 
 echo "Build OK. Binaire prêt dans ${SCRIPT_DIR}/test/${PROJECT_NAME}"
+if [ -f "${PROJECT_BUILD_DIR}/libbabet.a" ]; then
+    echo "Embedding expérimental : ${PROJECT_BUILD_DIR}/libbabet.a"
+    echo "Header C               : ${SCRIPT_DIR}/include/babet/babet.h"
+
+    # Le SDK autonome est un artefact du build normal uniquement. Un build
+    # sanitizer produit une libbabet instrumentée destinée aux tests in-tree,
+    # pas un paquet à redistribuer ou à lier sans les flags ASan/UBSan.
+    if [ "${ENABLE_SANITIZERS}" -eq 0 ]; then
+        EMBEDDING_SDK_DIR="${BUILD_DIR}/embedding-sdk"
+        mapfile -d '' -t ABSL_STATIC_LIBS < <(
+            find "${ABSL_INSTALL_DIR}/lib" -maxdepth 1 -type f \
+                -name 'libabsl_*.a' -print0 | sort -z
+        )
+        if [ "${#ABSL_STATIC_LIBS[@]}" -eq 0 ]; then
+            echo "Échec : aucune archive statique Abseil disponible pour le SDK d'embedding."
+            exit 1
+        fi
+
+        if ! bash "${SCRIPT_DIR}/tools/create_embedding_sdk.sh" \
+            "${EMBEDDING_SDK_DIR}" \
+            "${SCRIPT_DIR}/include/babet/babet.h" \
+            "${PROJECT_BUILD_DIR}/libbabet.a" \
+            "${LUA_LIB}" \
+            "${NCURSES_LIB}" \
+            "${OPENSSL_PATH}" \
+            "${CRYPTO_PATH}" \
+            "${LIBARCHIVE_LIB}" \
+            "${ZLIB_LIB}" \
+            "${XZ_LIB}" \
+            "${BZIP2_LIB}" \
+            "${ZSTD_LIB}" \
+            "${RE2_LIB}" \
+            "${ABSL_STATIC_LIBS[@]}"; then
+            echo "Échec de la création du SDK statique d'embedding."
+            exit 1
+        fi
+        echo "SDK embedding autonome : ${EMBEDDING_SDK_DIR}"
+    else
+        echo "SDK embedding autonome : non généré pour le build ASan/UBSan"
+    fi
+fi
 
 # Si --run : lance le binaire sur le dossier test
 if [ "${RUN_AFTER_BUILD}" -eq 1 ]; then

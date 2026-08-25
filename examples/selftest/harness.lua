@@ -27,6 +27,12 @@ function Harness.new(options)
     local self = setmetatable({
         pass = 0,
         fail = 0,
+        category_stats = {
+            common = { pass = 0, fail = 0 },
+            folder = { pass = 0, fail = 0 },
+            embedded = { pass = 0, fail = 0 },
+            ["single-run"] = { pass = 0, fail = 0 },
+        },
         start_dir = start_dir,
         sandbox = options.sandbox or "_babet_selftest",
     }, Harness)
@@ -35,15 +41,30 @@ function Harness.new(options)
         return self.sandbox .. "/" .. name
     end
 
-    self.ok = function(name, condition, detail)
+    local function record_result(category, name, condition, detail)
+        local stats = self.category_stats[category]
+        if not stats then
+            error("unknown self-test category '" .. tostring(category) .. "'", 2)
+        end
+
         if condition then
             self.pass = self.pass + 1
+            stats.pass = stats.pass + 1
             print("[PASS] " .. name)
         else
             self.fail = self.fail + 1
+            stats.fail = stats.fail + 1
             print("[FAIL] " .. name
                 .. (detail and ("  -> " .. tostring(detail)) or ""))
         end
+    end
+
+    self.ok = function(name, condition, detail)
+        record_result("common", name, condition, detail)
+    end
+
+    self.ok_in = function(category, name, condition, detail)
+        record_result(category, name, condition, detail)
     end
 
     self.ok_val = function(name, value, err, validator)
@@ -192,6 +213,7 @@ end
 function Harness:environment(context)
     local env = {
         ok = self.ok,
+        ok_in = self.ok_in,
         ok_val = self.ok_val,
         ok_act = self.ok_act,
         ok_fail = self.ok_fail,
@@ -250,10 +272,25 @@ function Harness:teardown()
 end
 
 function Harness:finish()
+    local categories = {
+        { key = "common", label = "communs" },
+        { key = "folder", label = "dossier" },
+        { key = "embedded", label = "embarqué" },
+        { key = "single-run", label = "une seule exécution" },
+    }
+
     print("")
     print("==========================================")
     print(string.format("Résultat : %d PASS / %d FAIL",
         self.pass, self.fail))
+    print("Résultat par catégorie :")
+    for _, category in ipairs(categories) do
+        local stats = self.category_stats[category.key]
+        if stats.pass + stats.fail > 0 then
+            print(string.format("  [%s] %-20s %d PASS / %d FAIL",
+                category.key, category.label .. " :", stats.pass, stats.fail))
+        end
+    end
     print("==========================================")
 
     if self.fail > 0 then

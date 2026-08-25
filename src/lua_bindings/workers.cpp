@@ -9,6 +9,7 @@
 #include "workers_serialization_budget.hpp"
 #include "../project_core/bundled_modules.hpp"
 #include "../project_core/embedded_searcher.hpp"
+#include "../project_core/runtime_registration.hpp"
 
 #include <pthread.h>
 #include <signal.h>
@@ -36,11 +37,6 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-
-// Forward déclaration de register_babet, défini dans main.cpp.
-// Pas d'extern "C" : fonction C++ standard, le linker la résout par
-// mangling C++ comme partout dans le codebase.
-void register_babet(lua_State *L);
 
 namespace
 {
@@ -1898,23 +1894,7 @@ namespace
                 return;
             }
 
-            lua_getglobal(state, "package");
-            lua_getfield(state, -1, "path");
-            if (lua_type(state, -1) == LUA_TSTRING)
-            {
-                lua_pushlstring(state, package_prefix.data(),
-                                package_prefix.size());
-                lua_insert(state, -2); // package, prefix, oldpath
-                lua_concat(state, 2);  // package, prefix .. oldpath
-            }
-            else
-            {
-                lua_pop(state, 1);
-                lua_pushlstring(state, package_prefix.data(),
-                                package_prefix.size());
-            }
-            lua_setfield(state, -2, "path");
-            lua_pop(state, 1);
+            prepend_babet_package_path(state, package_prefix);
         };
         setup_error.clear();
         if (!lua_run_setup_protected(
@@ -3439,12 +3419,14 @@ void register_workers(lua_State *L)
     lua_setfield(L, -2, "workers");
 }
 
-void set_workers_init_context(const std::string &projectDir,
-                              const std::string &exePath,
+void set_workers_init_context(std::string projectDir,
+                              std::string exePath,
                               bool embedded)
 {
-    g_init_ctx.projectDir = projectDir;
-    g_init_ctx.exePath = exePath;
-    g_init_ctx.embedded = embedded;
-    g_init_ctx.initialized = true;
+    // Build the replacement first so allocation failure cannot leave the
+    // process-wide worker init context half-updated. Moving the completed
+    // strings into place is allocation-free with the default allocator.
+    WorkerInitContext next{std::move(projectDir), std::move(exePath),
+                           embedded, true};
+    g_init_ctx = std::move(next);
 }
