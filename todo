@@ -519,6 +519,53 @@ Lot 11 — minimal native C/C++ plugin experiment
     bytes stripped, keeps FLTK static and leaves the normal CLI with zero GUI
     runtime dependency.
 
+Post-audit hardening — Lots 10/11
+----------------------------------
+
+[x] Reopen Lots 10/11 after the independent 2026-08-25 code audit instead of
+    publishing the first green implementation unchanged. Keep commit 90155eb as
+    the pre-audit checkpoint and apply hardening as a separate follow-up.
+[x] Make the plugin callback type distinct from embedding `babet_host_function`
+    and `noexcept` in C++; C++ plugins must catch their own exceptions because the
+    official statically-linked Babet C++ runtime cannot reliably catch across an
+    independently linked plugin DSO. Add a compile-fail regression and an
+    official-runtime caught-exception/recovery scenario.
+[x] Make host callbacks, plugin functions and `babet.plugin.load()` coroutine-safe
+    by validating runtime identity through the Lua registry shared by coroutines,
+    not by comparing the current `lua_State *` to the main thread pointer.
+[x] Harden the experimental plugin descriptor while it is still unpublished:
+    length-delimited metadata/function names avoid unbounded NUL scans, and an
+    explicit `function_struct_size` byte stride permits forward-compatible tails.
+[x] Reject duplicate shared objects by canonical/underlying-file identity and by
+    `dlopen()` handle identity, covering hardlinks and alternate DSO paths.
+[x] Make embedding host-function publication use raw Lua table operations and
+    reserve/commit ownership so user `__index`/`__newindex` metamethods cannot
+    observe a half-installed closure or retain a dangling registration.
+[x] Probe `--export-dynamic-symbol` support during CMake configuration and fail
+    with an explicit capability diagnostic on an unsupported linker.
+[x] Accept explicit Linux `.so` and `.so.<version>` filenames, remove the unused
+    internal `result_set` flag, update C/C++ examples, and document failed-probe
+    `dlclose()` constructor constraints.
+[x] Run the complete maintainer `./run_tests.sh` and separate
+    `./prototypes/fltk/test.sh` campaigns on the hardened candidate. Final
+    post-audit validation on 2026-08-25 is green: host-function contracts 58/0,
+    native-plugin structural contracts 98/0, embedding structural contracts
+    220/0, native-plugin runtime 5/0, embedding runtime 16/0, folder tests
+    3810/0, embedded tests 3796/0, embedded-via-PATH 3796/0 and 9/9 modes. The
+    stripped CLI measures 15,522,632 bytes (+525,504 bytes versus the published
+    v2.22.2 baseline). The FLTK regression remains green with `host_updates=2`,
+    measures 15,345,416 bytes stripped, keeps FLTK static and leaves the normal
+    CLI with zero GUI runtime dependency.
+[x] Request a second independent audit of the hardened source before any GitHub
+    push/release. The second audit on 2026-08-25 revalidated all six original
+    findings as corrected, confirmed the strengthened ABI/runtime regressions,
+    and concluded the code is ready to publish. Three final contract nits were
+    closed afterwards without architectural change: numeric-only `.so.<version>`
+    suffixes, `reserved == 0`, and local C++ callback symbols in the examples.
+[ ] Run one final maintainer `./run_tests.sh` and separate FLTK regression after
+    those three second-audit contract nits; no further external audit is required
+    unless that validation exposes a new issue.
+
 Deferred Windows port
 ---------------------
 

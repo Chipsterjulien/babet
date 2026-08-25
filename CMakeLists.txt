@@ -370,8 +370,22 @@ target_link_libraries(babet_embedding_cpp_callback_smoke PRIVATE
 )
 
 # Lot 11 native plugins resolve only this narrow C surface from the Babet
-# executable. Keep it exported in both normal and sanitizer builds; no shared
-# libbabet runtime is introduced.
+# executable. GNU ld added --export-dynamic-symbol in binutils 2.35; test the
+# capability explicitly so an older/incompatible linker fails with a useful
+# configuration diagnostic instead of a raw final-link error.
+include(CheckLinkerFlag)
+check_linker_flag(CXX
+    "-Wl,--export-dynamic-symbol=babet_version"
+    BABET_HAS_EXPORT_DYNAMIC_SYMBOL
+)
+if(NOT BABET_HAS_EXPORT_DYNAMIC_SYMBOL)
+    message(FATAL_ERROR
+        "Native plugin support requires a linker with "
+        "--export-dynamic-symbol support (GNU binutils >= 2.35 or compatible)")
+endif()
+
+# Keep only the narrow plugin callback surface exported in both normal and
+# sanitizer builds; no shared libbabet runtime is introduced.
 target_link_options(${PROJECT_NAME} PRIVATE
     -Wl,--export-dynamic-symbol=babet_version
     -Wl,--export-dynamic-symbol=babet_status_name

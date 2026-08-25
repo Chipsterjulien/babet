@@ -13,7 +13,6 @@ static babet_status echo_callback(babet_host_call *call, void *userdata)
     if (!arguments || arguments[0].type != BABET_VALUE_STRING)
         return BABET_STATUS_INVALID_ARGUMENT;
 
-    const char prefix[] = {'C', ':', '\0'};
     char output[128];
     if (arguments[0].as.string.length > sizeof(output) - 2)
     {
@@ -21,7 +20,7 @@ static babet_status echo_callback(babet_host_call *call, void *userdata)
         return BABET_STATUS_INVALID_ARGUMENT;
     }
 
-    memcpy(output, prefix, 2);
+    memcpy(output, "C:", 2);
     memcpy(output + 2, arguments[0].as.string.data,
            arguments[0].as.string.length);
     babet_value result = {0};
@@ -46,7 +45,6 @@ static babet_status add_callback(babet_host_call *call, void *userdata)
     result.as.integer = arguments[0].as.integer + arguments[1].as.integer;
     return babet_host_call_set_result(call, &result);
 }
-
 
 static babet_status version_callback(babet_host_call *call, void *userdata)
 {
@@ -77,17 +75,19 @@ static babet_status status_name_callback(babet_host_call *call, void *userdata)
 }
 
 static const babet_plugin_function_v1 functions[] = {
-    {"echo", echo_callback, NULL},
-    {"add", add_callback, NULL},
-    {"version", version_callback, NULL},
-    {"status_name", status_name_callback, NULL},
+    {{"echo", sizeof("echo") - 1}, echo_callback, NULL},
+    {{"add", sizeof("add") - 1}, add_callback, NULL},
+    {{"version", sizeof("version") - 1}, version_callback, NULL},
+    {{"status_name", sizeof("status_name") - 1}, status_name_callback, NULL},
 };
 
 static const babet_plugin_descriptor_v1 descriptor = {
     BABET_PLUGIN_ABI_VERSION_V1,
     (uint32_t)sizeof(babet_plugin_descriptor_v1),
-    "lot11-c-fixture",
-    "1.0.0",
+    (uint32_t)sizeof(babet_plugin_function_v1),
+    0,
+    {"lot11-c-fixture", sizeof("lot11-c-fixture") - 1},
+    {"1.0.0", sizeof("1.0.0") - 1},
     functions,
     sizeof(functions) / sizeof(functions[0]),
 };

@@ -9,7 +9,6 @@ struct babet_host_call
     size_t argument_count = 0;
     babet_value result{};
     babet_status setter_status = BABET_STATUS_OK;
-    bool result_set = false;
 
     void *owner = nullptr;
     bool (*is_active)(const babet_host_call *call) noexcept = nullptr;

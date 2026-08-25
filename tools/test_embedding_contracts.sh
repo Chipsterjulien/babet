@@ -251,6 +251,9 @@ require_grep 'embedding_cpp_callback_smoke' "CMakeLists.txt" "CMake builds the C
 require_grep 'babet_enable_sanitizers\(babet_embedding_cpp_callback_smoke\)' "CMakeLists.txt" "sanitizers cover the C++ host callback exception smoke"
 require_grep 'C\+\+ host callback exceptions are contained and the context recovers' "tools/test_embedding_runtime.sh" "runtime regression executes the C++ callback exception smoke"
 require_grep 'uncaught host callback failure' "tests/embedding_smoke.c" "C smoke verifies uncaught host failure conversion"
+require_grep 'coroutine\.wrap' "tests/embedding_smoke.c" "C smoke verifies host callbacks from Lua coroutines"
+require_grep 'host __newindex sentinel' "tests/embedding_smoke.c" "C smoke verifies raw host registration bypasses metamethods"
+require_grep 'kEmbeddingContextRegistryKey' "src/embedding/babet_c_api.cpp" "embedding callback identity is registry-scoped across coroutines"
 
 echo "embedding structural contracts: ${PASS} PASS / ${FAIL} FAIL"
 [ "${FAIL}" -eq 0 ]

@@ -8,6 +8,7 @@
 
 #include <dlfcn.h>
 
+#include <cctype>
 #include <cstddef>
 #include <cstring>
 #include <exception>
@@ -23,7 +24,7 @@
 struct NativePluginFunctionRegistration
 {
     std::string name;
-    babet_host_function function = nullptr;
+    babet_plugin_callback_v1 function = nullptr;
     void *userdata = nullptr;
     NativePluginRuntime *runtime = nullptr;
 };
@@ -44,6 +45,7 @@ int native_plugin_boundary(lua_State *state)
 constexpr std::size_t kMaxPluginNameLength = 128;
 constexpr std::size_t kMaxPluginVersionLength = 128;
 constexpr std::size_t kMaxFunctionNameLength = 128;
+char kNativePluginRuntimeRegistryKey;
 
 class DlHandleGuard
 {
@@ -83,49 +85,59 @@ bool valid_status(babet_status status) noexcept
     return false;
 }
 
-bool valid_function_name(const char *name) noexcept
+bool valid_function_name(std::string_view name) noexcept
 {
-    if (!name || name[0] == '\0')
+    if (name.empty() || name.size() > kMaxFunctionNameLength)
         return false;
 
-    const unsigned char first = static_cast<unsigned char>(name[0]);
+    const unsigned char first = static_cast<unsigned char>(name.front());
     if (!((first >= 'A' && first <= 'Z') ||
           (first >= 'a' && first <= 'z') || first == '_'))
         return false;
 
-    for (const unsigned char *cursor =
-             reinterpret_cast<const unsigned char *>(name + 1);
-         *cursor != 0; ++cursor)
+    for (std::size_t i = 1; i < name.size(); ++i)
     {
-        if (!((*cursor >= 'A' && *cursor <= 'Z') ||
-              (*cursor >= 'a' && *cursor <= 'z') ||
-              (*cursor >= '0' && *cursor <= '9') || *cursor == '_'))
+        const unsigned char ch = static_cast<unsigned char>(name[i]);
+        if (!((ch >= 'A' && ch <= 'Z') ||
+              (ch >= 'a' && ch <= 'z') ||
+              (ch >= '0' && ch <= '9') || ch == '_'))
             return false;
     }
 
-    static constexpr const char *lua_keywords[] = {
+    static constexpr std::string_view lua_keywords[] = {
         "and", "break", "do", "else", "elseif", "end", "false",
         "for", "function", "goto", "if", "in", "local", "nil",
         "not", "or", "repeat", "return", "then", "true", "until",
         "while"};
-    for (const char *keyword : lua_keywords)
+    for (const std::string_view keyword : lua_keywords)
     {
-        if (std::strcmp(name, keyword) == 0)
+        if (name == keyword)
             return false;
     }
     return true;
 }
 
-bool copy_bounded_string(const char *source, std::size_t maximum,
-                         std::string &destination)
+bool copy_bounded_view(const babet_string_view &source, std::size_t maximum,
+                       std::string &destination)
 {
-    if (!source)
+    if ((!source.data && source.length != 0) || source.length == 0 ||
+        source.length > maximum)
         return false;
-    const std::size_t length = ::strnlen(source, maximum + 1);
-    if (length == 0 || length > maximum)
+    if (std::memchr(source.data, '\0', source.length) != nullptr)
         return false;
-    destination.assign(source, length);
+    destination.assign(source.data, source.length);
     return true;
+}
+
+bool same_native_plugin_runtime(lua_State *state,
+                                const NativePluginRuntime *runtime) noexcept
+{
+    if (!runtime || !lua_checkstack(state, 1))
+        return false;
+    lua_rawgetp(state, LUA_REGISTRYINDEX, &kNativePluginRuntimeRegistryKey);
+    const bool same = lua_touserdata(state, -1) == runtime;
+    lua_pop(state, 1);
+    return same;
 }
 
 babet_status read_plugin_argument(lua_State *state, int index,
@@ -283,6 +295,62 @@ bool path_already_loaded(const NativePluginRuntime *runtime,
     return false;
 }
 
+bool same_file_already_loaded(const NativePluginRuntime *runtime,
+                              const std::filesystem::path &canonical_path)
+{
+    std::error_code error;
+    for (const std::string &loaded : runtime->loaded_paths_)
+    {
+        if (std::filesystem::equivalent(canonical_path, loaded, error))
+            return true;
+        error.clear();
+    }
+    return false;
+}
+
+bool handle_already_loaded(const NativePluginRuntime *runtime,
+                           void *handle) noexcept
+{
+    for (void *loaded : runtime->loaded_handles_)
+    {
+        if (loaded == handle)
+            return true;
+    }
+    return false;
+}
+
+bool valid_shared_object_filename(const std::filesystem::path &path)
+{
+    const std::string filename = path.filename().string();
+    const std::size_t marker = filename.rfind(".so");
+    if (marker == std::string::npos)
+        return false;
+
+    const std::size_t suffix = marker + 3;
+    if (suffix == filename.size())
+        return true;
+    if (filename[suffix] != '.' || suffix + 1 >= filename.size())
+        return false;
+
+    bool expecting_digit = true;
+    for (std::size_t i = suffix + 1; i < filename.size(); ++i)
+    {
+        const unsigned char ch = static_cast<unsigned char>(filename[i]);
+        if (std::isdigit(ch))
+        {
+            expecting_digit = false;
+            continue;
+        }
+        if (filename[i] == '.' && !expecting_digit)
+        {
+            expecting_digit = true;
+            continue;
+        }
+        return false;
+    }
+    return !expecting_digit;
+}
+
 std::string prepare_plugin(NativePluginRuntime *runtime,
                            std::string_view requested_path,
                            PreparedPlugin &prepared,
@@ -296,7 +364,11 @@ std::string prepare_plugin(NativePluginRuntime *runtime,
         return "babet.plugin.load: path must be a non-empty text path";
 
     std::error_code error;
-    const fs::path absolute = fs::absolute(fs::path(requested_path), error);
+    const fs::path requested_fs_path(requested_path);
+    if (!valid_shared_object_filename(requested_fs_path))
+        return "babet.plugin.load: native plugin path must end in .so or .so.<version>";
+
+    const fs::path absolute = fs::absolute(requested_fs_path, error);
     if (error)
         return "babet.plugin.load: unable to resolve plugin path: " + error.message();
 
@@ -306,18 +378,25 @@ std::string prepare_plugin(NativePluginRuntime *runtime,
 
     if (!fs::is_regular_file(canonical, error) || error)
         return "babet.plugin.load: plugin path is not a regular file";
-    if (canonical.extension() != ".so")
-        return "babet.plugin.load: native plugin path must end in .so";
 
     prepared.canonical_path = canonical.string();
-    if (path_already_loaded(runtime, prepared.canonical_path))
-        return "babet.plugin.load: this plugin is already loaded in this Lua runtime";
+    if (path_already_loaded(runtime, prepared.canonical_path) ||
+        same_file_already_loaded(runtime, canonical))
+        return "babet.plugin.load: this shared object is already loaded in this Lua runtime";
 
     ::dlerror();
     void *handle = ::dlopen(prepared.canonical_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle)
         return dl_error_message("babet.plugin.load: dlopen failed");
     DlHandleGuard handle_guard(handle);
+
+    // Linux/glibc can return the same handle for another pathname referring to
+    // an already-loaded DSO (for example a hardlink, bind mount, or a DSO that
+    // was previously reached as another plugin dependency). Path/inode checks
+    // above provide the common fast path; handle identity is the final runtime
+    // identity before any second Lua function table is created.
+    if (handle_already_loaded(runtime, handle))
+        return "babet.plugin.load: this shared object is already loaded in this Lua runtime";
 
     ::dlerror();
     void *symbol = ::dlsym(handle, BABET_PLUGIN_QUERY_SYMBOL_V1);
@@ -339,16 +418,25 @@ std::string prepare_plugin(NativePluginRuntime *runtime,
 
     constexpr std::size_t required_descriptor_size =
         offsetof(babet_plugin_descriptor_v1, function_count) + sizeof(size_t);
+    constexpr std::size_t required_function_size =
+        offsetof(babet_plugin_function_v1, userdata) + sizeof(void *);
+
     if (descriptor->abi_version != BABET_PLUGIN_ABI_VERSION_V1)
         return "babet.plugin.load: unsupported plugin ABI version";
     if (descriptor->struct_size < required_descriptor_size)
         return "babet.plugin.load: plugin descriptor is too small";
-    if (!copy_bounded_string(descriptor->name, kMaxPluginNameLength,
-                             prepared.name))
-        return "babet.plugin.load: plugin name is missing or too long";
-    if (!copy_bounded_string(descriptor->version, kMaxPluginVersionLength,
-                             prepared.version))
-        return "babet.plugin.load: plugin version is missing or too long";
+    if (descriptor->reserved != 0)
+        return "babet.plugin.load: plugin descriptor reserved field must be zero";
+    if (descriptor->function_struct_size < required_function_size ||
+        descriptor->function_struct_size > BABET_PLUGIN_MAX_FUNCTION_STRUCT_SIZE_V1 ||
+        descriptor->function_struct_size % alignof(babet_plugin_function_v1) != 0)
+        return "babet.plugin.load: incompatible plugin function declaration size";
+    if (!copy_bounded_view(descriptor->name, kMaxPluginNameLength,
+                           prepared.name))
+        return "babet.plugin.load: plugin name is missing, invalid or too long";
+    if (!copy_bounded_view(descriptor->version, kMaxPluginVersionLength,
+                           prepared.version))
+        return "babet.plugin.load: plugin version is missing, invalid or too long";
     if (descriptor->function_count == 0 ||
         descriptor->function_count > BABET_PLUGIN_MAX_FUNCTIONS_V1 ||
         !descriptor->functions)
@@ -358,24 +446,27 @@ std::string prepare_plugin(NativePluginRuntime *runtime,
     std::unordered_set<std::string> declared_names;
     declared_names.reserve(descriptor->function_count);
 
+    const auto *function_bytes =
+        reinterpret_cast<const unsigned char *>(descriptor->functions);
     for (std::size_t i = 0; i < descriptor->function_count; ++i)
     {
-        const babet_plugin_function_v1 &declared = descriptor->functions[i];
-        if (!valid_function_name(declared.name) ||
-            ::strnlen(declared.name, kMaxFunctionNameLength + 1) >
-                kMaxFunctionNameLength ||
-            !declared.function)
+        const auto *declared = reinterpret_cast<const babet_plugin_function_v1 *>(
+            function_bytes + i * descriptor->function_struct_size);
+
+        std::string function_name;
+        if (!copy_bounded_view(declared->name, kMaxFunctionNameLength,
+                               function_name) ||
+            !valid_function_name(function_name) || !declared->function)
             return "babet.plugin.load: invalid function declaration";
 
-        std::string function_name(declared.name);
         if (!declared_names.insert(function_name).second)
             return "babet.plugin.load: duplicate function name in descriptor";
 
         auto registration =
             std::make_unique<NativePluginFunctionRegistration>();
         registration->name = std::move(function_name);
-        registration->function = declared.function;
-        registration->userdata = declared.userdata;
+        registration->function = declared->function;
+        registration->userdata = declared->userdata;
         registration->runtime = runtime;
         prepared.functions.push_back(std::move(registration));
     }
@@ -457,7 +548,6 @@ babet_status native_plugin_copy_result(
         }
         }
         call->result = result;
-        call->result_set = true;
         call->setter_status = BABET_STATUS_OK;
         return BABET_STATUS_OK;
     }
@@ -506,9 +596,10 @@ int native_plugin_function_thunk(lua_State *state) noexcept
     auto *registration = static_cast<NativePluginFunctionRegistration *>(
         lua_touserdata(state, lua_upvalueindex(1)));
     NativePluginRuntime *runtime = registration ? registration->runtime : nullptr;
-    if (!registration || !registration->function || !runtime ||
-        runtime->state_ != state)
+    if (!registration || !registration->function || !runtime)
         return luaL_error(state, "babet plugin: invalid native function closure");
+    if (!same_native_plugin_runtime(state, runtime))
+        return luaL_error(state, "babet plugin: native function belongs to another Lua runtime");
 
     const int argument_count = lua_gettop(state);
     const char *argument_setup_error = nullptr;
@@ -556,28 +647,13 @@ int native_plugin_function_thunk(lua_State *state) noexcept
     runtime->active_call_ = &call;
     runtime->callback_active_ = true;
 
-    babet_status callback_status = BABET_STATUS_INTERNAL_ERROR;
-    try
-    {
-        callback_status = registration->function(&call, registration->userdata);
-    }
-    catch (const std::bad_alloc &)
-    {
-        callback_status = BABET_STATUS_OUT_OF_MEMORY;
-        set_callback_error(runtime,
-                           "plugin C++ callback crossed the ABI with std::bad_alloc");
-    }
-    catch (const std::exception &error)
-    {
-        callback_status = BABET_STATUS_INTERNAL_ERROR;
-        set_callback_error(runtime, error.what());
-    }
-    catch (...)
-    {
-        callback_status = BABET_STATUS_INTERNAL_ERROR;
-        set_callback_error(runtime,
-                           "plugin C++ callback crossed the ABI with an unknown exception");
-    }
+    // The v1 plugin callback type is noexcept in C++. The official Babet binary
+    // statically links libgcc/libstdc++, while ordinary C++ plugins usually use
+    // the shared runtimes, so a host-side catch is not a reliable cross-DSO
+    // exception boundary. Plugin authors must contain exceptions inside their
+    // callback and translate them to babet_status + babet_host_call_set_error().
+    babet_status callback_status =
+        registration->function(&call, registration->userdata);
 
     runtime->callback_active_ = false;
     runtime->active_call_ = nullptr;
@@ -613,8 +689,11 @@ int lua_native_plugin_load(lua_State *state)
 {
     auto *runtime = static_cast<NativePluginRuntime *>(
         lua_touserdata(state, lua_upvalueindex(1)));
-    if (!runtime || runtime->state_ != state)
+    if (!runtime)
         return push_fail_protected(state, "babet.plugin.load: invalid plugin runtime");
+    if (!same_native_plugin_runtime(state, runtime))
+        return push_fail_protected(state,
+                                   "babet.plugin.load: plugin runtime belongs to another Lua state");
     if (!lua_arity_is(state, 1) || !lua_is_strict_string(state, 1))
         return push_fail_protected(state, "babet.plugin.load: expected exactly one string path");
 
@@ -637,6 +716,7 @@ int lua_native_plugin_load(lua_State *state)
     runtime->functions_.reserve(runtime->functions_.size() +
                                 prepared.functions.size());
     runtime->loaded_paths_.reserve(runtime->loaded_paths_.size() + 1);
+    runtime->loaded_handles_.reserve(runtime->loaded_handles_.size() + 1);
 
     PluginResultBuilder builder{&prepared};
     const int result_count = lua_build_results_protected(state, builder, 2);
@@ -644,6 +724,7 @@ int lua_native_plugin_load(lua_State *state)
     for (auto &registration : prepared.functions)
         runtime->functions_.push_back(std::move(registration));
     runtime->loaded_paths_.push_back(std::move(prepared.canonical_path));
+    runtime->loaded_handles_.push_back(handle);
 
     // Successful plugins are deliberately never dlclose()'d. Their callback
     // code and plugin-owned userdata remain valid until process exit.
@@ -658,6 +739,12 @@ void register_native_plugin(lua_State *state, NativePluginRuntime *runtime,
 
     if (mode == NativePluginMode::allowed && runtime)
     {
+        // The registry is shared by every coroutine of one Lua global state.
+        // Store the runtime identity there so plugin.load() and plugin functions
+        // work from coroutines without accepting closures from another state.
+        lua_pushlightuserdata(state, runtime);
+        lua_rawsetp(state, LUA_REGISTRYINDEX, &kNativePluginRuntimeRegistryKey);
+
         lua_pushlightuserdata(state, runtime);
         lua_pushcclosure(state, native_plugin_boundary<lua_native_plugin_load>, 1);
     }

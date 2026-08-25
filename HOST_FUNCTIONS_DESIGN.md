@@ -49,7 +49,9 @@ non-nil field already present at the target `babet.host` key.
 
 The `babet.host` table is a reserved embedding namespace. Trusted Lua code can
 technically mutate normal Lua tables, but doing so is outside the host-function
-contract.
+contract. Registration itself deliberately uses raw Lua table operations, so a
+user-installed `__index`/`__newindex` metamethod cannot observe a half-installed
+closure or turn a failed registration into a dangling callback pointer.
 
 ## 4. Registration lifetime and ownership
 
@@ -73,9 +75,11 @@ the scalar arguments and invokes the registered callback immediately on the
 same thread that is executing the embedded Lua state.
 
 Because an embedded context is owner-thread-bound, host callbacks therefore run
-on that same owner thread. This is exactly what the FLTK prototype needs: the
-GUI thread owns `Fl::run()`, invokes Lua, and Lua can synchronously request a
-widget update on the same GUI thread.
+on that same owner thread. Calls from Lua coroutines are supported: coroutine
+`lua_State *` values are validated through an identity marker in the shared Lua
+registry rather than by pointer-equality with the main thread. This is exactly
+what the FLTK prototype needs: the GUI thread owns `Fl::run()`, invokes Lua, and
+Lua can synchronously request a widget update on the same GUI thread.
 
 Host callbacks are installed only in the main embedded Lua state. Worker states
 do not inherit them. A worker must communicate through the existing worker
@@ -171,13 +175,14 @@ widget through the new public API, proving recovery in both directions.
 ## 11. Plugin foundation consumed by Lot 11
 
 Lot 10 itself does **not** define a plugin ABI or load `.so` files. Lot 11 now
-reuses this exact scalar callback type in a separate versioned C plugin
-descriptor returned by `babet_plugin_query_v1()`. Plugin functions are exposed
-through the local table returned by `babet.plugin.load()` rather than injected
-into the embedding-only `babet.host` namespace.
+reuses the same `babet_host_call` scalar value/helpers through a separate
+`babet_plugin_callback_v1` type in a versioned C descriptor returned by
+`babet_plugin_query_v1()`. In C++ that plugin callback type is `noexcept`; it is
+deliberately distinct from the embedding-only `babet_host_function` type because
+the official Babet executable and a separately built plugin may use different
+C++ runtime/unwinder instances. Plugin functions are exposed through the local
+table returned by `babet.plugin.load()` rather than injected into `babet.host`.
 
 The important groundwork remains unchanged: value passage is scalar/C-only,
-`lua_State *` stays private and result strings are copied at the boundary. The
-Lot 11 ABI additionally forbids C++ exceptions/objects crossing between an
-independently built plugin and the Babet executable. See
+`lua_State *` stays private and result strings are copied at the boundary. See
 `NATIVE_PLUGIN_DESIGN.md`.

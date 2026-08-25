@@ -48,6 +48,10 @@ check "nested context entry is explicitly forbidden" contains "$DESIGN" 'BABET_S
 check "implementation stores host registrations in context" contains "$IMPL" 'host_functions'
 check "implementation uses Lua closures for registered functions" contains "$IMPL" 'lua_pushcclosure(state, host_function_thunk, 2)'
 check "implementation tracks active callback reentrancy" contains "$IMPL" 'host_callback_active'
+check "embedding callback identity uses shared Lua registry" contains "$IMPL" 'kEmbeddingContextRegistryKey'
+check "embedding callbacks accept coroutine lua_State values" bash -c "grep -Fq 'same_embedding_context' '$IMPL' && ! grep -Fq 'context->lua != state' '$IMPL'"
+check "host registration bypasses user metamethods" bash -c "grep -Fq 'lua_rawget(state, -2)' '$IMPL' && grep -Fq 'lua_rawset(state, -3)' '$IMPL'"
+check "host registration reserves ownership before Lua publication" contains "$IMPL" 'context->host_functions.reserve(context->host_functions.size() + 1)'
 check "implementation catches host std::exception" contains "$IMPL" 'catch (const std::exception &error)'
 check "implementation owns callback result strings" contains "$IMPL" 'host_result_string_storage'
 check "implementation owns callback diagnostics" contains "$IMPL" 'host_callback_error_storage'
@@ -58,6 +62,8 @@ check "C smoke covers binary-safe host result" contains "$SMOKE" 'H\\0I'
 check "C smoke covers host failure diagnostic" contains "$SMOKE" 'host callback sentinel'
 check "C smoke covers uncaught host failure conversion" contains "$SMOKE" 'uncaught host callback failure'
 check "C smoke proves recovery after uncaught host failure" contains "$SMOKE" 'host callback recovery after uncaught failure'
+check "C smoke covers host callbacks from coroutines" bash -c "grep -Fq 'coroutine.wrap' '$SMOKE' && grep -Fq 'coroutine.create' '$SMOKE'"
+check "C smoke covers hostile babet.host metamethod" contains "$SMOKE" 'host __newindex sentinel'
 check "C smoke verifies call_global reaches host by relative counter" bash -c "grep -Fq 'echo_calls_before_call_global' '$SMOKE' && grep -Fq 'echo_calls_before_call_global + 1' '$SMOKE'"
 check "C++ callback smoke exists" test -f "$CPP_SMOKE"
 check "C++ callback smoke throws across callback body" contains "$CPP_SMOKE" 'throw std::runtime_error'

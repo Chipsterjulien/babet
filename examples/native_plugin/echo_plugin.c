@@ -14,14 +14,16 @@ static babet_status echo(babet_host_call *call, void *userdata)
 }
 
 static const babet_plugin_function_v1 functions[] = {
-    {"echo", echo, 0},
+    {{"echo", sizeof("echo") - 1}, echo, 0},
 };
 
 static const babet_plugin_descriptor_v1 descriptor = {
     BABET_PLUGIN_ABI_VERSION_V1,
     (uint32_t)sizeof(babet_plugin_descriptor_v1),
-    "example-c",
-    "1.0.0",
+    (uint32_t)sizeof(babet_plugin_function_v1),
+    0,
+    {"example-c", sizeof("example-c") - 1},
+    {"1.0.0", sizeof("1.0.0") - 1},
     functions,
     1,
 };

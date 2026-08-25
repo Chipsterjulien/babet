@@ -31,6 +31,7 @@ public:
     babet_host_call *active_call_ = nullptr;
     bool callback_active_ = false;
     std::vector<std::string> loaded_paths_;
+    std::vector<void *> loaded_handles_;
 
     friend int lua_native_plugin_load(lua_State *state);
     friend int native_plugin_function_thunk(lua_State *state) noexcept;

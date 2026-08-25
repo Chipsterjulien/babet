@@ -16,8 +16,10 @@ Run one explicitly with the original Babet CLI:
 
 The `.so` files intentionally do not link against `libbabet.so`. At load time
 they resolve only the narrow `babet_host_call_*` C surface exported by the Babet
-executable. The C++ example uses `std::string` internally but copies its result
-through `babet_host_call_set_result()` before the temporary is destroyed.
+executable. The C++ example exposes an `extern "C"` `noexcept` callback, catches
+its own C++ exceptions, and uses `std::string` internally before copying the
+result through `babet_host_call_set_result()`. Babet does not rely on catching
+C++ exceptions across the plugin DSO boundary.
 
 Generated `--create-exe` applications, workers and external embedding hosts do
 not load native plugins in Lot 11.

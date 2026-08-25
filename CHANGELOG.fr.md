@@ -1,5 +1,13 @@
 # Journal des modifications
 
+
+### Validation finale du durcissement post-audit
+
+- La seconde revue indépendante des Lots 10/11 confirme les six corrections du premier audit et conclut que le code est prêt à publier.
+- La campagne mainteneur finale passe les contrats fonctions hôte à 58/0, plugins natifs à 98/0, embedding à 220/0, le runtime plugins à 5/0, le runtime embedding à 16/0 et conserve 3810/0 en dossier, 3796/0 en embarqué, 3796/0 via PATH et 9/9 modes.
+- Trois derniers détails de contrat sont fermés avant publication : seuls les suffixes versionnés numériques `.so.N[.N...]` sont acceptés, le champ ABI v1 `reserved` doit rester à zéro et les callbacks C++ d'exemple restent locaux au DSO au lieu d'être exportés.
+- Le contrat documente aussi explicitement que les longueurs annoncées par un plugin font partie du modèle de confiance : Babet les borne mais ne peut pas vérifier la taille réellement lisible derrière un pointeur fourni par le plugin.
+
 Ce fichier décrit les changements notables de Babet.
 
 Le projet suit le versionnage sémantique pour ses publications. Les notes de
@@ -10,6 +18,10 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ### Plugins natifs (Lot 11)
 
+- rouvre les Lots 10/11 pour durcissement post-audit avant publication : les callbacks C++ de plugin utilisent désormais un type distinct `babet_plugin_callback_v1` déclaré `noexcept` en C++, et les exemples/fixtures officiels interceptent leurs exceptions dans le plugin au lieu de compter sur un rattrapage non fiable entre runtimes C++ liés séparément ;
+- rend les callbacks hôte embedding, les fonctions plugin et `babet.plugin.load()` utilisables depuis les coroutines Lua grâce à une identité runtime stockée dans le registre Lua partagé ; l’enregistrement `babet.host` utilise maintenant des accès raw et un ownership reserve/commit pour qu’un `__newindex` hostile ne puisse pas conserver une closure pendante ;
+- durcit l’ABI plugin encore expérimentale avec noms/métadonnées à longueur explicite et stride explicite des déclarations de fonctions, dédoublonnage par fichier sous-jacent puis handle `dlopen()`, prise en charge de `.so.<version>`, et suppression du drapeau interne `result_set` inutilisé ;
+- ajoute des régressions pour le refus à la compilation d’un callback C++ non-`noexcept`, l’exception C++ interceptée dans le plugin puis récupération sur le build officiel, les coroutines, hardlinks, `.so` versionnés, longueurs de noms invalides et stride forward-compatible ; CMake sonde désormais la capacité `--export-dynamic-symbol` avant d’activer les plugins natifs.
 - La validation mainteneur de la Candidate 1 a atteint la régression runtime des plugins après compilation réussie, contrôle des exports ELF et absence de dépendance `libbabet.so`, puis a révélé uniquement un défaut de quoting shell dans `tools/test_native_plugin_runtime.sh` lorsque Babet se trouve sous un chemin contenant des espaces ; la Candidate 2 quote l’invocation de l’exécutable et ajoute un garde-fou structurel dédié.
 - la validation mainteneur finale du Lot 11 du 25/08/2026 est verte : contrats structurels plugins natifs 74 PASS / 0 FAIL, runtime plugins natifs 4 PASS / 0 FAIL, runtime embedding 16 PASS / 0 FAIL, packaging 8 PASS / 0 FAIL, campagne normale toujours à 3810/0 en mode dossier + 3796/0 embarqué + 3796/0 embarqué via PATH avec 9/9 modes, et CLI strippé à 15 510 344 octets (+513 216 octets par rapport à la base 2.22.2 publiée) ; la régression FLTK séparée reste verte avec `host_updates=2`, un compagnon strippé de 15 337 224 octets, FLTK statique et zéro dépendance GUI dans le CLI normal.
 - ajoute une ABI de plugin natif v1 Linux volontairement minuscule dans `include/babet/plugin.h` : un descripteur `babet_plugin_query_v1()` avec nom/version/fonctions copiés et le type scalaire `babet_host_function` existant ; aucun `lua_State`, objet STL/RTTI, exception C++ ou propriété d'allocation ne fait partie de l'ABI ;

@@ -58,23 +58,25 @@ typedef struct babet_value
 } babet_value;
 
 /*
- * Scalar native callback used by embedding host functions and the experimental
- * native plugin ABI. An embedding registration is invoked synchronously when
- * Lua calls babet.host.<name>(...); a Lot 11 plugin callback is invoked through
- * the explicit table returned by babet.plugin.load().
+ * Scalar callback type for embedding host functions. An embedding registration
+ * is invoked synchronously when Lua calls babet.host.<name>(...). The native
+ * plugin ABI reuses babet_host_call and the same scalar helpers, but declares a
+ * distinct babet_plugin_callback_v1 type in plugin.h so C++ plugins can enforce
+ * noexcept at compile time.
  *
- * Embedding callbacks run on the context owner thread. They must not re-enter the
- * babet_context_* API while active; such calls are rejected with
+ * Embedding callbacks run on the context owner thread, including when Lua calls
+ * them from a coroutine belonging to that same global Lua state. They must not
+ * re-enter the babet_context_* API while active; such calls are rejected with
  * BABET_STATUS_REENTRANT_CALL. Arguments are borrowed and valid only for the
  * callback duration. Use babet_host_call_set_result() to publish a scalar
  * result; omitting a result yields Lua nil.
  *
  * Return BABET_STATUS_OK on success. Any other status is converted into a Lua
  * error. babet_host_call_set_error() may be used first to attach a copied
- * diagnostic. For embedding registrations, Babet contains any C++ exception
- * accidentally thrown by a C++ callback before control returns to Lua. Native
- * plugin callbacks use a pure-C ABI and must never let a C++ exception cross
- * that boundary.
+ * diagnostic. Because embedding callbacks live in the host program's own C++
+ * runtime, Babet contains accidentally thrown C++ exceptions before control
+ * returns to Lua. This exception guarantee does not apply to separately loaded
+ * native plugins; plugin.h enforces their separate noexcept callback contract.
  */
 typedef babet_status (*babet_host_function)(babet_host_call *call,
                                             void *userdata);

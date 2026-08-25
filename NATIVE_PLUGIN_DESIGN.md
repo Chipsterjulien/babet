@@ -4,10 +4,11 @@ This document defines the first deliberately small native plugin experiment.
 It is Linux-only, explicit, trusted and built on the scalar host-call boundary
 validated in Lot 10.
 
-Status: implemented and maintainer-validated on Linux on 2026-08-25. The public
-ABI remains experimental; Lot 11 validation covers C/C++ fixtures, explicit
-loading/rejection paths, generated-application refusal and absence of a runtime
-`libbabet.so` dependency.
+Status: Lots 10/11 and their post-audit hardening were maintainer-validated on
+Linux on 2026-08-25. A second independent audit rechecked the original findings,
+confirmed the hardening and concluded the code was ready to publish. Three
+non-blocking contract nits from that review were then closed and await one final
+maintainer regression. The public ABI remains experimental.
 
 ## 1. Why plugins exist
 
@@ -39,20 +40,34 @@ The returned static descriptor contains:
 
 - `abi_version == BABET_PLUGIN_ABI_VERSION_V1`;
 - `struct_size` for forward-compatible descriptor growth;
-- static plugin name and version strings;
+- `function_struct_size`, the byte stride of each declaration;
+- length-delimited plugin name and version views;
 - a bounded array of function declarations;
-- each function declaration contains a simple Lua identifier,
-  `babet_host_function`, and plugin-owned `userdata`.
+- each function declaration contains a length-delimited simple Lua identifier,
+  `babet_plugin_callback_v1`, and plugin-owned `userdata`.
 
-The host copies descriptor strings and function names while loading. Callback
-`userdata` remains plugin-owned and must stay valid for the process lifetime.
+The host validates declared lengths before copying metadata/function names. A
+terminating NUL is not required. Declared lengths are part of the trusted
+contract: Babet bounds them but cannot prove that a plugin-provided pointer has
+that many readable bytes. `function_struct_size` lets Babet index only the v1
+prefix even when a future declaration appends fields. The v1 `reserved` field
+must be zero so an older host fails closed if a future ABI gives it meaning.
+Callback `userdata` remains plugin-owned and must stay valid for the process
+lifetime.
 
 ## 4. Pure C boundary
 
 No `lua_State`, C++ class, STL/RTTI object, exception or allocator-owned C++
 object belongs to the ABI. Plugin internals may be C++ but exported/query
-functions and callbacks must obey the C ABI. In C++ the query entry point is
-`noexcept`; plugin callbacks must not let exceptions cross the boundary.
+functions and callbacks must obey the C ABI. In C++ both the query entry point
+and `babet_plugin_callback_v1` are `noexcept`; the callback function-pointer type
+makes forgetting `noexcept` a compile-time error.
+
+This is a correctness requirement, not merely style. The official Babet binary
+links libgcc/libstdc++ statically, while an ordinary C++ plugin normally uses
+shared runtimes. Babet therefore does **not** promise to catch a C++ exception
+that escapes a plugin DSO. A C++ plugin must catch every exception internally
+and translate it to `babet_host_call_set_error()` plus a non-OK `babet_status`.
 
 A C++ plugin may freely use `std::string`, containers, vendor C++ SDKs and other
 implementation details internally, provided it converts at the boundary and
@@ -61,7 +76,9 @@ copies string results immediately.
 
 ## 5. Scalar callback reuse from Lot 10
 
-Plugin functions use the exact Lot 10 callback type and helpers:
+Plugin functions reuse the Lot 10 `babet_host_call` object and helpers, but use
+the plugin-specific `babet_plugin_callback_v1` function-pointer type so C++ can
+enforce `noexcept` across the DSO boundary:
 
 - `babet_host_call_argument_count()`;
 - `babet_host_call_arguments()`;
@@ -83,9 +100,17 @@ The normal Babet CLI exposes:
 local plugin, err = babet.plugin.load("./my-plugin.so")
 ```
 
-The path is explicit. Babet resolves it to a canonical regular file and v1
-requires a `.so` suffix. There is no plugin-name search path and no automatic
-`require()` discovery.
+The path is explicit. Babet resolves it to a canonical regular file. Linux
+shared-object spellings ending in `.so` or a numeric dotted version such as
+`.so.1` / `.so.1.2.3` are accepted, so a normal `libvendor.so.1` file (or a `.so`
+symlink resolving to it) does not need to be renamed. Suffixes such as
+`.so.txt` or `.so.bak` are rejected. There is no plugin-name search path and no
+automatic `require()` discovery.
+
+`babet.plugin.load()` and the returned plugin functions are callable from normal
+Lua coroutines belonging to the same global Lua state. Runtime identity is
+validated through the shared Lua registry rather than by requiring the current
+coroutine pointer to equal the main `lua_State *`.
 
 On success the returned table contains:
 
@@ -113,15 +138,26 @@ vendor SDK. Resolving and deploying those libraries is the plugin author's or
 system administrator's responsibility; Babet does not become a dependency
 resolver.
 
+The Babet build probes linker support for `--export-dynamic-symbol` before using
+it. A linker without that capability is rejected at CMake configure time with a
+clear diagnostic rather than failing later during the final link.
+
 ## 8. Lifetime and no unload
 
 A successfully loaded plugin is deliberately never `dlclose()`'d. Its code and
 plugin-owned callback userdata remain valid until process exit, even if the Lua
 plugin table is garbage-collected.
 
-The same canonical `.so` path cannot be loaded twice in one Lua runtime. Lot 11
-has no unload/reload operation. A failed probe before publication may be
-`dlclose()`'d because no callback has escaped.
+The same shared object cannot be published twice in one Lua runtime. Babet first
+checks canonical path / underlying-file equivalence (covering hardlinks), then
+checks the actual `dlopen()` handle identity before creating a second Lua table.
+This mirrors the loader's real DSO identity instead of assuming pathname identity
+is sufficient. Lot 11 has no unload/reload operation.
+
+A failed probe before publication may be `dlclose()`'d because no callback has
+escaped. Consequently a plugin constructor must not start a thread or publish a
+resource that assumes the DSO will stay mapped if descriptor validation later
+fails. Successful plugins remain mapped for process lifetime.
 
 ## 9. Runtime scopes
 

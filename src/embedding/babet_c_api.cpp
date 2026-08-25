@@ -52,6 +52,7 @@ namespace
 {
 std::mutex g_context_mutex;
 babet_context *g_active_context = nullptr;
+char kEmbeddingContextRegistryKey;
 
 bool on_owner_thread(const babet_context *context) noexcept
 {
@@ -62,6 +63,17 @@ bool on_owner_thread(const babet_context *context) noexcept
 bool inside_host_callback(const babet_context *context) noexcept
 {
     return context && context->host_callback_active;
+}
+
+bool same_embedding_context(lua_State *state,
+                            const babet_context *context) noexcept
+{
+    if (!context || !lua_checkstack(state, 1))
+        return false;
+    lua_rawgetp(state, LUA_REGISTRYINDEX, &kEmbeddingContextRegistryKey);
+    const bool same = lua_touserdata(state, -1) == context;
+    lua_pop(state, 1);
+    return same;
 }
 
 void clear_error(babet_context *context) noexcept
@@ -341,7 +353,6 @@ babet_status embedding_host_call_copy_result(
         }
         }
         call->result = result;
-        call->result_set = true;
         call->setter_status = BABET_STATUS_OK;
         return BABET_STATUS_OK;
     }
@@ -455,9 +466,11 @@ int host_function_thunk(lua_State *state) noexcept
         lua_touserdata(state, lua_upvalueindex(1)));
     auto *context = static_cast<babet_context *>(
         lua_touserdata(state, lua_upvalueindex(2)));
-    if (!registration || !registration->function || !context ||
-        context->lua != state)
+    if (!registration || !registration->function || !context)
         return luaL_error(state, "babet embedding: invalid host function closure");
+    if (!same_embedding_context(state, context))
+        return luaL_error(state,
+                          "babet embedding: host function belongs to another Lua runtime");
 
     const int argument_count = lua_gettop(state);
     const char *argument_setup_error = nullptr;
@@ -571,37 +584,51 @@ int install_host_function_thunk(lua_State *state) noexcept
 {
     auto *operation = static_cast<InstallHostFunctionOperation *>(
         lua_touserdata(state, 1));
+    if (!operation || !operation->context || !operation->registration)
+        return luaL_error(state, "babet embedding: invalid host registration operation");
+
     babet_host_registration *registration = operation->registration;
 
-    lua_getglobal(state, "babet");
+    // Use raw table operations deliberately. A user may install __index or
+    // __newindex metamethods on _G, babet, or babet.host between registrations.
+    // Those hooks must never observe a half-installed closure or make a failed
+    // registration retain a dangling registration pointer.
+    lua_pushglobaltable(state); // globals
+    lua_pushliteral(state, "babet");
+    lua_rawget(state, -2); // globals, babet
     if (!lua_istable(state, -1))
         return luaL_error(state, "babet embedding: global 'babet' is not a table");
 
-    lua_getfield(state, -1, "host");
+    lua_pushliteral(state, "host");
+    lua_rawget(state, -2); // globals, babet, host|nil
     if (lua_isnil(state, -1))
     {
         lua_pop(state, 1);
-        lua_newtable(state);
-        lua_pushvalue(state, -1);
-        lua_setfield(state, -3, "host");
+        lua_newtable(state); // globals, babet, host
+        lua_pushliteral(state, "host");
+        lua_pushvalue(state, -2);
+        lua_rawset(state, -4); // babet.host = host, raw
     }
     else if (!lua_istable(state, -1))
     {
         return luaL_error(state, "babet embedding: babet.host is not a table");
     }
 
-    lua_getfield(state, -1, registration->name.c_str());
+    lua_pushlstring(state, registration->name.data(), registration->name.size());
+    lua_rawget(state, -2);
     if (!lua_isnil(state, -1))
         return luaL_error(state,
                           "babet embedding: babet.host.%s already exists",
                           registration->name.c_str());
     lua_pop(state, 1);
 
+    lua_pushlstring(state, registration->name.data(), registration->name.size());
     lua_pushlightuserdata(state, registration);
     lua_pushlightuserdata(state, operation->context);
     lua_pushcclosure(state, host_function_thunk, 2);
-    lua_setfield(state, -2, registration->name.c_str());
-    lua_pop(state, 2);
+    lua_rawset(state, -3); // host[name] = closure, raw
+
+    lua_pop(state, 3); // host, babet, globals
     return 0;
 }
 
@@ -766,11 +793,17 @@ extern "C" babet_status babet_context_create(babet_context **out_context)
             return BABET_STATUS_OUT_OF_MEMORY;
         }
 
-        auto setup_runtime = [](lua_State *state)
+        auto setup_runtime = [context](lua_State *state)
         {
             luaL_openlibs(state);
             register_bundled_modules(state);
             register_babet(state, nullptr, NativePluginMode::embedding);
+
+            // The registry is shared by every coroutine of this Lua global
+            // state. Host-function thunks validate against this marker instead
+            // of requiring the current lua_State* to be the main thread.
+            lua_pushlightuserdata(state, context);
+            lua_rawsetp(state, LUA_REGISTRYINDEX, &kEmbeddingContextRegistryKey);
         };
         std::string setup_error;
         if (!lua_run_setup_protected(
@@ -1306,17 +1339,21 @@ extern "C" babet_status babet_context_register_host_function(
             }
         }
 
+        // Reserve before Lua sees the registration pointer. The installation
+        // thunk uses raw table operations, so on failure no metamethod can have
+        // captured the closure. After a successful pcall, the final unique_ptr
+        // move is allocation-free and cannot invalidate the closure pointer.
+        context->host_functions.reserve(context->host_functions.size() + 1);
+
         auto registration = std::make_unique<babet_host_registration>();
         registration->name = name;
         registration->function = function;
         registration->userdata = userdata;
         babet_host_registration *registration_ptr = registration.get();
-        context->host_functions.push_back(std::move(registration));
 
         const int initial_top = lua_gettop(context->lua);
         if (!lua_checkstack(context->lua, 3))
         {
-            context->host_functions.pop_back();
             set_fallback_error(context, "babet: out of memory");
             return BABET_STATUS_OUT_OF_MEMORY;
         }
@@ -1331,10 +1368,10 @@ extern "C" babet_status babet_context_register_host_function(
         {
             capture_lua_error(context, status);
             lua_settop(context->lua, initial_top);
-            context->host_functions.pop_back();
             return status_from_lua(status);
         }
 
+        context->host_functions.push_back(std::move(registration));
         lua_settop(context->lua, initial_top);
         return BABET_STATUS_OK;
     }

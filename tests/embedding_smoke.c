@@ -485,6 +485,11 @@ int main(void)
         "assert(arg_ok == false and tostring(arg_err):find('unsupported type table', 1, true))\n"
         "local host_echo_after_error = babet.host.echo(nil, true, 1234567890123, 2.5, 'H\\0I')\n"
         "assert(#host_echo_after_error == 3)\n"
+        "local wrapped_echo = coroutine.wrap(function() return babet.host.echo(nil, true, 1234567890123, 2.5, 'H\\0I') end)()\n"
+        "assert(#wrapped_echo == 3 and wrapped_echo:byte(2) == 0)\n"
+        "local host_co = coroutine.create(function() return babet.host.echo(nil, true, 1234567890123, 2.5, 'H\\0I') end)\n"
+        "local host_resumed, resumed_echo = coroutine.resume(host_co)\n"
+        "assert(host_resumed == true and #resumed_echo == 3 and resumed_echo:byte(2) == 0)\n"
         "assert(babet.base64.encode('abc') == 'YWJj')\n"
         "assert(babet.json.decode('{\\\"answer\\\":42}').answer == 42)\n"
         "local inspect = require('inspect')\n"
@@ -534,7 +539,7 @@ int main(void)
         return 1;
     }
 
-    if (host_probe.echo_calls != 2 || host_probe.failure_calls != 1 ||
+    if (host_probe.echo_calls != 4 || host_probe.failure_calls != 1 ||
         host_probe.reentrant_calls != 1 ||
         host_probe.reentrant_run_status != BABET_STATUS_REENTRANT_CALL ||
         host_probe.reentrant_destroy_status != BABET_STATUS_REENTRANT_CALL)
@@ -577,7 +582,7 @@ int main(void)
                                          "embedding-host-recovery"),
                        BABET_STATUS_OK))
         return 1;
-    if (host_probe.failure_calls != 2 || host_probe.echo_calls != 3)
+    if (host_probe.failure_calls != 2 || host_probe.echo_calls != 5)
     {
         fprintf(stderr, "host recovery counters mismatch: echo=%u fail=%u\n",
                 host_probe.echo_calls, host_probe.failure_calls);
@@ -802,12 +807,25 @@ int main(void)
         return 1;
     }
 
-    if (!expect_status("late host callback registration",
+    static const char hostile_host_metatable_chunk[] =
+        "host_newindex_calls = 0; "
+        "setmetatable(babet.host, {__newindex=function() "
+        "host_newindex_calls = host_newindex_calls + 1; "
+        "error('host __newindex sentinel') end})";
+    if (!expect_status("install hostile babet.host metatable",
+                       babet_context_run(context, hostile_host_metatable_chunk,
+                                         sizeof(hostile_host_metatable_chunk) - 1,
+                                         "embedding-host-metatable"),
+                       BABET_STATUS_OK))
+        return 1;
+
+    if (!expect_status("late host callback registration bypasses metamethods",
                        babet_context_register_host_function(
                            context, "late_value", late_host_function, NULL),
                        BABET_STATUS_OK))
         return 1;
     static const char late_host_chunk[] =
+        "assert(host_newindex_calls == 0); "
         "assert(babet.host.late_value() == 77)";
     if (!expect_status("late host callback invocation",
                        babet_context_run(context, late_host_chunk,

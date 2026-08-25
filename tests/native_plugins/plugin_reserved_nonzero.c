@@ -12,11 +12,11 @@ static const babet_plugin_function_v1 functions[] = {
 };
 
 static const babet_plugin_descriptor_v1 descriptor = {
-    UINT32_C(999),
+    BABET_PLUGIN_ABI_VERSION_V1,
     (uint32_t)sizeof(babet_plugin_descriptor_v1),
     (uint32_t)sizeof(babet_plugin_function_v1),
-    0,
-    {"bad-abi", sizeof("bad-abi") - 1},
+    UINT32_C(1),
+    {"reserved-nonzero", sizeof("reserved-nonzero") - 1},
     {"1", sizeof("1") - 1},
     functions,
     1,

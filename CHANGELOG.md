@@ -1,5 +1,13 @@
 # Changelog
 
+
+### Post-audit hardening final validation
+
+- The second independent Lots 10/11 review revalidated all six findings from the first audit as corrected and concluded the code is ready to publish.
+- Final maintainer validation reaches 58/0 host-function contracts, 98/0 native-plugin contracts, 220/0 embedding contracts, 5/0 native-plugin runtime, 16/0 embedding runtime and preserves 3810/0 folder, 3796/0 embedded, 3796/0 embedded-via-PATH and 9/9 modes.
+- Three last contract nits are closed before publication: only numeric `.so.N[.N...]` version suffixes are accepted, the v1 ABI `reserved` field must stay zero, and C++ example callbacks remain local to the DSO instead of being exported.
+- The trust contract now also states explicitly that plugin-declared view lengths are trusted input: Babet bounds them but cannot prove how many bytes are actually readable behind a plugin-owned pointer.
+
 All notable changes to Babet are documented in this file.
 
 The project follows semantic versioning for public releases. Migration and
@@ -10,6 +18,10 @@ may affect existing scripts.
 
 ### Native plugins (Lot 11)
 
+- reopen Lots 10/11 for post-audit hardening before publication: native C++ plugin callbacks now use a distinct `babet_plugin_callback_v1` type that is `noexcept` in C++, and official examples/fixtures catch exceptions inside the plugin instead of relying on an unreliable catch across separately linked C++ runtimes;
+- make embedding host callbacks, native plugin functions and `babet.plugin.load()` work from Lua coroutines by validating runtime identity through the shared Lua registry; host-function registration now uses raw table operations plus reserve/commit ownership so hostile `__newindex` hooks cannot retain a dangling closure;
+- harden the still-experimental plugin ABI with length-delimited metadata/function names and an explicit function-declaration byte stride, reject duplicate DSOs through underlying-file and `dlopen()` handle identity, accept `.so.<version>` spellings, and remove the unused internal callback `result_set` flag;
+- add regressions for compile-time rejection of non-`noexcept` C++ callbacks, caught C++ plugin exception/recovery in the official build, coroutines, hardlinks, versioned `.so` names, oversized length-delimited names and forward-compatible function strides; CMake now probes `--export-dynamic-symbol` capability before enabling native plugins.
 - Candidate 1 maintainer validation reached the native plugin runtime after successful compilation, ELF export checks and `libbabet.so`-absence checks, then exposed a shell-only path quoting bug in `tools/test_native_plugin_runtime.sh` when Babet lives below a directory containing spaces; Candidate 2 quotes the executable invocation and adds a structural guard for this exact regression.
 - final Lot 11 maintainer validation on 2026-08-25 is green: native plugin structural contracts 74 PASS / 0 FAIL, native plugin runtime 4 PASS / 0 FAIL, embedding runtime 16 PASS / 0 FAIL, packaging 8 PASS / 0 FAIL, the normal campaign remains 3810/0 folder + 3796/0 embedded + 3796/0 embedded via PATH with 9/9 modes, and the stripped CLI measures 15,510,344 bytes (+513,216 bytes versus the published v2.22.2 baseline); the separate FLTK regression remains green with `host_updates=2`, a 15,337,224-byte stripped companion, static FLTK and zero GUI runtime dependency in the normal CLI.
 - add a deliberately tiny Linux-only native plugin ABI v1 in `include/babet/plugin.h`: one `babet_plugin_query_v1()` descriptor with copied name/version/function declarations and the existing scalar `babet_host_function` callback type; no `lua_State`, STL/RTTI object, C++ exception or allocator ownership belongs to the ABI;
