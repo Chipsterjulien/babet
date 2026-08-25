@@ -13,6 +13,13 @@ if [ -z "${BINARY}" ] || [ ! -x "${BINARY}" ]; then
     exit 1
 fi
 
+EXPECTED_VERSION="$("${BINARY}" --version 2>/dev/null)"
+EXPECTED_VERSION="${EXPECTED_VERSION#babet }"
+if [[ ! "${EXPECTED_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "native plugin runtime: cannot determine Babet version" >&2
+    exit 1
+fi
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/babet-native-plugin.XXXXXX")" || exit 1
 trap 'rm -rf -- "${TMP}"' EXIT
 mkdir -p "${TMP}/plugins" "${TMP}/project"
@@ -95,8 +102,8 @@ fi
 cat > "${TMP}/project/main.lua" <<'LUA'
 local c_path, cpp_path, bad_path, missing_path, bad_name_path,
       extended_path, reserved_path, hardlink_path, versioned_path,
-      invalid_suffix_path =
-      arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10]
+      invalid_suffix_path, expected_version =
+      arg[1], arg[2], arg[3], arg[4], arg[5], arg[6], arg[7], arg[8], arg[9], arg[10], arg[11]
 
 assert(type(babet.plugin) == "table" and type(babet.plugin.load) == "function")
 
@@ -105,7 +112,7 @@ assert(c, c_err)
 assert(c.name == "lot11-c-fixture" and c.version == "1.0.0" and c.abi == 1)
 assert(type(c.path) == "string" and type(c.functions) == "table")
 assert(c.functions.add(20, 22) == 42)
-assert(c.functions.version() == "2.22.2")
+assert(c.functions.version() == expected_version)
 assert(c.functions.status_name() == "ok")
 local binary = "A\0B"
 assert(c.functions.echo(binary) == "C:" .. binary)
@@ -202,7 +209,7 @@ OUTPUT="$("${BINARY}" "${TMP}/project" "${C_PLUGIN}" "${CPP_PLUGIN}" \
                    "${BAD_PLUGIN}" "${MISSING_PLUGIN}" "${BAD_NAME_PLUGIN}" \
                    "${EXTENDED_PLUGIN}" "${RESERVED_PLUGIN}" \
                    "${HARDLINK_PLUGIN}" "${VERSIONED_PLUGIN}" \
-                   "${INVALID_SUFFIX_PLUGIN}" 2>&1)"
+                   "${INVALID_SUFFIX_PLUGIN}" "${EXPECTED_VERSION}" 2>&1)"
 RC=$?
 if [ "${RC}" -eq 0 ] && grep -Fxq 'NATIVE_PLUGIN_RUNTIME_OK' <<<"${OUTPUT}"; then
     pass "plugin loading, coroutines, ABI stride, reserved/filename contracts and rejection paths work"

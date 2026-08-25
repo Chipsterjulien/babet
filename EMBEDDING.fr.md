@@ -86,6 +86,11 @@ détaillé. Le code de statut fait foi ; `last_error()` apporte un contexte
 supplémentaire lorsqu'il existe. Un appel mutateur suivant peut remplacer ce
 diagnostic.
 
+`babet_status` et le discriminant `babet_value.type` sont des tags ABI 32 bits
+de largeur fixe. Une valeur numérique inconnue reste donc représentable et peut
+être refusée proprement par Babet ; une application doit néanmoins utiliser
+uniquement les constantes publiées `BABET_STATUS_*` et `BABET_VALUE_*`.
+
 [`examples/embedding/05_errors.c`](examples/embedding/05_errors.c) provoque une
 erreur Lua, affiche son diagnostic, puis prouve que le même contexte peut
 continuer avec une exécution valide.

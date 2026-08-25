@@ -1,10 +1,25 @@
-Babet current roadmap (after 2.22.2)
+Babet current roadmap (2.23.0 release)
 =====================================
 
 Legend: [ ] todo, [~] in progress/pending validation, [x] completed.
 The ZIP supplied for each work session is the primary source of truth for
 files to modify. GitHub is a complementary reference and must not silently
 override a different local ZIP state.
+
+Release hardening — fixed-width public ABI tags
+------------------------------------------------
+
+[x] Reproduce the 2.23.0 pre-release UBSan failure caused by loading the invalid
+    numeric `babet_value.type` fixture through a C++ enum object before validation.
+[x] Make `babet_status` and `babet_value_type` fixed-width `uint32_t` ABI tags so
+    unknown numeric values remain representable and can be rejected explicitly.
+[x] Extend the C embedding smoke with compile-time width assertions and an
+    invalid host callback status, covering both public discriminants.
+[x] Re-run the complete `./run_tests.sh --release` maintainer campaign after the
+    fixed-width ABI-tag correction. ASan/UBSan embedding reaches 10/0, the
+    restored normal embedding campaign reaches 16/0, the complete normal
+    harness remains 3810/0 folder, 3796/0 embedded, 3796/0 embedded-via-PATH
+    and 9/9 modes, while network smoke tests reach 11 PASS / 0 FAIL / 0 WARN.
 
 Lot 0 — initial state and invariant documentation
 -------------------------------------------------
@@ -562,9 +577,32 @@ Post-audit hardening — Lots 10/11
     and concluded the code is ready to publish. Three final contract nits were
     closed afterwards without architectural change: numeric-only `.so.<version>`
     suffixes, `reserved == 0`, and local C++ callback symbols in the examples.
-[ ] Run one final maintainer `./run_tests.sh` and separate FLTK regression after
-    those three second-audit contract nits; no further external audit is required
-    unless that validation exposes a new issue.
+[x] Run one final maintainer `./run_tests.sh` and separate FLTK regression after
+    those three second-audit contract nits. Final post-audit validation on
+    2026-08-25 is green: host-function contracts 58/0, native-plugin structural
+    contracts 108/0, embedding structural contracts 220/0, native-plugin runtime
+    6/0, embedding runtime 16/0, folder tests 3810/0, embedded tests 3796/0,
+    embedded-via-PATH 3796/0 and 9/9 modes. The stripped CLI measures 15,522,632
+    bytes (+525,504 bytes versus the published v2.22.2 baseline). The separate
+    FLTK regression remains green with `host_updates=2`, measures 15,349,512
+    bytes stripped, keeps FLTK static and leaves the normal CLI with zero GUI
+    runtime dependency. No further external audit is required unless later code
+    changes reopen this surface.
+[x] Close the fixed-width ABI tag maintainability gap found during release review:
+    freeze every existing `babet_status` / `babet_value_type` numeric assignment
+    with compile-time assertions, document the intentional loss of C++ type
+    separation/`-Wswitch`, and make the embedding structural preflight derive the
+    public tag sets from `babet.h` and compare them against every exhaustive
+    validator, symbolic-name mapper and scalar converter. Future tag additions
+    must update all relevant handlers before release validation can pass.
+[x] Re-run `./run_tests.sh --release` and `./prototypes/fltk/test.sh` after the
+    final ABI-tag coverage guard. Final 2026-08-25 validation is green:
+    embedding structural contracts 230/0, host-function contracts 58/0,
+    native-plugin structural contracts 108/0, ASan/UBSan embedding runtime
+    10/0, normal embedding runtime 16/0, native-plugin runtime 6/0, folder
+    3810/0, embedded 3796/0, embedded-via-PATH 3796/0, 9/9 top-level modes,
+    network smoke tests 11/0/0 WARN and the separate FLTK event-loop regression
+    green at 15,349,512 stripped bytes with no dynamic FLTK dependency.
 
 Deferred Windows port
 ---------------------

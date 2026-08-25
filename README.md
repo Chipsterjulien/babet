@@ -16,9 +16,16 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release candidate: **2.22.2**. See the
+Current release: **2.23.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
+
+Babet 2.23.0 adds the static `libbabet` embedding SDK, a narrow Lua-to-host callback API,
+the first experimental Linux native plugin ABI, static `ncursesw` terminal UI support,
+and a separate optional FLTK prototype path. Native plugins are explicit trusted in-process
+shared objects for the original CLI only; generated applications, workers and embedding
+contexts reject plugin loading. The release also includes the post-audit hardening of
+coroutines, DSO identity, ABI validation and C++ exception boundaries.
 
 Babet 2.22.2 adds a native RFC 6455 WebSocket client through
 `babet.websocket`. It supports `ws://` and verified `wss://`, strict Upgrade

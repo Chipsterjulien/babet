@@ -1,13 +1,6 @@
 # Changelog
 
 
-### Post-audit hardening final validation
-
-- The second independent Lots 10/11 review revalidated all six findings from the first audit as corrected and concluded the code is ready to publish.
-- Final maintainer validation reaches 58/0 host-function contracts, 98/0 native-plugin contracts, 220/0 embedding contracts, 5/0 native-plugin runtime, 16/0 embedding runtime and preserves 3810/0 folder, 3796/0 embedded, 3796/0 embedded-via-PATH and 9/9 modes.
-- Three last contract nits are closed before publication: only numeric `.so.N[.N...]` version suffixes are accepted, the v1 ABI `reserved` field must stay zero, and C++ example callbacks remain local to the DSO instead of being exported.
-- The trust contract now also states explicitly that plugin-declared view lengths are trusted input: Babet bounds them but cannot prove how many bytes are actually readable behind a plugin-owned pointer.
-
 All notable changes to Babet are documented in this file.
 
 The project follows semantic versioning for public releases. Migration and
@@ -15,6 +8,19 @@ usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
 ## [Unreleased]
+
+## [2.23.0] - 2026-08-25
+
+### Post-audit hardening final validation
+
+- Exact 2.23.0 release validation after the fixed-width ABI-tag guard is fully green: ASan/UBSan embedding 10/0, normal embedding 16/0, native-plugin runtime 6/0, folder 3810/0, embedded 3796/0, embedded-via-PATH 3796/0, 9/9 top-level modes, and network smoke tests 11/0/0 WARN. The embedding structural preflight reaches 230/0 and the optional FLTK regression remains green.
+
+- Release sanitizer validation exposed that public `babet_status` / `babet_value_type` C enums could trigger C++ enum UB before unknown numeric values were rejected. Both are now fixed-width `uint32_t` ABI tags with the same named constants, and the embedding smoke explicitly exercises unknown value/status rejection under UBSan. ABI v1 numeric assignments are compile-time frozen, while the embedding preflight derives the public tag sets and requires exhaustive status/value handlers to cover every declared constant, replacing the `-Wswitch` protection intentionally lost with the fixed-width C ABI.
+- A follow-up release review also records the intentional loss of compile-time type separation between the two `uint32_t` tag families. Mutation checks prove the new executable invariant: adding a status or value tag without updating every required validator/name/converter makes the embedding structural preflight fail with the missing handlers listed explicitly. The targeted embedding preflight reaches 230/0 before the final release rerun.
+- The second independent Lots 10/11 review revalidated all six findings from the first audit as corrected and concluded the code is ready to publish.
+- Final maintainer validation reaches 58/0 host-function contracts, 108/0 native-plugin contracts, 230/0 embedding contracts, 6/0 native-plugin runtime, 16/0 embedding runtime and preserves 3810/0 folder, 3796/0 embedded, 3796/0 embedded-via-PATH and 9/9 modes.
+- Three last contract nits are closed before publication: only numeric `.so.N[.N...]` version suffixes are accepted, the v1 ABI `reserved` field must stay zero, and C++ example callbacks remain local to the DSO instead of being exported.
+- The trust contract now also states explicitly that plugin-declared view lengths are trusted input: Babet bounds them but cannot prove how many bytes are actually readable behind a plugin-owned pointer. Final measured sizes are 15,522,632 bytes for the stripped CLI (+525,504 bytes versus the published v2.22.2 baseline) and 15,349,512 bytes for the stripped FLTK companion; FLTK remains static and the normal CLI keeps zero GUI runtime dependency.
 
 ### Native plugins (Lot 11)
 

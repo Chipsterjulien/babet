@@ -62,6 +62,18 @@ The public header exposes:
 No `lua_State`, STL type, exception, ncurses handle, process-internal type or C++
 class crosses the public header.
 
+`babet_status` and `babet_value_type` are fixed-width `uint32_t` ABI tags, not
+C/C++ enum objects. Unknown numeric values therefore remain representable at
+the C boundary and can be rejected explicitly without triggering C++ enum UB
+under UBSan; the named constants remain the only supported values. The tradeoff
+is deliberate: the two tag families have the same C integer representation, so
+C++ no longer rejects an accidental assignment from one family to the other at
+compile time, and `-Wswitch` cannot diagnose a newly added public constant. ABI
+v1 therefore freezes every existing numeric value with compile-time assertions,
+and the embedding structural preflight derives both public constant sets from
+`babet.h` and requires exhaustive validators/names/converters to cover them. A
+new tag cannot pass release validation until those handlers are updated.
+
 This API remains **experimental through Lot 10**. Exercising each added slice
 with real C/C++ hosts is required before treating the ABI as frozen.
 

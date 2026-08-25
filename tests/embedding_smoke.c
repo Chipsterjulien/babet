@@ -116,6 +116,14 @@ static babet_status late_host_function(babet_host_call *call, void *userdata)
     return babet_host_call_set_result(call, &result);
 }
 
+static babet_status invalid_status_host_function(babet_host_call *call,
+                                                 void *userdata)
+{
+    (void)call;
+    (void)userdata;
+    return (babet_status)UINT32_C(999);
+}
+
 static void cleanup_search_root(void)
 {
     if (g_search_root[0] == '\0')
@@ -254,6 +262,11 @@ static int expect_status(const char *label, babet_status got,
 
 int main(void)
 {
+    _Static_assert(sizeof(babet_status) == sizeof(uint32_t),
+                   "babet_status must stay a 32-bit ABI tag");
+    _Static_assert(sizeof(babet_value_type) == sizeof(uint32_t),
+                   "babet_value_type must stay a 32-bit ABI tag");
+
     babet_context *context = NULL;
     babet_context *second = NULL;
 
@@ -460,6 +473,11 @@ int main(void)
                        babet_context_register_host_function(
                            context, "reentrant", reentrant_host_function,
                            &host_probe),
+                       BABET_STATUS_OK) ||
+        !expect_status("register invalid-status host callback",
+                       babet_context_register_host_function(
+                           context, "invalid_status", invalid_status_host_function,
+                           NULL),
                        BABET_STATUS_OK))
         return 1;
 
@@ -481,6 +499,8 @@ int main(void)
         "assert(babet.host.reentrant() == true)\n"
         "local host_ok, host_err = pcall(babet.host.fail)\n"
         "assert(host_ok == false and tostring(host_err):find('host callback sentinel', 1, true))\n"
+        "local status_ok, status_err = pcall(babet.host.invalid_status)\n"
+        "assert(status_ok == false and tostring(status_err):find('unknown babet_status', 1, true))\n"
         "local arg_ok, arg_err = pcall(babet.host.echo, {})\n"
         "assert(arg_ok == false and tostring(arg_err):find('unsupported type table', 1, true))\n"
         "local host_echo_after_error = babet.host.echo(nil, true, 1234567890123, 2.5, 'H\\0I')\n"

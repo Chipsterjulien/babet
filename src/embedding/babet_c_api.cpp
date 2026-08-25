@@ -50,6 +50,21 @@ struct babet_context
 
 namespace
 {
+static_assert(BABET_STATUS_OK == 0u &&
+                  BABET_STATUS_INVALID_ARGUMENT == 1u &&
+                  BABET_STATUS_BUSY == 2u &&
+                  BABET_STATUS_WRONG_THREAD == 3u &&
+                  BABET_STATUS_LUA_ERROR == 4u &&
+                  BABET_STATUS_OUT_OF_MEMORY == 5u &&
+                  BABET_STATUS_INTERNAL_ERROR == 6u &&
+                  BABET_STATUS_UNSUPPORTED_VALUE == 7u &&
+                  BABET_STATUS_REENTRANT_CALL == 8u,
+              "changing a babet_status value changes the public ABI v1");
+static_assert(BABET_VALUE_NIL == 0u && BABET_VALUE_BOOLEAN == 1u &&
+                  BABET_VALUE_INTEGER == 2u && BABET_VALUE_NUMBER == 3u &&
+                  BABET_VALUE_STRING == 4u,
+              "changing a babet_value_type value changes the public ABI v1");
+
 std::mutex g_context_mutex;
 babet_context *g_active_context = nullptr;
 char kEmbeddingContextRegistryKey;

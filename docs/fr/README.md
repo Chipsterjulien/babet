@@ -17,7 +17,12 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version candidate **Babet 2.22.2**.
+Documentation de la version **Babet 2.23.0**.
+
+Babet 2.23.0 ajoute le SDK d'embedding statique `libbabet`, les callbacks Lua vers hôte,
+une ABI expérimentale de plugins natifs Linux, le support `ncursesw` statique et une
+voie de prototype FLTK séparée et optionnelle. Les contrats mono-fichier du CLI et des
+applications générées restent inchangés ; les plugins natifs sont réservés au CLI original.
 
 Babet 2.22.2 ajoute un client RFC 6455 natif via `babet.websocket`, avec
 `ws://` et `wss://` vérifié, négociation stricte, framing borné, Ping/Pong
@@ -32,7 +37,7 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.22.2 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.23.0 et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 

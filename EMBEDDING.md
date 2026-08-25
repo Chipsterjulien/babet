@@ -84,6 +84,11 @@ Do not assume that every argument/lifecycle rejection has a detailed string.
 The status code is authoritative; `last_error()` is additional context when
 available. A later mutating call may replace the stored diagnostic.
 
+`babet_status` and the `babet_value.type` discriminator are fixed-width 32-bit
+ABI tags. Unknown numeric values are representable so Babet can reject them
+cleanly; applications should still use only the published `BABET_STATUS_*` and
+`BABET_VALUE_*` constants.
+
 [`examples/embedding/05_errors.c`](examples/embedding/05_errors.c) deliberately
 runs a failing Lua chunk, prints the diagnostic, then proves that the same
 context can continue executing valid Lua afterwards.

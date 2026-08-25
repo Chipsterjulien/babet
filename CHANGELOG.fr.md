@@ -1,13 +1,6 @@
 # Journal des modifications
 
 
-### Validation finale du durcissement post-audit
-
-- La seconde revue indépendante des Lots 10/11 confirme les six corrections du premier audit et conclut que le code est prêt à publier.
-- La campagne mainteneur finale passe les contrats fonctions hôte à 58/0, plugins natifs à 98/0, embedding à 220/0, le runtime plugins à 5/0, le runtime embedding à 16/0 et conserve 3810/0 en dossier, 3796/0 en embarqué, 3796/0 via PATH et 9/9 modes.
-- Trois derniers détails de contrat sont fermés avant publication : seuls les suffixes versionnés numériques `.so.N[.N...]` sont acceptés, le champ ABI v1 `reserved` doit rester à zéro et les callbacks C++ d'exemple restent locaux au DSO au lieu d'être exportés.
-- Le contrat documente aussi explicitement que les longueurs annoncées par un plugin font partie du modèle de confiance : Babet les borne mais ne peut pas vérifier la taille réellement lisible derrière un pointeur fourni par le plugin.
-
 Ce fichier décrit les changements notables de Babet.
 
 Le projet suit le versionnage sémantique pour ses publications. Les notes de
@@ -15,6 +8,19 @@ migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
 ## [Non publié]
+
+## [2.23.0] - 2026-08-25
+
+### Validation finale du durcissement post-audit
+
+- La validation exacte de release 2.23.0 après le garde des tags ABI à largeur fixe est entièrement verte : embedding ASan/UBSan 10/0, embedding normal 16/0, runtime plugins natifs 6/0, dossier 3810/0, embarqué 3796/0, embarqué-via-PATH 3796/0, 9/9 modes top-level et smoke tests réseau 11/0/0 WARN. Le préflight structurel embedding atteint 230/0 et la régression FLTK optionnelle reste verte.
+
+- La validation sanitizer de release a révélé que les enums C publics `babet_status` / `babet_value_type` pouvaient déclencher un UB d'enum côté C++ avant le rejet d'une valeur numérique inconnue. Ils deviennent des tags ABI `uint32_t` de largeur fixe avec les mêmes constantes nommées, et le smoke embedding exerce explicitement le rejet des valeurs/statuts inconnus sous UBSan. Les valeurs numériques de l'ABI v1 sont figées à la compilation et le préflight embedding dérive les ensembles de tags publics pour imposer leur couverture exhaustive par les validateurs/noms/convertisseurs, remplaçant la protection `-Wswitch` volontairement perdue avec l'ABI C à largeur fixe.
+- Une revue de release complémentaire documente aussi la perte volontaire de séparation de types à la compilation entre les deux familles de tags `uint32_t`. Des mutations de test prouvent le nouvel invariant exécutable : ajouter un statut ou un type de valeur sans mettre à jour tous les validateurs/noms/convertisseurs requis fait échouer le préflight embedding en listant précisément les handlers manquants. Le préflight embedding ciblé atteint 230/0 avant la dernière campagne de release.
+- La seconde revue indépendante des Lots 10/11 confirme les six corrections du premier audit et conclut que le code est prêt à publier.
+- La campagne mainteneur finale passe les contrats fonctions hôte à 58/0, plugins natifs à 108/0, embedding à 220/0, le runtime plugins à 6/0, le runtime embedding à 16/0 et conserve 3810/0 en dossier, 3796/0 en embarqué, 3796/0 via PATH et 9/9 modes.
+- Trois derniers détails de contrat sont fermés avant publication : seuls les suffixes versionnés numériques `.so.N[.N...]` sont acceptés, le champ ABI v1 `reserved` doit rester à zéro et les callbacks C++ d'exemple restent locaux au DSO au lieu d'être exportés.
+- Le contrat documente aussi explicitement que les longueurs annoncées par un plugin font partie du modèle de confiance : Babet les borne mais ne peut pas vérifier la taille réellement lisible derrière un pointeur fourni par le plugin. Les mesures finales sont de 15 522 632 octets pour le CLI strippé (+525 504 octets par rapport à la base 2.22.2 publiée) et 15 349 512 octets pour le compagnon FLTK strippé ; FLTK reste statique et le CLI normal conserve zéro dépendance GUI runtime.
 
 ### Plugins natifs (Lot 11)
 

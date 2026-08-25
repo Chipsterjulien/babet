@@ -17,9 +17,17 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version candidate actuelle : **2.22.2**. Voir le
+Version actuelle : **2.23.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
+
+Babet 2.23.0 ajoute le SDK d'embedding statique `libbabet`, une API étroite Lua vers hôte,
+la première ABI expérimentale de plugins natifs Linux, le support terminal `ncursesw`
+statique et une voie de prototype FLTK séparée et optionnelle. Les plugins natifs sont des
+bibliothèques partagées explicitement chargées et totalement de confiance, réservées au CLI
+original ; les applications générées, workers et contextes d'embedding refusent leur
+chargement. La version intègre aussi le durcissement post-audit des coroutines, de l'identité
+DSO, de la validation ABI et des frontières d'exceptions C++.
 
 Babet 2.22.2 ajoute un client WebSocket RFC 6455 natif via
 `babet.websocket`. Il prend en charge `ws://` et `wss://` vérifié, la

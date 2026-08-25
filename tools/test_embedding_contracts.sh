@@ -105,7 +105,9 @@ require_grep 'babet_context_set_search_root' "include/babet/babet.h" "public API
 require_grep 'before the first Lua execution call' "include/babet/babet.h" "search-root lifecycle is explicit in public header"
 require_grep 'same \?\.lua and \?/init\.lua' "include/babet/babet.h" "public search-root semantics match folder mode"
 require_grep 'BABET_STATUS_UNSUPPORTED_VALUE' "include/babet/babet.h" "public status surface represents unsupported Lua values"
-require_grep 'typedef enum babet_value_type' "include/babet/babet.h" "public scalar value type is explicit"
+require_grep 'typedef uint32_t babet_value_type;' "include/babet/babet.h" "public scalar value tag is fixed-width and accepts unknown values safely"
+require_grep 'typedef uint32_t babet_status;' "include/babet/babet.h" "public status tag is fixed-width and accepts unknown values safely"
+forbid_grep 'typedef enum babet_(status|value_type)' "include/babet/babet.h" "public ABI does not expose invalid-prone enum objects"
 require_grep 'BABET_VALUE_NIL' "include/babet/babet.h" "public scalar values include nil"
 require_grep 'BABET_VALUE_BOOLEAN' "include/babet/babet.h" "public scalar values include boolean"
 require_grep 'BABET_VALUE_INTEGER' "include/babet/babet.h" "public scalar values include signed integer"
@@ -251,9 +253,198 @@ require_grep 'embedding_cpp_callback_smoke' "CMakeLists.txt" "CMake builds the C
 require_grep 'babet_enable_sanitizers\(babet_embedding_cpp_callback_smoke\)' "CMakeLists.txt" "sanitizers cover the C++ host callback exception smoke"
 require_grep 'C\+\+ host callback exceptions are contained and the context recovers' "tools/test_embedding_runtime.sh" "runtime regression executes the C++ callback exception smoke"
 require_grep 'uncaught host callback failure' "tests/embedding_smoke.c" "C smoke verifies uncaught host failure conversion"
+require_grep 'invalid_status_host_function' "tests/embedding_smoke.c" "C smoke verifies unknown host status rejection without enum UB"
 require_grep 'coroutine\.wrap' "tests/embedding_smoke.c" "C smoke verifies host callbacks from Lua coroutines"
 require_grep 'host __newindex sentinel' "tests/embedding_smoke.c" "C smoke verifies raw host registration bypasses metamethods"
 require_grep 'kEmbeddingContextRegistryKey' "src/embedding/babet_c_api.cpp" "embedding callback identity is registry-scoped across coroutines"
+require_grep 'changing a babet_status value changes the public ABI v1' "src/embedding/babet_c_api.cpp" "public status ABI v1 numbering has a compile-time sentinel"
+require_grep 'changing a babet_value_type value changes the public ABI v1' "src/embedding/babet_c_api.cpp" "public value-tag ABI v1 numbering has a compile-time sentinel"
+
+while IFS='|' read -r result label; do
+    if [ "${result}" = "PASS" ]; then
+        pass "${label}"
+    else
+        fail "${label}"
+    fi
+done < <(python3 - "${SCRIPT_DIR}" <<'PY_ABI_TAG_COVERAGE'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+header = (root / "include/babet/babet.h").read_text()
+
+
+def public_tag_map(type_name, prefix):
+    match = re.search(
+        rf"typedef\s+uint32_t\s+{re.escape(type_name)}\s*;\s*enum\s*\{{(?P<body>.*?)\}}\s*;",
+        header,
+        re.S,
+    )
+    if not match:
+        raise RuntimeError(f"cannot locate public {type_name} constants")
+    pairs = re.findall(
+        rf"\b({re.escape(prefix)}[A-Z0-9_]+)\s*=\s*([0-9]+)",
+        match.group("body"),
+    )
+    if not pairs:
+        raise RuntimeError(f"no {prefix} constants found")
+    return {name: int(value) for name, value in pairs}
+
+
+def function_body(path, name):
+    text = (root / path).read_text()
+    match = re.search(
+        rf"\b{re.escape(name)}\s*\([^;{{}}]*\)\s*(?:noexcept\s*)?\{{",
+        text,
+        re.S,
+    )
+    if not match:
+        raise RuntimeError(f"cannot locate {path}:{name}")
+    start = text.find("{", match.start())
+    depth = 0
+    for pos in range(start, len(text)):
+        char = text[pos]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : pos]
+    raise RuntimeError(f"unterminated body for {path}:{name}")
+
+
+def case_set(path, name, prefix):
+    body = function_body(path, name)
+    return set(re.findall(rf"case\s+({re.escape(prefix)}[A-Z0-9_]+)\s*:", body))
+
+
+def ref_set(path, name, prefix):
+    body = function_body(path, name)
+    return set(re.findall(rf"\b({re.escape(prefix)}[A-Z0-9_]+)\b", body))
+
+
+def exact(label, expected, actual):
+    missing = sorted(expected - actual)
+    extra = sorted(actual - expected)
+    if missing or extra:
+        def render(items):
+            return ",".join(
+                f"{item[0]}={item[1]}" if isinstance(item, tuple) else str(item)
+                for item in items
+            )
+
+        details = []
+        if missing:
+            details.append("missing=" + render(missing))
+        if extra:
+            details.append("extra=" + render(extra))
+        print("FAIL|" + label + " (" + "; ".join(details) + ")")
+        return False
+    print("PASS|" + label)
+    return True
+
+
+try:
+    statuses = public_tag_map("babet_status", "BABET_STATUS_")
+    values = public_tag_map("babet_value_type", "BABET_VALUE_")
+
+    expected_status_values = {
+        "BABET_STATUS_OK": 0,
+        "BABET_STATUS_INVALID_ARGUMENT": 1,
+        "BABET_STATUS_BUSY": 2,
+        "BABET_STATUS_WRONG_THREAD": 3,
+        "BABET_STATUS_LUA_ERROR": 4,
+        "BABET_STATUS_OUT_OF_MEMORY": 5,
+        "BABET_STATUS_INTERNAL_ERROR": 6,
+        "BABET_STATUS_UNSUPPORTED_VALUE": 7,
+        "BABET_STATUS_REENTRANT_CALL": 8,
+    }
+    expected_value_values = {
+        "BABET_VALUE_NIL": 0,
+        "BABET_VALUE_BOOLEAN": 1,
+        "BABET_VALUE_INTEGER": 2,
+        "BABET_VALUE_NUMBER": 3,
+        "BABET_VALUE_STRING": 4,
+    }
+
+    exact(
+        "public status ABI v1 numbering/additions are explicit",
+        set(expected_status_values.items()),
+        set(statuses.items()),
+    )
+    exact(
+        "public value-tag ABI v1 numbering/additions are explicit",
+        set(expected_value_values.items()),
+        set(values.items()),
+    )
+
+    status_names = set(statuses)
+    status_sites = [
+        ("src/embedding/babet_c_api.cpp", "valid_status"),
+        ("src/embedding/babet_c_api.cpp", "babet_status_name"),
+        ("src/lua_bindings/native_plugin.cpp", "valid_status"),
+    ]
+    status_ok = True
+    status_details = []
+    for path, name in status_sites:
+        actual = case_set(path, name, "BABET_STATUS_")
+        if actual != status_names:
+            status_ok = False
+            status_details.append(f"{path}:{name}")
+    print(
+        ("PASS|" if status_ok else "FAIL|")
+        + "all public statuses are covered by validators and status-name mapping"
+        + ("" if status_ok else " (mismatch: " + ", ".join(status_details) + ")")
+    )
+
+    value_names = set(values)
+    exhaustive_value_switches = [
+        ("src/project_core/host_call_api.cpp", "valid_value_type"),
+        ("src/embedding/babet_c_api.cpp", "set_global_thunk"),
+        ("src/embedding/babet_c_api.cpp", "valid_value_type"),
+        ("src/embedding/babet_c_api.cpp", "embedding_host_call_copy_result"),
+        ("src/embedding/babet_c_api.cpp", "push_host_result"),
+        ("src/embedding/babet_c_api.cpp", "push_owned_scalar"),
+        ("src/embedding/babet_c_api.cpp", "babet_context_set_global"),
+        ("src/embedding/babet_c_api.cpp", "babet_context_call_global"),
+        ("src/lua_bindings/native_plugin.cpp", "push_plugin_result"),
+        ("src/lua_bindings/native_plugin.cpp", "native_plugin_copy_result"),
+    ]
+    value_switch_ok = True
+    value_switch_details = []
+    for path, name in exhaustive_value_switches:
+        actual = case_set(path, name, "BABET_VALUE_")
+        if actual != value_names:
+            value_switch_ok = False
+            value_switch_details.append(f"{path}:{name}")
+    print(
+        ("PASS|" if value_switch_ok else "FAIL|")
+        + "all exhaustive scalar tag switches cover every public value type"
+        + ("" if value_switch_ok else " (mismatch: " + ", ".join(value_switch_details) + ")")
+    )
+
+    lua_to_public_converters = [
+        ("src/embedding/babet_c_api.cpp", "read_host_argument"),
+        ("src/embedding/babet_c_api.cpp", "read_scalar_result"),
+        ("src/lua_bindings/native_plugin.cpp", "read_plugin_argument"),
+    ]
+    converter_ok = True
+    converter_details = []
+    for path, name in lua_to_public_converters:
+        actual = ref_set(path, name, "BABET_VALUE_")
+        if actual != value_names:
+            converter_ok = False
+            converter_details.append(f"{path}:{name}")
+    print(
+        ("PASS|" if converter_ok else "FAIL|")
+        + "Lua-to-public scalar converters cover every public value type"
+        + ("" if converter_ok else " (mismatch: " + ", ".join(converter_details) + ")")
+    )
+except Exception as exc:
+    print(f"FAIL|ABI tag coverage preflight could not run ({exc})")
+PY_ABI_TAG_COVERAGE
+)
 
 echo "embedding structural contracts: ${PASS} PASS / ${FAIL} FAIL"
 [ "${FAIL}" -eq 0 ]

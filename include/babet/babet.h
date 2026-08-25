@@ -17,7 +17,20 @@ extern "C" {
 typedef struct babet_context babet_context;
 typedef struct babet_host_call babet_host_call;
 
-typedef enum babet_status
+/*
+ * Public ABI tags are fixed-width integers rather than C/C++ enum objects.
+ * Unknown values must remain representable so Babet can reject them cleanly
+ * at the C boundary, including under UBSan, and future ABI revisions can add
+ * values without making an older host load an invalid C++ enum.
+ *
+ * babet_status and babet_value_type intentionally share the uint32_t C ABI
+ * representation, so C/C++ does not provide a compile-time type barrier between
+ * the two tag families. Runtime validation is authoritative. Maintainer
+ * preflights derive the public constant sets from this header and require every
+ * exhaustive validator/converter to cover them before a release can pass.
+ */
+typedef uint32_t babet_status;
+enum
 {
     BABET_STATUS_OK = 0,
     BABET_STATUS_INVALID_ARGUMENT = 1,
@@ -28,16 +41,17 @@ typedef enum babet_status
     BABET_STATUS_INTERNAL_ERROR = 6,
     BABET_STATUS_UNSUPPORTED_VALUE = 7,
     BABET_STATUS_REENTRANT_CALL = 8
-} babet_status;
+};
 
-typedef enum babet_value_type
+typedef uint32_t babet_value_type;
+enum
 {
     BABET_VALUE_NIL = 0,
     BABET_VALUE_BOOLEAN = 1,
     BABET_VALUE_INTEGER = 2,
     BABET_VALUE_NUMBER = 3,
     BABET_VALUE_STRING = 4
-} babet_value_type;
+};
 
 typedef struct babet_string_view
 {
