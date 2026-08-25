@@ -91,6 +91,10 @@ mkdir -p "${PROJECT}" "${TARGET}" "${COPY_TARGET}" \
 cat > "${PROJECT}/main.lua" <<'LUA'
 if arg and arg[1] == "__run__" then
     print("PACKAGING_AUTONOMOUS_OK")
+elseif arg and arg[1] == "__plugin__" then
+    local plugin, err = babet.plugin.load(arg[2] or "/tmp/not-a-plugin.so")
+    if plugin ~= nil then error("generated application unexpectedly loaded a plugin") end
+    print("PACKAGING_PLUGIN_REFUSAL:" .. tostring(err))
 else
     print("PACKAGING_MAIN_EXECUTED:" .. tostring(arg and arg[1]))
 end
@@ -152,6 +156,19 @@ for flag in --create-exe -c; do
              "rc=${rc}; stdout=$(cat "${stdout_file}"); stderr=$(cat "${stderr_file}")"
     fi
 done
+
+# Generated applications retain babet.plugin.load only as a controlled refusal.
+PLUGIN_REFUSAL_OUTPUT="$("${APP}" __plugin__ "${ROOT}/not-present.so" 2>&1)"
+PLUGIN_REFUSAL_RC=$?
+if [ "${PLUGIN_REFUSAL_RC}" -eq 0 ] \
+    && grep -Fq 'PACKAGING_PLUGIN_REFUSAL:' <<<"${PLUGIN_REFUSAL_OUTPUT}" \
+    && grep -Fq 'unavailable in generated --create-exe applications' \
+        <<<"${PLUGIN_REFUSAL_OUTPUT}"; then
+    pass "generated application refuses native plugin loading without extraction"
+else
+    fail "generated application refuses native plugin loading without extraction" \
+         "rc=${PLUGIN_REFUSAL_RC}; output=${PLUGIN_REFUSAL_OUTPUT}"
+fi
 
 # Copying/renaming the real Babet binary must not change its identity. It has no
 # embedded main.lua, so the same builder code remains available under any name.

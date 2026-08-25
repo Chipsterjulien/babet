@@ -35,6 +35,7 @@
 #include "../lua_bindings/mkdir.hpp"
 #include "../lua_bindings/mode.hpp"
 #include "../lua_bindings/moveTree.hpp"
+#include "../lua_bindings/native_plugin.hpp"
 #include "../lua_bindings/joinPath.hpp"
 #include "../lua_bindings/rename.hpp"
 #include "../lua_bindings/remove.hpp"
@@ -100,7 +101,8 @@ void prepend_babet_package_path(lua_State *L, std::string_view prefix)
  * @brief Register Babet functions to Lua state.
  * @param L Lua state.
  */
-void register_babet(lua_State *L)
+void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
+                    NativePluginMode plugin_mode)
 {
     lua_newtable(L);
 
@@ -338,6 +340,11 @@ void register_babet(lua_State *L)
     // depuis Lua. Même précondition de pile (table babet au
     // sommet). Cf. signal.hpp pour le design.
     register_signal(L);
+
+    // Sous-table babet.plugin : chargement natif explicite. Seul le runtime
+    // CLI normal reçoit un NativePluginRuntime autorisé ; applications générées,
+    // embedding et workers conservent une fonction load() de refus contrôlé.
+    register_native_plugin(L, plugin_runtime, plugin_mode);
 
     // Sous-table babet.curses : interface terminal ncursesw. Toutes les
     // opérations restent limitées au thread principal et partagent le

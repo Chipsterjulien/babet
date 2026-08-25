@@ -31,6 +31,7 @@ else
 fi
 LIB="${BUILD_DIR}/libbabet.a"
 HOST="${BUILD_DIR}/babet_embedding_smoke"
+CPP_HOST="${BUILD_DIR}/babet_embedding_cpp_callback_smoke"
 SDK_DIR="${ROOT}/build/embedding-sdk"
 PASS=0
 FAIL=0
@@ -59,7 +60,7 @@ if [ ! -d "${BUILD_DIR}" ]; then
     exit 1
 fi
 
-if cmake --build "${BUILD_DIR}" --target babet_embedding_smoke; then
+if cmake --build "${BUILD_DIR}" --target babet_embedding_smoke babet_embedding_cpp_callback_smoke; then
     if [ "${SANITIZERS}" -eq 1 ]; then
         pass "C embedding host builds against the sanitizer libbabet target"
     else
@@ -105,10 +106,25 @@ else
     fail "libbabet.a exports the scalar call entry point"
 fi
 
+if [ -f "${LIB}" ] &&
+   nm -g --defined-only "${LIB}" 2>/dev/null | grep -Eq '[[:space:]]babet_context_register_host_function$' &&
+   nm -g --defined-only "${LIB}" 2>/dev/null | grep -Eq '[[:space:]]babet_host_call_set_result$' &&
+   nm -g --defined-only "${LIB}" 2>/dev/null | grep -Eq '[[:space:]]babet_host_call_set_error$'; then
+    pass "libbabet.a exports the narrow host-function entry points"
+else
+    fail "libbabet.a exports the narrow host-function entry points"
+fi
+
 if [ -x "${HOST}" ] && "${HOST}"; then
     pass "C embedding host exercises create/run/error/thread/destroy lifecycle"
 else
     fail "C embedding host exercises create/run/error/thread/destroy lifecycle"
+fi
+
+if [ -x "${CPP_HOST}" ] && "${CPP_HOST}"; then
+    pass "C++ host callback exceptions are contained and the context recovers"
+else
+    fail "C++ host callback exceptions are contained and the context recovers"
 fi
 
 if ldd "${BINARY}" 2>/dev/null | grep -Eq 'libbabet\.so'; then
@@ -132,7 +148,8 @@ if [ "${SANITIZERS}" -eq 0 ]; then
 
     if [ -f "${SDK_LIB}" ] &&
        nm -g --defined-only "${SDK_LIB}" 2>/dev/null | grep -Eq '[[:space:]]babet_context_create$' &&
-       nm -g --defined-only "${SDK_LIB}" 2>/dev/null | grep -Eq '[[:space:]]babet_context_call_global$'; then
+       nm -g --defined-only "${SDK_LIB}" 2>/dev/null | grep -Eq '[[:space:]]babet_context_call_global$' &&
+       nm -g --defined-only "${SDK_LIB}" 2>/dev/null | grep -Eq '[[:space:]]babet_context_register_host_function$'; then
         pass "standalone SDK archive retains the public embedding symbols"
     else
         fail "standalone SDK archive retains the public embedding symbols"

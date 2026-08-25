@@ -1,6 +1,7 @@
 #include "lua_bindings/curses.hpp"
 #include "lua_bindings/lua_utils.hpp"
 #include "lua_bindings/main_thread.hpp"
+#include "lua_bindings/native_plugin.hpp"
 #include "lua_bindings/workers.hpp"
 
 #include "project_core/archive_backend.hpp"
@@ -88,11 +89,12 @@ static int run_tool_script(const fs::path &anchorDir,
         return 1;
     }
 
+    NativePluginRuntime plugin_runtime(L);
     auto setup_runtime = [&](lua_State *state)
     {
         luaL_openlibs(state);
         register_bundled_modules(state);
-        register_babet(state);
+        register_babet(state, &plugin_runtime, NativePluginMode::allowed);
         prepend_babet_package_path(state, package_prefix);
         push_lua_arg(state, argc, argv, 1);
     };
@@ -292,7 +294,8 @@ int main(int argc, char *argv[])
             {
                 luaL_openlibs(state);
                 register_bundled_modules(state);
-                register_babet(state);
+                register_babet(state, nullptr,
+                               NativePluginMode::generated_application);
                 register_embedded_searcher(state, exePath.c_str());
                 // Binaire packagé = l'application elle-même est le script :
                 // arg[0] = binaire, arg[1..n] = ses arguments.

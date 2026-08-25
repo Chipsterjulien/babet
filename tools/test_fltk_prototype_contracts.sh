@@ -42,16 +42,23 @@ check "prototype destroys GUI before Babet context" bash -c "python3 - <<'PY'
 s=open('$SRC', encoding='utf-8').read()
 assert s.index('delete state.window') < s.index('const babet_status destroy_status = babet_context_destroy(state.ctx)')
 PY"
-check "prototype has an automated event-loop self-test" contains "$SRC" 'LOT9_FLTK_SELFTEST_OK'
+check "prototype has an automated event-loop self-test" contains "$SRC" 'LOT10_FLTK_HOST_API_SELFTEST_OK'
 check "prototype pins stable FLTK 1.4.5" contains "$BOOT" 'FLTK_VERSION="1.4.5"'
 check "prototype verifies FLTK SHA-256" contains "$BOOT" 'eede1fb2b8e9c2e581e77082e15252145855c79aad30070ee3b24aabe2f926f1'
 check "normal CMake never finds FLTK" not_contains "CMakeLists.txt" 'find_package(FLTK'
 check "normal bootstrap never downloads FLTK" not_contains "build_local.sh" 'fltk-1.4.5'
 check "normal test harness never bootstraps FLTK" not_contains "run_tests.sh" 'bootstrap_fltk.sh'
 check "prototype documents short event-loop callbacks" contains "$DOC" 'callbacks execute on the event-loop thread and should stay short'
-check "prototype records the Lot 10 missing-capability list" contains "$DOC" 'What Lot 9 deliberately cannot express'
-check "prototype forbids polling workaround" contains "$DOC" 'polled globals/timers would hide rather than solve'
+check "prototype records how Lot 10 resolves the observed gap" contains "$DOC" 'What Lot 9 revealed and Lot 10 now solves'
+check "prototype forbids polling workaround" contains "$DOC" 'No polling'
 check "prototype documents desktop runtime dependency boundary" contains "$DOC" 'needs a compatible X11/Wayland graphical environment'
+
+check "prototype registers the public Lua-to-host bridge" contains "$SRC" 'babet_context_register_host_function'
+check "prototype exposes the label action under babet.host" contains "$SRC" '"set_button_label"'
+check "Lua calls the public host action" contains "$SRC" 'babet.host.set_button_label'
+check "host callback reads public scalar arguments" contains "$SRC" 'babet_host_call_arguments'
+check "prototype documents reentrancy rejection" contains "$DOC" 'BABET_STATUS_REENTRANT_CALL'
+check "prototype documents remaining GUI scope limits" contains "$DOC" 'Still deliberately out of scope'
 
 echo "FLTK prototype structural contracts: ${pass} PASS / ${fail} FAIL"
 exit "$fail"

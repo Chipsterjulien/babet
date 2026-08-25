@@ -1,6 +1,6 @@
-# Babet embedding design contract — Lot 6
+# Babet embedding design contract — Lots 6–11
 
-For practical usage, build commands and executable examples, see [`EMBEDDING.md`](EMBEDDING.md) / [`EMBEDDING.fr.md`](EMBEDDING.fr.md).
+For practical usage, build commands and executable examples, see [`EMBEDDING.md`](EMBEDDING.md) / [`EMBEDDING.fr.md`](EMBEDDING.fr.md). The Lua -> host callback contract added in Lot 10 is detailed separately in [`HOST_FUNCTIONS_DESIGN.md`](HOST_FUNCTIONS_DESIGN.md).
 
 This document defines the first exercised host-facing embedding boundary for
 Babet.  It is intentionally narrower than a general plugin ABI or a full Lua/C
@@ -54,14 +54,16 @@ The public header exposes:
 - the scalar `babet_value` tagged union;
 - `babet_context_set_global()` / `babet_context_get_global()`;
 - `babet_context_call_global()` for scalar arguments and one scalar result;
+- opaque `babet_host_call` plus `babet_host_function`;
+- `babet_context_register_host_function()` and the host-call scalar/result/error helpers;
 - `babet_context_last_error()`;
 - `babet_context_destroy()`.
 
 No `lua_State`, STL type, exception, ncurses handle, process-internal type or C++
 class crosses the public header.
 
-This API is **experimental during Lot 6**.  Exercising it with a real C host is
-required before treating the ABI as frozen.
+This API remains **experimental through Lot 10**. Exercising each added slice
+with real C/C++ hosts is required before treating the ABI as frozen.
 
 ## 4. First-context lifecycle
 
@@ -144,15 +146,25 @@ result uses the same scalar conversion and context-owned binary-string storage
 as `get_global()`. A missing/non-function global or a Lua exception returns
 `BABET_STATUS_LUA_ERROR`; tables/functions/userdata/threads returned as the
 selected result return `BABET_STATUS_UNSUPPORTED_VALUE`. Calling Lua counts as
-execution for the one-shot module-root lifecycle. The first API deliberately
-does not resolve dotted method paths, expose Lua functions as handles, accept
-structured table arguments, or register host callbacks.
+execution for the one-shot module-root lifecycle. The first API deliberately does not resolve dotted method paths, expose Lua
+functions as handles or accept structured table arguments. Lot 10 adds the
+separate reverse direction through `babet_context_register_host_function()`:
+registered callbacks appear as `babet.host.<name>`, receive only the same five
+scalar kinds, and return nil or one scalar through an opaque `babet_host_call`.
+String callback results and diagnostics are copied immediately into Babet-owned
+storage. Host callbacks are synchronous on the context owner thread, are not
+installed into worker states, and may not re-enter the public context API; such
+attempts return `BABET_STATUS_REENTRANT_CALL`. Full lifetime/error rationale is
+kept in `HOST_FUNCTIONS_DESIGN.md`.
 
 Errors are returned as `babet_status`; detailed Lua diagnostics remain owned by
-the context and are exposed through `babet_context_last_error()`.  The pointer
-is valid until the next mutating context call or destruction.
+the context and are exposed through `babet_context_last_error()`. The pointer
+is valid until the next mutating context call or destruction. A non-OK host
+callback status becomes a Lua error; an uncaught host-function failure therefore
+reaches the outer embedding call as `BABET_STATUS_LUA_ERROR` with the copied host
+diagnostic.
 
-No C++ exception may cross any C API function.
+No C++ exception may cross any C API function or host callback boundary.
 
 A Lua error must leave the context reusable by a later successful call.
 
@@ -207,7 +219,8 @@ After a normal build, `build_local.sh` also creates a relocatable static SDK in
 - one flattened `libbabet.a` under `lib/` containing the Babet runtime plus the
   pinned static Lua, ncursesw, OpenSSL, libarchive, zlib, liblzma, libbz2,
   libzstd, RE2 and Abseil archives;
-- a short `README.txt` documenting the final host link boundary.
+- a short `README.txt` documenting the final host link boundary;
+- the embedding/host-function design documents and executable C examples.
 
 The flattening step stages every archive under a space-free temporary name
 before using `ar` MRI mode, so a checkout or SDK path containing spaces cannot
@@ -238,6 +251,9 @@ header is a real C boundary. It exercises:
 - scalar global exchange in both directions, including binary strings;
 - a direct global Lua function call with all scalar argument kinds and one
   scalar result, plus bad-target/error recovery;
+- Lua -> host scalar callbacks under `babet.host`, including binary strings,
+  copied results, host failures, worker isolation, late registration and
+  explicit reentrancy rejection;
 - Lua-error diagnostics and reuse after failure;
 - wrong-thread rejection;
 - destruction and sequential recreation.
@@ -253,18 +269,21 @@ The following are not part of the first embedding slice:
 - shared `libbabet.so` packaging;
 - multiple concurrent contexts;
 - exposing `lua_State *`;
-- arbitrary host callbacks;
 - host/Lua structured table/value marshalling beyond the scalar value contract;
-- host callbacks and retained Lua function handles;
+- unregistering/replacing live host callbacks;
+- reentrant nested context calls from host callbacks;
+- retained Lua function handles;
 - dotted/object method lookup and multiple returned values;
 - multiple or mutable on-disk search roots after execution starts;
-- a generic plugin `.so` ABI;
+- loading native plugins from arbitrary embedding hosts;
 - automatic module/dependency discovery;
 - Windows DLL work;
-- GUI integration.
+- a product GUI layer (the FLTK prototype remains a separate optional host).
 
 They are reconsidered only after the minimal C host path has been validated in
-real use.
+real use. Lot 11 separately adds a narrow native `.so` ABI to the original Babet
+CLI; embedded contexts deliberately register `babet.plugin.load()` in refusal
+mode and do not inherit that ELF loader policy.
 
 ## 12. Lot 6 validation status
 
@@ -281,3 +300,10 @@ official CLI remains autonomous with no runtime `libbabet.so` dependency.
 
 This closes Lot 6 without freezing the ABI or widening the deferred surface in
 section 11.
+
+## 13. Lot 10 validation status
+
+Lot 10 adds the narrow Lua -> host callback surface and reworks the optional FLTK
+prototype to consume it. Structural and local syntax checks are part of the
+implementation candidate; final maintainer closure requires the normal Babet
+validation plus the separate FLTK runtime test from a clean Linux build.

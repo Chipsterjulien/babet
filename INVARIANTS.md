@@ -249,15 +249,28 @@ but are not selected as Babet's default GUI host under the current constraints.
 The preference is not a permanent dependency decision: a real prototype must
 measure its stripped binary and dynamic dependency closure first.
 
-A concrete GUI may justify one narrow host-function registration addition to
-the experimental embedding API. That does not reopen the generic `.so` plugin
-roadmap and must not expose `lua_State *` or force GUI support into the CLI.
+Lot 10 supplies the narrow host-function registration boundary required by the
+FLTK prototype. It remains scalar and C-only, exposes no `lua_State *`, and does
+not force GUI support into the CLI. Lot 11 native plugins are a separate
+extension mechanism for specialised/vendor SDKs and private or third-party
+integrations; they are not the GUI implementation path.
 
-### 3.6 Dynamic plugins
+### 3.6 Native plugins
 
-A generic `.so` plugin ABI, dependency resolver, automatic `require()` analysis,
-temporary extraction system, and package manager are explicitly outside the
-immediate roadmap. Reopen this only for a concrete use case.
+Lot 11 reopens native plugins only as a deliberately small Linux experiment. A
+normal, non-generated Babet CLI may explicitly load one trusted `.so` through
+`babet.plugin.load(path)`. The versioned plugin ABI is pure C, exposes no
+`lua_State *` or C++ ownership across the boundary, and reuses the scalar
+`babet_host_call_*` mechanism from Lot 10. A successfully loaded plugin remains
+resident for the process lifetime; there is no unload protocol.
+
+Native plugins are fully trusted in-process code, not a sandbox boundary. They
+are motivated by specialised/vendor libraries and third-party or private
+extensions, not by reducing Babet's binary size. Generated `--create-exe`
+applications, worker Lua states and external embedding contexts refuse native
+plugin loading in this first contract. There is no plugin package manager,
+dependency resolver, Internet downloader, automatic `require()` discovery,
+temporary extraction, or generated-application plugin packaging.
 
 ### 3.7 Windows
 

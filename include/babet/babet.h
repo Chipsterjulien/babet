@@ -11,10 +11,11 @@ extern "C" {
 /*
  * Experimental embedding API.
  *
- * Lot 6 intentionally exercises this small C surface before treating it as a
+ * Lots 6–11 intentionally exercise this small C surface before treating it as a
  * frozen ABI.  The public header exposes no Lua or C++ type.
  */
 typedef struct babet_context babet_context;
+typedef struct babet_host_call babet_host_call;
 
 typedef enum babet_status
 {
@@ -25,7 +26,8 @@ typedef enum babet_status
     BABET_STATUS_LUA_ERROR = 4,
     BABET_STATUS_OUT_OF_MEMORY = 5,
     BABET_STATUS_INTERNAL_ERROR = 6,
-    BABET_STATUS_UNSUPPORTED_VALUE = 7
+    BABET_STATUS_UNSUPPORTED_VALUE = 7,
+    BABET_STATUS_REENTRANT_CALL = 8
 } babet_status;
 
 typedef enum babet_value_type
@@ -54,6 +56,28 @@ typedef struct babet_value
         babet_string_view string;
     } as;
 } babet_value;
+
+/*
+ * Scalar native callback used by embedding host functions and the experimental
+ * native plugin ABI. An embedding registration is invoked synchronously when
+ * Lua calls babet.host.<name>(...); a Lot 11 plugin callback is invoked through
+ * the explicit table returned by babet.plugin.load().
+ *
+ * Embedding callbacks run on the context owner thread. They must not re-enter the
+ * babet_context_* API while active; such calls are rejected with
+ * BABET_STATUS_REENTRANT_CALL. Arguments are borrowed and valid only for the
+ * callback duration. Use babet_host_call_set_result() to publish a scalar
+ * result; omitting a result yields Lua nil.
+ *
+ * Return BABET_STATUS_OK on success. Any other status is converted into a Lua
+ * error. babet_host_call_set_error() may be used first to attach a copied
+ * diagnostic. For embedding registrations, Babet contains any C++ exception
+ * accidentally thrown by a C++ callback before control returns to Lua. Native
+ * plugin callbacks use a pure-C ABI and must never let a C++ exception cross
+ * that boundary.
+ */
+typedef babet_status (*babet_host_function)(babet_host_call *call,
+                                            void *userdata);
 
 /* Returns the Babet semantic version compiled into the library. */
 const char *babet_version(void);
@@ -139,6 +163,43 @@ babet_status babet_context_call_global(babet_context *context,
                                         const babet_value *arguments,
                                         size_t argument_count,
                                         babet_value *out_result);
+
+/*
+ * Registers one scalar host function as babet.host.<name>.
+ *
+ * name is copied by Babet and must be a simple ASCII Lua identifier that is not
+ * a Lua reserved keyword. Duplicate names are rejected. userdata is borrowed
+ * and must remain valid until the context is destroyed; this first API
+ * intentionally has no unregister path.
+ * Host functions are installed only in the main embedded Lua state, not in
+ * worker states. Registration may happen between Lua execution calls but never
+ * from inside another host callback.
+ */
+babet_status babet_context_register_host_function(
+    babet_context *context,
+    const char *name,
+    babet_host_function function,
+    void *userdata);
+
+/* Borrowed scalar arguments for the currently active host callback. */
+size_t babet_host_call_argument_count(const babet_host_call *call);
+const babet_value *babet_host_call_arguments(const babet_host_call *call);
+
+/*
+ * Copies one scalar callback result into Babet-owned storage immediately.
+ * Strings are therefore safe even when the source view points at temporary
+ * host storage. The last successful setter call wins.
+ */
+babet_status babet_host_call_set_result(babet_host_call *call,
+                                         const babet_value *value);
+
+/*
+ * Copies a human-readable diagnostic for a non-OK callback return status.
+ * Calling this does not itself fail the callback; the callback still returns
+ * the desired non-OK babet_status.
+ */
+babet_status babet_host_call_set_error(babet_host_call *call,
+                                        const char *message);
 
 /*
  * Returns the last detailed diagnostic owned by the context, or an empty

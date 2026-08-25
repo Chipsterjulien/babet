@@ -22,7 +22,8 @@ set(EXAMPLE_TARGETS
     babet_embed_03_values
     babet_embed_04_call
     babet_embed_05_errors
-    babet_embed_06_lifecycle_threads)
+    babet_embed_06_lifecycle_threads
+    babet_embed_07_host_functions)
 
 set(EXAMPLE_SOURCES
     01_hello.c
@@ -30,7 +31,8 @@ set(EXAMPLE_SOURCES
     03_values.c
     04_call.c
     05_errors.c
-    06_lifecycle_threads.c)
+    06_lifecycle_threads.c
+    07_host_functions.c)
 
 list(LENGTH EXAMPLE_TARGETS TARGET_COUNT)
 math(EXPR LAST_INDEX "${TARGET_COUNT} - 1")
@@ -56,3 +58,4 @@ add_test(NAME embed_03_values COMMAND babet_embed_03_values)
 add_test(NAME embed_04_call COMMAND babet_embed_04_call)
 add_test(NAME embed_05_errors COMMAND babet_embed_05_errors)
 add_test(NAME embed_06_lifecycle_threads COMMAND babet_embed_06_lifecycle_threads)
+add_test(NAME embed_07_host_functions COMMAND babet_embed_07_host_functions)

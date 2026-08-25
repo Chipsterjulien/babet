@@ -1517,6 +1517,7 @@ echo "Build OK. Binaire prêt dans ${SCRIPT_DIR}/test/${PROJECT_NAME}"
 if [ -f "${PROJECT_BUILD_DIR}/libbabet.a" ]; then
     echo "Embedding expérimental : ${PROJECT_BUILD_DIR}/libbabet.a"
     echo "Header C               : ${SCRIPT_DIR}/include/babet/babet.h"
+    echo "Header plugin C        : ${SCRIPT_DIR}/include/babet/plugin.h"
 
     # Le SDK autonome est un artefact du build normal uniquement. Un build
     # sanitizer produit une libbabet instrumentée destinée aux tests in-tree,

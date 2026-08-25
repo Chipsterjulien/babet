@@ -17,10 +17,104 @@ typedef struct thread_probe
     babet_status set_global_status;
     babet_status get_global_status;
     babet_status call_global_status;
+    babet_status register_host_status;
     babet_status destroy_status;
 } thread_probe;
 
+typedef struct host_function_probe
+{
+    babet_context *context;
+    unsigned echo_calls;
+    unsigned failure_calls;
+    unsigned reentrant_calls;
+    babet_status reentrant_run_status;
+    babet_status reentrant_destroy_status;
+} host_function_probe;
+
 static char g_search_root[PATH_MAX];
+
+static babet_status noop_host_function(babet_host_call *call, void *userdata)
+{
+    (void)call;
+    (void)userdata;
+    return BABET_STATUS_OK;
+}
+
+static babet_status scalar_echo_host_function(babet_host_call *call,
+                                              void *userdata)
+{
+    host_function_probe *probe = (host_function_probe *)userdata;
+    const size_t count = babet_host_call_argument_count(call);
+    const babet_value *arguments = babet_host_call_arguments(call);
+    if (probe == NULL || count != 5 || arguments == NULL)
+    {
+        (void)babet_host_call_set_error(call,
+                                        "echo expects exactly five scalar arguments");
+        return BABET_STATUS_INVALID_ARGUMENT;
+    }
+    if (arguments[0].type != BABET_VALUE_NIL ||
+        arguments[1].type != BABET_VALUE_BOOLEAN ||
+        arguments[1].as.boolean != 1 ||
+        arguments[2].type != BABET_VALUE_INTEGER ||
+        arguments[2].as.integer != INT64_C(1234567890123) ||
+        arguments[3].type != BABET_VALUE_NUMBER ||
+        arguments[3].as.number != 2.5 ||
+        arguments[4].type != BABET_VALUE_STRING ||
+        arguments[4].as.string.length != 3 ||
+        memcmp(arguments[4].as.string.data, "H\0I", 3) != 0)
+    {
+        (void)babet_host_call_set_error(call,
+                                        "echo received unexpected scalar values");
+        return BABET_STATUS_INVALID_ARGUMENT;
+    }
+
+    ++probe->echo_calls;
+    /* set_result copies the borrowed Lua string before this callback returns. */
+    return babet_host_call_set_result(call, &arguments[4]);
+}
+
+static babet_status failing_host_function(babet_host_call *call,
+                                          void *userdata)
+{
+    host_function_probe *probe = (host_function_probe *)userdata;
+    if (probe != NULL)
+        ++probe->failure_calls;
+    (void)babet_host_call_set_error(call, "host callback sentinel");
+    return BABET_STATUS_INVALID_ARGUMENT;
+}
+
+static babet_status reentrant_host_function(babet_host_call *call,
+                                            void *userdata)
+{
+    host_function_probe *probe = (host_function_probe *)userdata;
+    if (probe == NULL || probe->context == NULL)
+    {
+        (void)babet_host_call_set_error(call, "missing reentrancy probe context");
+        return BABET_STATUS_INTERNAL_ERROR;
+    }
+
+    ++probe->reentrant_calls;
+    static const char chunk[] = "return 1";
+    probe->reentrant_run_status = babet_context_run(
+        probe->context, chunk, sizeof(chunk) - 1, "host-reentrant-run");
+    probe->reentrant_destroy_status = babet_context_destroy(probe->context);
+
+    babet_value result = {0};
+    result.type = BABET_VALUE_BOOLEAN;
+    result.as.boolean =
+        probe->reentrant_run_status == BABET_STATUS_REENTRANT_CALL &&
+        probe->reentrant_destroy_status == BABET_STATUS_REENTRANT_CALL;
+    return babet_host_call_set_result(call, &result);
+}
+
+static babet_status late_host_function(babet_host_call *call, void *userdata)
+{
+    (void)userdata;
+    babet_value result = {0};
+    result.type = BABET_VALUE_INTEGER;
+    result.as.integer = 77;
+    return babet_host_call_set_result(call, &result);
+}
 
 static void cleanup_search_root(void)
 {
@@ -142,6 +236,8 @@ static void *run_from_wrong_thread(void *opaque)
         babet_context_get_global(probe->context, "wrong_thread_value", &output);
     probe->call_global_status = babet_context_call_global(
         probe->context, "wrong_thread_function", NULL, 0, &output);
+    probe->register_host_status = babet_context_register_host_function(
+        probe->context, "wrong_thread_host", noop_host_function, NULL);
     probe->destroy_status = babet_context_destroy(probe->context);
     return NULL;
 }
@@ -308,6 +404,65 @@ int main(void)
                        BABET_STATUS_OK))
         return 1;
 
+    host_function_probe host_probe = {context, 0, 0, 0,
+                                      BABET_STATUS_OK, BABET_STATUS_OK};
+    if (babet_host_call_argument_count(NULL) != 0 ||
+        babet_host_call_arguments(NULL) != NULL)
+    {
+        fprintf(stderr, "NULL host call accessors are not neutral\n");
+        return 1;
+    }
+    if (!expect_status("NULL host result call",
+                       babet_host_call_set_result(NULL, &value),
+                       BABET_STATUS_INVALID_ARGUMENT) ||
+        !expect_status("NULL host error call",
+                       babet_host_call_set_error(NULL, "ignored"),
+                       BABET_STATUS_INVALID_ARGUMENT))
+        return 1;
+    if (!expect_status("NULL host callback",
+                       babet_context_register_host_function(context, "echo",
+                                                            NULL, &host_probe),
+                       BABET_STATUS_INVALID_ARGUMENT) ||
+        !expect_status("empty host callback name",
+                       babet_context_register_host_function(
+                           context, "", scalar_echo_host_function, &host_probe),
+                       BABET_STATUS_INVALID_ARGUMENT) ||
+        !expect_status("dotted host callback name",
+                       babet_context_register_host_function(
+                           context, "bad.name", scalar_echo_host_function,
+                           &host_probe),
+                       BABET_STATUS_INVALID_ARGUMENT) ||
+        !expect_status("Lua-keyword host callback name",
+                       babet_context_register_host_function(
+                           context, "end", scalar_echo_host_function,
+                           &host_probe),
+                       BABET_STATUS_INVALID_ARGUMENT))
+        return 1;
+
+    char copied_host_name[] = "echo";
+    if (!expect_status("register scalar host callback",
+                       babet_context_register_host_function(
+                           context, copied_host_name, scalar_echo_host_function,
+                           &host_probe),
+                       BABET_STATUS_OK))
+        return 1;
+    copied_host_name[0] = 'X';
+    if (!expect_status("duplicate scalar host callback",
+                       babet_context_register_host_function(
+                           context, "echo", scalar_echo_host_function,
+                           &host_probe),
+                       BABET_STATUS_INVALID_ARGUMENT) ||
+        !expect_status("register failing host callback",
+                       babet_context_register_host_function(
+                           context, "fail", failing_host_function, &host_probe),
+                       BABET_STATUS_OK) ||
+        !expect_status("register reentrant host callback",
+                       babet_context_register_host_function(
+                           context, "reentrant", reentrant_host_function,
+                           &host_probe),
+                       BABET_STATUS_OK))
+        return 1;
+
     if (!expect_status("empty chunk",
                        babet_context_run(context, NULL, 0, NULL),
                        BABET_STATUS_OK))
@@ -320,6 +475,16 @@ int main(void)
     static const char good_chunk[] =
         "assert(type(babet) == 'table')\n"
         "assert(type(babet.VERSION) == 'string')\n"
+        "assert(type(babet.host) == 'table')\n"
+        "local host_echo = babet.host.echo(nil, true, 1234567890123, 2.5, 'H\\0I')\n"
+        "assert(#host_echo == 3 and host_echo:byte(1) == 72 and host_echo:byte(2) == 0 and host_echo:byte(3) == 73)\n"
+        "assert(babet.host.reentrant() == true)\n"
+        "local host_ok, host_err = pcall(babet.host.fail)\n"
+        "assert(host_ok == false and tostring(host_err):find('host callback sentinel', 1, true))\n"
+        "local arg_ok, arg_err = pcall(babet.host.echo, {})\n"
+        "assert(arg_ok == false and tostring(arg_err):find('unsupported type table', 1, true))\n"
+        "local host_echo_after_error = babet.host.echo(nil, true, 1234567890123, 2.5, 'H\\0I')\n"
+        "assert(#host_echo_after_error == 3)\n"
         "assert(babet.base64.encode('abc') == 'YWJj')\n"
         "assert(babet.json.decode('{\\\"answer\\\":42}').answer == 42)\n"
         "local inspect = require('inspect')\n"
@@ -331,6 +496,9 @@ int main(void)
         "local w = babet.workers.spawn(\"local m = require('host_module'); return m.value\")\n"
         "local joined, value = w:join(5)\n"
         "assert(joined == true and value == 'host-root-ok', tostring(value))\n"
+        "local hw = babet.workers.spawn(\"return babet.host == nil\")\n"
+        "local hw_joined, host_absent = hw:join(5)\n"
+        "assert(hw_joined == true and host_absent == true, tostring(host_absent))\n"
         "assert(host_nil == nil)\n"
         "assert(host_bool == true)\n"
         "assert(host_int == 1234567890123)\n"
@@ -353,7 +521,8 @@ int main(void)
         "function host_no_result() end\n"
         "function host_structured_result() return {} end\n"
         "not_callable = 42\n"
-        "function host_call_error() error('embedding call sentinel') end\n";
+        "function host_call_error() error('embedding call sentinel') end\n"
+        "function lua_calls_host() return babet.host.echo(nil, true, 1234567890123, 2.5, 'H\\0I') end\n";
 
     if (!expect_status("run valid chunk",
                        babet_context_run(context, good_chunk,
@@ -362,6 +531,56 @@ int main(void)
                        BABET_STATUS_OK))
     {
         fprintf(stderr, "detail: %s\n", babet_context_last_error(context));
+        return 1;
+    }
+
+    if (host_probe.echo_calls != 2 || host_probe.failure_calls != 1 ||
+        host_probe.reentrant_calls != 1 ||
+        host_probe.reentrant_run_status != BABET_STATUS_REENTRANT_CALL ||
+        host_probe.reentrant_destroy_status != BABET_STATUS_REENTRANT_CALL)
+    {
+        fprintf(stderr,
+                "host callback counters/reentrancy mismatch: echo=%u fail=%u "
+                "reentrant=%u run=%s destroy=%s\n",
+                host_probe.echo_calls, host_probe.failure_calls,
+                host_probe.reentrant_calls,
+                babet_status_name(host_probe.reentrant_run_status),
+                babet_status_name(host_probe.reentrant_destroy_status));
+        return 1;
+    }
+    if (strcmp(babet_status_name(BABET_STATUS_REENTRANT_CALL),
+               "reentrant_call") != 0)
+    {
+        fprintf(stderr, "reentrant status name mismatch\n");
+        return 1;
+    }
+
+    static const char uncaught_host_failure[] = "babet.host.fail()";
+    if (!expect_status("uncaught host callback failure",
+                       babet_context_run(context, uncaught_host_failure,
+                                         sizeof(uncaught_host_failure) - 1,
+                                         "embedding-host-failure"),
+                       BABET_STATUS_LUA_ERROR))
+        return 1;
+    if (strstr(babet_context_last_error(context), "host callback sentinel") == NULL ||
+        strstr(babet_context_last_error(context), "invalid_argument") == NULL)
+    {
+        fprintf(stderr, "missing host callback diagnostic: %s\n",
+                babet_context_last_error(context));
+        return 1;
+    }
+    static const char host_recovery_chunk[] =
+        "local s=babet.host.echo(nil,true,1234567890123,2.5,'H\0I'); assert(#s==3)";
+    if (!expect_status("host callback recovery after uncaught failure",
+                       babet_context_run(context, host_recovery_chunk,
+                                         sizeof(host_recovery_chunk) - 1,
+                                         "embedding-host-recovery"),
+                       BABET_STATUS_OK))
+        return 1;
+    if (host_probe.failure_calls != 2 || host_probe.echo_calls != 3)
+    {
+        fprintf(stderr, "host recovery counters mismatch: echo=%u fail=%u\n",
+                host_probe.echo_calls, host_probe.failure_calls);
         return 1;
     }
 
@@ -466,6 +685,26 @@ int main(void)
         return 1;
     }
 
+    const unsigned echo_calls_before_call_global = host_probe.echo_calls;
+    if (!expect_status("call Lua function that invokes host callback",
+                       babet_context_call_global(context, "lua_calls_host",
+                                                 NULL, 0, &output),
+                       BABET_STATUS_OK) ||
+        output.type != BABET_VALUE_STRING || output.as.string.length != 3 ||
+        memcmp(output.as.string.data, "H\0I", 3) != 0)
+    {
+        fprintf(stderr, "Lua -> host -> Lua scalar result mismatch: %s\n",
+                babet_context_last_error(context));
+        return 1;
+    }
+    if (host_probe.echo_calls != echo_calls_before_call_global + 1)
+    {
+        fprintf(stderr,
+                "call_global host callback count mismatch: before=%u after=%u\n",
+                echo_calls_before_call_global, host_probe.echo_calls);
+        return 1;
+    }
+
     if (!expect_status("call Lua no-result function",
                        babet_context_call_global(context, "host_no_result",
                                                  NULL, 0, &output),
@@ -563,6 +802,20 @@ int main(void)
         return 1;
     }
 
+    if (!expect_status("late host callback registration",
+                       babet_context_register_host_function(
+                           context, "late_value", late_host_function, NULL),
+                       BABET_STATUS_OK))
+        return 1;
+    static const char late_host_chunk[] =
+        "assert(babet.host.late_value() == 77)";
+    if (!expect_status("late host callback invocation",
+                       babet_context_run(context, late_host_chunk,
+                                         sizeof(late_host_chunk) - 1,
+                                         "embedding-late-host"),
+                       BABET_STATUS_OK))
+        return 1;
+
     if (!expect_status("search root after run",
                        babet_context_set_search_root(context, g_search_root),
                        BABET_STATUS_INVALID_ARGUMENT))
@@ -572,7 +825,7 @@ int main(void)
     thread_probe probe = {context, g_search_root, BABET_STATUS_OK,
                           BABET_STATUS_OK, BABET_STATUS_OK,
                           BABET_STATUS_OK, BABET_STATUS_OK,
-                          BABET_STATUS_OK};
+                          BABET_STATUS_OK, BABET_STATUS_OK};
     if (pthread_create(&thread, NULL, run_from_wrong_thread, &probe) != 0)
     {
         fprintf(stderr, "pthread_create failed\n");
@@ -596,6 +849,9 @@ int main(void)
                        BABET_STATUS_WRONG_THREAD))
         return 1;
     if (!expect_status("wrong-thread call global", probe.call_global_status,
+                       BABET_STATUS_WRONG_THREAD))
+        return 1;
+    if (!expect_status("wrong-thread register host", probe.register_host_status,
                        BABET_STATUS_WRONG_THREAD))
         return 1;
     if (!expect_status("wrong-thread destroy", probe.destroy_status,

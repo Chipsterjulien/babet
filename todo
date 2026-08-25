@@ -446,40 +446,78 @@ Inter-lot maintenance — complete local cleanup
 Lot 10 — narrow Lua -> host C/C++ function API
 -----------------------------------------------
 
-[ ] Design the smallest host-function registration surface from the concrete
+[x] Design the smallest host-function registration surface from the concrete
     missing-capability list produced by the FLTK prototype, not from speculation.
-[ ] Keep the public boundary C-only and reuse babet_value scalar arguments/results
+[x] Keep the public boundary C-only and reuse babet_value scalar arguments/results
     first; expose no lua_State, STL types, C++ classes or exception ABI.
-[ ] Define callback lifetime, name/ID ownership, error conversion, reentrancy and
-    thread rules explicitly before implementation.
-[ ] Rework the Lot 9 prototype onto the public host-function API and remove every
+[x] Define callback lifetime, name ownership, error conversion, worker isolation,
+    reentrancy and owner-thread rules explicitly before implementation.
+[x] Publish registered functions only as `babet.host.<name>` with copied simple
+    identifier names excluding Lua reserved keywords, host-owned userdata lasting
+    until context destruction and no
+    unregister operation in this first slice.
+[x] Use the opaque `babet_host_call` accessors/setters so scalar result strings and
+    callback diagnostics are copied by Babet before temporary host storage dies.
+[x] Reject nested `babet_context_*` entry from an active callback with the explicit
+    `BABET_STATUS_REENTRANT_CALL` status; workers do not inherit host callbacks.
+[x] Rework the Lot 9 prototype onto the public host-function API and remove every
     temporary/prototype-only bridge rather than keeping a workaround because it
     happens to work.
-[ ] Add C/C++ host regressions and documentation before considering the API
-    suitable as a foundation for native plugins.
+[x] Add C host regressions for scalar/binary arguments, host errors, recovery,
+    reentrancy, late/wrong-thread registration and worker isolation, plus a C++
+    regression proving thrown exceptions are contained and the context recovers.
+[x] Ship the host-function design contract and a standalone SDK example, and extend
+    the bilingual embedding documentation before treating this API as the value-
+    passage foundation for the future native-plugin experiment.
+[x] Run the complete maintainer `./run_tests.sh` campaign and the separate
+    `./prototypes/fltk/test.sh` runtime validation on Lot 10 Candidate 2. Final
+    maintainer validation on 2026-08-25 is green: host-function contracts reach
+    52 PASS / 0 FAIL, embedding runtime reaches 16 PASS / 0 FAIL, all seven moved
+    SDK examples pass, the normal campaign remains 3810/0 folder, 3796/0 embedded,
+    3796/0 embedded via PATH and 9/9 modes, and the FLTK self-test proves the full
+    Lua -> host round trip with `host_updates=2`. The stripped FLTK companion measures
+    15,316,744 bytes, keeps FLTK static, and the normal Babet CLI retains zero GUI
+    runtime dependency.
 
 Lot 11 — minimal native C/C++ plugin experiment
 -----------------------------------------------
 
-[ ] Reopen native plugins for the real extension use cases: libraries that
+[x] Reopen native plugins for the real extension use cases: libraries that
     Babet should never absorb into core (for example specialised/vendor SDKs)
     and third-party/private extensions that should not require forking Babet.
     Binary-size reduction is explicitly NOT a plugin architecture motivation.
-[ ] Define a tiny versioned C plugin entry point/declaration ABI. Plugin internals
+[x] Define a tiny versioned C plugin entry point/declaration ABI. Plugin internals
     may use C++, but no C++ exception, RTTI/STL object or allocator ownership may
     cross the Babet/plugin boundary because the host/plugin runtime configuration
-    is not under Babet's control.
-[ ] Keep the first plugin ABI away from lua_State and reuse the Lot 10 scalar
+    is not under Babet's control. ABI v1 is a static descriptor returned by
+    `babet_plugin_query_v1()` and a bounded list of `babet_host_function`.
+[x] Keep the first plugin ABI away from lua_State and reuse the Lot 10 scalar
     host-function mechanism for value passage instead of exposing Lua internals.
-[ ] Treat native plugins as fully trusted in-process code with no sandbox or
+[x] Treat native plugins as fully trusted in-process code with no sandbox or
     memory-safety boundary.
-[ ] Load explicitly chosen .so files and keep them loaded for process lifetime;
-    do not support dlclose while callbacks/functions may remain registered.
-[ ] Refuse native-plugin loading from generated --create-exe applications in the
+[x] Load explicitly chosen .so files with RTLD_NOW|RTLD_LOCAL and keep successful
+    plugins loaded for process lifetime; do not support unload/reload while
+    callbacks/functions may remain reachable.
+[x] Refuse native-plugin loading from generated --create-exe applications in the
     first design and do not weaken the one-file generated-application contract.
-[ ] Do not add a package manager, dependency resolver, Internet downloader,
+    Lot 11 also refuses loading from workers and external embedding hosts.
+[x] Do not add a package manager, dependency resolver, Internet downloader,
     automatic require() discovery, /tmp extraction or plugin packaging until a
     later concrete need proves that complexity worthwhile.
+[x] Run the complete maintainer campaign on Linux (`./run_tests.sh`) plus the
+    separate FLTK regression (`./prototypes/fltk/test.sh`) because Lot 11
+    generalises the public `babet_host_call_*` implementation reused by Lot 10.
+    Candidate 1 reached the native plugin runtime and exposed only an unquoted
+    Babet executable path in its shell regression on a checkout path containing
+    spaces; Candidate 2 quotes that invocation and protects it structurally.
+    Final maintainer validation on 2026-08-25 is green: native plugin structural
+    contracts 74/0, native plugin runtime 4/0, embedding runtime 16/0, packaging
+    8/0, folder tests 3810/0, embedded tests 3796/0, embedded-via-PATH 3796/0 and
+    9/9 modes. The stripped CLI measures 15,510,344 bytes (+513,216 bytes versus
+    the published v2.22.2 baseline). The separate FLTK regression still proves
+    the Lot 10 Lua -> host round trip with `host_updates=2`, measures 15,337,224
+    bytes stripped, keeps FLTK static and leaves the normal CLI with zero GUI
+    runtime dependency.
 
 Deferred Windows port
 ---------------------

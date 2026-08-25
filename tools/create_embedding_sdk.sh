@@ -30,13 +30,19 @@ trap 'rm -rf -- "${WORK_DIR}"' EXIT
 mkdir -p "${WORK_DIR}/archives" "${WORK_DIR}/sdk/include/babet" "${WORK_DIR}/sdk/lib"
 
 cp -- "${PUBLIC_HEADER}" "${WORK_DIR}/sdk/include/babet/babet.h"
+PLUGIN_HEADER="$(dirname -- "${PUBLIC_HEADER}")/plugin.h"
+if [ ! -f "${PLUGIN_HEADER}" ]; then
+    echo "ERREUR: header plugin public introuvable : ${PLUGIN_HEADER}" >&2
+    exit 1
+fi
+cp -- "${PLUGIN_HEADER}" "${WORK_DIR}/sdk/include/babet/plugin.h"
 
 # Documentation and examples are part of the standalone developer experience.
 # The builder lives under tools/, so resolve these from the source tree rather
 # than from the caller's current working directory.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-for DOC in EMBEDDING.md EMBEDDING.fr.md EMBEDDING_DESIGN.md; do
+for DOC in EMBEDDING.md EMBEDDING.fr.md EMBEDDING_DESIGN.md HOST_FUNCTIONS_DESIGN.md NATIVE_PLUGINS.md NATIVE_PLUGINS.fr.md NATIVE_PLUGIN_DESIGN.md; do
     if [ ! -f "${SOURCE_ROOT}/${DOC}" ]; then
         echo "ERREUR: documentation d'embedding introuvable : ${SOURCE_ROOT}/${DOC}" >&2
         exit 1
@@ -49,6 +55,11 @@ if [ ! -d "${SOURCE_ROOT}/examples/embedding" ]; then
 fi
 mkdir -p "${WORK_DIR}/sdk/examples"
 cp -a -- "${SOURCE_ROOT}/examples/embedding" "${WORK_DIR}/sdk/examples/embedding"
+if [ ! -d "${SOURCE_ROOT}/examples/native_plugin" ]; then
+    echo "ERREUR: exemples de plugin natif introuvables." >&2
+    exit 1
+fi
+cp -a -- "${SOURCE_ROOT}/examples/native_plugin" "${WORK_DIR}/sdk/examples/native_plugin"
 
 # MRI `ar -M` does not have a portable quoting convention for archive names
 # containing spaces. Stage every input under a numbered, space-free name first;
@@ -93,12 +104,17 @@ Babet experimental static embedding SDK
 =======================================
 
 Contents:
-  include/babet/babet.h       public C API
+  include/babet/babet.h       public embedding/host-call C API
+  include/babet/plugin.h      native plugin ABI v1 declarations
   lib/libbabet.a              Babet runtime + pinned static third-party libraries
   EMBEDDING.md                complete English developer guide
   EMBEDDING.fr.md             complete French developer guide
   EMBEDDING_DESIGN.md         architectural embedding contract
+  HOST_FUNCTIONS_DESIGN.md    Lua -> host callback contract
+  NATIVE_PLUGINS.md/.fr.md    native plugin developer guides
+  NATIVE_PLUGIN_DESIGN.md     native plugin ABI/loader contract
   examples/embedding/         executable C examples + CMake project
+  examples/native_plugin/     standalone C/C++ plugin examples
 
 Linux host build example:
   cc -std=c99 -I/path/to/sdk/include -c host.c -o host.o
@@ -112,8 +128,8 @@ Examples with CMake:
 Use a C++ linker driver for the final link because Babet itself is implemented
 in C++. On 32-bit Linux targets, add -latomic. The SDK intentionally does not
 provide a shared libbabet.so and the embedding ABI remains experimental.
-See EMBEDDING.md or EMBEDDING.fr.md for lifecycle, scalar-value, threading and
-Linux/glibc compatibility details.
+See EMBEDDING.md or EMBEDDING.fr.md for lifecycle, scalar-value, host-function,
+threading and Linux/glibc compatibility details.
 EOF_README
 
 PARENT_DIR="$(dirname -- "${OUTPUT_DIR}")"

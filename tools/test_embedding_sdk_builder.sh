@@ -13,6 +13,7 @@ INPUT_DIR="${TMP_DIR}/input archives with spaces"
 OUTPUT_DIR="${TMP_DIR}/moved sdk with spaces"
 mkdir -p "${INPUT_DIR}"
 printf '%s\n' '#ifndef BABET_FAKE_H' '#define BABET_FAKE_H' '#endif' > "${TMP_DIR}/babet.h"
+printf '%s\n' '#ifndef BABET_PLUGIN_FAKE_H' '#define BABET_PLUGIN_FAKE_H' '#endif' > "${TMP_DIR}/plugin.h"
 printf 'one\n' > "${INPUT_DIR}/member_one.o"
 printf 'two\n' > "${INPUT_DIR}/member_two.o"
 ar rcs "${INPUT_DIR}/lib one.a" "${INPUT_DIR}/member_one.o"
@@ -27,10 +28,12 @@ else
 fi
 
 if [ -f "${OUTPUT_DIR}/include/babet/babet.h" ] &&
-   cmp -s "${TMP_DIR}/babet.h" "${OUTPUT_DIR}/include/babet/babet.h"; then
-    pass "standalone SDK builder publishes the public header"
+   [ -f "${OUTPUT_DIR}/include/babet/plugin.h" ] &&
+   cmp -s "${TMP_DIR}/babet.h" "${OUTPUT_DIR}/include/babet/babet.h" &&
+   cmp -s "${TMP_DIR}/plugin.h" "${OUTPUT_DIR}/include/babet/plugin.h"; then
+    pass "standalone SDK builder publishes embedding and plugin public headers"
 else
-    fail "standalone SDK builder publishes the public header"
+    fail "standalone SDK builder publishes embedding and plugin public headers"
 fi
 
 SDK_LIB="${OUTPUT_DIR}/lib/libbabet.a"
@@ -58,20 +61,28 @@ fi
 if [ -f "${OUTPUT_DIR}/EMBEDDING.md" ] &&
    [ -f "${OUTPUT_DIR}/EMBEDDING.fr.md" ] &&
    [ -f "${OUTPUT_DIR}/EMBEDDING_DESIGN.md" ] &&
+   [ -f "${OUTPUT_DIR}/HOST_FUNCTIONS_DESIGN.md" ] &&
+   [ -f "${OUTPUT_DIR}/NATIVE_PLUGINS.md" ] &&
+   [ -f "${OUTPUT_DIR}/NATIVE_PLUGINS.fr.md" ] &&
+   [ -f "${OUTPUT_DIR}/NATIVE_PLUGIN_DESIGN.md" ] &&
    grep -Fq 'Linux/glibc compatibility' "${OUTPUT_DIR}/EMBEDDING.md" &&
    grep -Fq 'Compatibilité Linux/glibc' "${OUTPUT_DIR}/EMBEDDING.fr.md"; then
-    pass "standalone SDK publishes bilingual embedding guides"
+    pass "standalone SDK publishes embedding, host-function and native-plugin guides"
 else
-    fail "standalone SDK publishes bilingual embedding guides"
+    fail "standalone SDK publishes embedding, host-function and native-plugin guides"
 fi
 
 if [ -f "${OUTPUT_DIR}/examples/embedding/CMakeLists.txt" ] &&
    [ -f "${OUTPUT_DIR}/examples/embedding/01_hello.c" ] &&
    [ -f "${OUTPUT_DIR}/examples/embedding/06_lifecycle_threads.c" ] &&
-   [ -f "${OUTPUT_DIR}/examples/embedding/modules/greeting.lua" ]; then
-    pass "standalone SDK publishes executable embedding examples"
+   [ -f "${OUTPUT_DIR}/examples/embedding/07_host_functions.c" ] &&
+   [ -f "${OUTPUT_DIR}/examples/embedding/modules/greeting.lua" ] &&
+   [ -f "${OUTPUT_DIR}/examples/native_plugin/CMakeLists.txt" ] &&
+   [ -f "${OUTPUT_DIR}/examples/native_plugin/echo_plugin.c" ] &&
+   [ -f "${OUTPUT_DIR}/examples/native_plugin/decorate_plugin.cpp" ]; then
+    pass "standalone SDK publishes embedding and native-plugin examples"
 else
-    fail "standalone SDK publishes executable embedding examples"
+    fail "standalone SDK publishes embedding and native-plugin examples"
 fi
 
 echo "embedding SDK builder regression: ${PASS} PASS / ${FAIL} FAIL"

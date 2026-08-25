@@ -443,9 +443,10 @@ Le Lot 6 introduit la première frontière d'embedding réellement exercée. Un
 hôte C ou C++ peut viser le petit header C
 [`include/babet/babet.h`](include/babet/babet.h) et le runtime statique
 `libbabet.a` produit dans le build CMake. Un build normal crée aussi un SDK
-statique déplaçable sous `build/embedding-sdk/` : le header public, un unique
+statique déplaçable sous `build/embedding-sdk/` : les headers C publics
+(`babet.h` ainsi que l’ABI développeur `plugin.h` du Lot 11), un unique
 `libbabet.a` aplati qui incorpore les dépendances statiques épinglées de Babet,
-et une courte note de linkage. Un hôte C externe peut donc compiler contre ce
+ainsi que la documentation et les exemples développeur. Un hôte C externe peut donc compiler contre ce
 SDK déplacé sans connaître l'arborescence des dépendances ; le lien final utilise
 un driver C++ avec les bibliothèques système Linux normales (`-ldl -pthread
 -lm`, plus `-latomic` en 32 bits). L'API reste volontairement réduite et
@@ -457,25 +458,44 @@ seule fois avant la première exécution ; il alimente à la fois `package.path`
 du contexte principal et les workers. Une petite API `babet_value` permet aussi
 d'échanger des globals scalaires (`nil`, booléen, entier signé 64 bits, double
 et chaîne binaire) sans exposer `lua_State`, et d'appeler une fonction globale
-Lua avec des arguments scalaires et un résultat scalaire. Tables structurées,
-callbacks hôte, résolution de méthodes pointées et multi-retours restent
-différés. Aucun détail Lua/C++ ne fait partie de l'ABI publique.
+Lua avec des arguments scalaires et un résultat scalaire. Le Lot 10 ajoute le
+sens inverse : l'hôte peut enregistrer des fonctions scalaires sous
+`babet.host.<nom>` à travers la même frontière C pure. Babet copie les chaînes
+et diagnostics des callbacks, les workers n'héritent pas des enregistrements et
+une réentrée `babet_context_*` depuis un callback hôte actif est refusée avec
+`BABET_STATUS_REENTRANT_CALL`. Tables structurées, désenregistrement de fonction
+hôte, résolution de méthodes pointées et multi-retours restent différés. Aucun
+détail Lua/C++ ne fait partie de l'ABI publique.
 
 Le binaire officiel `babet` continue d'embarquer le runtime dans son propre
 fichier et ne dépend **pas** d'un `libbabet.so` au runtime. Le packaging en
 bibliothèque partagée et plusieurs contextes concurrents restent différés ; le
 Lot 6 valide volontairement d’abord le chemin du SDK statique. Les API Babet process-wide (`chdir`, environnement,
 signaux, enfants, terminal) restent de vrais effets sur le processus hôte et ne
-sont pas sandboxées. Le guide pratique développeur est [`EMBEDDING.fr.md`](EMBEDDING.fr.md), avec de petits exemples C exécutables sous [`examples/embedding/`](examples/embedding/). Le contrat architectural détaillé et ses raisons restent dans [`EMBEDDING_DESIGN.md`](EMBEDDING_DESIGN.md).
+sont pas sandboxées. Le guide pratique développeur est [`EMBEDDING.fr.md`](EMBEDDING.fr.md), avec de petits exemples C exécutables sous [`examples/embedding/`](examples/embedding/). Le contrat architectural détaillé et ses raisons restent dans [`EMBEDDING_DESIGN.md`](EMBEDDING_DESIGN.md), et le contrat Lua -> fonctions hôte est isolé dans [`HOST_FUNCTIONS_DESIGN.md`](HOST_FUNCTIONS_DESIGN.md).
 
 Le Lot 7 garde volontairement toute GUI optionnelle hors du CLI. Le Lot 9 ajoute
-maintenant un minuscule prototype compagnon **séparé** en FLTK 1.4.5 qui consomme
-le SDK libbabet autonome ; il ne fait pas partie du build Babet normal et ne
-change pas `--create-exe`. Le prototype n'utilise que le chemin hôte -> Lua déjà
-existant et consigne les capacités Lua -> hôte manquantes qui définiront le Lot
-10. wxWidgets 3.2.x reste le premier repli si le prototype réel montre que FLTK
-n'est pas adapté. Voir [`GUI_STUDY.md`](GUI_STUDY.md) et
+un minuscule prototype compagnon **séparé** en FLTK 1.4.5 qui consomme le SDK
+libbabet autonome ; il ne fait pas partie du build Babet normal et ne change pas
+`--create-exe`. Le Lot 10 réécrit ce même prototype sur l'API publique de
+fonctions hôte : un clic exerce maintenant FLTK -> Lua ->
+`babet.host.set_button_label()` -> FLTK sans polling ni pont privé. wxWidgets
+3.2.x reste le premier repli si une future vraie GUI montre que FLTK n'est pas
+adapté. Voir [`GUI_STUDY.md`](GUI_STUDY.md) et
 [`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md).
+
+Le Lot 11 ajoute séparément un chemin de **plugins natifs expérimentaux** pour
+des extensions Linux `.so` totalement de confiance qui ne doivent pas entrer
+dans le cœur de Babet (par exemple des wrappers de SDK constructeur). Le
+chargement reste explicite via `babet.plugin.load(path)` et renvoie une table
+locale de callbacks scalaires ; les plugins réutilisent la frontière C
+`babet_host_call_*` du Lot 10 et ne voient jamais `lua_State *`. Un plugin
+chargé avec succès reste chargé jusqu'à la fin du processus. Il n'y a ni
+`libbabet.so`, ni gestionnaire de paquets, ni résolution de dépendances, ni
+découverte automatique ; les applications `--create-exe`, les workers et les
+hôtes d'embedding externes refusent le chargement natif dans cette première
+version. Voir [`NATIVE_PLUGINS.fr.md`](NATIVE_PLUGINS.fr.md) et
+[`NATIVE_PLUGIN_DESIGN.md`](NATIVE_PLUGIN_DESIGN.md).
 
 ## Validation avant une release
 
@@ -512,6 +532,8 @@ comportement indéfini principaux du projet.
 - Invariants du projet et garde-fous d’architecture : [`INVARIANTS.md`](INVARIANTS.md)
 - Étude d’architecture de la GUI optionnelle : [`GUI_STUDY.md`](GUI_STUDY.md)
 - Prototype compagnon FLTK (Lot 9) : [`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md)
+- Guide développeur des plugins natifs (Lot 11) : [`NATIVE_PLUGINS.fr.md`](NATIVE_PLUGINS.fr.md)
+- Contrat ABI/loader des plugins natifs : [`NATIVE_PLUGIN_DESIGN.md`](NATIVE_PLUGIN_DESIGN.md)
 - Feuille de route de développement actuelle : [`todo`](todo)
 
 - [Manuel français](docs/fr/README.md)

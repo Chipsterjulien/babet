@@ -1850,7 +1850,7 @@ namespace
             // lua_pcall : un LUA_ERRMEM devient un échec du worker, jamais
             // un panic du processus ni un longjmp par-dessus la pthread C++.
             register_bundled_modules(state);
-            register_babet(state);
+            register_babet(state, nullptr, NativePluginMode::worker);
         };
         if (!lua_run_setup_protected(
                 L, setup_libraries,

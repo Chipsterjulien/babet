@@ -20,8 +20,10 @@ The answer must preserve the existing product contracts:
   plausible;
 - no generic `.so` plugin ABI is introduced as a side effect of GUI work.
 
-This document is a technology and architecture study only. It deliberately does
-not add GUI bindings or a GUI executable yet.
+This document began as the Lot 7 technology/architecture study. Lot 9 later
+added a deliberately separate FLTK prototype, and Lot 10 added only the narrow
+Lua -> host callback API that prototype proved necessary. Neither change turns
+the normal Babet CLI into a GUI executable.
 
 ## 2. Architecture decision
 
@@ -71,7 +73,7 @@ from "preferred prototype" to a long-term product decision.
 FLTK currently best matches the constraints that made GUI work interesting in
 the first place:
 
-1. Babet should not grow simply because GUI support exists.
+1. The normal Babet CLI should not acquire GUI dependencies simply because optional GUI support exists.
 2. A future Windows port should not require replacing the entire GUI layer.
 3. Static linkage should be a technically and legally normal option rather than
    an exceptional deployment mode.
@@ -107,31 +109,35 @@ GUI toolkit calls remain main-thread-only. Babet workers may still perform
 background/non-GUI work, but a worker must never manipulate GUI widgets
 directly.
 
-## 6. Minimal bridge required before a GUI prototype
+## 6. Narrow bridge validated by Lots 9–10
 
-Lot 6 intentionally deferred arbitrary host callbacks. A useful Lua-driven GUI
-cannot be implemented cleanly with only C-to-Lua calls: Lua also needs a narrow
-way to request host operations such as creating a window or changing a label.
+Lot 9 deliberately built the smallest useful FLTK host **before** adding a new
+embedding API. It proved the existing host -> Lua path with
+`babet_context_call_global()` and recorded the reverse Lua -> host direction as
+the first real missing capability.
 
-A GUI prototype therefore justifies reopening **one narrowly scoped embedding
-feature**, not the generic plugin roadmap:
+Lot 10 implements only that observed requirement, not the generic plugin roadmap:
 
-- register one or more host functions in the main embedded Lua state without
+- a C/C++ host registers named functions under `babet.host.<name>` without
   exposing `lua_State *`;
-- keep the first callback boundary scalar/binary-safe, consistent with
-  `babet_value`;
-- represent GUI object identity with opaque integer IDs rather than C++ widget
-  pointers;
-- represent an event callback initially by the name of a Lua global function;
-  the GUI host can invoke it through the already validated
-  `babet_context_call_global()` path;
-- do not add retained Lua function handles, generic `.so` loading or arbitrary
-  C ABI objects merely for the GUI.
+- callback arguments/results reuse the scalar/binary-safe `babet_value` contract;
+- callback diagnostics are copied by Babet and non-OK callback statuses become
+  Lua errors;
+- registration, userdata lifetime, owner-thread use, worker isolation and
+  reentrancy rejection are explicit;
+- the existing named-Lua-global event direction still uses the already validated
+  `babet_context_call_global()` path.
 
-A first prototype can therefore expose a small Lua surface such as
-`babet.gui.window(...)`, `babet.gui.button(...)`, `babet.gui.setText(...)`,
-with host-owned integer handles and named Lua callbacks. The exact widget API is
-not designed in Lot 7.
+The FLTK prototype now validates the complete round trip:
+
+```text
+FLTK callback -> Lua global -> babet.host.set_button_label() -> FLTK widget
+```
+
+It still does **not** define a generic GUI object model. Opaque widget IDs, Lua-
+driven widget creation/destruction, asynchronous event queues and retained Lua
+function handles remain deferred until a concrete GUI application proves they
+are necessary. See `HOST_FUNCTIONS_DESIGN.md` and `FLTK_PROTOTYPE.md`.
 
 ## 7. Interaction with `--create-exe`
 
@@ -196,9 +202,11 @@ Lot 7 concludes:
    dependency/deployment surface.
 5. GTK 4 and Qt 6 remain technically capable but are not selected as the
    default Babet GUI host under the current constraints.
-6. Before any GUI widget API, add only the minimal host-function registration
-   boundary that the concrete companion needs; this is not permission to start
-   generic plugin work.
+6. The minimal host-function registration boundary justified by the concrete
+   companion is implemented by Lot 10. Lot 11 later introduces a separate,
+   deliberately narrow native-plugin experiment for vendor/private extensions;
+   it is **not** a mechanism for smuggling GUI toolkit code into the CLI and does
+   not create a generic GUI object model.
 7. Measure the actual prototype before promoting FLTK from preferred candidate
    to a permanent product dependency.
 
@@ -235,5 +243,5 @@ capability list becomes the Lot 10 design input, after which the FLTK prototype
 will be rewritten on the public host-function API.
 
 This refinement does not change the Lot 7 architecture decision: FLTK remains
-outside the normal CLI and the future Lua -> host boundary remains narrow and
-independent from generic native-plugin loading.
+outside the normal CLI and the implemented Lot 10 Lua -> host boundary remains
+narrow and independent from Lot 11 native-plugin loading.

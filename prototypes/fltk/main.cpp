@@ -9,6 +9,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <string>
 #include <string_view>
 
 namespace {
@@ -18,6 +19,7 @@ function on_counter_click(attempt)
     if attempt == 2 then
         error("intentional Lot 9 callback failure")
     end
+    babet.host.set_button_label(("Lua counter: %d"):format(attempt))
     return attempt
 end
 )lua";
@@ -33,8 +35,38 @@ struct HostState {
     std::uint64_t attempts = 0;
     std::uint64_t successful_calls = 0;
     std::uint64_t lua_errors = 0;
+    std::uint64_t host_label_updates = 0;
     std::int64_t last_value = 0;
 };
+
+babet_status set_button_label_host(babet_host_call *call, void *userdata)
+{
+    auto *state = static_cast<HostState *>(userdata);
+    const size_t count = babet_host_call_argument_count(call);
+    const babet_value *arguments = babet_host_call_arguments(call);
+    if (state == nullptr || !state->callbacks_enabled || state->button == nullptr) {
+        (void)babet_host_call_set_error(call, "GUI is not available");
+        return BABET_STATUS_INTERNAL_ERROR;
+    }
+    if (count != 1 || arguments == nullptr ||
+        arguments[0].type != BABET_VALUE_STRING) {
+        (void)babet_host_call_set_error(
+            call, "set_button_label expects exactly one string argument");
+        return BABET_STATUS_INVALID_ARGUMENT;
+    }
+    if (std::memchr(arguments[0].as.string.data, '\0',
+                    arguments[0].as.string.length) != nullptr) {
+        (void)babet_host_call_set_error(
+            call, "set_button_label does not accept embedded NUL bytes");
+        return BABET_STATUS_INVALID_ARGUMENT;
+    }
+
+    const std::string label(arguments[0].as.string.data,
+                            arguments[0].as.string.length);
+    state->button->copy_label(label.c_str());
+    ++state->host_label_updates;
+    return BABET_STATUS_OK;
+}
 
 void log_lua_failure(HostState &state, babet_status status) noexcept
 {
@@ -84,14 +116,6 @@ bool invoke_lua_counter(HostState &state) noexcept
 
     state.last_value = result.as.integer;
     ++state.successful_calls;
-
-    if (state.button != nullptr) {
-        char label[96];
-        const int written = std::snprintf(label, sizeof(label), "Lua counter: %lld",
-                                          static_cast<long long>(state.last_value));
-        if (written > 0 && static_cast<std::size_t>(written) < sizeof(label))
-            state.button->copy_label(label);
-    }
 
     return true;
 }
@@ -149,15 +173,18 @@ void self_test_tick(void *userdata) noexcept
         state->button->do_callback();
         (void)expect_self_test(*state,
                                state->attempts == 1 && state->successful_calls == 1 &&
-                                   state->lua_errors == 0 && state->last_value == 1,
-                               "first FLTK -> Lua callback did not return 1");
+                                   state->lua_errors == 0 && state->last_value == 1 &&
+                                   state->host_label_updates == 1 &&
+                                   std::strcmp(state->button->label(), "Lua counter: 1") == 0,
+                               "first FLTK -> Lua -> host callback did not update label");
         schedule_self_test(*state);
         break;
     case 1:
         state->button->do_callback();
         (void)expect_self_test(*state,
                                state->attempts == 2 && state->successful_calls == 1 &&
-                                   state->lua_errors == 1,
+                                   state->lua_errors == 1 &&
+                                   state->host_label_updates == 1,
                                "intentional Lua error did not stay inside callback boundary");
         schedule_self_test(*state);
         break;
@@ -165,8 +192,10 @@ void self_test_tick(void *userdata) noexcept
         state->button->do_callback();
         (void)expect_self_test(*state,
                                state->attempts == 3 && state->successful_calls == 2 &&
-                                   state->lua_errors == 1 && state->last_value == 3,
-                               "event loop did not recover after Lua callback error");
+                                   state->lua_errors == 1 && state->last_value == 3 &&
+                                   state->host_label_updates == 2 &&
+                                   std::strcmp(state->button->label(), "Lua counter: 3") == 0,
+                               "event loop did not recover through Lua -> host API");
         schedule_self_test(*state);
         break;
     case 3: {
@@ -193,7 +222,7 @@ void schedule_self_test(HostState &state) noexcept
 bool load_lua(HostState &state) noexcept
 {
     const babet_status status = babet_context_run(
-        state.ctx, kBootstrapLua.data(), kBootstrapLua.size(), "fltk-lot9-bootstrap");
+        state.ctx, kBootstrapLua.data(), kBootstrapLua.size(), "fltk-lot10-bootstrap");
     if (status == BABET_STATUS_OK)
         return true;
 
@@ -214,17 +243,37 @@ int run_host(bool self_test)
         return 1;
     }
 
-    if (!load_lua(state)) {
-        (void)babet_context_destroy(state.ctx);
-        return 1;
-    }
-
-    state.window = new Fl_Window(360, 150, "Babet + FLTK Lot 9");
+    state.window = new Fl_Window(360, 150, "Babet + FLTK Lot 10");
     state.button = new Fl_Button(70, 50, 220, 48, "Lua counter: 0");
     state.button->callback(button_callback, &state);
     state.window->callback(close_callback, &state);
     state.window->end();
     state.callbacks_enabled = true;
+
+    const babet_status register_status = babet_context_register_host_function(
+        state.ctx, "set_button_label", set_button_label_host, &state);
+    if (register_status != BABET_STATUS_OK) {
+        std::fprintf(stderr,
+                     "[babet-fltk-prototype] host function registration failed (%s): %s\n",
+                     babet_status_name(register_status),
+                     babet_context_last_error(state.ctx));
+        state.callbacks_enabled = false;
+        delete state.window;
+        state.window = nullptr;
+        state.button = nullptr;
+        (void)babet_context_destroy(state.ctx);
+        return 1;
+    }
+
+    if (!load_lua(state)) {
+        state.callbacks_enabled = false;
+        delete state.window;
+        state.window = nullptr;
+        state.button = nullptr;
+        (void)babet_context_destroy(state.ctx);
+        return 1;
+    }
+
     state.window->show();
 
     if (self_test)
@@ -263,17 +312,18 @@ int run_host(bool self_test)
     if (self_test) {
         if (state.self_test_failed || state.attempts != 3 ||
             state.successful_calls != 2 || state.lua_errors != 1 ||
-            state.last_value != 3) {
+            state.host_label_updates != 2 || state.last_value != 3) {
             std::fprintf(stderr,
                          "[babet-fltk-prototype] SELFTEST summary mismatch: "
-                         "attempts=%llu successes=%llu lua_errors=%llu last=%lld\n",
+                         "attempts=%llu successes=%llu lua_errors=%llu host_updates=%llu last=%lld\n",
                          static_cast<unsigned long long>(state.attempts),
                          static_cast<unsigned long long>(state.successful_calls),
                          static_cast<unsigned long long>(state.lua_errors),
+                         static_cast<unsigned long long>(state.host_label_updates),
                          static_cast<long long>(state.last_value));
             return 1;
         }
-        std::printf("LOT9_FLTK_SELFTEST_OK attempts=3 successes=2 lua_errors=1 last=3\n");
+        std::printf("LOT10_FLTK_HOST_API_SELFTEST_OK attempts=3 successes=2 lua_errors=1 host_updates=2 last=3\n");
     }
 
     return loop_status == 0 ? 0 : 1;

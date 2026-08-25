@@ -1,15 +1,20 @@
 #ifndef BABET_RUNTIME_REGISTRATION_HPP
 #define BABET_RUNTIME_REGISTRATION_HPP
 
+#include "../lua_bindings/native_plugin.hpp"
+
 #include <string_view>
 
 struct lua_State;
 
 // Registers the complete public `babet` table and its userdata metatables in
 // an already-open Lua state. The caller owns luaL_openlibs() and any host-
-// specific package.path / arg setup.
-void register_babet(lua_State *L);
-
+// specific package.path / arg setup. Native plugins are explicitly enabled
+// only by the normal CLI main state; generated apps, embedding and workers use
+// their respective refusal modes.
+void register_babet(lua_State *L,
+                    NativePluginRuntime *plugin_runtime = nullptr,
+                    NativePluginMode plugin_mode = NativePluginMode::embedding);
 
 // Prepends an already-owned Lua module search prefix to package.path.
 // The caller must execute this helper inside lua_run_setup_protected(); the

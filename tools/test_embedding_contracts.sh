@@ -23,6 +23,7 @@ forbid_grep() {
 }
 
 require_file "EMBEDDING_DESIGN.md" "embedding design contract exists"
+require_file "HOST_FUNCTIONS_DESIGN.md" "host-function design contract exists"
 require_file "EMBEDDING.md" "English embedding developer guide exists"
 require_file "EMBEDDING.fr.md" "French embedding developer guide exists"
 require_file "examples/embedding/CMakeLists.txt" "standalone embedding example CMake project exists"
@@ -33,6 +34,7 @@ require_file "examples/embedding/03_values.c" "scalar-value embedding example ex
 require_file "examples/embedding/04_call.c" "direct-call embedding example exists"
 require_file "examples/embedding/05_errors.c" "error-recovery embedding example exists"
 require_file "examples/embedding/06_lifecycle_threads.c" "lifecycle/threading embedding example exists"
+require_file "examples/embedding/07_host_functions.c" "host-function embedding example exists"
 require_file "include/babet/babet.h" "public embedding C header exists"
 require_file "src/embedding/babet_c_api.cpp" "embedding C implementation exists"
 require_file "tests/embedding_smoke.c" "embedding smoke host is written in C"
@@ -46,7 +48,7 @@ require_grep 'exactly one live embedded context' "EMBEDDING_DESIGN.md" "single-c
 require_grep 'created, used and destroyed by one host thread' "EMBEDDING_DESIGN.md" "same-thread context lifecycle is explicit"
 require_grep 'No `lua_State`' "EMBEDDING_DESIGN.md" "Lua internals are excluded from public ABI"
 require_grep 'No C\+\+ exception may cross' "EMBEDDING_DESIGN.md" "C exception boundary is explicit"
-require_grep 'experimental during Lot 6' "EMBEDDING_DESIGN.md" "public ABI is not frozen prematurely"
+require_grep 'experimental through Lot 10' "EMBEDDING_DESIGN.md" "public ABI is not frozen prematurely"
 require_grep 'exactly one explicit module search root' "EMBEDDING_DESIGN.md" "embedding design defines a single explicit module root"
 require_grep 'before its first Lua execution call' "EMBEDDING_DESIGN.md" "embedding design freezes search root before execution"
 require_grep 'same absolute root is propagated to workers' "EMBEDDING_DESIGN.md" "embedding design keeps parent and worker module roots aligned"
@@ -121,7 +123,7 @@ require_grep 'std::mutex g_context_mutex' "src/embedding/babet_c_api.cpp" "embed
 require_grep 'g_active_context' "src/embedding/babet_c_api.cpp" "embedding enforces one active context"
 require_grep 'register_main_thread\(\)' "src/embedding/babet_c_api.cpp" "embedding captures the host owner thread"
 require_grep 'register_bundled_modules\(state\)' "src/embedding/babet_c_api.cpp" "embedding installs bundled Lua modules"
-require_grep 'register_babet\(state\)' "src/embedding/babet_c_api.cpp" "embedding installs the complete Babet Lua API"
+require_grep 'register_babet\(state, nullptr, NativePluginMode::embedding\)' "src/embedding/babet_c_api.cpp" "embedding installs the complete Babet Lua API with explicit native-plugin refusal mode"
 require_grep 'babet_context_set_search_root' "src/embedding/babet_c_api.cpp" "embedding implements explicit search-root configuration"
 require_grep 'fs::absolute' "src/embedding/babet_c_api.cpp" "embedding resolves search root to an absolute path"
 require_grep 'fs::is_directory' "src/embedding/babet_c_api.cpp" "embedding rejects non-directory search roots"
@@ -231,6 +233,24 @@ require_grep 'documentation examples execute successfully' "tools/test_embedding
 require_grep 'max_glibc_requirement' "tools/test_embedding_runtime.sh" "runtime regression measures GLIBC symbol requirements"
 require_grep 'babet_context_call_global' "tests/embedding_external_smoke.c" "external SDK smoke exercises the public scalar call API"
 require_grep 'babet\.base64\.encode' "tests/embedding_external_smoke.c" "external SDK smoke exercises a real Babet binding"
+
+
+require_grep 'babet_host_call' "include/babet/babet.h" "public header exposes opaque host-call handle"
+require_grep 'babet_context_register_host_function' "include/babet/babet.h" "public header exposes host-function registration"
+require_grep 'BABET_STATUS_REENTRANT_CALL' "include/babet/babet.h" "public status surface represents callback reentrancy rejection"
+require_grep 'babet\.host\.<name>' "HOST_FUNCTIONS_DESIGN.md" "host-function design fixes the Lua namespace"
+require_grep 'no unregister operation in Lot 10' "HOST_FUNCTIONS_DESIGN.md" "host-function design fixes callback lifetime"
+require_grep 'do not inherit them' "HOST_FUNCTIONS_DESIGN.md" "host-function design preserves worker isolation"
+require_grep 'BABET_STATUS_REENTRANT_CALL' "HOST_FUNCTIONS_DESIGN.md" "host-function design forbids nested context entry"
+require_grep 'babet_context_register_host_function' "examples/embedding/07_host_functions.c" "host-function example registers a C callback"
+require_grep 'babet\.host\.greet' "examples/embedding/07_host_functions.c" "host-function example is called from Lua"
+require_grep 'HOST_FUNCTIONS_DESIGN\.md' "tools/create_embedding_sdk.sh" "SDK builder publishes host-function design contract"
+require_grep 'babet_context_register_host_function' "tools/test_embedding_runtime.sh" "runtime regression checks host-function export"
+require_grep 'babet_context_register_host_function' "tests/embedding_external_smoke.c" "external SDK smoke exercises host-function registration"
+require_grep 'embedding_cpp_callback_smoke' "CMakeLists.txt" "CMake builds the C++ host callback exception smoke"
+require_grep 'babet_enable_sanitizers\(babet_embedding_cpp_callback_smoke\)' "CMakeLists.txt" "sanitizers cover the C++ host callback exception smoke"
+require_grep 'C\+\+ host callback exceptions are contained and the context recovers' "tools/test_embedding_runtime.sh" "runtime regression executes the C++ callback exception smoke"
+require_grep 'uncaught host callback failure' "tests/embedding_smoke.c" "C smoke verifies uncaught host failure conversion"
 
 echo "embedding structural contracts: ${PASS} PASS / ${FAIL} FAIL"
 [ "${FAIL}" -eq 0 ]

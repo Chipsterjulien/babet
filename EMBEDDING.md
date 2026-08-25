@@ -17,6 +17,7 @@ build/embedding-sdk/
 ├── lib/libbabet.a
 ├── EMBEDDING.md
 ├── EMBEDDING.fr.md
+├── HOST_FUNCTIONS_DESIGN.md
 └── examples/embedding/
 ```
 
@@ -154,7 +155,62 @@ Current semantics:
 
 See [`examples/embedding/04_call.c`](examples/embedding/04_call.c).
 
-## 8. Thread and process-wide rules
+## 8. Registering host functions callable from Lua
+
+Lot 10 adds the reverse direction without exposing `lua_State *`:
+
+```c
+static babet_status host_greet(babet_host_call *call, void *userdata)
+{
+    const size_t count = babet_host_call_argument_count(call);
+    const babet_value *args = babet_host_call_arguments(call);
+    if (count != 1 || args == NULL || args[0].type != BABET_VALUE_STRING) {
+        (void)babet_host_call_set_error(call, "greet expects one string");
+        return BABET_STATUS_INVALID_ARGUMENT;
+    }
+
+    babet_value result = {0};
+    result.type = BABET_VALUE_STRING;
+    result.as.string.data = "hello from C";
+    result.as.string.length = 12;
+    return babet_host_call_set_result(call, &result);
+}
+
+babet_context_register_host_function(ctx, "greet", host_greet, userdata);
+```
+
+Lua then calls:
+
+```lua
+local message = babet.host.greet("Lua")
+```
+
+The registration name is copied and must be a simple ASCII Lua identifier; Lua reserved keywords are rejected so the name is always callable as `babet.host.<name>`.
+`userdata` is borrowed from the host and must remain valid until the context is
+destroyed; Lot 10 intentionally has no unregister operation.
+
+Host-function arguments use the same five scalar `babet_value` kinds as the rest
+of the embedding API. The argument array and its strings are borrowed only for
+the callback duration. `babet_host_call_set_result()` copies string results
+immediately, so a callback may safely use a temporary/local source buffer. If no
+result is set, Lua receives `nil`.
+
+To fail a host call, optionally copy a diagnostic with
+`babet_host_call_set_error()` and return a non-OK `babet_status`. Lua receives a
+normal error that can be caught with `pcall`; if it escapes, the outer
+`babet_context_run()` / `call_global()` returns `BABET_STATUS_LUA_ERROR` and the
+context diagnostic contains the host function name/status/message.
+
+Callbacks execute synchronously on the context owner thread and are installed
+only in the main embedded state, not worker states. Re-entering the public
+`babet_context_*` API from inside a host callback is deliberately rejected with
+`BABET_STATUS_REENTRANT_CALL`. A C++ callback may use C++ internally, but any
+exception is contained by Babet before returning to Lua.
+
+See [`examples/embedding/07_host_functions.c`](examples/embedding/07_host_functions.c)
+and [`HOST_FUNCTIONS_DESIGN.md`](HOST_FUNCTIONS_DESIGN.md).
+
+## 9. Thread and process-wide rules
 
 The first embedding API intentionally allows **one live context per process**.
 A second simultaneous `babet_context_create()` returns `BABET_STATUS_BUSY`.
@@ -167,7 +223,7 @@ Embedding is not a sandbox. Babet APIs that change the current directory,
 environment, signal policy, child processes or interactive terminal affect the
 host process. The host owns that consequence just as the normal Babet CLI does.
 
-## 9. C++ hosts
+## 10. C++ hosts
 
 Include the same public header from C++:
 
@@ -179,7 +235,7 @@ The header uses `extern "C"` automatically when compiled as C++. Keep C++
 objects and exceptions on the host side. The public Babet boundary consists of
 C types and status codes; no exception is specified to cross it.
 
-## 10. Linux/glibc compatibility
+## 11. Linux/glibc compatibility
 
 `file` may print a phrase such as `for GNU/Linux 3.2.0`. That is **not** a glibc
 minimum-version promise. It reflects ELF/kernel ABI metadata.
@@ -209,25 +265,28 @@ for the maintained Babet binary and its freshly linked external SDK smoke host
 when `objdump` is available. Those measurements describe that build; they are
 not an ABI guarantee for every future host.
 
-## 11. What is deliberately not supported yet
+## 12. What is deliberately not supported yet
 
 The first API intentionally does not expose:
 
-- host functions callable from Lua;
-- structured table/container marshalling;
+- structured table/container marshalling for host functions or direct calls;
+- unregistering/replacing host callbacks while the context is live;
+- reentrant nested `babet_context_*` calls from a host callback;
 - arbitrary Lua function handles/callbacks;
 - dotted method lookup;
 - multiple return values;
 - multiple simultaneous contexts;
 - a shared `libbabet.so` ABI;
-- a generic native-plugin ABI.
+- loading native plugins from an external embedding context.
 
-These are deferred until a concrete consumer demonstrates the need. The next
-planned consumer is the separate FLTK prototype, which will use the existing
-host-to-Lua call path first and record exactly what is missing in the opposite
-direction.
+These embedding capabilities remain deferred until a concrete consumer demonstrates the need.
+Lot 11 separately defines a narrow native-plugin ABI for the original Babet CLI;
+it does not widen the embedding loader boundary. The
+separate FLTK prototype is now the first real consumer of the public host-function
+API: Lua changes a button label through `babet.host.set_button_label()` instead
+of relying on a private bridge.
 
-## 12. Executable examples
+## 13. Executable examples
 
 The SDK ships these intentionally small programs:
 
@@ -239,6 +298,16 @@ The SDK ships these intentionally small programs:
 | `04_call.c` | direct scalar Lua function call |
 | `05_errors.c` | Lua diagnostics and recovery |
 | `06_lifecycle_threads.c` | BUSY and WRONG_THREAD lifecycle rules |
+| `07_host_functions.c` | register a C callback callable as `babet.host.*` |
 
 They are documentation **and** regression material: the Babet validation harness
 compiles and runs them against a moved standalone SDK.
+
+### Native plugin boundary (Lot 11)
+
+The developer SDK also ships `include/babet/plugin.h` and native-plugin examples
+because both reuse the public scalar `babet_host_call_*` surface. This does not
+mean an arbitrary embedding host can load Babet plugins in Lot 11: inside an
+embedded Lua context `babet.plugin.load()` returns a controlled "unavailable in
+embedding hosts" error. The first native loader is intentionally limited to the
+original Babet CLI executable, whose ELF export policy Babet controls.

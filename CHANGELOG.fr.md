@@ -8,11 +8,35 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+### Plugins natifs (Lot 11)
+
+- La validation mainteneur de la Candidate 1 a atteint la régression runtime des plugins après compilation réussie, contrôle des exports ELF et absence de dépendance `libbabet.so`, puis a révélé uniquement un défaut de quoting shell dans `tools/test_native_plugin_runtime.sh` lorsque Babet se trouve sous un chemin contenant des espaces ; la Candidate 2 quote l’invocation de l’exécutable et ajoute un garde-fou structurel dédié.
+- la validation mainteneur finale du Lot 11 du 25/08/2026 est verte : contrats structurels plugins natifs 74 PASS / 0 FAIL, runtime plugins natifs 4 PASS / 0 FAIL, runtime embedding 16 PASS / 0 FAIL, packaging 8 PASS / 0 FAIL, campagne normale toujours à 3810/0 en mode dossier + 3796/0 embarqué + 3796/0 embarqué via PATH avec 9/9 modes, et CLI strippé à 15 510 344 octets (+513 216 octets par rapport à la base 2.22.2 publiée) ; la régression FLTK séparée reste verte avec `host_updates=2`, un compagnon strippé de 15 337 224 octets, FLTK statique et zéro dépendance GUI dans le CLI normal.
+- ajoute une ABI de plugin natif v1 Linux volontairement minuscule dans `include/babet/plugin.h` : un descripteur `babet_plugin_query_v1()` avec nom/version/fonctions copiés et le type scalaire `babet_host_function` existant ; aucun `lua_State`, objet STL/RTTI, exception C++ ou propriété d'allocation ne fait partie de l'ABI ;
+- ajoute `babet.plugin.load(path)` explicitement dans l'état principal du CLI normal. Le loader canonicalise un fichier régulier `.so`, utilise `dlopen(..., RTLD_NOW | RTLD_LOCAL)`, valide l'ABI et renvoie une table locale `plugin.functions` sans injecter de noms globaux ;
+- conserve chaque plugin chargé avec succès jusqu'à la fin du processus et refuse un second chargement du même chemin canonique ; les applications `--create-exe`, les workers et les hôtes d'embedding externes ne disposent que d'un refus contrôlé, ce qui préserve le contrat mono-fichier et n'impose pas une politique ELF aux exécutables hôtes arbitraires ;
+- exporte depuis le binaire Babet original uniquement les symboles C étroits nécessaires aux callbacks/version ; un plugin ne se lie pas et ne dépend pas d'un `libbabet.so`, tandis que ses éventuelles bibliothèques constructeur `DT_NEEDED` restent à la charge du déploiement du plugin ;
+- généralise l'implémentation publique `babet_host_call_*` afin que les callbacks d'embedding du Lot 10 et les callbacks de plugin utilisent exactement le même contrat scalaire sans exposer Lua ; les erreurs possédées et la publication des résultats restent protégées contre les longjmp Lua ;
+- ajoute des fixtures/exemples de plugins C et C++, dont un plugin C++ utilisant `std::string` uniquement en interne, et des régressions pour ABI incompatible, symbole absent, double chargement, valeur non supportée, refus worker/application générée, symboles exportés et absence de `libbabet.so` ;
+- documente explicitement le modèle de confiance : un plugin natif est du code totalement de confiance dans le processus, sans sandbox, unload/reload, gestionnaire de paquets, résolution de dépendances, downloader, découverte `require()` automatique, extraction `/tmp` ni empaquetage de plugin au Lot 11. La réduction de taille du binaire n'est pas une motivation.
+
 ### Build / nettoyage local
 
 - `clear_code.sh --all` supprime désormais tout l’état local généré connu et reconstruisible sans risque : `downloads/`, `dist/`, `babet-tests.txt`, `babet-fltk-tests.txt`, `MODIFIED_FILES.txt` et `GITHUB_RELEASE_*.md`, en plus des arbres normaux de build/test ;
 - le nettoyage par défaut reste volontairement limité aux artefacts d’un rebuild rapide, tandis que le reset complet préserve explicitement les archives/documents utilisateur sans employer de glob générique dangereux ;
 - ajout d’une régression isolée de `clear_code.sh` au préflight normal afin qu’un futur artefact généré ne puisse plus sortir silencieusement du contrat de nettoyage.
+
+### Embedding / fonctions Lua -> hôte
+
+- La validation mainteneur de la Candidate 1 a révélé un compteur absolu fragile dans le smoke C après le nouveau scénario de récupération ; le chemin runtime était déjà correct (la valeur binaire retournée prouvait l’exécution du callback), la régression vérifie désormais un incrément exact de +1 autour de `babet_context_call_global()`.
+
+- ajoute la première API étroite de callbacks Lua -> hôte sous `babet.host.<nom>` avec une frontière publique C pure : `babet_host_call` opaque, arguments/résultats scalaires `babet_value`, copie immédiate des chaînes résultat/diagnostics et aucune exposition de `lua_State` ou de types ABI C++ ;
+- fige explicitement durée de vie et isolation : les noms sont copiés, les mots-clés réservés Lua et les doublons sont refusés, `userdata` reste propriété de l'hôte jusqu'à destruction du contexte, les workers n'héritent pas des fonctions hôte et cette première tranche n'a volontairement aucun désenregistrement ;
+- refuse toute réentrée mutante `babet_context_*` depuis un callback hôte actif avec `BABET_STATUS_REENTRANT_CALL`, et convertit les statuts hôte non OK ou exceptions C++ lancées par un callback en erreurs Lua normales sans laisser traverser d'exception la frontière C/Lua ;
+- étend le smoke C aux callbacks binaires, erreurs hôte non attrapées et récupération, réentrée, enregistrement tardif/mauvais thread et isolation workers ; ajoute un smoke C++ prouvant qu'une `std::exception` lancée est contenue et que le même contexte reste réutilisable ;
+- livre `HOST_FUNCTIONS_DESIGN.md` et un septième exemple C autonome dans le SDK, puis met à jour les guides embedding bilingues pour qu'un hôte externe puisse utiliser ce nouveau sens sans connaître l'arbre source ;
+- réécrit le prototype FLTK séparé sur l'API publique : un clic exerce maintenant FLTK -> Lua -> `babet.host.set_button_label()` -> FLTK, tandis que l'erreur Lua volontaire du deuxième clic laisse toujours la boucle événementielle et le callback suivant utilisables.
+- la validation mainteneur finale du Lot 10 du 25/08/2026 est verte : les contrats des fonctions hôte atteignent 52 PASS / 0 FAIL, le runtime embedding atteint 16 PASS / 0 FAIL, les sept exemples SDK déplacés passent, la campagne normale complète reste à 3810/0 en mode dossier, 3796/0 en mode embarqué, 3796/0 via PATH et 9/9 modes ; l'auto-test FLTK de l'API hôte rapporte `host_updates=2`, le compagnon strippé mesure 15 316 744 octets avec FLTK statique et le CLI Babet normal conserve zéro dépendance GUI au runtime.
 
 ### Documentation embedding / utilisation du SDK
 

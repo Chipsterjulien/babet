@@ -135,8 +135,9 @@ fi
 
 cat "${RUN_LOG}"
 grep -Fq 'intentional Lot 9 callback failure' "${RUN_LOG}"
-grep -Fq 'LOT9_FLTK_SELFTEST_OK attempts=3 successes=2 lua_errors=1 last=3' "${RUN_LOG}"
+grep -Fq 'LOT10_FLTK_HOST_API_SELFTEST_OK attempts=3 successes=2 lua_errors=1 host_updates=2 last=3' "${RUN_LOG}"
 echo '[PASS] FLTK event loop survives a Lua callback error and recovers'
+echo '[PASS] Lua updates the widget through the public host-function API'
 echo '[PASS] FLTK callbacks are disabled before GUI/context destruction'
 
 STRIPPED="${HOST_BUILD}/babet_fltk_prototype.stripped"

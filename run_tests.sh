@@ -177,6 +177,18 @@ if ! bash "${SCRIPT_DIR}/tools/test_clear_code_contracts.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — fonctions hôte Lua -> C/C++"
+if ! bash "${SCRIPT_DIR}/tools/test_host_function_contracts.sh"; then
+    echo "ÉCHEC : le préflight des fonctions hôte Lua -> C/C++ a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — plugins natifs C/C++"
+if ! bash "${SCRIPT_DIR}/tools/test_native_plugin_contracts.sh"; then
+    echo "ÉCHEC : le préflight des plugins natifs C/C++ a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — contrat d'embedding C/libbabet"
 if ! bash "${SCRIPT_DIR}/tools/test_embedding_contracts.sh"; then
     echo "ÉCHEC : le préflight du contrat d'embedding C/libbabet a échoué."
@@ -330,6 +342,12 @@ if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
 fi
 if ! bash "${SCRIPT_DIR}/tools/test_embedding_runtime.sh" "${EMBEDDING_ARGS[@]}"; then
     echo "ÉCHEC : la régression runtime d'embedding C/libbabet a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — plugins natifs C/C++"
+if ! bash "${SCRIPT_DIR}/tools/test_native_plugin_runtime.sh" "${BINARY}"; then
+    echo "ÉCHEC : la régression runtime des plugins natifs C/C++ a échoué."
     exit 1
 fi
 

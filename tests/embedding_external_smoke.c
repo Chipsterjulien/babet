@@ -4,6 +4,26 @@
 #include <stdio.h>
 #include <string.h>
 
+static babet_status sdk_host_add(babet_host_call *call, void *userdata)
+{
+    (void)userdata;
+    const size_t count = babet_host_call_argument_count(call);
+    const babet_value *arguments = babet_host_call_arguments(call);
+    if (count != 2 || arguments == NULL ||
+        arguments[0].type != BABET_VALUE_INTEGER ||
+        arguments[1].type != BABET_VALUE_INTEGER)
+    {
+        (void)babet_host_call_set_error(call,
+                                        "sdk_host_add expects two integers");
+        return BABET_STATUS_INVALID_ARGUMENT;
+    }
+
+    babet_value result = {0};
+    result.type = BABET_VALUE_INTEGER;
+    result.as.integer = arguments[0].as.integer + arguments[1].as.integer;
+    return babet_host_call_set_result(call, &result);
+}
+
 static int expect_status(const char *label, babet_status actual,
                          babet_status expected)
 {
@@ -21,8 +41,19 @@ int main(void)
                        BABET_STATUS_OK) || context == NULL)
         return 1;
 
+    if (!expect_status("register host function",
+                       babet_context_register_host_function(
+                           context, "sdk_host_add", sdk_host_add, NULL),
+                       BABET_STATUS_OK))
+    {
+        fprintf(stderr, "%s\n", babet_context_last_error(context));
+        (void)babet_context_destroy(context);
+        return 1;
+    }
+
     static const char chunk[] =
         "assert(babet.base64.encode('sdk') == 'c2Rr')\n"
+        "assert(babet.host.sdk_host_add(20, 22) == 42)\n"
         "function sdk_add(a, b) return a + b end\n";
     if (!expect_status("run", babet_context_run(context, chunk,
                                                  sizeof(chunk) - 1,

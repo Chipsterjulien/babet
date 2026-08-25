@@ -5,6 +5,7 @@
 #include "lua_bindings/workers.hpp"
 #include "project_core/bundled_modules.hpp"
 #include "project_core/runtime_registration.hpp"
+#include "project_core/host_call_internal.hpp"
 #include "version.hpp"
 
 #include <lua.hpp>
@@ -14,11 +15,19 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <new>
 #include <string>
 #include <utility>
 #include <vector>
+
+struct babet_host_registration
+{
+    std::string name;
+    babet_host_function function = nullptr;
+    void *userdata = nullptr;
+};
 
 struct babet_context
 {
@@ -26,10 +35,18 @@ struct babet_context
     pthread_t owner{};
     std::string last_error;
     std::string value_string_storage;
+    std::string host_result_string_storage;
+    std::string host_callback_error_storage;
     const char *fallback_error = nullptr;
+    const char *host_callback_fallback_error = nullptr;
+    std::vector<std::unique_ptr<babet_host_registration>> host_functions;
+    std::vector<babet_value> host_arguments;
+    babet_host_call *active_host_call = nullptr;
+    bool host_callback_active = false;
     bool search_root_configured = false;
     bool execution_started = false;
 };
+
 
 namespace
 {
@@ -40,6 +57,11 @@ bool on_owner_thread(const babet_context *context) noexcept
 {
     return context &&
            ::pthread_equal(context->owner, ::pthread_self()) != 0;
+}
+
+bool inside_host_callback(const babet_context *context) noexcept
+{
+    return context && context->host_callback_active;
 }
 
 void clear_error(babet_context *context) noexcept
@@ -194,6 +216,395 @@ bool valid_value_type(babet_value_type type) noexcept
     return false;
 }
 
+bool valid_status(babet_status status) noexcept
+{
+    switch (status)
+    {
+    case BABET_STATUS_OK:
+    case BABET_STATUS_INVALID_ARGUMENT:
+    case BABET_STATUS_BUSY:
+    case BABET_STATUS_WRONG_THREAD:
+    case BABET_STATUS_LUA_ERROR:
+    case BABET_STATUS_OUT_OF_MEMORY:
+    case BABET_STATUS_INTERNAL_ERROR:
+    case BABET_STATUS_UNSUPPORTED_VALUE:
+    case BABET_STATUS_REENTRANT_CALL:
+        return true;
+    }
+    return false;
+}
+
+bool valid_host_name(const char *name) noexcept
+{
+    if (!name || name[0] == '\0')
+        return false;
+
+    const unsigned char first = static_cast<unsigned char>(name[0]);
+    if (!((first >= 'A' && first <= 'Z') ||
+          (first >= 'a' && first <= 'z') || first == '_'))
+        return false;
+
+    for (const unsigned char *cursor =
+             reinterpret_cast<const unsigned char *>(name + 1);
+         *cursor != 0; ++cursor)
+    {
+        if (!((*cursor >= 'A' && *cursor <= 'Z') ||
+              (*cursor >= 'a' && *cursor <= 'z') ||
+              (*cursor >= '0' && *cursor <= '9') || *cursor == '_'))
+            return false;
+    }
+
+    // The public spelling is babet.host.<name>. Lua keywords satisfy the
+    // lexical identifier pattern above but cannot appear after '.', so reject
+    // them instead of publishing a function that contradicts the API syntax.
+    static constexpr const char *lua_keywords[] = {
+        "and", "break", "do", "else", "elseif", "end", "false",
+        "for", "function", "goto", "if", "in", "local", "nil",
+        "not", "or", "repeat", "return", "then", "true", "until",
+        "while"};
+    for (const char *keyword : lua_keywords)
+    {
+        if (std::strcmp(name, keyword) == 0)
+            return false;
+    }
+    return true;
+}
+
+void clear_host_callback_storage(babet_context *context) noexcept
+{
+    context->host_result_string_storage.clear();
+    context->host_callback_error_storage.clear();
+    context->host_callback_fallback_error = nullptr;
+}
+
+void set_host_callback_error(babet_context *context,
+                             const char *message) noexcept
+{
+    try
+    {
+        context->host_callback_error_storage = message ? message : "";
+        context->host_callback_fallback_error = nullptr;
+    }
+    catch (...)
+    {
+        context->host_callback_error_storage.clear();
+        context->host_callback_fallback_error =
+            "babet: unable to store host callback diagnostic";
+    }
+}
+
+const char *host_callback_error(const babet_context *context) noexcept
+{
+    if (context->host_callback_fallback_error)
+        return context->host_callback_fallback_error;
+    return context->host_callback_error_storage.c_str();
+}
+
+bool embedding_host_call_is_active(const babet_host_call *call) noexcept
+{
+    if (!call || !call->owner)
+        return false;
+    const auto *context = static_cast<const babet_context *>(call->owner);
+    return context->host_callback_active && context->active_host_call == call;
+}
+
+babet_status embedding_host_call_copy_result(
+    babet_host_call *call, const babet_value *value) noexcept
+{
+    auto *context = static_cast<babet_context *>(call->owner);
+    try
+    {
+        babet_value result{};
+        result.type = value->type;
+        switch (value->type)
+        {
+        case BABET_VALUE_NIL:
+            result.as.integer = 0;
+            break;
+        case BABET_VALUE_BOOLEAN:
+            result.as.boolean = value->as.boolean ? 1 : 0;
+            break;
+        case BABET_VALUE_INTEGER:
+            result.as.integer = value->as.integer;
+            break;
+        case BABET_VALUE_NUMBER:
+            result.as.number = value->as.number;
+            break;
+        case BABET_VALUE_STRING:
+        {
+            const char *data = value->as.string.data ? value->as.string.data : "";
+            context->host_result_string_storage.assign(data,
+                                                       value->as.string.length);
+            result.as.string.data = context->host_result_string_storage.data();
+            result.as.string.length = context->host_result_string_storage.size();
+            break;
+        }
+        }
+        call->result = result;
+        call->result_set = true;
+        call->setter_status = BABET_STATUS_OK;
+        return BABET_STATUS_OK;
+    }
+    catch (const std::bad_alloc &)
+    {
+        call->setter_status = BABET_STATUS_OUT_OF_MEMORY;
+        set_host_callback_error(context,
+                                "out of memory while copying host result");
+        return BABET_STATUS_OUT_OF_MEMORY;
+    }
+    catch (...)
+    {
+        call->setter_status = BABET_STATUS_INTERNAL_ERROR;
+        set_host_callback_error(context,
+                                "unable to copy host callback result");
+        return BABET_STATUS_INTERNAL_ERROR;
+    }
+}
+
+babet_status embedding_host_call_copy_error(
+    babet_host_call *call, const char *message) noexcept
+{
+    auto *context = static_cast<babet_context *>(call->owner);
+    try
+    {
+        context->host_callback_error_storage = message;
+        context->host_callback_fallback_error = nullptr;
+        return BABET_STATUS_OK;
+    }
+    catch (const std::bad_alloc &)
+    {
+        context->host_callback_error_storage.clear();
+        context->host_callback_fallback_error =
+            "babet: out of memory while storing host callback diagnostic";
+        return BABET_STATUS_OUT_OF_MEMORY;
+    }
+    catch (...)
+    {
+        context->host_callback_error_storage.clear();
+        context->host_callback_fallback_error =
+            "babet: unable to store host callback diagnostic";
+        return BABET_STATUS_INTERNAL_ERROR;
+    }
+}
+
+babet_status read_host_argument(lua_State *state, int index,
+                                babet_value *out_value) noexcept
+{
+    switch (lua_type(state, index))
+    {
+    case LUA_TNIL:
+        out_value->type = BABET_VALUE_NIL;
+        out_value->as.integer = 0;
+        return BABET_STATUS_OK;
+    case LUA_TBOOLEAN:
+        out_value->type = BABET_VALUE_BOOLEAN;
+        out_value->as.boolean = lua_toboolean(state, index) ? 1 : 0;
+        return BABET_STATUS_OK;
+    case LUA_TNUMBER:
+        if (lua_isinteger(state, index))
+        {
+            out_value->type = BABET_VALUE_INTEGER;
+            out_value->as.integer =
+                static_cast<int64_t>(lua_tointeger(state, index));
+        }
+        else
+        {
+            out_value->type = BABET_VALUE_NUMBER;
+            out_value->as.number = static_cast<double>(lua_tonumber(state, index));
+        }
+        return BABET_STATUS_OK;
+    case LUA_TSTRING:
+    {
+        size_t length = 0;
+        const char *data = lua_tolstring(state, index, &length);
+        out_value->type = BABET_VALUE_STRING;
+        out_value->as.string.data = data;
+        out_value->as.string.length = length;
+        return BABET_STATUS_OK;
+    }
+    default:
+        return BABET_STATUS_UNSUPPORTED_VALUE;
+    }
+}
+
+void push_host_result(lua_State *state, const babet_value &value)
+{
+    switch (value.type)
+    {
+    case BABET_VALUE_NIL:
+        lua_pushnil(state);
+        break;
+    case BABET_VALUE_BOOLEAN:
+        lua_pushboolean(state, value.as.boolean != 0);
+        break;
+    case BABET_VALUE_INTEGER:
+        lua_pushinteger(state, static_cast<lua_Integer>(value.as.integer));
+        break;
+    case BABET_VALUE_NUMBER:
+        lua_pushnumber(state, static_cast<lua_Number>(value.as.number));
+        break;
+    case BABET_VALUE_STRING:
+        lua_pushlstring(state, value.as.string.data, value.as.string.length);
+        break;
+    }
+}
+
+int host_function_thunk(lua_State *state) noexcept
+{
+    auto *registration = static_cast<babet_host_registration *>(
+        lua_touserdata(state, lua_upvalueindex(1)));
+    auto *context = static_cast<babet_context *>(
+        lua_touserdata(state, lua_upvalueindex(2)));
+    if (!registration || !registration->function || !context ||
+        context->lua != state)
+        return luaL_error(state, "babet embedding: invalid host function closure");
+
+    const int argument_count = lua_gettop(state);
+    const char *argument_setup_error = nullptr;
+    try
+    {
+        context->host_arguments.resize(static_cast<size_t>(argument_count));
+    }
+    catch (const std::bad_alloc &)
+    {
+        argument_setup_error =
+            "babet embedding: out of memory preparing host arguments";
+    }
+    catch (...)
+    {
+        argument_setup_error =
+            "babet embedding: unable to prepare host arguments";
+    }
+    if (argument_setup_error)
+        return luaL_error(state, "%s", argument_setup_error);
+
+    for (int i = 0; i < argument_count; ++i)
+    {
+        babet_value *argument = &context->host_arguments[static_cast<size_t>(i)];
+        const babet_status status = read_host_argument(state, i + 1, argument);
+        if (status != BABET_STATUS_OK)
+        {
+            const char *type_name = luaL_typename(state, i + 1);
+            return luaL_error(
+                state,
+                "babet embedding: host function '%s' argument #%d has unsupported type %s",
+                registration->name.c_str(), i + 1,
+                type_name ? type_name : "unknown");
+        }
+    }
+
+    clear_host_callback_storage(context);
+    babet_host_call call{};
+    call.arguments = context->host_arguments.data();
+    call.argument_count = static_cast<size_t>(argument_count);
+    call.result.type = BABET_VALUE_NIL;
+    call.result.as.integer = 0;
+    call.owner = context;
+    call.is_active = embedding_host_call_is_active;
+    call.copy_result = embedding_host_call_copy_result;
+    call.copy_error = embedding_host_call_copy_error;
+
+    context->active_host_call = &call;
+    context->host_callback_active = true;
+
+    babet_status callback_status = BABET_STATUS_INTERNAL_ERROR;
+    try
+    {
+        callback_status = registration->function(&call, registration->userdata);
+    }
+    catch (const std::bad_alloc &)
+    {
+        callback_status = BABET_STATUS_OUT_OF_MEMORY;
+        set_host_callback_error(context,
+                                "C++ host callback threw std::bad_alloc");
+    }
+    catch (const std::exception &error)
+    {
+        callback_status = BABET_STATUS_INTERNAL_ERROR;
+        set_host_callback_error(context, error.what());
+    }
+    catch (...)
+    {
+        callback_status = BABET_STATUS_INTERNAL_ERROR;
+        set_host_callback_error(context,
+                                "C++ host callback threw an unknown exception");
+    }
+
+    context->host_callback_active = false;
+    context->active_host_call = nullptr;
+
+    if (!valid_status(callback_status))
+    {
+        callback_status = BABET_STATUS_INTERNAL_ERROR;
+        set_host_callback_error(context,
+                                "host callback returned an unknown babet_status");
+    }
+    if (callback_status == BABET_STATUS_OK &&
+        call.setter_status != BABET_STATUS_OK)
+        callback_status = call.setter_status;
+
+    if (callback_status != BABET_STATUS_OK)
+    {
+        const char *detail = host_callback_error(context);
+        if (detail && detail[0] != '\0')
+            return luaL_error(state,
+                              "babet embedding: host function '%s' failed (%s): %s",
+                              registration->name.c_str(),
+                              babet_status_name(callback_status), detail);
+        return luaL_error(state,
+                          "babet embedding: host function '%s' failed (%s)",
+                          registration->name.c_str(),
+                          babet_status_name(callback_status));
+    }
+
+    push_host_result(state, call.result);
+    return 1;
+}
+
+struct InstallHostFunctionOperation
+{
+    babet_context *context = nullptr;
+    babet_host_registration *registration = nullptr;
+};
+
+int install_host_function_thunk(lua_State *state) noexcept
+{
+    auto *operation = static_cast<InstallHostFunctionOperation *>(
+        lua_touserdata(state, 1));
+    babet_host_registration *registration = operation->registration;
+
+    lua_getglobal(state, "babet");
+    if (!lua_istable(state, -1))
+        return luaL_error(state, "babet embedding: global 'babet' is not a table");
+
+    lua_getfield(state, -1, "host");
+    if (lua_isnil(state, -1))
+    {
+        lua_pop(state, 1);
+        lua_newtable(state);
+        lua_pushvalue(state, -1);
+        lua_setfield(state, -3, "host");
+    }
+    else if (!lua_istable(state, -1))
+    {
+        return luaL_error(state, "babet embedding: babet.host is not a table");
+    }
+
+    lua_getfield(state, -1, registration->name.c_str());
+    if (!lua_isnil(state, -1))
+        return luaL_error(state,
+                          "babet embedding: babet.host.%s already exists",
+                          registration->name.c_str());
+    lua_pop(state, 1);
+
+    lua_pushlightuserdata(state, registration);
+    lua_pushlightuserdata(state, operation->context);
+    lua_pushcclosure(state, host_function_thunk, 2);
+    lua_setfield(state, -2, registration->name.c_str());
+    lua_pop(state, 2);
+    return 0;
+}
+
 struct OwnedCallArgument
 {
     babet_value_type type = BABET_VALUE_NIL;
@@ -322,6 +733,8 @@ extern "C" const char *babet_status_name(babet_status status)
         return "internal_error";
     case BABET_STATUS_UNSUPPORTED_VALUE:
         return "unsupported_value";
+    case BABET_STATUS_REENTRANT_CALL:
+        return "reentrant_call";
     }
     return "unknown";
 }
@@ -357,7 +770,7 @@ extern "C" babet_status babet_context_create(babet_context **out_context)
         {
             luaL_openlibs(state);
             register_bundled_modules(state);
-            register_babet(state);
+            register_babet(state, nullptr, NativePluginMode::embedding);
         };
         std::string setup_error;
         if (!lua_run_setup_protected(
@@ -410,6 +823,8 @@ extern "C" babet_status babet_context_set_search_root(
         return BABET_STATUS_INVALID_ARGUMENT;
     if (!on_owner_thread(context))
         return BABET_STATUS_WRONG_THREAD;
+    if (inside_host_callback(context))
+        return BABET_STATUS_REENTRANT_CALL;
 
     begin_mutating_call(context);
     if (context->execution_started)
@@ -523,6 +938,8 @@ extern "C" babet_status babet_context_run(babet_context *context,
         return BABET_STATUS_INVALID_ARGUMENT;
     if (!on_owner_thread(context))
         return BABET_STATUS_WRONG_THREAD;
+    if (inside_host_callback(context))
+        return BABET_STATUS_REENTRANT_CALL;
 
     context->execution_started = true;
     begin_mutating_call(context);
@@ -580,6 +997,8 @@ extern "C" babet_status babet_context_set_global(
         return BABET_STATUS_INVALID_ARGUMENT;
     if (!on_owner_thread(context))
         return BABET_STATUS_WRONG_THREAD;
+    if (inside_host_callback(context))
+        return BABET_STATUS_REENTRANT_CALL;
     if (value->type == BABET_VALUE_STRING &&
         !value->as.string.data && value->as.string.length != 0)
         return BABET_STATUS_INVALID_ARGUMENT;
@@ -674,6 +1093,8 @@ extern "C" babet_status babet_context_get_global(
         return BABET_STATUS_INVALID_ARGUMENT;
     if (!on_owner_thread(context))
         return BABET_STATUS_WRONG_THREAD;
+    if (inside_host_callback(context))
+        return BABET_STATUS_REENTRANT_CALL;
 
     out_value->type = BABET_VALUE_NIL;
     out_value->as.integer = 0;
@@ -756,6 +1177,8 @@ extern "C" babet_status babet_context_call_global(
         return BABET_STATUS_INVALID_ARGUMENT;
     if (!on_owner_thread(context))
         return BABET_STATUS_WRONG_THREAD;
+    if (inside_host_callback(context))
+        return BABET_STATUS_REENTRANT_CALL;
 
     static_assert(sizeof(lua_Integer) >= sizeof(int64_t),
                   "Babet embedding requires a Lua integer wide enough for int64_t");
@@ -859,6 +1282,83 @@ extern "C" babet_status babet_context_call_global(
     }
 }
 
+extern "C" babet_status babet_context_register_host_function(
+    babet_context *context, const char *name,
+    babet_host_function function, void *userdata)
+{
+    if (!context || !valid_host_name(name) || !function)
+        return BABET_STATUS_INVALID_ARGUMENT;
+    if (!on_owner_thread(context))
+        return BABET_STATUS_WRONG_THREAD;
+    if (inside_host_callback(context))
+        return BABET_STATUS_REENTRANT_CALL;
+
+    try
+    {
+        begin_mutating_call(context);
+        for (const auto &registered : context->host_functions)
+        {
+            if (registered && registered->name == name)
+            {
+                set_error(context,
+                          "babet embedding: host function name is already registered");
+                return BABET_STATUS_INVALID_ARGUMENT;
+            }
+        }
+
+        auto registration = std::make_unique<babet_host_registration>();
+        registration->name = name;
+        registration->function = function;
+        registration->userdata = userdata;
+        babet_host_registration *registration_ptr = registration.get();
+        context->host_functions.push_back(std::move(registration));
+
+        const int initial_top = lua_gettop(context->lua);
+        if (!lua_checkstack(context->lua, 3))
+        {
+            context->host_functions.pop_back();
+            set_fallback_error(context, "babet: out of memory");
+            return BABET_STATUS_OUT_OF_MEMORY;
+        }
+
+        InstallHostFunctionOperation operation;
+        operation.context = context;
+        operation.registration = registration_ptr;
+        lua_pushcfunction(context->lua, install_host_function_thunk);
+        lua_pushlightuserdata(context->lua, &operation);
+        const int status = lua_pcall(context->lua, 1, 0, 0);
+        if (status != LUA_OK)
+        {
+            capture_lua_error(context, status);
+            lua_settop(context->lua, initial_top);
+            context->host_functions.pop_back();
+            return status_from_lua(status);
+        }
+
+        lua_settop(context->lua, initial_top);
+        return BABET_STATUS_OK;
+    }
+    catch (const std::bad_alloc &)
+    {
+        begin_mutating_call(context);
+        set_fallback_error(context, "babet: out of memory");
+        return BABET_STATUS_OUT_OF_MEMORY;
+    }
+    catch (const std::exception &error)
+    {
+        begin_mutating_call(context);
+        set_error(context, error.what());
+        return BABET_STATUS_INTERNAL_ERROR;
+    }
+    catch (...)
+    {
+        begin_mutating_call(context);
+        set_fallback_error(context,
+                           "babet: unknown host-function registration failure");
+        return BABET_STATUS_INTERNAL_ERROR;
+    }
+}
+
 extern "C" const char *babet_context_last_error(const babet_context *context)
 {
     if (!context)
@@ -874,6 +1374,8 @@ extern "C" babet_status babet_context_destroy(babet_context *context)
         return BABET_STATUS_OK;
     if (!on_owner_thread(context))
         return BABET_STATUS_WRONG_THREAD;
+    if (inside_host_callback(context))
+        return BABET_STATUS_REENTRANT_CALL;
 
     try
     {

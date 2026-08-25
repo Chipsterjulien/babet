@@ -18,6 +18,7 @@ build/embedding-sdk/
 ├── lib/libbabet.a
 ├── EMBEDDING.md
 ├── EMBEDDING.fr.md
+├── HOST_FUNCTIONS_DESIGN.md
 └── examples/embedding/
 ```
 
@@ -157,7 +158,63 @@ Sémantique actuelle :
 
 Voir [`examples/embedding/04_call.c`](examples/embedding/04_call.c).
 
-## 8. Règles de thread et effets processus
+## 8. Enregistrer des fonctions hôte appelables depuis Lua
+
+Le Lot 10 ajoute le sens inverse sans exposer `lua_State *` :
+
+```c
+static babet_status host_greet(babet_host_call *call, void *userdata)
+{
+    const size_t count = babet_host_call_argument_count(call);
+    const babet_value *args = babet_host_call_arguments(call);
+    if (count != 1 || args == NULL || args[0].type != BABET_VALUE_STRING) {
+        (void)babet_host_call_set_error(call, "greet attend une chaîne");
+        return BABET_STATUS_INVALID_ARGUMENT;
+    }
+
+    babet_value result = {0};
+    result.type = BABET_VALUE_STRING;
+    result.as.string.data = "bonjour depuis C";
+    result.as.string.length = 15;
+    return babet_host_call_set_result(call, &result);
+}
+
+babet_context_register_host_function(ctx, "greet", host_greet, userdata);
+```
+
+Lua appelle ensuite :
+
+```lua
+local message = babet.host.greet("Lua")
+```
+
+Le nom d'enregistrement est copié et doit être un identifiant Lua ASCII simple ; les mots-clés réservés Lua sont refusés afin que le nom reste toujours appelable sous la forme `babet.host.<nom>`.
+Le `userdata` reste propriété de l'hôte et doit rester valide jusqu'à la
+destruction du contexte ; le Lot 10 n'ajoute volontairement aucun unregister.
+
+Les arguments utilisent les mêmes cinq formes scalaires `babet_value`. Le tableau
+d'arguments et les chaînes qu'il contient sont empruntés seulement pendant le
+callback. `babet_host_call_set_result()` copie immédiatement une chaîne de
+résultat : le callback peut donc fournir un buffer local/temporaire. Sans setter
+de résultat, Lua reçoit `nil`.
+
+Pour signaler un échec, le callback peut copier un diagnostic avec
+`babet_host_call_set_error()` puis renvoyer un `babet_status` non OK. Lua reçoit
+une erreur normale, rattrapable avec `pcall`. Si elle s'échappe, l'appel externe
+`babet_context_run()` / `call_global()` renvoie `BABET_STATUS_LUA_ERROR` et le
+diagnostic du contexte contient le nom/statut/message du callback hôte.
+
+Les callbacks sont synchrones sur le thread propriétaire du contexte et ne sont
+installés que dans l'état Lua principal, jamais automatiquement dans les
+workers. Réentrer dans l'API publique `babet_context_*` depuis un callback est
+volontairement refusé avec `BABET_STATUS_REENTRANT_CALL`. Un callback C++ peut
+utiliser C++ en interne, mais Babet contient toute exception avant le retour à
+Lua.
+
+Voir [`examples/embedding/07_host_functions.c`](examples/embedding/07_host_functions.c)
+et [`HOST_FUNCTIONS_DESIGN.md`](HOST_FUNCTIONS_DESIGN.md).
+
+## 9. Règles de thread et effets processus
 
 La première API autorise volontairement **un seul contexte vivant par
 processus**. Un second `babet_context_create()` simultané renvoie
@@ -171,7 +228,7 @@ L'embedding n'est pas une sandbox. Les API Babet qui changent le répertoire
 courant, l'environnement, les signaux, les processus enfants ou le terminal
 interactif modifient réellement le processus hôte.
 
-## 9. Hôtes C++
+## 10. Hôtes C++
 
 Le même header public s'utilise depuis C++ :
 
@@ -184,7 +241,7 @@ exceptions côté hôte. La frontière publique Babet est faite de types C et de
 codes de statut ; aucune exception n'est définie comme traversant cette
 frontière.
 
-## 10. Compatibilité Linux/glibc
+## 11. Compatibilité Linux/glibc
 
 `file` peut afficher une mention comme `for GNU/Linux 3.2.0`. Ce n'est **pas**
 une promesse de version minimale de glibc ; cela décrit des métadonnées ABI
@@ -216,25 +273,28 @@ version `GLIBC_*` la plus haute mesurée pour le Babet maintenu et pour son hôt
 SDK externe fraîchement lié. Ces valeurs décrivent ce build ; elles ne
 constituent pas une garantie ABI universelle.
 
-## 11. Ce qui reste volontairement différé
+## 12. Ce qui reste volontairement différé
 
 La première API n'expose pas encore :
 
-- des fonctions hôte appelables depuis Lua ;
-- le marshalling de tables/conteneurs structurés ;
+- le marshalling de tables/conteneurs structurés pour les callbacks hôte ou les appels directs ;
+- le désenregistrement/remplacement de callbacks hôte pendant la vie du contexte ;
+- les appels `babet_context_*` réentrants depuis un callback hôte ;
 - des handles/callbacks de fonctions Lua arbitraires ;
 - la résolution de méthodes pointées ;
 - plusieurs résultats ;
 - plusieurs contextes simultanés ;
 - une ABI partagée `libbabet.so` ;
-- une ABI générique de plugins natifs.
+- le chargement de plugins natifs depuis un contexte d'embedding externe.
 
-Ces sujets restent différés jusqu'à ce qu'un consommateur réel démontre le
-besoin. Le prochain consommateur prévu est le prototype FLTK séparé : il
-utilisera d'abord l'appel hôte -> Lua existant et consignera précisément ce qui
-manque dans l'autre direction.
+Ces capacités d'embedding restent différées jusqu'à ce qu'un consommateur réel
+démontre le besoin. Le Lot 11 définit séparément une ABI étroite de plugins
+natifs pour le CLI Babet original ; il n'élargit pas la frontière de chargement
+de l'embedding. Le prototype FLTK séparé est maintenant le premier consommateur réel de
+l'API publique de fonctions hôte : Lua change le libellé du bouton via
+`babet.host.set_button_label()` sans pont privé.
 
-## 12. Exemples exécutables
+## 13. Exemples exécutables
 
 Le SDK fournit volontairement plusieurs petits programmes :
 
@@ -246,6 +306,18 @@ Le SDK fournit volontairement plusieurs petits programmes :
 | `04_call.c` | appel direct d'une fonction Lua scalaire |
 | `05_errors.c` | diagnostics Lua et reprise |
 | `06_lifecycle_threads.c` | règles BUSY et WRONG_THREAD |
+| `07_host_functions.c` | enregistrer un callback C appelable via `babet.host.*` |
 
 Ils servent à la fois de documentation **et** de régression : le harnais Babet
 les compile et les exécute contre un SDK autonome déplacé.
+
+### Frontière plugins natifs (Lot 11)
+
+Le SDK développeur fournit aussi `include/babet/plugin.h` et les exemples de
+plugins natifs, car ils réutilisent la surface scalaire publique
+`babet_host_call_*`. Cela ne signifie pas qu'un hôte d'embedding arbitraire peut
+charger ces plugins au Lot 11 : dans un contexte Lua embarqué,
+`babet.plugin.load()` renvoie une erreur contrôlée indiquant que le chargement
+natif est indisponible pour les hôtes d'embedding. Le premier loader reste
+volontairement limité au binaire CLI Babet original, dont Babet maîtrise les
+symboles ELF exportés.

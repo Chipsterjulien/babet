@@ -359,6 +359,35 @@ set_target_properties(babet_embedding_smoke PROPERTIES
     LINKER_LANGUAGE CXX
 )
 
+# C++ host used to prove that exceptions thrown by host callbacks are contained
+# inside the C ABI/Lua boundary and that the same context remains usable.
+add_executable(babet_embedding_cpp_callback_smoke EXCLUDE_FROM_ALL
+    tests/embedding_cpp_callback_smoke.cpp
+)
+target_link_libraries(babet_embedding_cpp_callback_smoke PRIVATE
+    ${BABET_RUNTIME_TARGET}
+    pthread
+)
+
+# Lot 11 native plugins resolve only this narrow C surface from the Babet
+# executable. Keep it exported in both normal and sanitizer builds; no shared
+# libbabet runtime is introduced.
+target_link_options(${PROJECT_NAME} PRIVATE
+    -Wl,--export-dynamic-symbol=babet_version
+    -Wl,--export-dynamic-symbol=babet_status_name
+    -Wl,--export-dynamic-symbol=babet_host_call_argument_count
+    -Wl,--export-dynamic-symbol=babet_host_call_arguments
+    -Wl,--export-dynamic-symbol=babet_host_call_set_result
+    -Wl,--export-dynamic-symbol=babet_host_call_set_error
+    # The callback API is in its own member of the static libbabet archive.
+    # Export visibility alone does not force archive extraction, so create
+    # explicit undefined roots for the four plugin-call entry points.
+    -Wl,--undefined=babet_host_call_argument_count
+    -Wl,--undefined=babet_host_call_arguments
+    -Wl,--undefined=babet_host_call_set_result
+    -Wl,--undefined=babet_host_call_set_error
+)
+
 function(babet_enable_sanitizers target)
     target_compile_options(${target} PRIVATE
         -O1
@@ -380,6 +409,7 @@ if(BABET_ENABLE_SANITIZERS)
         babet_enable_sanitizers(${BABET_RUNTIME_TARGET})
         babet_enable_sanitizers(${PROJECT_NAME})
         babet_enable_sanitizers(babet_embedding_smoke)
+        babet_enable_sanitizers(babet_embedding_cpp_callback_smoke)
         message(STATUS "Babet sanitizers enabled: ASan + UBSan")
     else()
         message(FATAL_ERROR
@@ -389,6 +419,10 @@ else()
     # Le binaire officiel conserve ses runtimes GCC/libstdc++ statiques. La
     # bibliothèque d'embedding reste une archive statique et n'impose donc
     # aucune politique de runtime C++ au programme hôte.
+    #
+    # Lot 11: native plugins are ordinary RTLD_LOCAL shared objects that do not
+    # link libbabet.so. Export only the tiny C callback surface they are allowed
+    # to resolve from the original Babet executable.
     target_link_options(${PROJECT_NAME} PRIVATE
         -static-libgcc
         -static-libstdc++

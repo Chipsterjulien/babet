@@ -8,11 +8,35 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+### Native plugins (Lot 11)
+
+- Candidate 1 maintainer validation reached the native plugin runtime after successful compilation, ELF export checks and `libbabet.so`-absence checks, then exposed a shell-only path quoting bug in `tools/test_native_plugin_runtime.sh` when Babet lives below a directory containing spaces; Candidate 2 quotes the executable invocation and adds a structural guard for this exact regression.
+- final Lot 11 maintainer validation on 2026-08-25 is green: native plugin structural contracts 74 PASS / 0 FAIL, native plugin runtime 4 PASS / 0 FAIL, embedding runtime 16 PASS / 0 FAIL, packaging 8 PASS / 0 FAIL, the normal campaign remains 3810/0 folder + 3796/0 embedded + 3796/0 embedded via PATH with 9/9 modes, and the stripped CLI measures 15,510,344 bytes (+513,216 bytes versus the published v2.22.2 baseline); the separate FLTK regression remains green with `host_updates=2`, a 15,337,224-byte stripped companion, static FLTK and zero GUI runtime dependency in the normal CLI.
+- add a deliberately tiny Linux-only native plugin ABI v1 in `include/babet/plugin.h`: one `babet_plugin_query_v1()` descriptor with copied name/version/function declarations and the existing scalar `babet_host_function` callback type; no `lua_State`, STL/RTTI object, C++ exception or allocator ownership belongs to the ABI;
+- add explicit `babet.plugin.load(path)` for the normal CLI main state. The loader canonicalizes a regular `.so`, uses `dlopen(..., RTLD_NOW | RTLD_LOCAL)`, validates the ABI and returns a local `plugin.functions` table instead of injecting global names;
+- keep successful plugins mapped until process exit and reject duplicate canonical loads; generated `--create-exe` applications, workers and external embedding hosts expose only a controlled refusal, preserving the one-file generated application contract and avoiding an ELF export requirement for arbitrary embedding executables;
+- export only the narrow callback/version C symbols needed by plugins from the original Babet executable; plugins do not link or require a runtime `libbabet.so`, while vendor/plugin-specific `DT_NEEDED` libraries remain the plugin deployer's responsibility;
+- generalize the public `babet_host_call_*` implementation so the same Lot 10 scalar argument/result helpers serve embedding callbacks and native plugin callbacks without exposing Lua internals; owned plugin-load errors and Lua result publication stay under the existing protected-builder/longjmp discipline;
+- add standalone C and C++ plugin fixtures and examples, including a C++ fixture that uses `std::string` internally but returns through copied C scalar storage, plus regressions for ABI mismatch, missing query symbol, duplicate load, unsupported values, worker refusal, generated-app refusal, exported host symbols and absence of `libbabet.so`;
+- document the trust model explicitly: native plugins are fully trusted in-process code with no sandbox, unload/reload, package manager, dependency resolver, downloader, automatic `require()` discovery, `/tmp` extraction or plugin packaging in Lot 11. Binary-size reduction is not a plugin motivation.
+
 ### Build / local cleanup
 
 - `clear_code.sh --all` now removes all known generated local state that is safe to recreate: `downloads/`, `dist/`, `babet-tests.txt`, `babet-fltk-tests.txt`, `MODIFIED_FILES.txt` and `GITHUB_RELEASE_*.md`, in addition to the normal build/test trees;
 - the default cleanup remains intentionally limited to fast rebuild artefacts, while the full reset explicitly preserves unrelated user archives/documents instead of using dangerous broad globs;
 - add an isolated `clear_code.sh` regression to the normal preflight so future generated artefacts cannot silently fall outside the cleanup contract.
+
+### Embedding / Lua -> host functions
+
+- Candidate 1 maintainer validation exposed a brittle absolute callback counter in the C smoke after the newly added recovery scenario; the runtime path was already correct (the returned binary value proved the callback ran), so the regression now checks an exact +1 counter delta around `babet_context_call_global()` instead.
+
+- add the first narrow Lua -> host callback API under `babet.host.<name>` with a C-only public boundary: opaque `babet_host_call`, scalar `babet_value` arguments/results, copied result strings/diagnostics and no `lua_State` or C++ ABI types;
+- define registration lifetime and isolation explicitly: names are copied, Lua reserved keywords and duplicate names are rejected, `userdata` remains host-owned until context destruction, workers do not inherit host functions and this first slice intentionally has no unregister path;
+- reject nested mutating `babet_context_*` entry from an active host callback with `BABET_STATUS_REENTRANT_CALL`, and convert non-OK host statuses or thrown C++ callback exceptions into ordinary Lua errors without crossing the C/Lua exception boundary;
+- extend C embedding smoke coverage for binary-safe callbacks, uncaught host failure diagnostics/recovery, reentrancy, late/wrong-thread registration and worker isolation; add a C++ callback smoke proving a thrown `std::exception` is contained and the same context remains usable;
+- ship `HOST_FUNCTIONS_DESIGN.md` plus a seventh standalone SDK C example, and update the bilingual embedding guides/SDK so external hosts can consume the new direction without source-tree knowledge;
+- rewrite the separate FLTK prototype onto the public API: a button event now exercises FLTK -> Lua -> `babet.host.set_button_label()` -> FLTK, while the intentional second-click Lua failure still leaves the event loop and later callback usable.
+- final Lot 10 maintainer validation on 2026-08-25 is green: host-function contracts reach 52 PASS / 0 FAIL, embedding runtime reaches 16 PASS / 0 FAIL, all seven relocated SDK examples pass, the complete normal campaign remains 3810/0 folder, 3796/0 embedded, 3796/0 embedded via PATH and 9/9 modes; the FLTK host-API self-test reports `host_updates=2`, the stripped companion measures 15,316,744 bytes with static FLTK, and the normal Babet CLI still has zero GUI runtime dependency.
 
 ### Embedding documentation / SDK usability
 
