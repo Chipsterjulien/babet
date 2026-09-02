@@ -5,6 +5,7 @@
 #define MAX_WIDGETS 64
 
 typedef void (*FakeCallback)(void);
+typedef void (*FakeClosureNotify)(void *, void *);
 typedef int (*FakeSourceCallback)(void *);
 typedef void (*WidgetSignal)(void *, void *);
 
@@ -18,6 +19,7 @@ typedef struct FakeWidget {
     void *destroy_data;
     FakeCallback clicked_cb;
     void *clicked_data;
+    FakeClosureNotify clicked_destroy_notify;
     char text[256];
 } FakeWidget;
 
@@ -74,6 +76,12 @@ static void destroy_widget(FakeWidget *w)
     if (w->destroy_cb) {
         WidgetSignal cb = as_widget_signal(w->destroy_cb);
         cb(w, w->destroy_data);
+    }
+    if (w->clicked_destroy_notify) {
+        FakeClosureNotify notify = w->clicked_destroy_notify;
+        w->clicked_destroy_notify = NULL;
+        log_line("closure-notify:clicked", NULL);
+        notify(w->clicked_data, NULL);
     }
     for (size_t i = 0; i < widget_count; ++i) {
         if (widgets[i] == w) { widgets[i] = NULL; break; }
@@ -140,16 +148,20 @@ void g_object_unref(void *p)
 }
 unsigned long g_signal_connect_data(void *instance, const char *signal,
                                     FakeCallback cb, void *data,
-                                    void *destroy_notify, unsigned int flags)
+                                    FakeClosureNotify destroy_notify,
+                                    unsigned int flags)
 {
-    (void)destroy_notify; (void)flags;
+    (void)flags;
     FakeWidget *w = (FakeWidget *)instance;
     if (!w || !signal || !cb) return 0;
     if (strcmp(signal, "destroy") == 0) {
         w->destroy_cb = cb; w->destroy_data = data; return 1;
     }
     if (strcmp(signal, "clicked") == 0) {
-        w->clicked_cb = cb; w->clicked_data = data; return 2;
+        w->clicked_cb = cb;
+        w->clicked_data = data;
+        w->clicked_destroy_notify = destroy_notify;
+        return 2;
     }
     return 0;
 }

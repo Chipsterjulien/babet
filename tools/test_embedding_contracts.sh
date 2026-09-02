@@ -63,6 +63,8 @@ require_grep 'does not resolve dotted method paths' "EMBEDDING_DESIGN.md" "embed
 require_grep 'relocatable static SDK' "EMBEDDING_DESIGN.md" "embedding design defines a relocatable standalone SDK"
 require_grep 'flattened `libbabet\.a`' "EMBEDDING_DESIGN.md" "embedding design defines a flattened standalone archive"
 require_grep 'C\+\+ linker driver' "EMBEDDING_DESIGN.md" "embedding design documents the C++ final-link requirement"
+require_grep 'linker garbage collection is not a host requirement' "EMBEDDING_DESIGN.md" "embedding design keeps linker GC optional for SDK consumers"
+require_grep 'same.*object again with `-Wl,--gc-sections`|`-Wl,--gc-sections`' "EMBEDDING_DESIGN.md" "embedding design requires separate GC-link compatibility coverage"
 
 require_grep 'babet_context_create\(\)' "EMBEDDING.md" "English guide documents the minimal lifecycle"
 require_grep 'babet_context_set_search_root\(\)' "EMBEDDING.md" "English guide documents search-root use"
@@ -232,6 +234,8 @@ require_grep 'project_build_ubsan' "tools/test_embedding_runtime.sh" "runtime re
 require_grep 'sdk moved with spaces' "tools/test_embedding_runtime.sh" "runtime regression relocates the SDK before external linking"
 require_grep 'embedding_external_smoke\.c' "tools/test_embedding_runtime.sh" "runtime regression compiles a source-tree-independent external host"
 require_grep 'external C host compiles and links using only the moved standalone SDK' "tools/test_embedding_runtime.sh" "runtime regression checks out-of-tree standalone linking"
+require_grep 'external SDK host also links with --gc-sections' "tools/test_embedding_runtime.sh" "runtime regression separately checks SDK linkage with linker GC"
+require_grep 'external SDK host runs correctly with --gc-sections' "tools/test_embedding_runtime.sh" "runtime regression executes the linker-GC SDK host"
 require_grep 'documentation examples configure and build out of tree' "tools/test_embedding_runtime.sh" "runtime regression builds SDK documentation examples"
 require_grep 'documentation examples execute successfully' "tools/test_embedding_runtime.sh" "runtime regression executes SDK documentation examples"
 require_grep 'max_glibc_requirement' "tools/test_embedding_runtime.sh" "runtime regression measures GLIBC symbol requirements"

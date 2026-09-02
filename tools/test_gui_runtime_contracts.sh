@@ -19,6 +19,8 @@ CURSES="src/lua_bindings/curses.cpp"
 CMAKE="CMakeLists.txt"
 RUN="run_tests.sh"
 DESIGN="GUI_DESIGN.md"
+DOC_EN="docs/en/modules/gui.md"
+DOC_FR="docs/fr/modules/gui.md"
 
 check "GUI binding header exists" test -f "$HDR"
 check "GUI binding implementation exists" test -f "$IMPL"
@@ -37,6 +39,8 @@ if [ -f "$IMPL" ]; then
     check "recoverable GTK initialization is used" contains "$LOADER" 'gtk_init_check'
     check "uncontrolled gtk_init is absent" bash -c "! grep -E '[^_]gtk_init\\(' '$LOADER' >/dev/null"
     check "GUI public calls enforce the main thread" contains "$IMPL" 'babet_runtime::require_main_thread'
+    check "gui.run requires the main Lua thread itself" contains "$IMPL" 'L != main_lua_state(L)'
+    check "GUI runtime regression covers coroutine rejection" contains "$ROOT/tools/test_gui_runtime.sh" 'BABET_GUI_COROUTINE_REJECTED'
     check "GUI init rejects active curses" contains "$IMPL" 'babet_curses::session_active()'
     check "GUI session state is queryable by curses" contains "$HDR" 'session_active() noexcept'
     check "GUI cleanup hook is explicit" contains "$HDR" 'cleanup_on_main_thread(lua_State *L) noexcept'
@@ -54,6 +58,9 @@ check "curses start rejects an active GUI" contains "$CURSES" 'babet_gui::sessio
 check "CMake has no direct GTK link item" not_contains "$CMAKE" 'gtk-4'
 check "CMake has no GTK pkg-config discovery" not_contains "$CMAKE" 'pkg_check_modules(GTK'
 check "design still forbids direct GTK link" contains "$DESIGN" 'must not link GTK'
+check "design documents resident GTK runtime" contains "$DESIGN" 'kept resident until process exit'
+check "English GUI docs document resident GTK runtime" contains "$DOC_EN" 'kept resident until process exit'
+check "French GUI docs document resident GTK runtime" contains "$DOC_FR" "résident jusqu'à la fin du processus"
 
 echo "GUI runtime structural contracts: ${PASS} PASS / ${FAIL} FAIL"
 [ "$FAIL" -eq 0 ]

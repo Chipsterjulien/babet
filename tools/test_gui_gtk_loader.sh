@@ -92,5 +92,25 @@ else
     fail "GTK loader diagnostic carries common distro install examples"
 fi
 
+LOADER_LOG="$TMP/missing-loader.log"
+set +e
+OUT="$(LD_LIBRARY_PATH="$TMP/missing" BABET_FAKE_GTK_LOADER_LOG="$LOADER_LOG" \
+    "$TMP/probe" load-twice 2>&1)"
+RC=$?
+set -e
+
+if [ "$RC" -eq 4 ] \
+    && grep -Fq "missing GTK 4 dependency symbol 'gtk_init_check'" <<<"$OUT"; then
+    pass "failed GTK symbol validation is memoized"
+else
+    fail "failed GTK symbol validation is memoized"
+fi
+
+if [ "$(grep -c '^load$' "$LOADER_LOG" 2>/dev/null || true)" -eq 1 ]; then
+    pass "failed GTK runtime is opened only once per process"
+else
+    fail "failed GTK runtime is opened only once per process"
+fi
+
 echo "GTK4 lazy-loader regression: ${PASS} PASS / ${FAIL} FAIL"
 [ "$FAIL" -eq 0 ]

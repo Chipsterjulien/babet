@@ -30,7 +30,8 @@ using GtkWidgetGetParent = void *(*)(void *);
 using GObjectRefSink = void *(*)(void *);
 using GObjectUnref = void (*)(void *);
 using GSignalConnectData = unsigned long (*)(void *, const char *, GtkCallback,
-                                             void *, void *, unsigned int);
+                                             void *, GtkClosureNotify,
+                                             unsigned int);
 using GMainContextIteration = int (*)(void *, int);
 using GTimeoutAdd = unsigned int (*)(unsigned int, GtkSourceCallback, void *);
 using GSourceRemove = int (*)(unsigned int);
@@ -62,6 +63,17 @@ struct GtkApi
 };
 
 GtkApi g_gtk;
+
+enum class GtkLoadState
+{
+    not_attempted,
+    loaded,
+    failed,
+};
+
+GtkLoadState g_load_state = GtkLoadState::not_attempted;
+void *g_resident_handle = nullptr;
+std::string g_load_error;
 
 std::string install_diagnostic(std::string_view detail)
 {
@@ -113,17 +125,32 @@ bool resolve(void *handle, const char *name, Function &function,
 bool gtk4_load(std::string &error)
 {
     error.clear();
-    if (g_gtk.handle != nullptr)
+    if (g_load_state == GtkLoadState::loaded)
         return true;
+    if (g_load_state == GtkLoadState::failed)
+    {
+        error = g_load_error;
+        return false;
+    }
 
     (void)::dlerror();
     void *handle = ::dlopen(GTK4_SONAME, RTLD_NOW | RTLD_LOCAL);
     if (!handle)
     {
         const char *detail = ::dlerror();
-        error = install_diagnostic(detail ? detail : "dlopen failed");
+        g_load_error = install_diagnostic(detail ? detail : "dlopen failed");
+        g_load_state = GtkLoadState::failed;
+        error = g_load_error;
         return false;
     }
+
+    // A successfully opened GTK DSO is deliberately kept resident for the
+    // lifetime of the process, even if symbol validation subsequently fails.
+    // GTK/GLib may install process-wide state while the DSO is being loaded;
+    // unloading a partially validated runtime is therefore not a supported
+    // recovery strategy. Remembering the failed state also prevents repeated
+    // dlopen() calls from incrementing the loader reference count.
+    g_resident_handle = handle;
 
     GtkApi candidate;
     candidate.handle = handle;
@@ -152,11 +179,13 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(source_remove, "g_source_remove");
 
     g_gtk = candidate;
+    g_load_state = GtkLoadState::loaded;
     return true;
 
 symbol_failure:
-    ::dlclose(handle);
-    error = install_diagnostic(symbol_error);
+    g_load_error = install_diagnostic(symbol_error);
+    g_load_state = GtkLoadState::failed;
+    error = g_load_error;
     return false;
 }
 
@@ -196,9 +225,10 @@ void gtk4_button_set_label(void *b, const char *t) noexcept { g_gtk.button_set_l
 void *gtk4_widget_get_parent(void *w) noexcept { return g_gtk.widget_get_parent(w); }
 void *gtk4_object_ref_sink(void *o) noexcept { return g_gtk.object_ref_sink(o); }
 void gtk4_object_unref(void *o) noexcept { g_gtk.object_unref(o); }
-unsigned long gtk4_signal_connect(void *i, const char *s, GtkCallback c, void *d) noexcept
+unsigned long gtk4_signal_connect(void *i, const char *s, GtkCallback c, void *d,
+                                  GtkClosureNotify n) noexcept
 {
-    return g_gtk.signal_connect_data(i, s, c, d, nullptr, 0U);
+    return g_gtk.signal_connect_data(i, s, c, d, n, 0U);
 }
 int gtk4_main_context_iteration(bool block) noexcept
 {

@@ -1,7 +1,35 @@
+#include <stdio.h>
+#include <stdlib.h>
+
+static void log_loader_event(const char *event)
+{
+    const char *path = getenv("BABET_FAKE_GTK_LOADER_LOG");
+    if (path == NULL || *path == '\0')
+        return;
+
+    FILE *file = fopen(path, "a");
+    if (file == NULL)
+        return;
+
+    fprintf(file, "%s\n", event);
+    fclose(file);
+}
+
+__attribute__((constructor)) static void on_load(void)
+{
+    log_loader_event("load");
+}
+
+__attribute__((destructor)) static void on_unload(void)
+{
+    log_loader_event("unload");
+}
+
 void gtk_disable_setlocale(void) {}
 #include <stddef.h>
 
 typedef void (*FakeCallback)(void);
+typedef void (*FakeClosureNotify)(void *, void *);
 typedef int (*FakeSourceCallback)(void *);
 
 void *gtk_window_new(void) { return (void *)0x1; }
@@ -20,7 +48,7 @@ void *gtk_widget_get_parent(void *w) { (void)w; return NULL; }
 void *g_object_ref_sink(void *o) { return o; }
 void g_object_unref(void *o) { (void)o; }
 unsigned long g_signal_connect_data(void *i, const char *s, FakeCallback c,
-                                    void *d, void *n, unsigned int f)
+                                    void *d, FakeClosureNotify n, unsigned int f)
 { (void)i; (void)s; (void)c; (void)d; (void)n; (void)f; return 1; }
 int g_main_context_iteration(void *c, int b) { (void)c; (void)b; return 1; }
 unsigned int g_timeout_add(unsigned int ms, FakeSourceCallback cb, void *d)

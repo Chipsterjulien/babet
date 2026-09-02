@@ -7,6 +7,7 @@ namespace babet_gui::detail
 {
 
 using GtkCallback = void (*)();
+using GtkClosureNotify = void (*)(void *, void *);
 using GtkSourceCallback = int (*)(void *);
 
 // Charge libgtk-4.so.1 et résout uniquement la surface GTK/GLib nécessaire au
@@ -37,7 +38,8 @@ void *gtk4_widget_get_parent(void *widget) noexcept;
 void *gtk4_object_ref_sink(void *object) noexcept;
 void gtk4_object_unref(void *object) noexcept;
 unsigned long gtk4_signal_connect(void *instance, const char *signal,
-                                  GtkCallback callback, void *data) noexcept;
+                                  GtkCallback callback, void *data,
+                                  GtkClosureNotify destroy_data) noexcept;
 
 int gtk4_main_context_iteration(bool may_block) noexcept;
 unsigned int gtk4_timeout_add(unsigned int milliseconds,

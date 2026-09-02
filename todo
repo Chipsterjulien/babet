@@ -629,6 +629,28 @@ Post-2.23.0 GUI direction — Lua-facing optional GTK 4
     publication and an `ldd` no-GUI-dependency guard. The x86_64 maintainer run
     is green at 9/0 on 2026-08-26; the complete Babet campaign remains 3810/0
     folder, 3796/0 embedded, 3796/0 embedded-via-PATH and 9/9 top-level modes.
+[x] GUI post-audit hardening: keep every successfully opened GTK DSO resident
+    until process exit, including required-symbol validation failure; memoize
+    both success/failure so repeated `gui.available()` calls never reopen GTK.
+[x] GUI post-audit hardening: require `gui.run()` to be entered from the main
+    Lua thread itself, not merely from a coroutine resumed on Babet's main OS
+    thread; protect the rule with a dedicated runtime regression.
+[x] GUI post-audit hardening: document in French, English and `GUI_DESIGN.md`
+    that `gui.available()` performs lazy symbol loading without display
+    initialization and that an opened GTK DSO remains resident for the process.
+[x] GUI post-audit hardening: give the button `clicked` signal its own
+    `WidgetState` lifetime reference and release it through `GClosureNotify`
+    when the GObject signal handler is disconnected/no longer used.
+[x] Embedding post-audit hardening: keep ordinary SDK consumer linkage free of
+    any `--gc-sections` requirement while separately linking and executing the
+    same relocated external SDK host with `-Wl,--gc-sections`.
+[x] Re-run the complete `./run_tests.sh --release` maintainer campaign after
+    this hardening on 2026-09-02. GUI runtime contracts reach 35/0, widget
+    contracts 31/0, isolated GTK loader regression 11/0, embedding structural
+    contracts 236/0 and normal embedding runtime 18/0. ASan+UBSan, restored
+    normal build and network smoke tests all pass; the normal harness remains
+    3810/0 folder, 3796/0 embedded, 3796/0 embedded-via-PATH and 9/9 modes.
+    The stripped normal x86_64 binary measures 13,843,016 bytes.
 [ ] Only after those lots are green, decide whether the MVP needs any additional
     widgets/capabilities; do not widen the GTK dispatch table speculatively.
 

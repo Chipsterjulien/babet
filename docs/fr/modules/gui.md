@@ -25,9 +25,12 @@ assert(ok, err)
 ```
 
 `available()` charge et valide l'étroite surface de symboles GTK/GLib sans
-initialiser l'affichage. `init()` empêche GTK de modifier la locale globale du
-processus puis utilise son chemin d'initialisation récupérable. Ces deux appels
-sont réservés au thread OS principal de Babet.
+initialiser l'affichage. Dès qu'un DSO GTK a été ouvert avec succès, il reste
+résident jusqu'à la fin du processus, y compris si la validation d'un symbole
+requis échoue. Le résultat du chargement est mémorisé : les appels suivants ne
+rouvrent pas GTK. `init()` empêche GTK de modifier la locale globale du processus
+puis utilise son chemin d'initialisation récupérable. Ces deux appels sont
+réservés au thread OS principal de Babet.
 
 Si GTK 4 manque, le diagnostic nomme le runtime absent et donne des exemples
 d'installation Debian/Ubuntu, Arch Linux et Fedora. Si GTK est installé mais
@@ -93,7 +96,9 @@ des chaînes C.
 Les opérations GTK sont réservées au thread principal. Une session GUI vivante
 et une session `babet.curses` active sont mutuellement exclusives. `gui.run()`
 possède la boucle interactive principale jusqu'à la destruction de toutes les
-fenêtres ou l'appel à `gui.quit()`.
+fenêtres ou l'appel à `gui.quit()`. `gui.run()` doit être lancé depuis le thread
+Lua principal lui-même ; un appel depuis une coroutine Lua est refusé même si
+cette coroutine est reprise sur le thread OS principal de Babet.
 
 Babet installe une petite source de réveil GLib bornée afin de continuer à
 servir ses callbacks de signaux Unix différés pendant que GTK possède la boucle.

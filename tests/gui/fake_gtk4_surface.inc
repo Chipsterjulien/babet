@@ -1,6 +1,7 @@
 #include <stddef.h>
 
 typedef void (*FakeCallback)(void);
+typedef void (*FakeClosureNotify)(void *, void *);
 typedef int (*FakeSourceCallback)(void *);
 
 void *gtk_window_new(void) { return (void *)0x1; }
@@ -19,7 +20,7 @@ void *gtk_widget_get_parent(void *w) { (void)w; return NULL; }
 void *g_object_ref_sink(void *o) { return o; }
 void g_object_unref(void *o) { (void)o; }
 unsigned long g_signal_connect_data(void *i, const char *s, FakeCallback c,
-                                    void *d, void *n, unsigned int f)
+                                    void *d, FakeClosureNotify n, unsigned int f)
 { (void)i; (void)s; (void)c; (void)d; (void)n; (void)f; return 1; }
 int g_main_context_iteration(void *c, int b) { (void)c; (void)b; return 1; }
 unsigned int g_timeout_add(unsigned int ms, FakeSourceCallback cb, void *d)

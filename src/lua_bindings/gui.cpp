@@ -41,7 +41,7 @@ struct WidgetState
     lua_State *owner = nullptr; // main Lua thread of the owning Lua state
     WidgetKind kind = WidgetKind::label;
     int callback_ref = LUA_NOREF;
-    int references = 1; // Lua userdata; destroy signal adds one native reference
+    int references = 1; // Lua userdata; native signal handlers retain as needed
     bool owns_reference = false; // construction ref for non-toplevel widgets
     WidgetState *previous = nullptr;
     WidgetState *next = nullptr;
@@ -198,6 +198,13 @@ void widget_destroyed(void *, void *data) noexcept
     release_state(state);
 }
 
+void button_signal_released(void *data, void *) noexcept
+{
+    auto *state = static_cast<WidgetState *>(data);
+    if (state)
+        release_state(state);
+}
+
 void button_clicked(void *, void *data) noexcept
 {
     auto *state = static_cast<WidgetState *>(data);
@@ -229,7 +236,7 @@ bool attach_destroy_signal(WidgetState *state) noexcept
 {
     retain_state(state);
     const unsigned long id = detail::gtk4_signal_connect(
-        state->native, "destroy", gtk_callback(&widget_destroyed), state);
+        state->native, "destroy", gtk_callback(&widget_destroyed), state, nullptr);
     if (id == 0)
     {
         release_state(state);
@@ -499,10 +506,15 @@ int l_button(lua_State *L)
         return result;
 
     auto *userdata = static_cast<WidgetUserdata *>(lua_touserdata(L, -1));
+    retain_state(userdata->state);
     const unsigned long id = detail::gtk4_signal_connect(
-        button, "clicked", gtk_callback(&button_clicked), userdata->state);
+        button, "clicked", gtk_callback(&button_clicked), userdata->state,
+        &button_signal_released);
     if (id == 0)
+    {
+        release_state(userdata->state);
         return push_fail_protected(L, "babet.gui: cannot attach button click signal");
+    }
     return 1;
 }
 
@@ -609,6 +621,10 @@ int l_run(lua_State *L)
     if (!lua_arity_is(L, 0))
         return luaL_error(L, "gui.run expects no arguments");
     require_gui_initialized(L, "gui.run");
+    if (L != main_lua_state(L))
+        return luaL_error(
+            L,
+            "gui.run: must be called from the main Lua thread, not from a coroutine");
     if (g_run_active.load(std::memory_order_acquire))
         return luaL_error(L, "gui.run: GUI event loop is already running");
     if (g_live_windows.load(std::memory_order_acquire) <= 0)

@@ -40,7 +40,10 @@ c++ host.o /path/to/sdk/lib/libbabet.a \
 ```
 
 Use a **C++ linker driver** for the final link because Babet itself is implemented
-in C++. On a 32-bit Linux target, add `-latomic`.
+in C++. On a 32-bit Linux target, add `-latomic`. `--gc-sections` is not required
+by the SDK: ordinary host linkage is supported. The maintained regression also
+links and runs the same external SDK host with `-Wl,--gc-sections` to verify
+compatibility with Babet's production linker-GC policy.
 
 The SDK also ships a small CMake project under `examples/embedding/`:
 

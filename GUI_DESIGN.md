@@ -25,11 +25,14 @@ forbidden, but no FLTK, wxWidgets, Qt, or other backend is currently promised.
 The normal Babet build must not link GTK, download GTK, require GTK development
 headers, or require `pkg-config gtk4`.
 
-GTK 4 is discovered lazily only when the Lua program explicitly initializes the
-GUI. The implementation opens the system GTK runtime with `dlopen()` and resolves
-only the narrow set of C symbols it actually uses with `dlsym()`. Every imported
-symbol is permanent maintenance surface; do not build a generic GTK binding or
-mirror all of GTK.
+GTK 4 is discovered lazily only when the Lua program explicitly probes it with
+`babet.gui.available()` or initializes the GUI. The implementation opens the
+system GTK runtime with `dlopen()` and resolves only the narrow set of C symbols
+it actually uses with `dlsym()`. Once a GTK DSO has been opened successfully, it
+is kept resident until process exit, including when required-symbol validation
+fails. The load result is memoized so later probes do not reopen GTK. Every
+imported symbol is permanent maintenance surface; do not build a generic GTK
+binding or mirror all of GTK.
 
 The expected Linux runtime soname for the first implementation is
 `libgtk-4.so.1`. Missing GTK, a missing required symbol, or failure to initialize
@@ -63,8 +66,10 @@ An active ncurses session and an active GUI session are mutually exclusive.
 Attempting to start one while the other owns the interactive session must fail
 cleanly before toolkit state is mutated.
 
-All GTK/widget operations are main-thread only. Workers may perform non-GUI work
-but must never touch GTK objects directly. A later worker-to-GUI notification
+All GTK/widget operations are main-thread only. `babet.gui.run()` is stricter:
+it must be entered from the main Lua thread itself, not from a Lua coroutine
+resumed on the same OS thread. Workers may perform non-GUI work but must never
+touch GTK objects directly. A later worker-to-GUI notification
 mechanism must marshal work onto the GTK/main thread, for example through a GLib
 main-context wakeup/idle source; it must not weaken the owner-thread rule.
 
@@ -91,8 +96,11 @@ already been destroyed", never dereference a stale pointer.
 Parent/child ownership and GTK floating-reference semantics must be dealt with
 inside the bridge; they are not exposed as Lua reference-counting rules.
 Callbacks connected to a widget must not outlive the Lua/GTK state they target.
-Shutdown ordering must disconnect or neutralize callbacks and invalidate native
-handles before the Lua state is closed.
+A native signal handler that needs independent `WidgetState` lifetime retains
+that state when connected and releases it through `GClosureNotify` when the
+handler is disconnected and no longer used. Shutdown ordering must disconnect
+or neutralize callbacks and invalidate native handles before the Lua state is
+closed.
 
 ## Initial API slice
 

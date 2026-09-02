@@ -244,12 +244,14 @@ A C source can compile against the public header, but the final executable must
 use a C++ linker driver because Babet itself is implemented in C++. On Linux the
 remaining host-side system link boundary is `-ldl -pthread -lm` (plus `-latomic`
 on 32-bit targets). No pinned Babet third-party archive path is required by the
-external host.
+external host, and linker garbage collection is not a host requirement.
 
 The runtime regression copies this SDK to a new path containing spaces, copies a
 small C host outside the source tree, compiles it only against the moved SDK and
-runs it. This verifies that the standalone package does not accidentally depend
-on CMake target propagation or build-tree archive locations.
+first links/runs it with ordinary host linkage. It then links and runs the same
+object again with `-Wl,--gc-sections`. This preserves coverage of the normal SDK
+consumer contract while separately proving compatibility with Babet's production
+linker-GC policy; the SDK must work in both modes.
 
 The primary in-tree smoke host is written as C, not C++, to prove that the public
 header is a real C boundary. It exercises:

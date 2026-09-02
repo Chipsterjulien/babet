@@ -31,5 +31,21 @@ int main(int argc, char **argv)
         std::cout << "INIT_FAIL " << error << "\n";
         return 3;
     }
+    if (mode == "load-twice")
+    {
+        std::string first_error;
+        if (babet_gui::detail::gtk4_load(first_error))
+            return 5;
+
+        std::string second_error;
+        if (babet_gui::detail::gtk4_load(second_error))
+            return 6;
+
+        if (first_error != second_error)
+            return 7;
+
+        std::cout << "LOAD_TWICE_FAIL " << second_error << "\n";
+        return 4;
+    }
     return 64;
 }

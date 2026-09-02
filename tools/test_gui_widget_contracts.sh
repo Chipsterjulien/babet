@@ -10,6 +10,7 @@ check(){ local label="$1"; shift; if "$@"; then ok "$label"; else ko "$label"; f
 contains(){ grep -Fq -- "$2" "$1"; }
 
 IMPL="src/lua_bindings/gui.cpp"
+HEADER="src/lua_bindings/gui_gtk_loader.hpp"
 LOADER="src/lua_bindings/gui_gtk_loader.cpp"
 DESIGN="GUI_DESIGN.md"
 RUN="run_tests.sh"
@@ -39,6 +40,9 @@ check "setText supports GTK labels" contains "$IMPL" 'gtk4_label_set_text'
 check "setText supports GTK buttons" contains "$IMPL" 'gtk4_button_set_label'
 check "loader resolves GtkBox append" contains "$LOADER" 'gtk_box_append'
 check "loader resolves GObject signal bridge" contains "$LOADER" 'g_signal_connect_data'
+check "GTK signal bridge exposes closure destroy notification" contains "$HEADER" 'GtkClosureNotify destroy_data'
+check "button clicked signal retains WidgetState" contains "$IMPL" 'retain_state(userdata->state)'
+check "button clicked signal installs lifetime notifier" contains "$IMPL" '&button_signal_released'
 check "loader resolves GLib main-context iteration" contains "$LOADER" 'g_main_context_iteration'
 check "runtime harness includes widget contract preflight" contains "$RUN" 'tools/test_gui_widget_contracts.sh'
 check "design requires safe dead handles" contains "$DESIGN" 'dead handle'

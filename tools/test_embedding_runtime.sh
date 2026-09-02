@@ -200,6 +200,26 @@ if [ "${SANITIZER_MODE}" = "OFF" ]; then
         fail "external C host runs against the standalone static SDK"
     fi
 
+    EXTERNAL_GC_BUILD_OK="${EXTERNAL_BUILD_OK}"
+    if [ "${EXTERNAL_GC_BUILD_OK}" -eq 1 ] &&
+       ! "${CXX_BIN}" -Wl,--gc-sections "${TMP_DIR}/host.o" \
+            "${MOVED_SDK}/lib/libbabet.a" "${SYSTEM_LIBS[@]}" \
+            -o "${TMP_DIR}/external-host-gc"; then
+        EXTERNAL_GC_BUILD_OK=0
+    fi
+
+    if [ "${EXTERNAL_GC_BUILD_OK}" -eq 1 ]; then
+        pass "external SDK host also links with --gc-sections"
+    else
+        fail "external SDK host also links with --gc-sections"
+    fi
+
+    if [ "${EXTERNAL_GC_BUILD_OK}" -eq 1 ] && "${TMP_DIR}/external-host-gc"; then
+        pass "external SDK host runs correctly with --gc-sections"
+    else
+        fail "external SDK host runs correctly with --gc-sections"
+    fi
+
     EXAMPLES_BUILD="${TMP_DIR}/examples-build"
     if cmake -S "${MOVED_SDK}/examples/embedding" -B "${EXAMPLES_BUILD}" \
             -DBABET_SDK_DIR="${MOVED_SDK}" &&
