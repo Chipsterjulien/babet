@@ -9,6 +9,8 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+## [2.24.0] - 2026-09-02
+
 ### Release / architecture follow-up
 
 - make pre-release sanitizer coverage architecture-aware after the native ARMv6 builder diagnosis: `--sanitizers` keeps its historical ASan+UBSan meaning, a new explicit `--ubsan` mode uses a separate `project_build_ubsan` tree, and `--release` selects UBSan-only for `linux-armhf` while x86_64/AArch64 retain ASan+UBSan. Minimal programs independent of Babet show GCC 12 ASan failing before `main()` on the ARMv6 builder (and segfaulting with preload/static workarounds) while direct `libatomic` and UBSan probes pass, so the ARMHF report records `pre_release_sanitizers=UBSAN_ONLY` instead of manufacturing an ASan PASS. The native architecture runner also adds opt-in `--suspend-watchdog`: it persistently records initially active `watchdog.service`/`wd_keepalive.service` feeders before `stop`, launches a detached privileged restore guard while sudo authorization is available, verifies hardware disarm when available, and lets the guard restore after normal exit or parent disappearance including SIGKILL without depending on a multi-hour sudo timestamp; the marker remains recovery state after power loss/reboot/guard failure, units are never disabled/masked, and a machine without a watchdog is a no-op.
@@ -40,6 +42,25 @@ may affect existing scripts.
 - preserve the deployment exception explicitly: only generated applications that use `babet.gui` require GTK 4 on the target, while all non-GUI Babet use remains autonomous;
 - validate the GTK4 MVP on the maintainer x86_64 machine: GUI runtime 9/0, one-file GUI `--create-exe` after source removal, no direct GTK/GObject/GLib dependency, embedding 16/0, native plugins 6/0, folder 3810/0, embedded 3796/0, embedded-via-PATH 3796/0 and 9/9 top-level modes; the stripped CLI measures 15,559,496 bytes, only +36,864 bytes (+0.24%) versus the published 2.23.0 CLI measurement;
 - keep any second backend and any broader GTK surface deferred until a concrete need justifies the maintenance and testing cost.
+
+### GUI / embedding post-audit hardening
+
+- keep every successfully opened GTK DSO resident until process exit, including
+  required-symbol validation failure, and memoize the load result so later
+  `gui.available()` calls never reopen GTK;
+- explicitly reject `gui.run()` from Lua coroutines, even when resumed on
+  Babet's main OS thread;
+- give the GTK `clicked` signal its own `WidgetState` lifetime reference,
+  released through `GClosureNotify` when the handler is no longer used;
+- preserve ordinary SDK linkage without requiring `--gc-sections` and add a
+  separate regression that links and runs the same external SDK host with
+  `-Wl,--gc-sections`;
+- the final `./run_tests.sh --release` campaign is fully green: ASan+UBSan OK,
+  normal build OK, network smoke 11/0/0 WARN, GUI runtime contracts 35/0,
+  widget contracts 31/0, GTK loader 11/0, embedding structural contracts 236/0,
+  normal embedding runtime 18/0, folder 3810/0, embedded 3796/0,
+  embedded-via-PATH 3796/0 and 9/9 top-level modes. The normal stripped x86_64
+  binary measures 13,843,016 bytes.
 
 ## [2.23.0] - 2026-08-25
 

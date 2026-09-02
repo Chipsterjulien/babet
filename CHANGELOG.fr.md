@@ -9,6 +9,8 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+## [2.24.0] - 2026-09-02
+
 ### Release / architecture — suite
 
 - rend la couverture sanitizer de pré-release explicite par architecture après le diagnostic du builder ARMv6 natif : `--sanitizers` conserve son sens historique ASan+UBSan, un nouveau mode explicite `--ubsan` utilise un arbre séparé `project_build_ubsan`, et `--release` sélectionne UBSan seul pour `linux-armhf` tandis que x86_64/AArch64 gardent ASan+UBSan. Des programmes minimaux indépendants de Babet montrent que l’ASan GCC 12 du builder ARMv6 échoue avant `main()` (puis segfault avec les contournements preload/statique), alors que `libatomic` direct et UBSan passent ; le rapport ARMHF enregistre donc `pre_release_sanitizers=UBSAN_ONLY` au lieu de fabriquer un faux PASS ASan. Le runner natif ajoute aussi `--suspend-watchdog` en opt-in : il enregistre de façon persistante les feeders `watchdog.service`/`wd_keepalive.service` initialement actifs avant `stop`, lance un gardien de restauration privilégié détaché tant que l’autorisation sudo est disponible, attend son handshake explicite `ready` plutôt que le PID transitoire du lanceur `sudo`/`setsid`, vérifie le désarmement matériel lorsqu’il est visible et laisse ce gardien restaurer après une sortie normale ou la disparition du parent, y compris `SIGKILL`, sans dépendre d’un timestamp sudo encore valide plusieurs heures plus tard ; le marqueur reste le secours après coupure/reboot/échec du gardien, les unités ne sont jamais `disable`/`mask`, et une machine sans watchdog reste un no-op.
@@ -39,6 +41,26 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 - ajoute les tests isolés du chargeur via faux GTK et une régression runtime post-build couvrant callbacks, récupération, durée de vie, `--create-exe` mono-fichier, suppression des sources et absence de dépendance GUI GTK/GObject/GLib directe ;
 - préserve explicitement l'exception de déploiement : seules les applications générées utilisant `babet.gui` exigent GTK 4 sur la cible ; tout usage non-GUI de Babet reste autonome ;
 - diffère tout second backend et tout élargissement important de GTK jusqu'à validation complète de ce MVP sur les architectures supportées.
+
+### Durcissement post-audit GUI / embedding
+
+- conserve résident jusqu'à la fin du processus tout DSO GTK ouvert avec succès,
+  y compris lorsqu'une validation de symbole requis échoue, et mémorise le
+  résultat du chargement afin que les appels suivants à `gui.available()` ne
+  rouvrent pas GTK ;
+- refuse explicitement `gui.run()` depuis une coroutine Lua, même lorsqu'elle
+  s'exécute sur le thread OS principal de Babet ;
+- donne au signal GTK `clicked` sa propre référence de durée de vie
+  `WidgetState`, libérée par `GClosureNotify` lorsque le handler n'est plus
+  utilisé ;
+- conserve le linkage SDK ordinaire sans exigence `--gc-sections` et ajoute une
+  validation distincte qui relie puis exécute le même hôte SDK externe avec
+  `-Wl,--gc-sections` ;
+- la campagne finale `./run_tests.sh --release` est entièrement verte :
+  ASan+UBSan OK, build normal OK, réseau 11/0/0 WARN, contrats GUI runtime 35/0,
+  widgets 31/0, loader GTK 11/0, embedding structurel 236/0, embedding runtime
+  normal 18/0, dossier 3810/0, embarqué 3796/0, embarqué-via-PATH 3796/0 et
+  9/9 modes top-level. Le binaire x86_64 normal strippé mesure 13 843 016 octets.
 
 ## [2.23.0] - 2026-08-25
 
