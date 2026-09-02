@@ -21,13 +21,20 @@ Version actuelle : **2.23.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
-Babet 2.23.0 ajoute le SDK d'embedding statique `libbabet`, une API étroite Lua vers hôte,
-la première ABI expérimentale de plugins natifs Linux, le support terminal `ncursesw`
-statique et une voie de prototype FLTK séparée et optionnelle. Les plugins natifs sont des
-bibliothèques partagées explicitement chargées et totalement de confiance, réservées au CLI
-original ; les applications générées, workers et contextes d'embedding refusent leur
-chargement. La version intègre aussi le durcissement post-audit des coroutines, de l'identité
-DSO, de la validation ABI et des frontières d'exceptions C++.
+La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.23.0 ajoute le SDK développeur statique `libbabet`, une API étroite Lua
+vers hôte, la première ABI expérimentale de plugins natifs Linux, le support
+terminal `ncursesw` statique et l'expérience de prototype FLTK séparé désormais
+retirée. Les plugins natifs restent des bibliothèques partagées explicitement
+chargées et totalement de confiance, réservées au CLI original ; les
+applications générées, workers et contextes d'embedding refusent leur chargement.
+
+Le développement post-2.23 remplace la direction du compagnon FLTK par un design
+[`babet.gui`](GUI_DESIGN.md) beaucoup plus étroit : GTK 4 est chargé
+paresseusement depuis le système cible au lieu d'être lié dans Babet. Babet sans
+GUI et les applications `--create-exe` sans GUI conservent leur autonomie ; une
+application GUI reste mono-fichier mais exige explicitement GTK 4 sur la cible.
 
 Babet 2.22.2 ajoute un client WebSocket RFC 6455 natif via
 `babet.websocket`. Il prend en charge `ws://` et `wss://` vérifié, la
@@ -72,7 +79,7 @@ Babet s’utilise de trois façons :
    application.
 3. **Bibliothèque de bindings** : les scripts disposent notamment de
    `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`, `babet.socket`, `babet.websocket`,
-   `babet.inotify`, `babet.curses`, `babet.workers`, `babet.user`, `babet.exec`,
+   `babet.inotify`, `babet.curses`, `babet.gui`, `babet.workers`, `babet.user`, `babet.exec`,
    `babet.writeFileAtomic`, le streaming `babet.spawn`, les pipelines `babet.pipeline` / `babet.spawnPipeline`, les
    archives ZIP et TAR sécurisées `babet.archive`, les flux autonomes
    gzip/xz/bzip2/zstd via `babet.compression` et le téléchargement direct
@@ -451,13 +458,14 @@ Le Lot 6 introduit la première frontière d'embedding réellement exercée. Un
 hôte C ou C++ peut viser le petit header C
 [`include/babet/babet.h`](include/babet/babet.h) et le runtime statique
 `libbabet.a` produit dans le build CMake. Un build normal crée aussi un SDK
-statique déplaçable sous `build/embedding-sdk/` : les headers C publics
+statique déplaçable sous `build/sdk/` : les headers C publics
 (`babet.h` ainsi que l’ABI développeur `plugin.h` du Lot 11), un unique
 `libbabet.a` aplati qui incorpore les dépendances statiques épinglées de Babet,
 ainsi que la documentation et les exemples développeur. Un hôte C externe peut donc compiler contre ce
 SDK déplacé sans connaître l'arborescence des dépendances ; le lien final utilise
 un driver C++ avec les bibliothèques système Linux normales (`-ldl -pthread
--lm`, plus `-latomic` en 32 bits). L'API reste volontairement réduite et
+-lm`, plus `-latomic` en 32 bits). `release.sh` empaquette ce SDK comme artefact
+de release versionné et propre à l'architecture, avec son propre checksum SHA256. L'API reste volontairement réduite et
 expérimentale :
 contexte opaque, cycle create/search-root/run/error/destroy, helpers de
 version/statut, un seul contexte actif par processus et utilisation sur le
@@ -482,15 +490,14 @@ Lot 6 valide volontairement d’abord le chemin du SDK statique. Les API Babet p
 signaux, enfants, terminal) restent de vrais effets sur le processus hôte et ne
 sont pas sandboxées. Le guide pratique développeur est [`EMBEDDING.fr.md`](EMBEDDING.fr.md), avec de petits exemples C exécutables sous [`examples/embedding/`](examples/embedding/). Le contrat architectural détaillé et ses raisons restent dans [`EMBEDDING_DESIGN.md`](EMBEDDING_DESIGN.md), et le contrat Lua -> fonctions hôte est isolé dans [`HOST_FUNCTIONS_DESIGN.md`](HOST_FUNCTIONS_DESIGN.md).
 
-Le Lot 7 garde volontairement toute GUI optionnelle hors du CLI. Le Lot 9 ajoute
-un minuscule prototype compagnon **séparé** en FLTK 1.4.5 qui consomme le SDK
-libbabet autonome ; il ne fait pas partie du build Babet normal et ne change pas
-`--create-exe`. Le Lot 10 réécrit ce même prototype sur l'API publique de
-fonctions hôte : un clic exerce maintenant FLTK -> Lua ->
-`babet.host.set_button_label()` -> FLTK sans polling ni pont privé. wxWidgets
-3.2.x reste le premier repli si une future vraie GUI montre que FLTK n'est pas
-adapté. Voir [`GUI_STUDY.md`](GUI_STUDY.md) et
-[`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md).
+Le compagnon FLTK séparé livré comme expérience en 2.23.0 a rempli son rôle :
+il a exercé `libbabet` et l'API de callbacks Lua vers hôte, mais il n'est plus
+la direction GUI active. Le développement post-2.23 définit plutôt une API Lua
+optionnelle `babet.gui` dont le premier backend Linux sera GTK 4 chargé
+paresseusement depuis le système. GTK ne devient pas une dépendance de lien du
+Babet normal ; l'usage GUI est l'exception explicite où une application générée
+mono-fichier peut exiger un runtime système cible. Voir
+[`GUI_DESIGN.md`](GUI_DESIGN.md).
 
 Le Lot 11 ajoute séparément un chemin de **plugins natifs expérimentaux** pour
 des extensions Linux `.so` totalement de confiance qui ne doivent pas entrer
@@ -507,14 +514,15 @@ version. Voir [`NATIVE_PLUGINS.fr.md`](NATIVE_PLUGINS.fr.md) et
 
 ## Validation avant une release
 
-Une seule commande exécute les tests ASan/UBSan, restaure et valide le build
-normal, puis lance les smoke tests réseau :
+Une seule commande sélectionne les sanitizers de release adaptés à
+l'architecture native, restaure et valide le build normal, puis lance les smoke
+tests réseau :
 
 ```sh
 ./run_tests.sh --release
 ```
 
-Comme le mode normal et `--sanitizers`, la validation `--release` enregistre
+Comme les modes normal, `--sanitizers` et `--ubsan`, la validation `--release` enregistre
 la sortie complète sans couleurs dans `babet-tests.txt`, toujours sous ce même
 nom et en remplaçant le journal précédent. C’est ce fichier qu’il faut
 transmettre pour faire contrôler un résultat de tests.
@@ -532,14 +540,27 @@ L’étape réseau nécessite les commandes `python3` et `openssl`. Les contrôl
 HTTP et TLS bloquants restent locaux ; le contrôle TCP borné utilise une
 adresse réservée TEST-NET.
 
-Valgrind est facultatif ; ASan et UBSan sont les contrôles mémoire et
-comportement indéfini principaux du projet.
+Sur x86_64 et AArch64, la première étape utilise ASan + UBSan. Sur
+`linux-armhf`, elle utilise explicitement UBSan seul : sur le builder ARMv6 de
+référence, le runtime ASan de GCC 12 échoue avant `main()` même sur un programme
+C minimal, alors qu'un test `libatomic` isolé et UBSan passent. Le bilan ARMHF
+ne revendique donc jamais une validation ASan. Pour un diagnostic manuel :
+
+```sh
+./run_tests.sh --sanitizers
+./run_tests.sh --ubsan
+./run_tests.sh
+```
+
+Valgrind est facultatif ; ASan + UBSan restent la paire principale sur
+x86_64/AArch64, tandis que la gate officielle `linux-armhf` utilise UBSan seul
+et l’indique explicitement dans son bilan.
 
 ## Documentation
 
 - Invariants du projet et garde-fous d’architecture : [`INVARIANTS.md`](INVARIANTS.md)
-- Étude d’architecture de la GUI optionnelle : [`GUI_STUDY.md`](GUI_STUDY.md)
-- Prototype compagnon FLTK (Lot 9) : [`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md)
+- Design de la GUI dynamique optionnelle : [`GUI_DESIGN.md`](GUI_DESIGN.md)
+- Guide utilisateur GUI Lua : [`docs/fr/modules/gui.md`](docs/fr/modules/gui.md)
 - Guide développeur des plugins natifs (Lot 11) : [`NATIVE_PLUGINS.fr.md`](NATIVE_PLUGINS.fr.md)
 - Contrat ABI/loader des plugins natifs : [`NATIVE_PLUGIN_DESIGN.md`](NATIVE_PLUGIN_DESIGN.md)
 - Feuille de route de développement actuelle : [`todo`](todo)

@@ -48,8 +48,8 @@ remove_file_if_present() {
     fi
 }
 
-# Artefacts de compilation et de tests locaux. Le prototype FLTK et le SDK
-# généré vivent sous build/ et sont donc couverts ici sans règle spécifique.
+# Artefacts de compilation et de tests locaux. Le SDK développeur généré
+# vit sous build/ et est donc couvert ici sans règle spécifique.
 remove_dir_if_present "${SCRIPT_DIR}/build" "build/"
 remove_dir_if_present "${SCRIPT_DIR}/test" "test/"
 
@@ -61,8 +61,10 @@ if [ "$REMOVE_ALL" -eq 1 ]; then
     remove_dir_if_present "${SCRIPT_DIR}/downloads" "downloads/"
     remove_dir_if_present "${SCRIPT_DIR}/dist" "dist/"
 
-    # Journaux stables publiés par les validations normales et FLTK.
+    # Journaux stables : le journal FLTK n'est plus produit après 2.23.0,
+    # mais --all continue de supprimer cet artefact legacy s'il existe.
     remove_file_if_present "${SCRIPT_DIR}/babet-tests.txt" "babet-tests.txt"
+    remove_file_if_present "${SCRIPT_DIR}/native-arch-validation.log" "native-arch-validation.log"
     remove_file_if_present "${SCRIPT_DIR}/babet-fltk-tests.txt" "babet-fltk-tests.txt"
 
     # Scratch files de release historiques/locaux explicitement ignorés par Git.

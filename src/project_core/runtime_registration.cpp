@@ -1,12 +1,26 @@
 #include "runtime_registration.hpp"
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION
 #include "../lua_bindings/archive.hpp"
+#endif
 #include "../lua_bindings/base64.hpp"
-#include "../lua_bindings/attributes.hpp"
+#ifndef BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING
 #include "../lua_bindings/blake2b.hpp"
 #include "../lua_bindings/blake2s.hpp"
+#include "../lua_bindings/md5.hpp"
+#include "../lua_bindings/sha1.hpp"
+#include "../lua_bindings/sha256.hpp"
+#include "../lua_bindings/sha3_256.hpp"
+#include "../lua_bindings/sha3_384.hpp"
+#include "../lua_bindings/sha3_512.hpp"
+#include "../lua_bindings/sha384.hpp"
+#include "../lua_bindings/sha512.hpp"
+#endif
+#include "../lua_bindings/attributes.hpp"
 #include "../lua_bindings/chdir.hpp"
+#ifndef BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION
 #include "../lua_bindings/compression.hpp"
+#endif
 #include "../lua_bindings/copy.hpp"
 #include "../lua_bindings/copyTree.hpp"
 #include "../lua_bindings/crc32.hpp"
@@ -19,9 +33,14 @@
 #include "../lua_bindings/fileExists.hpp"
 #include "../lua_bindings/fileSize.hpp"
 #include "../lua_bindings/fileUtils.hpp"
+#ifndef BABET_SIZE_EXPERIMENT_NO_FIND_RE2
 #include "../lua_bindings/find.hpp"
+#endif
+#include "../lua_bindings/gui.hpp"
 #include "../lua_bindings/helloThere.hpp"
+#ifndef BABET_SIZE_EXPERIMENT_NO_NETWORK
 #include "../lua_bindings/http.hpp"
+#endif
 #include "../lua_bindings/inotify.hpp"
 #include "../lua_bindings/isdir.hpp"
 #include "../lua_bindings/isfile.hpp"
@@ -29,7 +48,6 @@
 #include "../lua_bindings/link.hpp"
 #include "../lua_bindings/listFiles.hpp"
 #include "../lua_bindings/lua_utils.hpp"
-#include "../lua_bindings/md5.hpp"
 #include "../lua_bindings/memoryUtils.hpp"
 #include "../lua_bindings/mergeTables.hpp"
 #include "../lua_bindings/mkdir.hpp"
@@ -40,17 +58,12 @@
 #include "../lua_bindings/rename.hpp"
 #include "../lua_bindings/remove.hpp"
 #include "../lua_bindings/rmdir.hpp"
-#include "../lua_bindings/sha1.hpp"
-#include "../lua_bindings/sha256.hpp"
-#include "../lua_bindings/sha3_256.hpp"
-#include "../lua_bindings/sha3_512.hpp"
-#include "../lua_bindings/sha3_384.hpp"
-#include "../lua_bindings/sha384.hpp"
-#include "../lua_bindings/sha512.hpp"
 #include "../lua_bindings/sleep.hpp"
 #include "../lua_bindings/signal.hpp"
+#ifndef BABET_SIZE_EXPERIMENT_NO_NETWORK
 #include "../lua_bindings/socket.hpp"
 #include "../lua_bindings/websocket.hpp"
+#endif
 #include "../lua_bindings/split.hpp"
 #include "../lua_bindings/sqlite.hpp"
 #include "../lua_bindings/sys.hpp"
@@ -149,8 +162,10 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     lua_pushcfunction(L, babet_lua_boundary<lua_fileSize>);
     lua_setfield(L, -2, "fileSize");
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_FIND_RE2
     lua_pushcfunction(L, babet_lua_boundary<lua_find>);
     lua_setfield(L, -2, "find");
+#endif
 
     lua_pushcfunction(L, babet_lua_boundary<lua_getBasename>);
     lua_setfield(L, -2, "getBasename");
@@ -195,8 +210,10 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     lua_pushcfunction(L, babet_lua_boundary<lua_listFiles>);
     lua_setfield(L, -2, "listFiles");
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING
     lua_pushcfunction(L, babet_lua_boundary<lua_md5sum>);
     lua_setfield(L, -2, "md5sum");
+#endif
 
     lua_pushcfunction(L, babet_lua_boundary<lua_mergeTables>);
     lua_setfield(L, -2, "mergeTables");
@@ -228,6 +245,7 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     lua_pushcfunction(L, babet_lua_boundary<lua_getmode>);
     lua_setfield(L, -2, "getMode");
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING
     lua_pushcfunction(L, babet_lua_boundary<lua_sha1sum>);
     lua_setfield(L, -2, "sha1sum");
 
@@ -254,6 +272,8 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
 
     lua_pushcfunction(L, babet_lua_boundary<lua_sha3_384sum>);
     lua_setfield(L, -2, "sha3_384sum");
+
+#endif
 
     lua_pushcfunction(L, babet_lua_boundary<lua_sleep>);
     lua_setfield(L, -2, "sleep");
@@ -285,26 +305,31 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     // Sous-table babet.base64 (RFC 4648, chaînes binaires).
     register_base64(L);
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION
     // Sous-table babet.compression (flux gzip/xz/bzip2/zstd autonomes).
     register_compression(L);
 
     // Sous-table babet.archive (ZIP miniz + TAR brut/gzip/xz/bzip2/zstd).
     // Même précondition de pile que les autres sous-modules.
     register_archive(L);
+#endif
 
     // Sous-table babet.json (encode/decode + sentinels null,
     // empty_array). register_json attend la table babet au sommet de
     // la pile, ce qui est le cas ici.
     register_json(L);
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_NETWORK
     // Sous-table babet.http (request/get/post). Même précondition de
     // pile que register_json (table babet au sommet).
     register_http(L);
+#endif
 
     // Sous-table babet.toml (decode). Même précondition de pile
     // que register_json / register_http (table babet au sommet).
     register_toml(L);
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_NETWORK
     // Sous-table babet.socket (connect/listen + métatable
     // LuapilotSocket dans le registry). Même précondition de pile
     // (table babet au sommet) ; register_socket pose en passant
@@ -315,6 +340,7 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     // Le protocole reste générique ; Selenium/WebDriver BiDi se construit
     // au-dessus côté Lua sans dépendance spécifique dans Babet.
     register_websocket(L);
+#endif
 
     // Sous-table babet.inotify (new + métatable LuapilotInotify
     // dans le registry). Surveillance de système de fichiers via
@@ -346,16 +372,22 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     // embedding et workers conservent une fonction load() de refus contrôlé.
     register_native_plugin(L, plugin_runtime, plugin_mode);
 
+    // Sous-table babet.gui : API GUI optionnelle. Son enregistrement ne charge
+    // aucun toolkit ; GTK 4 n'est recherché que lors d'un appel Lua explicite.
+    babet_gui::register_gui(L);
+
     // Sous-table babet.curses : interface terminal ncursesw. Toutes les
     // opérations restent limitées au thread principal et partagent le
     // gestionnaire de terminal de process/spawn.
     babet_curses::register_curses(L);
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_SQLITE
     // Sous-table babet.sqlite (open + méthodes du userdata db).
     // V1 : API haut niveau, open/close/exec sans params (session 1).
     // Sessions à venir : params bind, query lazy iterator. Cf.
     // sqlite.hpp pour le design figé.
     register_sqlite(L);
+#endif
 
     // Sous-table babet.user (get/exists) pour les lookups
     // utilisateur via NSS (getpwnam_r/getpwuid_r). Couvre LDAP,
@@ -416,6 +448,11 @@ void close_babet_lua_state(lua_State *L) noexcept
 {
     if (!L)
         return;
+
+    // GUI callback/widget state must be neutralized before Lua disappears.
+    // Lot 1 only releases logical ownership; later widget lots extend this
+    // same hook without moving toolkit cleanup behind lua_close().
+    babet_gui::cleanup_on_main_thread(L);
 
     // Process userdata finalizers may still have to terminate/resume an
     // interactive child. Let them return the TTY to the registry first, then

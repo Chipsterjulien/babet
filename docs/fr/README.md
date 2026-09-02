@@ -17,12 +17,7 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de la version **Babet 2.23.0**.
-
-Babet 2.23.0 ajoute le SDK d'embedding statique `libbabet`, les callbacks Lua vers hôte,
-une ABI expérimentale de plugins natifs Linux, le support `ncursesw` statique et une
-voie de prototype FLTK séparée et optionnelle. Les contrats mono-fichier du CLI et des
-applications générées restent inchangés ; les plugins natifs sont réservés au CLI original.
+Documentation de **Babet 2.23.0** et des travaux post-release en cours.
 
 Babet 2.22.2 ajoute un client RFC 6455 natif via `babet.websocket`, avec
 `ws://` et `wss://` vérifié, négociation stricte, framing borné, Ping/Pong
@@ -37,7 +32,7 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
-- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de la 2.23.0 et historique des versions précédentes, migration, validation et limites connues.
+- [`Journal des modifications`](../../CHANGELOG.fr.md) — notes complètes de release et historique des versions précédentes, migration, validation et limites connues.
 
 ## Trouver une fonctionnalité
 
@@ -47,6 +42,7 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 | publier atomiquement une configuration ou un fichier binaire | [`writeFileAtomic — écriture atomique`](modules/write-file-atomic.md) | refus d’écrasement par défaut, permissions, durabilité, confinement des chemins, concurrence et workers |
 | lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |
 | construire une interface terminal | [`CURSES — interfaces utilisateur en terminal`](modules/curses.md) | affichage UTF-8, clavier symbolique, resize/suspension, handoff des enfants interactifs, workers et fallbacks terminfo autonomes |
+| construire une GUI de bureau optionnelle | [`GUI — interface graphique GTK 4 optionnelle`](modules/gui.md) | chargement paresseux de GTK 4 système, fenêtre/box/label/bouton, callbacks, durée de vie, boucle événementielle et exception de déploiement `--create-exe` |
 | lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, capture avec `exec`, streaming avec `spawn`, environnement, cwd et contrôle du processus |
 | enchaîner plusieurs commandes | [`Pipelines de processus`](modules/pipeline.md) | capture complète ou streaming, stderr séparés, statuts individuels et nettoyage des groupes |
 | créer ou inspecter/extraire des archives ZIP ou TAR | [`Archive — archives multi-formats sécurisées`](modules/archive.md) | création déterministe de ZIP et de TAR brut/gzip/xz/bzip2/zstd, listing, test intégral, extraction sélective, simulation `dry_run`, limites anti-bombe et publication atomique des fichiers |

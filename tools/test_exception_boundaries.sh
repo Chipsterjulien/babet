@@ -175,7 +175,20 @@ for specification in \
     "src/lua_bindings/workers.cpp|workers_lua_boundary<channel_send>|WorkerChannel.send" \
     "src/lua_bindings/workers.cpp|workers_lua_boundary<channel_recv>|WorkerChannel.recv" \
     "src/lua_bindings/workers.cpp|worker_side_lua_boundary<worker_side_send>|worker.send" \
-    "src/lua_bindings/workers.cpp|worker_side_lua_boundary<worker_side_recv>|worker.recv"
+    "src/lua_bindings/workers.cpp|worker_side_lua_boundary<worker_side_recv>|worker.recv" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_available>|gui.available" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_init>|gui.init" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_window>|gui.window" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_box>|gui.box" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_label>|gui.label" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_button>|gui.button" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_run>|gui.run" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_quit>|gui.quit" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<widget_add>|gui widget.add" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<widget_set_text>|gui widget.setText" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<button_on_click>|gui button.onClick" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<window_show>|gui window.show" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<window_close>|gui window.close"
 do
     IFS='|' read -r file pattern label <<< "${specification}"
     require_pattern "${file}" "${pattern}" \
@@ -252,6 +265,8 @@ for specification in \
     "src/lua_bindings/workers.cpp|channel_userdata->constructed = false|worker channel explicit inert state" \
     "src/lua_bindings/workers.cpp|userdata->constructed = true|worker channel constructor completion marker" \
     "src/lua_bindings/json.cpp|Intentionally registered directly: this function creates no C\+\+ owner|json.as_array direct-boundary rationale" \
+    "src/lua_bindings/gui.cpp|int widget_gc\(lua_State \*L\) noexcept|GUI userdata finalizer is noexcept" \
+    "src/lua_bindings/gui.cpp|lua_pushcfunction\(L, widget_gc\)|GUI direct finalizer registration is limited to noexcept cleanup" \
     "src/lua_bindings/process.cpp|cleanup_process\(Process \*process\) noexcept|process allocation-free finalizer cleanup" \
     "src/lua_bindings/pipeline.cpp|cleanup_pipeline_process\(PipelineProcess \*pipeline\) noexcept|pipeline allocation-free finalizer cleanup"
 do

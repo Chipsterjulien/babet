@@ -93,6 +93,20 @@ else
     fail "GitHub release notes stay outside tracked source"
 fi
 
+if grep -Fq 'tools/release_arch_tag.sh' "${RELEASE}" \
+    && grep -Fq 'tools/package_sdk.sh' "${RELEASE}"; then
+    pass "release builder delegates architecture naming and developer SDK packaging"
+else
+    fail "release builder delegates architecture naming and developer SDK packaging"
+fi
+
+if grep -Fq 'SDK_DIR=' "${RELEASE}" \
+    && grep -Fq 'SDK développeur incomplet' "${RELEASE}"; then
+    pass "release builder fails closed on a missing or incomplete developer SDK"
+else
+    fail "release builder fails closed on a missing or incomplete developer SDK"
+fi
+
 echo "release builder structural contracts: ${pass_count} PASS / ${fail_count} FAIL"
 
 [ "${fail_count}" -eq 0 ]

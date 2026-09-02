@@ -41,7 +41,7 @@ ls -lh docs/manual-en.pdf docs/manual-fr.pdf
 ~~~
 
 `run_tests.sh` writes the complete color-free output of every top-level run
-(normal, `--sanitizers`, or `--release`) to `babet-tests.txt`, replacing the
+(normal, `--sanitizers`, `--ubsan`, or `--release`) to `babet-tests.txt`, replacing the
 previous log. Keep that file when sharing a validation result.
 
 The optional sudo PTY layer is enabled only when `sudo -n true` succeeds from
@@ -57,6 +57,26 @@ Verify the compiled runtime explicitly:
 ~~~
 
 It must match the version declared in `CMakeLists.txt`.
+
+`--release` uses ASan + UBSan on x86_64/AArch64 and UBSan-only on
+`linux-armhf`. The ARMHF policy is explicit because the GCC 12 ASan runtime on
+the ARMv6 reference builder fails before `main()` independently of Babet; a
+successful ARMHF report must therefore say UBSan, not ASan.
+
+For long native ARM validation on a machine with a hardware watchdog, use the
+native runner after pre-authorizing sudo:
+
+~~~sh
+sudo -v
+./tools/run_native_arch_release_validation.sh --suspend-watchdog
+~~~
+
+The runner records the active known watchdog feeders before stopping them and
+starts a detached privileged restore guard while sudo authorization is still
+available. The guard restores the feeders on normal exit and when the runner
+disappears even after SIGKILL, so a multi-hour build does not depend on the sudo
+timestamp. A persistent marker remains as recovery state after power loss,
+reboot, or guard failure and is consumed before the next validation proceeds.
 
 ## 4. Review the Git tree
 
@@ -99,7 +119,20 @@ Run the builder from the exact tagged commit:
 
 The explicit version is only an assertion against the CMake source version.
 
-Verify checksums:
+The builder publishes both the normal Babet artifacts and one standalone
+developer SDK archive for the current machine architecture. Typical SDK names
+are:
+
+~~~text
+babet-X.Y.Z-linux-x86_64-sdk.tar.gz
+babet-X.Y.Z-linux-aarch64-sdk.tar.gz
+babet-X.Y.Z-linux-armhf-sdk.tar.gz
+~~~
+
+Each architecture must be built on the corresponding release machine; the
+static `libbabet.a` inside the SDK is not architecture-neutral.
+
+Verify all checksums:
 
 ~~~sh
 cd dist

@@ -20,12 +20,20 @@ Current release: **2.23.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
-Babet 2.23.0 adds the static `libbabet` embedding SDK, a narrow Lua-to-host callback API,
-the first experimental Linux native plugin ABI, static `ncursesw` terminal UI support,
-and a separate optional FLTK prototype path. Native plugins are explicit trusted in-process
-shared objects for the original CLI only; generated applications, workers and embedding
-contexts reject plugin loading. The release also includes the post-audit hardening of
-coroutines, DSO identity, ABI validation and C++ exception boundaries.
+[Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.23.0 adds the static `libbabet` developer SDK, a narrow Lua-to-host
+callback API, the first experimental Linux native plugin ABI, static `ncursesw`
+terminal UI support, and the now-retired separate FLTK prototype experiment.
+Native plugins remain explicit trusted in-process shared objects for the
+original CLI only; generated applications, workers and embedding contexts reject
+plugin loading.
+
+Post-2.23 development replaces the FLTK companion-host direction with a much
+narrower optional [`babet.gui` design](GUI_DESIGN.md): GTK 4 is loaded
+lazily from the target system rather than linked into Babet. Non-GUI Babet and
+non-GUI `--create-exe` applications keep their existing autonomy; a GUI
+application remains a single file but explicitly requires GTK 4 on the target.
 
 Babet 2.22.2 adds a native RFC 6455 WebSocket client through
 `babet.websocket`. It supports `ws://` and verified `wss://`, strict Upgrade
@@ -67,7 +75,7 @@ Can be used in three modes:
    another application.
 3. **As a library of bindings** : Lua scripts get
    `babet.base64`, `babet.json`, `babet.http`, `babet.sqlite`,
-   `babet.socket`, `babet.websocket`, `babet.inotify`, `babet.curses`, `babet.workers`,
+   `babet.socket`, `babet.websocket`, `babet.inotify`, `babet.curses`, `babet.gui`, `babet.workers`,
    `babet.user`, `babet.exec`, `babet.writeFileAtomic`, the streaming
    `babet.spawn`,
    `babet.pipeline` / `babet.spawnPipeline`, secure ZIP and TAR handling through
@@ -437,13 +445,15 @@ reported as `list().entries[i].safe_path = false` and forbidden for extraction.
 Lot 6 introduces the first exercised host embedding boundary.  C and C++ hosts
 can target the small C header [`include/babet/babet.h`](include/babet/babet.h)
 and the in-tree static `libbabet.a` runtime produced by CMake. A normal build
-also creates a relocatable static SDK under `build/embedding-sdk/` containing
+also creates a relocatable static SDK under `build/sdk/` containing
 the public C headers (`babet.h` plus the Lot 11 `plugin.h` developer ABI), one
 flattened `libbabet.a` with Babet's pinned static third-party libraries folded
 in, and the developer documentation/examples. An external C host
 can therefore compile against that moved SDK without knowing the dependency
 build tree; the final executable is linked with a C++ linker driver plus the
 normal Linux system libraries (`-ldl -pthread -lm`, and `-latomic` on 32-bit).
+`release.sh` packages that SDK as a versioned, architecture-specific release
+artifact with its own SHA256 checksum.
 The public surface is deliberately narrow and experimental: an opaque context,
 create/search-root/run/error/destroy
 lifecycle, version/status helpers, one active context per process, and
@@ -467,15 +477,13 @@ static SDK path first. Process-wide Babet APIs
 (`chdir`, environment, signals, children, terminal) remain real host-process
 side effects rather than sandboxed state. The practical developer guide is [`EMBEDDING.md`](EMBEDDING.md), with small executable C examples under [`examples/embedding/`](examples/embedding/). The detailed architectural contract and rationale remain in [`EMBEDDING_DESIGN.md`](EMBEDDING_DESIGN.md), and the Lua -> host callback contract is isolated in [`HOST_FUNCTIONS_DESIGN.md`](HOST_FUNCTIONS_DESIGN.md).
 
-Lot 7 deliberately keeps optional GUI support outside the CLI. Lot 9 adds a
-deliberately tiny **separate** FLTK 1.4.5 companion prototype consuming the
-standalone libbabet SDK; it is not part of the normal Babet build and does not
-change `--create-exe`. Lot 10 rewrites that same prototype onto the public host-
-function API so one button activation now exercises FLTK -> Lua ->
-`babet.host.set_button_label()` -> FLTK without polling or a private bridge.
-wxWidgets 3.2.x remains the first fallback if a later real GUI shows FLTK is not
-suitable. See [`GUI_STUDY.md`](GUI_STUDY.md) and
-[`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md).
+The separate FLTK companion shipped as a 2.23.0 experiment has completed its
+job of exercising `libbabet` and the Lua-to-host callback API and is no longer
+the active GUI direction. Post-2.23 work instead defines an optional Lua-facing
+`babet.gui` whose initial Linux backend is GTK 4 loaded lazily from the system.
+GTK is not a normal Babet link dependency, and GUI use is the explicit exception
+where a one-file generated application may require a target-system runtime. See
+[`GUI_DESIGN.md`](GUI_DESIGN.md).
 
 Lot 11 adds a separate **experimental native plugin** path for trusted Linux
 `.so` extensions that should remain outside Babet core (for example vendor SDK
@@ -496,7 +504,7 @@ Before tagging a release, run the complete validation with one command:
 ./run_tests.sh --release
 ```
 
-Like the normal and `--sanitizers` modes, `--release` saves the complete
+Like the normal, `--sanitizers` and `--ubsan` modes, `--release` saves the complete
 color-free output to `babet-tests.txt`. The filename is stable and each
 top-level run replaces the previous log. This is the file to provide when a
 validation result must be reviewed.
@@ -510,9 +518,13 @@ a release. To make those probes blocking too:
 BABET_SMOKE_STRICT_EXTERNAL=1 ./run_tests.sh --release
 ```
 
-It automatically runs the ASan/UBSan suite, restores and revalidates the
-normal build, then runs the network smoke tests against that final binary.
-The normal build step is still attempted when the sanitizer stage fails, so
+It automatically selects the release sanitizer policy for the native
+architecture, restores and revalidates the normal build, then runs the network
+smoke tests against that final binary. x86_64 and AArch64 use ASan + UBSan;
+`linux-armhf` uses UBSan alone because the GCC 12 ASan runtime on the ARMv6
+reference builder fails before `main()` even for a minimal C program. That
+platform is therefore never reported as ASan-validated. The normal build step
+is still attempted when the sanitizer stage fails, so
 `test/babet` is not deliberately left instrumented. Internet access is
 optional: without it, only the advisory public probes warn. The blocking HTTP
 and TLS checks use local fixtures; the bounded TCP check uses a reserved
@@ -523,18 +535,20 @@ The individual commands remain available for diagnosis:
 
 ```sh
 ./run_tests.sh --sanitizers
+./run_tests.sh --ubsan
 ./run_tests.sh
 ./smoke_test_network.sh ./test/babet
 ```
 
-Valgrind is optional; ASan and UBSan are the primary memory and undefined
-behaviour checks used by the project.
+Valgrind is optional. ASan + UBSan remain the primary sanitizer pair on
+x86_64/AArch64; the official `linux-armhf` release gate uses UBSan only and
+records that reduced sanitizer policy explicitly.
 
 ## Documentation
 
 - Project invariants and architectural guardrails: [`INVARIANTS.md`](INVARIANTS.md)
-- Optional GUI architecture study: [`GUI_STUDY.md`](GUI_STUDY.md)
-- Separate FLTK companion prototype (Lot 9): [`FLTK_PROTOTYPE.md`](FLTK_PROTOTYPE.md)
+- Optional dynamic GUI design: [`GUI_DESIGN.md`](GUI_DESIGN.md)
+- Lua GUI user guide: [`docs/en/modules/gui.md`](docs/en/modules/gui.md)
 - Native plugin developer guide (Lot 11): [`NATIVE_PLUGINS.md`](NATIVE_PLUGINS.md)
 - Native plugin ABI/loader contract: [`NATIVE_PLUGIN_DESIGN.md`](NATIVE_PLUGIN_DESIGN.md)
 - Current development roadmap: [`todo`](todo)

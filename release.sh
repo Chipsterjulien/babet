@@ -11,6 +11,8 @@
 #   5. tarball babet-<version>-linux-<arch>.tar.gz
 #      (contient : babet, README, changelogs, licences et notes.md)
 #   6. sha256 du tarball
+#   7. archive du SDK développeur autonome pour l'architecture courante
+#   8. sha256 du SDK développeur
 #
 # Sortie : tout dans le répertoire dist/ à la racine du projet.
 # Ce dossier est ignoré par git (cf. .gitignore).
@@ -65,15 +67,12 @@ cd "${SCRIPT_DIR}"
 
 PROJECT_NAME="babet"
 BUILT_BINARY="${SCRIPT_DIR}/build/project_build/${PROJECT_NAME}"
+SDK_DIR="${SCRIPT_DIR}/build/sdk"
 DIST_DIR="${SCRIPT_DIR}/dist"
 
 # --- Détection de l'architecture -------------------------------------
 ARCH="$(uname -m)"
-case "${ARCH}" in
-    x86_64|amd64) ARCH_TAG="linux-x86_64" ;;
-    aarch64|arm64) ARCH_TAG="linux-aarch64" ;;
-    *) ARCH_TAG="linux-${ARCH}" ;;
-esac
+ARCH_TAG="$(bash "${SCRIPT_DIR}/tools/release_arch_tag.sh" "${ARCH}")"
 
 # --- Version : CMakeLists.txt est l'unique source de vérité ----------
 mapfile -t CMAKE_VERSIONS < <(
@@ -114,7 +113,7 @@ echo "=========================================="
 echo ""
 
 # --- Vérification des outils requis ----------------------------------
-for tool in sha256sum strip tar; do
+for tool in sha256sum strip tar ar; do
     if ! command -v "${tool}" &>/dev/null; then
         echo "ERREUR: '${tool}' introuvable dans PATH" >&2
         exit 1
@@ -123,7 +122,7 @@ done
 
 # --- Étape 1 : build (optionnel) -------------------------------------
 if [[ "${DO_BUILD}" -eq 1 ]]; then
-    echo "[1/6] Build via build_local.sh..."
+    echo "[1/8] Build via build_local.sh..."
     if [[ ! -x "${SCRIPT_DIR}/build_local.sh" ]]; then
         echo "ERREUR: build_local.sh introuvable ou non exécutable" >&2
         exit 1
@@ -131,7 +130,7 @@ if [[ "${DO_BUILD}" -eq 1 ]]; then
     bash "${SCRIPT_DIR}/build_local.sh"
     echo "      Build terminé."
 else
-    echo "[1/6] Skip build (utilise le binaire existant)."
+    echo "[1/8] Skip build (utilise le binaire existant)."
 fi
 
 # --- Vérification du binaire ----------------------------------------
@@ -140,6 +139,19 @@ if [[ ! -f "${BUILT_BINARY}" ]]; then
     echo "  Lance avec --build pour rebuild, ou exécute build_local.sh d'abord." >&2
     exit 1
 fi
+
+if [[ ! -d "${SDK_DIR}" ]]; then
+    echo "ERREUR: SDK développeur introuvable à ${SDK_DIR}" >&2
+    echo "  Lance avec --build pour rebuild, ou exécute build_local.sh d'abord." >&2
+    exit 1
+fi
+for sdk_required in include/babet/babet.h include/babet/plugin.h lib/libbabet.a LICENSE THIRD_PARTY_NOTICES.md; do
+    if [[ ! -f "${SDK_DIR}/${sdk_required}" ]]; then
+        echo "ERREUR: SDK développeur incomplet : ${sdk_required}" >&2
+        echo "  Reconstruis avec ./release.sh --build." >&2
+        exit 1
+    fi
+done
 
 EXPECTED_VERSION_OUTPUT="${PROJECT_NAME} ${VERSION}"
 ACTUAL_VERSION_OUTPUT="$("${BUILT_BINARY}" --version 2>/dev/null || true)"
@@ -153,7 +165,7 @@ if [[ "${ACTUAL_VERSION_OUTPUT}" != "${EXPECTED_VERSION_OUTPUT}" ]]; then
 fi
 
 # --- Préparation de dist/ -------------------------------------------
-echo "[2/6] Préparation de dist/..."
+echo "[2/8] Préparation de dist/..."
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
@@ -179,14 +191,14 @@ cp "${BUILT_BINARY}" "${DIST_DIR}/${BINARY_NAME_VERSIONED}"
 echo "      Binaire copié : dist/${BINARY_NAME_VERSIONED}"
 
 # --- Étape 3 : strip ------------------------------------------------
-echo "[3/6] Strip du binaire..."
+echo "[3/8] Strip du binaire..."
 SIZE_BEFORE=$(stat -c%s "${DIST_DIR}/${BINARY_NAME_VERSIONED}")
 strip "${DIST_DIR}/${BINARY_NAME_VERSIONED}"
 SIZE_AFTER=$(stat -c%s "${DIST_DIR}/${BINARY_NAME_VERSIONED}")
 echo "      Taille : ${SIZE_BEFORE} -> ${SIZE_AFTER} octets"
 
 # --- Étape 4 : sha256 du binaire ------------------------------------
-echo "[4/6] Calcul SHA256 du binaire..."
+echo "[4/8] Calcul SHA256 du binaire..."
 BINARY_SHA256_FILE="${DIST_DIR}/${BINARY_NAME_VERSIONED}.sha256"
 
 (cd "${DIST_DIR}" && sha256sum "${BINARY_NAME_VERSIONED}") \
@@ -194,7 +206,7 @@ BINARY_SHA256_FILE="${DIST_DIR}/${BINARY_NAME_VERSIONED}.sha256"
 echo "      SHA256 binaire : $(awk '{print $1}' "${BINARY_SHA256_FILE}")"
 
 # --- Étape 5 : tarball ----------------------------------------------
-echo "[5/6] Création du tarball..."
+echo "[5/8] Création du tarball..."
 TARBALL_BASENAME="${PROJECT_NAME}-${VERSION}-${ARCH_TAG}"
 TARBALL_FILE="${DIST_DIR}/${TARBALL_BASENAME}.tar.gz"
 
@@ -244,10 +256,32 @@ echo "      Contenu :"
 tar -tzf "${TARBALL_FILE}" | sed 's/^/        /'
 
 # --- Étape 6 : sha256 du tarball ------------------------------------
-echo "[6/6] Calcul SHA256 du tarball..."
+echo "[6/8] Calcul SHA256 du tarball..."
 TARBALL_SHA256_FILE="${TARBALL_FILE}.sha256"
 (cd "${DIST_DIR}" && sha256sum "${TARBALL_BASENAME}.tar.gz") > "${TARBALL_SHA256_FILE}"
 echo "      SHA256 tarball : $(awk '{print $1}' "${TARBALL_SHA256_FILE}")"
+
+# --- Étapes 7-8 : SDK développeur par architecture --------------------
+echo "[7/8] Création de l'archive SDK développeur..."
+mapfile -t SDK_OUTPUTS < <(
+    bash "${SCRIPT_DIR}/tools/package_sdk.sh" \
+        "${SDK_DIR}" "${DIST_DIR}" \
+        "${PROJECT_NAME}" "${VERSION}" "${ARCH_TAG}"
+)
+if [[ "${#SDK_OUTPUTS[@]}" -ne 2 ]]; then
+    echo "ERREUR: le packager SDK développeur n'a pas publié les deux artefacts attendus." >&2
+    exit 1
+fi
+SDK_TARBALL="${SDK_OUTPUTS[0]}"
+SDK_SHA256_FILE="${SDK_OUTPUTS[1]}"
+echo "      SDK : $(basename "${SDK_TARBALL}")"
+
+echo "[8/8] Vérification SHA256 du SDK développeur..."
+if ! (cd "${DIST_DIR}" && sha256sum -c "$(basename "${SDK_SHA256_FILE}")" >/dev/null); then
+    echo "ERREUR: checksum du SDK développeur invalide." >&2
+    exit 1
+fi
+echo "      SHA256 SDK : $(awk '{print $1}' "${SDK_SHA256_FILE}")"
 
 # --- Résumé ---------------------------------------------------------
 echo ""
@@ -258,6 +292,7 @@ ls -lh "${DIST_DIR}/" | awk 'NR>1 {printf "  %s  %s\n", $5, $9}'
 echo ""
 echo "Tu peux maintenant uploader ces fichiers sur la page Releases GitHub :"
 echo "  - $(basename "${TARBALL_FILE}")"
+echo "  - $(basename "${SDK_TARBALL}")"
 echo "  - $(basename "${TARBALL_SHA256_FILE}")"
 echo ""
 echo "Le binaire seul et son sha256 sont aussi dans dist/ si tu veux les"

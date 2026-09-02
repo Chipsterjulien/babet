@@ -1,0 +1,17 @@
+Membre d’archive inclus pour satisfaire une référence
+
+Carte mémoire de l’éditeur de liens
+
+.text           0x0000000000001000      0x500
+ .text.gui
+                0x0000000000001000       0x20 /tmp/libbabet.a(gui.cpp.o)
+ .text.sqlite    0x0000000000001020       0x30 /tmp/libbabet.a(sqlite.cpp.o)
+ .text.ssl       0x0000000000001050       0x40 /tmp/libssl.a(ssl_lib.o)
+ .text.re2       0x0000000000001090       0x50 /tmp/libre2.a(re2.o)
+ .text.curses    0x00000000000010e0       0x60 /tmp/libncursesw.a(lib_addch.o)
+ .text.pack      0x0000000000001140       0x70 /tmp/libbabet.a(create_executable.cpp.o)
+ .text.main      0x00000000000011b0       0x80 CMakeFiles/babet.dir/src/main.cpp.o
+.rodata         0x0000000000002000       0x20
+ .rodata.gui     0x0000000000002000       0x10 /tmp/libbabet.a(gui_gtk_loader.cpp.o)
+.bss            0x0000000000003000       0x80
+ .bss.gui        0x0000000000003000       0x80 /tmp/libbabet.a(gui.cpp.o)

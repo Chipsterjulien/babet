@@ -2,9 +2,19 @@
 # validate_release.sh — validation complète avant publication.
 #
 # Enchaîne automatiquement :
-#   1. build + tests ASan/UBSan ;
+#   1. build + tests sanitizers adaptés à l'architecture native ;
 #   2. restauration du build normal + tests complets ;
 #   3. smoke tests réseau avec le binaire normal final.
+#
+# Politique sanitizer de release :
+#   - x86_64/aarch64 et autres hôtes pris en charge : ASan + UBSan ;
+#   - linux-armhf (armv6l/armv7l/armhf) : UBSan seul.
+#
+# Le mode UBSan-only armhf est volontaire et explicite. Sur le builder ARMv6
+# de référence, le runtime GCC 12 ASan échoue avant main() même pour un programme
+# C minimal (diagnostic d'ordre du runtime en dynamique, puis SIGSEGV avec les
+# contournements preload/statique), tandis que libatomic et UBSan minimaux passent.
+# La campagne ne présente donc jamais cette architecture comme validée par ASan.
 #
 # Un échec de compilation est distingué des autres échecs par run_tests.sh.
 # Il interrompt immédiatement la campagne : relancer le même code dans le
@@ -12,15 +22,10 @@
 # un échec de test sous sanitizers laisse encore le build normal s'exécuter,
 # afin de restaurer le binaire final et de compléter le diagnostic.
 #
-# Chaque appel à run_tests.sh exécute d'abord les préflights hermétiques du
-# bootstrap Zstandard, du décodage des buffers inotify et des budgets de
-# sérialisation workers. Ils passent donc une fois pour le build sanitizer et
-# une fois pour le build normal lorsque la compilation sanitizer réussit.
-#
 # Le réseau est volontairement testé APRES la restauration du build normal :
-# les sanitizers servent à détecter les erreurs mémoire/UB, mais peuvent
-# modifier les timings et les interpositions système. Le smoke test valide le
-# binaire réellement destiné à la release.
+# les sanitizers servent à détecter les erreurs mémoire/UB, mais peuvent modifier
+# les timings et les interpositions système. Le smoke test valide le binaire
+# réellement destiné à la release.
 
 set -u
 
@@ -32,6 +37,20 @@ NETWORK_RC=1
 NORMAL_SKIPPED=0
 NETWORK_SKIPPED=0
 
+# BABET_VALIDATE_ARCH est un hook mainteneur/test hermétique. En usage normal,
+# la sélection repose exclusivement sur l'architecture native.
+VALIDATE_ARCH="${BABET_VALIDATE_ARCH:-$(uname -m)}"
+case "${VALIDATE_ARCH}" in
+    armv6l|armv7l|armhf)
+        SANITIZER_ARG="--ubsan"
+        SANITIZER_LABEL="UBSan (linux-armhf)"
+        ;;
+    *)
+        SANITIZER_ARG="--sanitizers"
+        SANITIZER_LABEL="ASan + UBSan"
+        ;;
+esac
+
 print_stage() {
     echo
     echo "============================================================"
@@ -39,8 +58,11 @@ print_stage() {
     echo "============================================================"
 }
 
-print_stage "Étape 1/3 — ASan + UBSan"
-bash "${SCRIPT_DIR}/run_tests.sh" --sanitizers
+print_stage "Étape 1/3 — ${SANITIZER_LABEL}"
+if [ "${SANITIZER_ARG}" = "--ubsan" ]; then
+    echo "INFO: politique linux-armhf : ASan non revendiqué ; validation UBSan seule."
+fi
+bash "${SCRIPT_DIR}/run_tests.sh" "${SANITIZER_ARG}"
 SANITIZERS_RC=$?
 
 if [ ${SANITIZERS_RC} -eq ${BUILD_FAILURE_EXIT_CODE} ]; then
@@ -48,7 +70,7 @@ if [ ${SANITIZERS_RC} -eq ${BUILD_FAILURE_EXIT_CODE} ]; then
     NETWORK_SKIPPED=1
     echo
     echo "Étape 2/3 — build normal : IGNORÉ"
-    echo "La compilation ASan/UBSan a échoué ; la campagne est arrêtée."
+    echo "La compilation ${SANITIZER_LABEL} a échoué ; la campagne est arrêtée."
     echo
     echo "Étape 3/3 — smoke tests réseau : IGNORÉS"
     echo "Aucun binaire normal final validé n'est disponible."
@@ -59,7 +81,8 @@ else
 
     if [ ${NORMAL_RC} -eq 0 ]; then
         print_stage "Étape 3/3 — smoke tests réseau (binaire normal)"
-        bash "${SCRIPT_DIR}/smoke_test_network.sh" "${SCRIPT_DIR}/test/babet"
+        NETWORK_BINARY="${BABET_TEST_PREBUILT_BINARY_NORMAL:-${SCRIPT_DIR}/test/babet}"
+        bash "${SCRIPT_DIR}/smoke_test_network.sh" "${NETWORK_BINARY}"
         NETWORK_RC=$?
     else
         NETWORK_SKIPPED=1
@@ -78,11 +101,11 @@ echo "============================================================"
 echo "Bilan de la validation pré-release"
 echo "============================================================"
 if [ ${SANITIZERS_RC} -eq 0 ]; then
-    echo "  ASan + UBSan        : OK"
+    echo "  ${SANITIZER_LABEL} : OK"
 elif [ ${SANITIZERS_RC} -eq ${BUILD_FAILURE_EXIT_CODE} ]; then
-    echo "  ASan + UBSan        : ÉCHEC DE COMPILATION"
+    echo "  ${SANITIZER_LABEL} : ÉCHEC DE COMPILATION"
 else
-    echo "  ASan + UBSan        : ÉCHEC (code ${SANITIZERS_RC})"
+    echo "  ${SANITIZER_LABEL} : ÉCHEC (code ${SANITIZERS_RC})"
 fi
 
 if [ ${NORMAL_SKIPPED} -eq 1 ]; then

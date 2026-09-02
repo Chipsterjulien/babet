@@ -32,12 +32,13 @@ expect_present() {
 
 make_fixture() {
     local dir="$1"
-    mkdir -p "$dir/src/third_party" "$dir/build/fltk-prototype" "$dir/test" \
+    mkdir -p "$dir/src/third_party" "$dir/build/project_build" "$dir/test" \
         "$dir/downloads" "$dir/dist"
     cp "$SOURCE_SCRIPT" "$dir/clear_code.sh"
     chmod +x "$dir/clear_code.sh"
     printf 'normal\n' > "$dir/babet-tests.txt"
-    printf 'fltk\n' > "$dir/babet-fltk-tests.txt"
+    printf 'native-arm\n' > "$dir/native-arch-validation.log"
+    printf 'legacy-fltk\n' > "$dir/babet-fltk-tests.txt"
     printf 'scratch\n' > "$dir/MODIFIED_FILES.txt"
     printf 'notes\n' > "$dir/GITHUB_RELEASE_test.md"
     printf 'keep me\n' > "$dir/user-backup.zip"
@@ -53,7 +54,8 @@ expect_absent "default cleanup removes legacy third_party tree" "$DEFAULT_FIXTUR
 expect_present "default cleanup preserves downloads" "$DEFAULT_FIXTURE/downloads"
 expect_present "default cleanup preserves dist" "$DEFAULT_FIXTURE/dist"
 expect_present "default cleanup preserves normal validation log" "$DEFAULT_FIXTURE/babet-tests.txt"
-expect_present "default cleanup preserves FLTK validation log" "$DEFAULT_FIXTURE/babet-fltk-tests.txt"
+expect_present "default cleanup preserves native ARM validation log" "$DEFAULT_FIXTURE/native-arch-validation.log"
+expect_present "default cleanup preserves legacy FLTK validation log" "$DEFAULT_FIXTURE/babet-fltk-tests.txt"
 expect_present "default cleanup preserves release scratch" "$DEFAULT_FIXTURE/MODIFIED_FILES.txt"
 
 ALL_FIXTURE="$TMP/all"
@@ -65,7 +67,8 @@ expect_absent "--all removes legacy third_party tree" "$ALL_FIXTURE/src/third_pa
 expect_absent "--all removes downloads" "$ALL_FIXTURE/downloads"
 expect_absent "--all removes dist" "$ALL_FIXTURE/dist"
 expect_absent "--all removes normal validation log" "$ALL_FIXTURE/babet-tests.txt"
-expect_absent "--all removes FLTK validation log" "$ALL_FIXTURE/babet-fltk-tests.txt"
+expect_absent "--all removes native ARM validation log" "$ALL_FIXTURE/native-arch-validation.log"
+expect_absent "--all removes legacy FLTK validation log" "$ALL_FIXTURE/babet-fltk-tests.txt"
 expect_absent "--all removes MODIFIED_FILES scratch" "$ALL_FIXTURE/MODIFIED_FILES.txt"
 expect_absent "--all removes GITHUB_RELEASE scratch" "$ALL_FIXTURE/GITHUB_RELEASE_test.md"
 expect_present "--all never deletes an unrelated ZIP" "$ALL_FIXTURE/user-backup.zip"

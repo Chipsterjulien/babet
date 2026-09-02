@@ -6,6 +6,7 @@
 #endif
 
 #include "curses.hpp"
+#include "gui.hpp"
 #include "lua_utils.hpp"
 #include "main_thread.hpp"
 #include "process_terminal_internal.hpp"
@@ -388,6 +389,8 @@ int l_start(lua_State *L)
         return luaL_error(L, "curses.start expects no arguments");
     if (g_active.load(std::memory_order_acquire))
         return luaL_error(L, "curses.start: a curses session is already active");
+    if (babet_gui::session_active())
+        return luaL_error(L, "curses.start: a GUI session is already active");
     if (::isatty(STDIN_FILENO) != 1 || ::isatty(STDOUT_FILENO) != 1 ||
         !same_tty(STDIN_FILENO, STDOUT_FILENO))
         return luaL_error(L, "curses.start: stdin and stdout must be the same TTY");

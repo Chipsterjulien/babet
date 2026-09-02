@@ -12,7 +12,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Parsing des arguments
 RUN_AFTER_BUILD=0
-ENABLE_SANITIZERS=0
+SANITIZER_MODE="OFF"
+ENABLE_SIZE_AUDIT=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -20,13 +21,29 @@ for arg in "$@"; do
             RUN_AFTER_BUILD=1
             ;;
         --sanitizers)
-            ENABLE_SANITIZERS=1
+            if [ "${SANITIZER_MODE}" != "OFF" ] && [ "${SANITIZER_MODE}" != "ASAN_UBSAN" ]; then
+                echo "ERREUR: --sanitizers et --ubsan ne peuvent pas être combinés." >&2
+                exit 1
+            fi
+            SANITIZER_MODE="ASAN_UBSAN"
+            ;;
+        --ubsan)
+            if [ "${SANITIZER_MODE}" != "OFF" ] && [ "${SANITIZER_MODE}" != "UBSAN" ]; then
+                echo "ERREUR: --sanitizers et --ubsan ne peuvent pas être combinés." >&2
+                exit 1
+            fi
+            SANITIZER_MODE="UBSAN"
+            ;;
+        --size-audit)
+            ENABLE_SIZE_AUDIT=1
             ;;
         --help|-h)
-            echo "Usage: $0 [--run] [--sanitizers]"
+            echo "Usage: $0 [--run] [--sanitizers|--ubsan] [--size-audit]"
             echo "  (par défaut)   Compile uniquement"
             echo "  --run          Compile puis exécute le binaire sur test/"
             echo "  --sanitizers   Compile avec ASan + UBSan (GCC/Clang)"
+            echo "  --ubsan        Compile avec UBSan seul (GCC/Clang)"
+            echo "  --size-audit   Génère une map du linker et build/size-audit.txt"
             exit 0
             ;;
         *)
@@ -36,6 +53,11 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ "${SANITIZER_MODE}" != "OFF" ] && [ "${ENABLE_SIZE_AUDIT}" -eq 1 ]; then
+    echo "ERREUR: --size-audit est incompatible avec les builds sanitizers." >&2
+    exit 1
+fi
 
 # Vérifier si CMake est installé
 if ! command -v cmake &> /dev/null; then
@@ -236,13 +258,21 @@ download_with_fallback() {
 BUILD_DIR="${SCRIPT_DIR}/build"
 DOWNLOAD_DIR="${SCRIPT_DIR}/downloads"
 #
-if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-    PROJECT_BUILD_DIR="${BUILD_DIR}/project_build_sanitizers"
-    CMAKE_SANITIZERS="ON"
-else
-    PROJECT_BUILD_DIR="${BUILD_DIR}/project_build"
-    CMAKE_SANITIZERS="OFF"
-fi
+case "${SANITIZER_MODE}" in
+    ASAN_UBSAN)
+        PROJECT_BUILD_DIR="${BUILD_DIR}/project_build_sanitizers"
+        ;;
+    UBSAN)
+        PROJECT_BUILD_DIR="${BUILD_DIR}/project_build_ubsan"
+        ;;
+    OFF)
+        PROJECT_BUILD_DIR="${BUILD_DIR}/project_build"
+        ;;
+    *)
+        echo "ERREUR: mode sanitizer interne invalide: ${SANITIZER_MODE}" >&2
+        exit 1
+        ;;
+esac
 PROJECT_NAME="babet"
 #
 # LUA_VERSION="5.4.7"
@@ -267,20 +297,33 @@ LUA_LIB="${LUA_BUILD_DIR}/${LUA_DIR}/src/${LUA_LIB_NAME}"
 LUA_INCLUDE="${LUA_BUILD_DIR}/${LUA_DIR}/src"
 #
 # OPENSSL_VERSION="3.3.1"
-OPENSSL_VERSION="3.5.6"
+OPENSSL_VERSION="3.5.8"
 OPENSSL_DIR="openssl-${OPENSSL_VERSION}"
 OPENSSL_TAR="${OPENSSL_DIR}.tar.gz"
 OPENSSL_BUILD_DIR="${BUILD_DIR}/openssl"
 # Dépendance crypto : la plus critique à vérifier. Calcule :
-#   wget -qO- https://www.openssl.org/source/openssl-3.5.6.tar.gz | sha256sum
+#   wget -qO- https://www.openssl.org/source/openssl-3.5.8.tar.gz | sha256sum
 # et recoupe avec le hash publié officiellement par le projet :
-#   wget -qO- https://www.openssl.org/source/openssl-3.5.6.tar.gz.sha256
-OPENSSL_SHA256="deae7c80cba99c4b4f940ecadb3c3338b13cb77418409238e57d7f31f2a3b736"
+#   wget -qO- https://github.com/openssl/openssl/releases/download/openssl-3.5.8/openssl-3.5.8.tar.gz.sha256
+OPENSSL_SHA256="a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2"
 OPENSSL_URL="https://www.openssl.org/source/${OPENSSL_TAR}"
-# Sources alternatives pour OpenSSL (Wayback en filet, comme Lua).
+# Sources alternatives pour OpenSSL. Le release asset GitHub est la source
+# effectivement publiée par OpenSSL ; Wayback reste un dernier filet.
 OPENSSL_URLS=(
     "${OPENSSL_URL}"
-    "https://web.archive.org/web/2025id_/${OPENSSL_URL}"
+    "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/${OPENSSL_TAR}"
+    "https://web.archive.org/web/202608id_/${OPENSSL_URL}"
+)
+# Candidate 11 validated this exact production contract: section-splitting the
+# vendored OpenSSL C code plus linker GC saves 602,432 additional bytes on the
+# x86_64 reference build without removing TLS/PQC capabilities. Keep these
+# flags explicit and fingerprinted so a future OpenSSL bump cannot silently
+# reuse archives built with a different configuration.
+OPENSSL_CONFIGURE_FLAGS=(
+    no-shared
+    --openssldir=/etc/ssl
+    -ffunction-sections
+    -fdata-sections
 )
 #
 MINIZ_VERSION="3.1.2"
@@ -1342,13 +1385,27 @@ cd "$SCRIPT_DIR" || exit 1
 # qui compile. Cohérence avec miniz, json, httplib, tomlpp, sqlite
 # qui sont tous vendored.
 #
-# Trade-off accepté : premier build ~30-60s sur x86_64 (variable
-# selon CPU), 1-2h sur RPi0. Builds suivants instantanés grâce au
-# cache build/openssl/.
-OPENSSL_PATH_LOCAL=$(find "${OPENSSL_BUILD_DIR}" -name "libssl.a" -print -quit 2>/dev/null | sed 's|^\./||')
+# Candidate 11 a aussi validé le sectionnement du code C OpenSSL avec
+# -ffunction-sections/-fdata-sections, combiné au --gc-sections du lien final.
+# Le cache est contractuel : une archive 3.5.8 plus ancienne, compilée sans ces
+# flags, doit être reconstruite même si libssl.a/libcrypto.a existent déjà.
+OPENSSL_PATH_LOCAL="${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}/libssl.a"
+CRYPTO_PATH_LOCAL="${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}/libcrypto.a"
+OPENSSL_CLI_LOCAL="${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}/apps/openssl"
+OPENSSL_BUILD_CONTRACT_FILE="${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}/.babet-build-contract"
+OPENSSL_EXPECTED_CONTRACT="$(printf 'version=%s\nConfigure=%s\n' \
+    "${OPENSSL_VERSION}" "${OPENSSL_CONFIGURE_FLAGS[*]}")"
+OPENSSL_CACHE_VALID=0
+if [ -f "${OPENSSL_PATH_LOCAL}" ] \
+    && [ -f "${CRYPTO_PATH_LOCAL}" ] \
+    && [ -x "${OPENSSL_CLI_LOCAL}" ] \
+    && [ -f "${OPENSSL_BUILD_CONTRACT_FILE}" ] \
+    && [ "$(cat "${OPENSSL_BUILD_CONTRACT_FILE}")" = "${OPENSSL_EXPECTED_CONTRACT}" ]; then
+    OPENSSL_CACHE_VALID=1
+fi
 
-if [ ! -f "${OPENSSL_PATH_LOCAL}" ]; then
-    echo "openssl ${OPENSSL_VERSION} : pas encore compilé localement"
+if [ "${OPENSSL_CACHE_VALID}" -ne 1 ]; then
+    echo "openssl ${OPENSSL_VERSION} : cache absent ou configuration obsolète, reconstruction"
 
     if [ ! -f "${DOWNLOAD_DIR}/${OPENSSL_TAR}" ]; then
         if ! download_with_fallback "${DOWNLOAD_DIR}/${OPENSSL_TAR}" \
@@ -1361,40 +1418,47 @@ if [ ! -f "${OPENSSL_PATH_LOCAL}" ]; then
         fi
     fi
 
-    # SHA256 vérifié systématiquement, même si déjà en cache.
+    # SHA256 vérifié avant toute reconstruction, même avec un tarball en cache.
     verify_sha256 "${DOWNLOAD_DIR}/${OPENSSL_TAR}" "${OPENSSL_SHA256}" "openssl"
 
-    if [ ! -d "${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}" ]; then
-        echo "Décompression de openssl ${OPENSSL_VERSION}..."
-        mkdir -p "${OPENSSL_BUILD_DIR}"
-        tar -xzf "${DOWNLOAD_DIR}/${OPENSSL_TAR}" -C "${OPENSSL_BUILD_DIR}"
-        if [ $? -ne 0 ]; then
-            echo "Échec de la décompression de openssl."
-            exit 1
-        fi
-    fi
-
-    echo "Compilation de openssl ${OPENSSL_VERSION} (peut prendre du temps)..."
-    cd "${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}" || exit 1
-    # --openssldir=/etc/ssl : pointe OPENSSLDIR vers l'emplacement
-    # standard sur Arch, Debian, Ubuntu, Alpine, et de nombreuses
-    # autres distros. Sans ça, SSL_CTX_set_default_verify_paths()
-    # cherche les CA dans le chemin par défaut d'OpenSSL upstream
-    # (~/usr/local/ssl) qui n'existe nulle part en pratique →
-    # HTTPS échoue par défaut.
-    # Fedora/RHEL/OpenSUSE/*BSD utilisent d'autres chemins ;
-    # un probing runtime côté socket.cpp les couvre en complément.
-    ./Configure no-shared --openssldir=/etc/ssl
-    make clean
-    make -j"$(nproc)"
+    # Repartir d'un arbre propre est volontaire : un Configure précédent avec
+    # d'autres options ne doit jamais contaminer le contrat de production.
+    rm -rf -- "${OPENSSL_BUILD_DIR:?}/${OPENSSL_DIR}"
+    mkdir -p "${OPENSSL_BUILD_DIR}"
+    echo "Décompression de openssl ${OPENSSL_VERSION}..."
+    tar -xzf "${DOWNLOAD_DIR}/${OPENSSL_TAR}" -C "${OPENSSL_BUILD_DIR}"
     if [ $? -ne 0 ]; then
-        echo "Échec de la compilation d'openssl."
+        echo "Échec de la décompression d'openssl."
         exit 1
     fi
+
+    echo "Compilation de openssl ${OPENSSL_VERSION} (bibliothèques statiques)..."
+    cd "${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}" || exit 1
+    # --openssldir=/etc/ssl : chemin de confiance par défaut ; le probing
+    # runtime de socket.cpp/websocket.cpp couvre les autres distributions.
+    ./Configure "${OPENSSL_CONFIGURE_FLAGS[@]}"
+    # Babet lie uniquement libssl.a/libcrypto.a, mais les régressions TLS
+    # déterministes utilisent aussi le CLI OpenSSL vendored exact. Construire
+    # build_libs + apps/openssl évite toute la suite de tests OpenSSL tout en
+    # conservant ce driver de validation.
+    make -j"$(nproc)" build_libs apps/openssl
+    if [ $? -ne 0 ]; then
+        echo "Échec de la compilation des bibliothèques openssl."
+        exit 1
+    fi
+    if [ ! -f "${OPENSSL_PATH_LOCAL}" ] \
+        || [ ! -f "${CRYPTO_PATH_LOCAL}" ] \
+        || [ ! -x "${OPENSSL_CLI_LOCAL}" ]; then
+        echo "Échec : les archives ou le CLI OpenSSL ${OPENSSL_VERSION} attendus sont absents." >&2
+        exit 1
+    fi
+    printf '%s\n' "${OPENSSL_EXPECTED_CONTRACT}" > "${OPENSSL_BUILD_CONTRACT_FILE}"
+else
+    echo "openssl ${OPENSSL_VERSION} est déjà compilé avec le contrat de production."
 fi
 
-OPENSSL_PATH="${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}/libssl.a"
-CRYPTO_PATH="${OPENSSL_BUILD_DIR}/${OPENSSL_DIR}/libcrypto.a"
+OPENSSL_PATH="${OPENSSL_PATH_LOCAL}"
+CRYPTO_PATH="${CRYPTO_PATH_LOCAL}"
 
 # Revenir au répertoire du script
 cd "$SCRIPT_DIR" || exit 1
@@ -1442,9 +1506,10 @@ bash "${SCRIPT_DIR}/tools/embed_lua_module.sh" \
     "${GENERATED_DIR}/embedded_workers_pool.hpp" \
     "workers_pool"
 
-if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-    echo "Configuration pré-release : ASan + UBSan activés."
-fi
+case "${SANITIZER_MODE}" in
+    ASAN_UBSAN) echo "Configuration pré-release : ASan + UBSan activés." ;;
+    UBSAN) echo "Configuration pré-release : UBSan seul activé." ;;
+esac
 
 cmake "$SCRIPT_DIR" \
     -DLUA_LIB="$LUA_LIB" \
@@ -1475,7 +1540,10 @@ cmake "$SCRIPT_DIR" \
     -DSQLITE_SRC="${SQLITE_C}" \
     -DSQLITE_INCLUDE="${SQLITE_INSTALL_DIR}" \
     -DGENERATED_INCLUDE="${GENERATED_DIR}" \
-    -DBABET_ENABLE_SANITIZERS="${CMAKE_SANITIZERS}"
+    -DBABET_ENABLE_SANITIZERS=OFF \
+    -DBABET_SANITIZER_MODE="${SANITIZER_MODE}" \
+    -DBABET_ENABLE_GC_SECTIONS=ON \
+    -DBABET_ENABLE_SIZE_AUDIT="$([ "${ENABLE_SIZE_AUDIT}" -eq 1 ] && printf ON || printf OFF)"
 if [ $? -ne 0 ]; then
     echo "Échec de la configuration avec CMake."
     exit 1
@@ -1514,6 +1582,30 @@ if [ -d "${SCRIPT_DIR}/examples" ]; then
 fi
 
 echo "Build OK. Binaire prêt dans ${SCRIPT_DIR}/test/${PROJECT_NAME}"
+
+if [ "${ENABLE_SIZE_AUDIT}" -eq 1 ]; then
+    LINK_MAP="${PROJECT_BUILD_DIR}/babet-link.map"
+    SIZE_REPORT="${BUILD_DIR}/size-audit.txt"
+    SIZE_BINARY="${BUILD_DIR}/size-audit-babet"
+    if [ ! -f "${LINK_MAP}" ]; then
+        echo "Échec : map du linker absente après le build size-audit : ${LINK_MAP}" >&2
+        exit 1
+    fi
+    if ! command -v strip >/dev/null 2>&1; then
+        echo "Échec : strip est requis pour --size-audit." >&2
+        exit 1
+    fi
+    cp -- "${SCRIPT_DIR}/test/${PROJECT_NAME}" "${SIZE_BINARY}"
+    strip "${SIZE_BINARY}"
+    if ! bash "${SCRIPT_DIR}/tools/analyze_link_map.sh" \
+        "${LINK_MAP}" "${SIZE_BINARY}" "${SIZE_REPORT}"; then
+        echo "Échec : analyse de taille du linker." >&2
+        exit 1
+    fi
+    echo "Binaire strippé de mesure   : ${SIZE_BINARY}"
+    echo "Rapport d'attribution taille : ${SIZE_REPORT}"
+fi
+
 if [ -f "${PROJECT_BUILD_DIR}/libbabet.a" ]; then
     echo "Embedding expérimental : ${PROJECT_BUILD_DIR}/libbabet.a"
     echo "Header C               : ${SCRIPT_DIR}/include/babet/babet.h"
@@ -1521,20 +1613,23 @@ if [ -f "${PROJECT_BUILD_DIR}/libbabet.a" ]; then
 
     # Le SDK autonome est un artefact du build normal uniquement. Un build
     # sanitizer produit une libbabet instrumentée destinée aux tests in-tree,
-    # pas un paquet à redistribuer ou à lier sans les flags ASan/UBSan.
-    if [ "${ENABLE_SANITIZERS}" -eq 0 ]; then
-        EMBEDDING_SDK_DIR="${BUILD_DIR}/embedding-sdk"
+    # pas un paquet à redistribuer ou à lier sans les mêmes flags sanitizer.
+    if [ "${SANITIZER_MODE}" = "OFF" ]; then
+        # Migration from the former embedding-only name: this is generated
+        # state, so remove it to avoid presenting two SDKs after an upgrade.
+        rm -rf -- "${BUILD_DIR}/embedding-sdk"
+        SDK_DIR="${BUILD_DIR}/sdk"
         mapfile -d '' -t ABSL_STATIC_LIBS < <(
             find "${ABSL_INSTALL_DIR}/lib" -maxdepth 1 -type f \
                 -name 'libabsl_*.a' -print0 | sort -z
         )
         if [ "${#ABSL_STATIC_LIBS[@]}" -eq 0 ]; then
-            echo "Échec : aucune archive statique Abseil disponible pour le SDK d'embedding."
+            echo "Échec : aucune archive statique Abseil disponible pour le SDK développeur."
             exit 1
         fi
 
-        if ! bash "${SCRIPT_DIR}/tools/create_embedding_sdk.sh" \
-            "${EMBEDDING_SDK_DIR}" \
+        if ! bash "${SCRIPT_DIR}/tools/create_sdk.sh" \
+            "${SDK_DIR}" \
             "${SCRIPT_DIR}/include/babet/babet.h" \
             "${PROJECT_BUILD_DIR}/libbabet.a" \
             "${LUA_LIB}" \
@@ -1548,12 +1643,12 @@ if [ -f "${PROJECT_BUILD_DIR}/libbabet.a" ]; then
             "${ZSTD_LIB}" \
             "${RE2_LIB}" \
             "${ABSL_STATIC_LIBS[@]}"; then
-            echo "Échec de la création du SDK statique d'embedding."
+            echo "Échec de la création du SDK développeur statique."
             exit 1
         fi
-        echo "SDK embedding autonome : ${EMBEDDING_SDK_DIR}"
+        echo "SDK développeur autonome : ${SDK_DIR}"
     else
-        echo "SDK embedding autonome : non généré pour le build ASan/UBSan"
+        echo "SDK développeur autonome : non généré pour le build sanitizer (${SANITIZER_MODE})"
     fi
 fi
 

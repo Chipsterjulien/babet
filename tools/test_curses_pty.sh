@@ -207,7 +207,9 @@ assert(io.read("*l") == "go")
 assert(babet.curses.start())
 assert(babet.curses.write("CURSES_TSTP_READY\n"))
 assert(babet.curses.refresh())
-babet.curses.readKey()
+local key, reason = babet.curses.readKey(5.0)
+assert(key == nil and reason == "interrupted",
+       "SIGTSTP/SIGCONT must interrupt curses.readKey")
 assert(babet.curses.write("CURSES_TSTP_RESUMED\n"))
 assert(babet.curses.refresh())
 assert(babet.curses.stop())
@@ -546,8 +548,19 @@ run_case("babet.signal handler remains authoritative during curses",
          required=("CURSES_HANDLER_OK", "CURSES_HANDLER_EXIT_OK"))
 
 def suspend_driver(pid, master, out, state):
-    if b"CURSES_TSTP_READY" in out and not state.get("ctrlz"):
-        os.write(master, b"\x1a"); state["ctrlz"] = True
+    # CURSES_TSTP_READY is emitted immediately before Lua enters readKey().
+    # Do not inject Ctrl-Z in that tiny pre-call window: on a fast optimized
+    # build the terminal-generated SIGTSTP could be fully serviced before
+    # readKey() captures its suspend generation, turning a correct resume into
+    # an apparent readKey timeout. Arm the terminal signal first, then inject
+    # it after a bounded grace period so readKey() is definitely waiting.
+    if (b"CURSES_TSTP_READY" in out and
+            "ctrlz_due" not in state and not state.get("ctrlz")):
+        state["ctrlz_due"] = time.monotonic() + 0.5
+    if (not state.get("ctrlz") and "ctrlz_due" in state and
+            time.monotonic() >= state["ctrlz_due"]):
+        os.write(master, b"\x1a")
+        state["ctrlz"] = True
     if state.get("stopped") and not state.get("continued_sent"):
         # The shell-like supervisor is now foreground and waiting for this
         # acknowledgement after observing WIFSTOPPED on the Babet child.

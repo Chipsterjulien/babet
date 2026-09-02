@@ -76,6 +76,10 @@ void register_sqlite(lua_State *L);
 
 // Reconnaît la sentinelle par identité exacte. Ce helper permet aux autres
 // modules de la refuser avec un diagnostic stable sans exposer son adresse.
+#ifdef BABET_SIZE_EXPERIMENT_NO_SQLITE
+inline bool is_sqlite_null(lua_State *, int) noexcept { return false; }
+#else
 bool is_sqlite_null(lua_State *L, int idx) noexcept;
+#endif
 
 #endif // LUA_BINDINGS_SQLITE_HPP

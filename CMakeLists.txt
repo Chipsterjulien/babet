@@ -20,8 +20,92 @@ set(CMAKE_C_STANDARD 99)
 # Validation mémoire/UB optionnelle pour les builds de pré-release.
 # Désactivée par défaut afin de ne rien changer aux builds normaux ni
 # aux binaires distribués. Compatible GCC et Clang.
+#
+# ASAN_UBSAN reste le mode de validation principal sur x86_64/aarch64.
+# UBSAN existe séparément pour les builders linux-armhf où le runtime ASan
+# système peut être inutilisable avant même main() (cas ARMv6 observé).
+set(BABET_SANITIZER_MODE "OFF" CACHE STRING
+    "Sanitizer mode: OFF, ASAN_UBSAN or UBSAN")
+set_property(CACHE BABET_SANITIZER_MODE PROPERTY STRINGS OFF ASAN_UBSAN UBSAN)
+string(TOUPPER "${BABET_SANITIZER_MODE}" BABET_SANITIZER_MODE)
+set(BABET_SANITIZER_MODE "${BABET_SANITIZER_MODE}" CACHE STRING
+    "Sanitizer mode: OFF, ASAN_UBSAN or UBSAN" FORCE)
+
+# Compatibilité mainteneur avec les anciens scripts/commandes CMake.
+# ON conserve exactement son sens historique : ASan + UBSan.
 option(BABET_ENABLE_SANITIZERS
-       "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+       "Legacy alias for BABET_SANITIZER_MODE=ASAN_UBSAN" OFF)
+if(BABET_ENABLE_SANITIZERS)
+    if(NOT BABET_SANITIZER_MODE STREQUAL "OFF"
+       AND NOT BABET_SANITIZER_MODE STREQUAL "ASAN_UBSAN")
+        message(FATAL_ERROR
+            "BABET_ENABLE_SANITIZERS=ON implies ASAN_UBSAN and cannot be combined with BABET_SANITIZER_MODE=${BABET_SANITIZER_MODE}")
+    endif()
+    set(BABET_SANITIZER_MODE "ASAN_UBSAN" CACHE STRING
+        "Sanitizer mode: OFF, ASAN_UBSAN or UBSAN" FORCE)
+endif()
+
+if(NOT BABET_SANITIZER_MODE STREQUAL "OFF"
+   AND NOT BABET_SANITIZER_MODE STREQUAL "ASAN_UBSAN"
+   AND NOT BABET_SANITIZER_MODE STREQUAL "UBSAN")
+    message(FATAL_ERROR
+        "Invalid BABET_SANITIZER_MODE=${BABET_SANITIZER_MODE}; expected OFF, ASAN_UBSAN or UBSAN")
+endif()
+
+# Maintainer-only binary size attribution.  This changes no runtime feature:
+# it only asks the linker to emit a GNU ld map that can be inspected after
+# the build.  Disabled for ordinary, sanitizer and release validation builds.
+option(BABET_ENABLE_SIZE_AUDIT
+       "Emit a linker map for maintainer binary-size attribution" OFF)
+
+
+# Maintainer-only differential size experiments. These switches deliberately
+# do NOT define supported product profiles; they exist only to measure actual
+# stripped-binary deltas one feature group at a time.
+option(BABET_SIZE_EXPERIMENT_NO_SQLITE
+       "Maintainer size experiment: build without babet.sqlite" OFF)
+option(BABET_SIZE_EXPERIMENT_NO_FIND_RE2
+       "Maintainer size experiment: build without babet.find/RE2" OFF)
+option(BABET_SIZE_EXPERIMENT_NO_NETWORK
+       "Maintainer size experiment: build without HTTP/socket/WebSocket" OFF)
+option(BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION
+       "Maintainer size experiment: build without archive/compression APIs" OFF)
+option(BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING
+       "Maintainer size experiment: build without OpenSSL-backed file hashing" OFF)
+# Production size policy validated by Candidates 10/11: let the linker discard
+# unreachable input sections. This preserves the single full-featured runtime;
+# it is not a product profile and removes no intentionally selected feature.
+option(BABET_ENABLE_GC_SECTIONS
+       "Enable production linker garbage collection of unreachable sections" ON)
+
+# Historical/maintainer-only follow-up switches. Splitting Babet-owned C/C++
+# sources was measured at only 61,440 bytes on the Candidate 10 x86_64 baseline
+# and is deliberately NOT part of the product build. Printing discarded
+# sections remains useful for audits.
+option(BABET_SIZE_EXPERIMENT_GC_BABET_SECTIONS
+       "Maintainer size experiment: split Babet functions/data into sections" OFF)
+option(BABET_SIZE_EXPERIMENT_GC_PRINT
+       "Maintainer audit: print linker-discarded sections" OFF)
+
+if(BABET_SIZE_EXPERIMENT_GC_BABET_SECTIONS AND
+   NOT BABET_ENABLE_GC_SECTIONS)
+    message(FATAL_ERROR
+        "BABET_SIZE_EXPERIMENT_GC_BABET_SECTIONS requires BABET_ENABLE_GC_SECTIONS")
+endif()
+if(BABET_SIZE_EXPERIMENT_GC_PRINT AND
+   NOT BABET_ENABLE_GC_SECTIONS)
+    message(FATAL_ERROR
+        "BABET_SIZE_EXPERIMENT_GC_PRINT requires BABET_ENABLE_GC_SECTIONS")
+endif()
+
+include(CheckLinkerFlag)
+if(BABET_ENABLE_GC_SECTIONS)
+    check_linker_flag(CXX "-Wl,--gc-sections" BABET_HAS_GC_SECTIONS)
+    if(NOT BABET_HAS_GC_SECTIONS)
+        message(FATAL_ERROR
+            "The production Babet build requires linker --gc-sections support")
+    endif()
+endif()
 
 # External libs provided by build_local.sh
 if(NOT LUA_INCLUDE OR NOT LUA_LIB)
@@ -242,11 +326,54 @@ file(GLOB_RECURSE BABET_RUNTIME_SOURCES
     src/embedding/*.cpp
 )
 
+# Differential-size builds remove only the implementation being measured.
+# Registration is disabled below with matching private compile definitions.
+if(BABET_SIZE_EXPERIMENT_NO_SQLITE)
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sqlite\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sqlite_backup_file\\.cpp$")
+    set(BABET_SQLITE_AMALGAMATION)
+else()
+    set(BABET_SQLITE_AMALGAMATION ${SQLITE_SRC})
+endif()
+
+if(BABET_SIZE_EXPERIMENT_NO_FIND_RE2)
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/find\\.cpp$")
+endif()
+
+if(BABET_SIZE_EXPERIMENT_NO_NETWORK)
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/http\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/http_download_file\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/socket\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/websocket\\.cpp$")
+endif()
+
+if(BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION)
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/archive\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/archive_backend\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/archive_tar\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/compression\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/compression_stream\\.cpp$")
+endif()
+
+if(BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING)
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/checksum_utils\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/md5\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sha1\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sha256\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sha384\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sha512\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sha3_256\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sha3_384\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/sha3_512\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/blake2b\\.cpp$")
+    list(FILTER BABET_RUNTIME_SOURCES EXCLUDE REGEX "/blake2s\\.cpp$")
+endif()
+
 set(BABET_RUNTIME_TARGET babet_runtime_static)
 add_library(${BABET_RUNTIME_TARGET} STATIC
     ${BABET_RUNTIME_SOURCES}
     ${MINIZ_SRC}
-    ${SQLITE_SRC}
+    ${BABET_SQLITE_AMALGAMATION}
 )
 set_target_properties(${BABET_RUNTIME_TARGET} PROPERTIES
     OUTPUT_NAME babet
@@ -254,6 +381,36 @@ set_target_properties(${BABET_RUNTIME_TARGET} PROPERTIES
 
 add_executable(${PROJECT_NAME} src/main.cpp)
 target_link_libraries(${PROJECT_NAME} PRIVATE ${BABET_RUNTIME_TARGET})
+
+# Candidate 10/11 follow-up hooks. Linker GC itself is now the production
+# default. The Babet-owned source split remains maintainer-only because its
+# measured marginal saving (61,440 bytes) did not justify the persistent build
+# complexity/risk. COMDAT/template sections may still be discarded without this
+# compiler flag, which is expected and covered by the full regression suite.
+if(BABET_SIZE_EXPERIMENT_GC_BABET_SECTIONS)
+    foreach(babet_source IN LISTS BABET_RUNTIME_SOURCES)
+        set_property(SOURCE ${babet_source} APPEND PROPERTY
+            COMPILE_OPTIONS -ffunction-sections -fdata-sections)
+    endforeach()
+    set_property(SOURCE src/main.cpp APPEND PROPERTY
+        COMPILE_OPTIONS -ffunction-sections -fdata-sections)
+endif()
+
+if(BABET_ENABLE_GC_SECTIONS)
+    target_link_options(${PROJECT_NAME} PRIVATE -Wl,--gc-sections)
+endif()
+if(BABET_SIZE_EXPERIMENT_GC_PRINT)
+    target_link_options(${PROJECT_NAME} PRIVATE -Wl,--print-gc-sections)
+endif()
+
+if(BABET_ENABLE_SIZE_AUDIT)
+    if(NOT BABET_SANITIZER_MODE STREQUAL "OFF")
+        message(FATAL_ERROR
+            "BABET_ENABLE_SIZE_AUDIT cannot be combined with sanitizers")
+    endif()
+    target_link_options(${PROJECT_NAME} PRIVATE
+        "-Wl,-Map=${CMAKE_BINARY_DIR}/babet-link.map")
+endif()
 
 # Compile-time options for sqlite3.c.
 # SQLITE_DQS=0           : refuse les "double-quoted strings as identifiers"
@@ -323,11 +480,50 @@ target_compile_definitions(${BABET_RUNTIME_TARGET} PRIVATE
     BABET_BZIP2_EXPECTED_VERSION="${BZIP2_VERSION}"
 )
 
+# Keep differential-build macros source-local so switching experiments does not
+# force a rebuild of the whole runtime. They are maintainer measurements only.
+if(BABET_SIZE_EXPERIMENT_NO_SQLITE)
+    set_property(SOURCE src/project_core/runtime_registration.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_SQLITE)
+    set_property(SOURCE src/lua_bindings/json.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_SQLITE)
+    set_property(SOURCE src/lua_bindings/workers.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_SQLITE)
+endif()
+if(BABET_SIZE_EXPERIMENT_NO_FIND_RE2)
+    set_property(SOURCE src/project_core/runtime_registration.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_FIND_RE2)
+endif()
+if(BABET_SIZE_EXPERIMENT_NO_NETWORK)
+    set_property(SOURCE src/project_core/runtime_registration.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_NETWORK)
+endif()
+if(BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION)
+    set_property(SOURCE src/project_core/runtime_registration.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION)
+    set_property(SOURCE src/main.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION)
+endif()
+if(BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING)
+    set_property(SOURCE src/project_core/runtime_registration.cpp APPEND PROPERTY
+        COMPILE_DEFINITIONS BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING)
+endif()
+
+# OpenSSL is shared by the network stack and EVP-backed file hashes. Only the
+# combined maintainer experiment that removes both may omit the static SSL and
+# crypto archives, exposing the real shared OpenSSL cost. Keep the normal-build
+# link order identical to the product build by substituting an empty list only
+# for that experiment.
+set(BABET_OPENSSL_LINK_LIBS ${OPENSSL_LIB} ${CRYPTO_LIB})
+if(BABET_SIZE_EXPERIMENT_NO_NETWORK AND
+   BABET_SIZE_EXPERIMENT_NO_OPENSSL_HASHING)
+    set(BABET_OPENSSL_LINK_LIBS)
+endif()
+
 target_link_libraries(${BABET_RUNTIME_TARGET} PRIVATE
     ${LUA_LIB}
     ${NCURSES_LIB}
-    ${OPENSSL_LIB}
-    ${CRYPTO_LIB}
+    ${BABET_OPENSSL_LINK_LIBS}
     ${LIBARCHIVE_LIB}
     ${ZLIB_LIB}
     ${LZMA_LIB}
@@ -373,7 +569,6 @@ target_link_libraries(babet_embedding_cpp_callback_smoke PRIVATE
 # executable. GNU ld added --export-dynamic-symbol in binutils 2.35; test the
 # capability explicitly so an older/incompatible linker fails with a useful
 # configuration diagnostic instead of a raw final-link error.
-include(CheckLinkerFlag)
 check_linker_flag(CXX
     "-Wl,--export-dynamic-symbol=babet_version"
     BABET_HAS_EXPORT_DYNAMIC_SYMBOL
@@ -402,32 +597,40 @@ target_link_options(${PROJECT_NAME} PRIVATE
     -Wl,--undefined=babet_host_call_set_error
 )
 
-function(babet_enable_sanitizers target)
+function(babet_enable_sanitizers target sanitizer_flag)
     target_compile_options(${target} PRIVATE
         -O1
         -g
         -fno-omit-frame-pointer
         -fno-sanitize-recover=all
-        -fsanitize=address,undefined
+        "${sanitizer_flag}"
     )
     target_link_options(${target} PRIVATE
         -fno-sanitize-recover=all
-        -fsanitize=address,undefined
+        "${sanitizer_flag}"
     )
 endfunction()
 
-if(BABET_ENABLE_SANITIZERS)
+if(NOT BABET_SANITIZER_MODE STREQUAL "OFF")
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        if(BABET_SANITIZER_MODE STREQUAL "ASAN_UBSAN")
+            set(BABET_SANITIZER_FLAG "-fsanitize=address,undefined")
+            set(BABET_SANITIZER_LABEL "ASan + UBSan")
+        else()
+            set(BABET_SANITIZER_FLAG "-fsanitize=undefined")
+            set(BABET_SANITIZER_LABEL "UBSan")
+        endif()
+
         # The static runtime contains almost all implementation TUs; the two
         # executables need sanitizer link flags as final link drivers.
-        babet_enable_sanitizers(${BABET_RUNTIME_TARGET})
-        babet_enable_sanitizers(${PROJECT_NAME})
-        babet_enable_sanitizers(babet_embedding_smoke)
-        babet_enable_sanitizers(babet_embedding_cpp_callback_smoke)
-        message(STATUS "Babet sanitizers enabled: ASan + UBSan")
+        babet_enable_sanitizers(${BABET_RUNTIME_TARGET} "${BABET_SANITIZER_FLAG}")
+        babet_enable_sanitizers(${PROJECT_NAME} "${BABET_SANITIZER_FLAG}")
+        babet_enable_sanitizers(babet_embedding_smoke "${BABET_SANITIZER_FLAG}")
+        babet_enable_sanitizers(babet_embedding_cpp_callback_smoke "${BABET_SANITIZER_FLAG}")
+        message(STATUS "Babet sanitizers enabled: ${BABET_SANITIZER_LABEL}")
     else()
         message(FATAL_ERROR
-            "BABET_ENABLE_SANITIZERS requires GCC or Clang")
+            "BABET_SANITIZER_MODE=${BABET_SANITIZER_MODE} requires GCC or Clang")
     endif()
 else()
     # Le binaire officiel conserve ses runtimes GCC/libstdc++ statiques. La

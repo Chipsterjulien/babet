@@ -258,12 +258,12 @@ do
         --    attend (cmd, args_table, opts) — la commande NE peut PAS
         --    être passée comme une seule string composée.
         local gen       = babet.exec("openssl", {
-            "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
             "-keyout", key_path,
             "-out", cert_path,
             "-days", "1",
             "-subj", "/CN=localhost",
-        }, { timeout = 15 })
+        }, { timeout = 60 })
 
         if not (gen and gen.code == 0
                 and babet.fileExists(cert_path)) then

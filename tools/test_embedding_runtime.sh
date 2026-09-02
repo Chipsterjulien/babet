@@ -2,17 +2,20 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SANITIZERS=0
+SANITIZER_MODE="OFF"
 BINARY=""
 
 for arg in "$@"; do
     case "$arg" in
         --sanitizers)
-            SANITIZERS=1
+            SANITIZER_MODE="ASAN_UBSAN"
+            ;;
+        --ubsan)
+            SANITIZER_MODE="UBSAN"
             ;;
         *)
             if [ -n "${BINARY}" ]; then
-                echo "Usage: $0 [babet-binary] [--sanitizers]" >&2
+                echo "Usage: $0 [babet-binary] [--sanitizers|--ubsan]" >&2
                 exit 1
             fi
             BINARY="$arg"
@@ -24,15 +27,19 @@ if [ -z "${BINARY}" ]; then
     BINARY="${ROOT}/test/babet"
 fi
 
-if [ "${SANITIZERS}" -eq 1 ]; then
+if [ -n "${BABET_EMBEDDING_BUILD_DIR:-}" ]; then
+    BUILD_DIR="${BABET_EMBEDDING_BUILD_DIR}"
+elif [ "${SANITIZER_MODE}" = "ASAN_UBSAN" ]; then
     BUILD_DIR="${ROOT}/build/project_build_sanitizers"
+elif [ "${SANITIZER_MODE}" = "UBSAN" ]; then
+    BUILD_DIR="${ROOT}/build/project_build_ubsan"
 else
     BUILD_DIR="${ROOT}/build/project_build"
 fi
 LIB="${BUILD_DIR}/libbabet.a"
 HOST="${BUILD_DIR}/babet_embedding_smoke"
 CPP_HOST="${BUILD_DIR}/babet_embedding_cpp_callback_smoke"
-SDK_DIR="${ROOT}/build/embedding-sdk"
+SDK_DIR="${ROOT}/build/sdk"
 PASS=0
 FAIL=0
 
@@ -61,14 +68,14 @@ if [ ! -d "${BUILD_DIR}" ]; then
 fi
 
 if cmake --build "${BUILD_DIR}" --target babet_embedding_smoke babet_embedding_cpp_callback_smoke; then
-    if [ "${SANITIZERS}" -eq 1 ]; then
-        pass "C embedding host builds against the sanitizer libbabet target"
+    if [ "${SANITIZER_MODE}" != "OFF" ]; then
+        pass "C embedding host builds against the sanitizer libbabet target (${SANITIZER_MODE})"
     else
         pass "C embedding host builds against the in-tree libbabet target"
     fi
 else
-    if [ "${SANITIZERS}" -eq 1 ]; then
-        fail "C embedding host builds against the sanitizer libbabet target"
+    if [ "${SANITIZER_MODE}" != "OFF" ]; then
+        fail "C embedding host builds against the sanitizer libbabet target (${SANITIZER_MODE})"
     else
         fail "C embedding host builds against the in-tree libbabet target"
     fi
@@ -136,14 +143,14 @@ fi
 # The relocatable SDK is a normal-build release artifact. Sanitizer runs still
 # exercise the actual instrumented in-tree library above, but do not attempt to
 # redistribute/link it without sanitizer flags.
-if [ "${SANITIZERS}" -eq 0 ]; then
+if [ "${SANITIZER_MODE}" = "OFF" ]; then
     SDK_HEADER="${SDK_DIR}/include/babet/babet.h"
     SDK_LIB="${SDK_DIR}/lib/libbabet.a"
     if [ -f "${SDK_HEADER}" ] && [ -f "${SDK_LIB}" ] &&
        ar t "${SDK_LIB}" >/dev/null 2>&1; then
-        pass "standalone embedding SDK contains a public header and valid flattened libbabet.a"
+        pass "standalone developer SDK contains a public header and valid flattened libbabet.a"
     else
-        fail "standalone embedding SDK contains a public header and valid flattened libbabet.a"
+        fail "standalone developer SDK contains a public header and valid flattened libbabet.a"
     fi
 
     if [ -f "${SDK_LIB}" ] &&
@@ -224,7 +231,7 @@ if [ "${SANITIZERS}" -eq 0 ]; then
     rm -rf -- "${TMP_DIR}"
     trap - EXIT
 else
-    echo "[INFO] standalone embedding SDK smoke skipped for sanitizer build"
+    echo "[INFO] standalone developer SDK smoke skipped for sanitizer build"
 fi
 
 echo "embedding runtime regression: ${PASS} PASS / ${FAIL} FAIL"

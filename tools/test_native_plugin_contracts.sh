@@ -120,9 +120,9 @@ require_grep 'numeric dotted version' "NATIVE_PLUGIN_DESIGN.md" "design document
 require_grep 'must be zero' "NATIVE_PLUGIN_DESIGN.md" "design documents the v1 reserved-field rule"
 require_grep 'Declared lengths are part of the trusted' "NATIVE_PLUGIN_DESIGN.md" "design documents trust in plugin-provided view lengths"
 
-require_grep 'include/babet/plugin\.h' "tools/create_embedding_sdk.sh" "developer SDK publishes the plugin ABI header"
-require_grep 'NATIVE_PLUGIN_DESIGN\.md' "tools/create_embedding_sdk.sh" "developer SDK publishes native plugin design"
-require_grep 'examples/native_plugin' "tools/create_embedding_sdk.sh" "developer SDK publishes native plugin examples"
+require_grep 'include/babet/plugin\.h' "tools/create_sdk.sh" "developer SDK publishes the plugin ABI header"
+require_grep 'NATIVE_PLUGIN_DESIGN\.md' "tools/create_sdk.sh" "developer SDK publishes native plugin design"
+require_grep 'examples/native_plugin' "tools/create_sdk.sh" "developer SDK publishes native plugin examples"
 require_grep 'find include -type f -print0' "build_local.sh" "project source fingerprint covers plugin.h through the public include tree"
 require_grep 'Lot 11 reopens native plugins' "INVARIANTS.md" "project invariants record the narrow Lot 11 native-plugin reopening"
 require_grep 'Generated `--create-exe`' "INVARIANTS.md" "project invariants preserve generated-application plugin refusal"

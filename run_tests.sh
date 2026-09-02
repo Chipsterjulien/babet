@@ -9,9 +9,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME="babet"
 TEST_DIR="${SCRIPT_DIR}/test"
 EXAMPLES_DIR="${SCRIPT_DIR}/examples"
-ENABLE_SANITIZERS=0
+SANITIZER_MODE="OFF"
+SANITIZERS_ENABLED=0
+ASAN_ENABLED=0
 RELEASE_VALIDATION=0
 BUILD_FAILURE_EXIT_CODE=2
+
+# Maintainer prebuilt-validation hook. When these variables are set, the test
+# harness exercises an already-built binary/build directory instead of invoking
+# build_local.sh. Candidate 11 introduced the hook; the final GC integration
+# keeps it generic for focused release validation without changing normal use.
+PREBUILT_BINARY_NORMAL="${BABET_TEST_PREBUILT_BINARY_NORMAL:-}"
+PREBUILT_BUILD_DIR_NORMAL="${BABET_TEST_PREBUILT_BUILD_DIR_NORMAL:-}"
+PREBUILT_BINARY_SANITIZERS="${BABET_TEST_PREBUILT_BINARY_SANITIZERS:-}"
+PREBUILT_BUILD_DIR_SANITIZERS="${BABET_TEST_PREBUILT_BUILD_DIR_SANITIZERS:-}"
+PREBUILT_BINARY_UBSAN="${BABET_TEST_PREBUILT_BINARY_UBSAN:-}"
+PREBUILT_BUILD_DIR_UBSAN="${BABET_TEST_PREBUILT_BUILD_DIR_UBSAN:-}"
 
 # Exécute toute invocation top-level dans un pseudo-terminal afin que les
 # outils qui colorent uniquement leur sortie interactive conservent leurs
@@ -109,15 +122,27 @@ run_with_log() {
 for arg in "$@"; do
     case "$arg" in
         --sanitizers)
-            ENABLE_SANITIZERS=1
+            if [ "${SANITIZER_MODE}" != "OFF" ] && [ "${SANITIZER_MODE}" != "ASAN_UBSAN" ]; then
+                echo "Les options --sanitizers et --ubsan ne peuvent pas être combinées."
+                exit 1
+            fi
+            SANITIZER_MODE="ASAN_UBSAN"
+            ;;
+        --ubsan)
+            if [ "${SANITIZER_MODE}" != "OFF" ] && [ "${SANITIZER_MODE}" != "UBSAN" ]; then
+                echo "Les options --sanitizers et --ubsan ne peuvent pas être combinées."
+                exit 1
+            fi
+            SANITIZER_MODE="UBSAN"
             ;;
         --release)
             RELEASE_VALIDATION=1
             ;;
         --help|-h)
-            echo "Usage: $0 [--sanitizers|--release]"
+            echo "Usage: $0 [--sanitizers|--ubsan|--release]"
             echo "  (par défaut)   Build normal + tests complets + babet-tests.txt"
             echo "  --sanitizers   Build ASan/UBSan + tests compatibles + babet-tests.txt"
+            echo "  --ubsan        Build UBSan seul + tests compatibles + babet-tests.txt"
             echo "  --release      Validation pré-release complète + babet-tests.txt"
             exit 0
             ;;
@@ -129,8 +154,20 @@ for arg in "$@"; do
     esac
 done
 
-if [ "${RELEASE_VALIDATION}" -eq 1 ] && [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-    echo "Les options --release et --sanitizers ne peuvent pas être combinées."
+case "${SANITIZER_MODE}" in
+    ASAN_UBSAN)
+        SANITIZERS_ENABLED=1
+        ASAN_ENABLED=1
+        ;;
+    UBSAN)
+        SANITIZERS_ENABLED=1
+        ;;
+    OFF)
+        ;;
+esac
+
+if [ "${RELEASE_VALIDATION}" -eq 1 ] && [ "${SANITIZERS_ENABLED}" -eq 1 ]; then
+    echo "L'option --release ne peut pas être combinée avec un mode sanitizer explicite."
     exit 1
 fi
 
@@ -195,21 +232,33 @@ if ! bash "${SCRIPT_DIR}/tools/test_embedding_contracts.sh"; then
     exit 1
 fi
 
-print_preflight_stage "Préflight — builder SDK embedding"
-if ! bash "${SCRIPT_DIR}/tools/test_embedding_sdk_builder.sh"; then
-    echo "ÉCHEC : le préflight du builder SDK embedding a échoué."
+print_preflight_stage "Préflight — builder SDK développeur"
+if ! bash "${SCRIPT_DIR}/tools/test_sdk_builder.sh"; then
+    echo "ÉCHEC : le préflight du builder SDK développeur a échoué."
     exit 1
 fi
 
-print_preflight_stage "Préflight — étude GUI optionnelle"
-if ! bash "${SCRIPT_DIR}/tools/test_gui_study_contract.sh"; then
-    echo "ÉCHEC : le préflight de l'étude GUI optionnelle a échoué."
+print_preflight_stage "Préflight — contrat GUI dynamique optionnelle"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_design_contract.sh"; then
+    echo "ÉCHEC : le préflight du contrat GUI dynamique a échoué."
     exit 1
 fi
 
-print_preflight_stage "Préflight — prototype FLTK séparé"
-if ! bash "${SCRIPT_DIR}/tools/test_fltk_prototype_contracts.sh"; then
-    echo "ÉCHEC : le préflight structurel du prototype FLTK a échoué."
+print_preflight_stage "Préflight — implémentation GUI GTK4 dynamique"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_runtime_contracts.sh"; then
+    echo "ÉCHEC : le préflight de l'implémentation GUI GTK4 a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — widgets et boucle GUI GTK4"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_widget_contracts.sh"; then
+    echo "ÉCHEC : le préflight des widgets GUI GTK4 a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — chargeur GTK4 dynamique isolé"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_gtk_loader.sh"; then
+    echo "ÉCHEC : la régression du chargeur GTK4 dynamique a échoué."
     exit 1
 fi
 
@@ -285,9 +334,69 @@ if ! bash "${SCRIPT_DIR}/tools/test_release_fail_fast.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — modes sanitizer de release"
+if ! bash "${SCRIPT_DIR}/tools/test_sanitizer_modes.sh"; then
+    echo "ÉCHEC : le préflight des modes sanitizer a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — artefact SDK développeur de release"
+if ! bash "${SCRIPT_DIR}/tools/test_release_sdk.sh"; then
+    echo "ÉCHEC : le préflight de l'artefact SDK développeur a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — validation native de release par architecture"
+if ! bash "${SCRIPT_DIR}/tools/test_native_arch_release_contracts.sh"; then
+    echo "ÉCHEC : le préflight de validation native par architecture a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — vue d'ensemble de l'architecture"
+if ! bash "${SCRIPT_DIR}/tools/test_architecture_contracts.sh"; then
+    echo "ÉCHEC : le préflight de la vue d'ensemble de l'architecture a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — cohérence du builder de release"
 if ! bash "${SCRIPT_DIR}/tools/test_release_builder_contracts.sh"; then
     echo "ÉCHEC : le préflight du builder de release a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — étude taille et profils de build"
+if ! bash "${SCRIPT_DIR}/tools/test_size_audit_contracts.sh"; then
+    echo "ÉCHEC : le préflight de l'étude taille/profils a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — builds différentiels de taille"
+if ! bash "${SCRIPT_DIR}/tools/test_size_differential_contracts.sh"; then
+    echo "ÉCHEC : le préflight des builds différentiels de taille a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — Candidate 9 OpenSSL"
+if ! bash "${SCRIPT_DIR}/tools/test_candidate9_contracts.sh"; then
+    echo "ÉCHEC : le préflight Candidate 9 OpenSSL a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — Candidate 10 GC de sections"
+if ! bash "${SCRIPT_DIR}/tools/test_candidate10_contracts.sh"; then
+    echo "ÉCHEC : le préflight Candidate 10 GC de sections a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — Candidate 11 adoption GC"
+if ! bash "${SCRIPT_DIR}/tools/test_candidate11_contracts.sh"; then
+    echo "ÉCHEC : le préflight Candidate 11 adoption GC a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — contrat GC de sections en production"
+if ! bash "${SCRIPT_DIR}/tools/test_gc_sections_contracts.sh"; then
+    echo "ÉCHEC : le préflight GC de sections en production a échoué."
     exit 1
 fi
 
@@ -304,29 +413,76 @@ if ! bash "${SCRIPT_DIR}/tools/test_process_launch_preparation.sh"; then
 fi
 
 BUILD_ARGS=()
-if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-    BUILD_ARGS+=(--sanitizers)
-    # Les valeurs fournies par l'utilisateur restent prioritaires.
-    export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1}"
-    export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}"
-fi
+PREBUILT_BINARY=""
+PREBUILT_BUILD_DIR=""
+case "${SANITIZER_MODE}" in
+    ASAN_UBSAN)
+        BUILD_ARGS+=(--sanitizers)
+        PREBUILT_BINARY="${PREBUILT_BINARY_SANITIZERS}"
+        PREBUILT_BUILD_DIR="${PREBUILT_BUILD_DIR_SANITIZERS}"
+        # Les valeurs fournies par l'utilisateur restent prioritaires.
+        export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=1:halt_on_error=1:abort_on_error=1:strict_string_checks=1}"
+        export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}"
+        ;;
+    UBSAN)
+        BUILD_ARGS+=(--ubsan)
+        PREBUILT_BINARY="${PREBUILT_BINARY_UBSAN}"
+        PREBUILT_BUILD_DIR="${PREBUILT_BUILD_DIR_UBSAN}"
+        export UBSAN_OPTIONS="${UBSAN_OPTIONS:-print_stacktrace=1:halt_on_error=1}"
+        ;;
+    OFF)
+        PREBUILT_BINARY="${PREBUILT_BINARY_NORMAL}"
+        PREBUILT_BUILD_DIR="${PREBUILT_BUILD_DIR_NORMAL}"
+        ;;
+esac
 
 # --- 1. Compilation -------------------------------------------------
-if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-    echo "### Compilation (ASan + UBSan) ###"
+if [ -n "${PREBUILT_BINARY}" ]; then
+    if [ ! -x "${PREBUILT_BINARY}" ]; then
+        echo "ÉCHEC : binaire préconstruit absent/non exécutable : ${PREBUILT_BINARY}"
+        exit "${BUILD_FAILURE_EXIT_CODE}"
+    fi
+    if [ -z "${PREBUILT_BUILD_DIR}" ] || [ ! -d "${PREBUILT_BUILD_DIR}" ]; then
+        echo "ÉCHEC : build CMake préconstruit absent : ${PREBUILT_BUILD_DIR}"
+        exit "${BUILD_FAILURE_EXIT_CODE}"
+    fi
+    BINARY="${PREBUILT_BINARY}"
+    echo "### Validation d'un binaire préconstruit ###"
+    echo "Binaire : ${BINARY}"
+    echo "Build CMake associé : ${PREBUILT_BUILD_DIR}"
 else
-    echo "### Compilation ###"
-fi
-if ! bash "${SCRIPT_DIR}/build_local.sh" "${BUILD_ARGS[@]}"; then
-    echo "ÉCHEC : la compilation a échoué."
-    exit "${BUILD_FAILURE_EXIT_CODE}"
+    case "${SANITIZER_MODE}" in
+        ASAN_UBSAN) echo "### Compilation (ASan + UBSan) ###" ;;
+        UBSAN) echo "### Compilation (UBSan) ###" ;;
+        OFF) echo "### Compilation ###" ;;
+    esac
+    if ! bash "${SCRIPT_DIR}/build_local.sh" "${BUILD_ARGS[@]}"; then
+        echo "ÉCHEC : la compilation a échoué."
+        exit "${BUILD_FAILURE_EXIT_CODE}"
+    fi
+    BINARY="${TEST_DIR}/${PROJECT_NAME}"
 fi
 echo ""
 
-BINARY="${TEST_DIR}/${PROJECT_NAME}"
 if [ ! -f "${BINARY}" ]; then
     echo "ÉCHEC : binaire introuvable après compilation (${BINARY})."
     exit "${BUILD_FAILURE_EXIT_CODE}"
+fi
+
+# Ordinary production builds must prove that the adopted GC/OpenSSL contract is
+# present in the actual CMake/link/OpenSSL state. Maintainer prebuilt candidates
+# intentionally skip this production-only check.
+if [ -z "${PREBUILT_BINARY}" ]; then
+    case "${SANITIZER_MODE}" in
+        ASAN_UBSAN) GC_BUILD_DIR="${SCRIPT_DIR}/build/project_build_sanitizers" ;;
+        UBSAN) GC_BUILD_DIR="${SCRIPT_DIR}/build/project_build_ubsan" ;;
+        OFF) GC_BUILD_DIR="${SCRIPT_DIR}/build/project_build" ;;
+    esac
+    print_preflight_stage "Régression — contrat GC de sections du build réel"
+    if ! bash "${SCRIPT_DIR}/tools/test_gc_sections_runtime.sh"         "${BINARY}" "${GC_BUILD_DIR}"; then
+        echo "ÉCHEC : le build réel n'applique pas le contrat GC/OpenSSL adopté."
+        exit 1
+    fi
 fi
 
 print_preflight_stage "Régression — packaging --create-exe"
@@ -335,17 +491,43 @@ if ! bash "${SCRIPT_DIR}/tests/test_packaging.sh" "${BINARY}"; then
     exit 1
 fi
 
-print_preflight_stage "Régression — embedding C/libbabet"
-EMBEDDING_ARGS=("${BINARY}")
-if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-    EMBEDDING_ARGS+=(--sanitizers)
-fi
-if ! bash "${SCRIPT_DIR}/tools/test_embedding_runtime.sh" "${EMBEDDING_ARGS[@]}"; then
-    echo "ÉCHEC : la régression runtime d'embedding C/libbabet a échoué."
+print_preflight_stage "Régression — GUI GTK4 dynamique et --create-exe"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_runtime.sh" "${BINARY}"; then
+    echo "ÉCHEC : la régression runtime GUI GTK4 a échoué."
     exit 1
 fi
 
+print_preflight_stage "Régression — analyseur de taille du linker"
+if ! bash "${SCRIPT_DIR}/tools/test_size_audit_runtime.sh" "${BINARY}"; then
+    echo "ÉCHEC : la régression de l'analyseur de taille a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — embedding C/libbabet"
+EMBEDDING_ARGS=("${BINARY}")
+case "${SANITIZER_MODE}" in
+    ASAN_UBSAN) EMBEDDING_ARGS+=(--sanitizers) ;;
+    UBSAN) EMBEDDING_ARGS+=(--ubsan) ;;
+esac
+if [ -n "${PREBUILT_BUILD_DIR}" ]; then
+    if ! BABET_EMBEDDING_BUILD_DIR="${PREBUILT_BUILD_DIR}" \
+        bash "${SCRIPT_DIR}/tools/test_embedding_runtime.sh" "${EMBEDDING_ARGS[@]}"; then
+        echo "ÉCHEC : la régression runtime d'embedding C/libbabet a échoué."
+        exit 1
+    fi
+else
+    if ! bash "${SCRIPT_DIR}/tools/test_embedding_runtime.sh" "${EMBEDDING_ARGS[@]}"; then
+        echo "ÉCHEC : la régression runtime d'embedding C/libbabet a échoué."
+        exit 1
+    fi
+fi
+
 print_preflight_stage "Régression — plugins natifs C/C++"
+if ! bash "${SCRIPT_DIR}/tools/test_runtime_surface.sh" "${BINARY}"; then
+    echo "ÉCHEC : la surface runtime babet.* est incomplète ou inattendue."
+    exit 1
+fi
+
 if ! bash "${SCRIPT_DIR}/tools/test_native_plugin_runtime.sh" "${BINARY}"; then
     echo "ÉCHEC : la régression runtime des plugins natifs C/C++ a échoué."
     exit 1
@@ -353,9 +535,10 @@ fi
 
 print_preflight_stage "Régression — nettoyage OOM Lua / RAII C++"
 OOM_ARGS=()
-if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
-    OOM_ARGS+=(--sanitizers)
-fi
+case "${SANITIZER_MODE}" in
+    ASAN_UBSAN) OOM_ARGS+=(--sanitizers) ;;
+    UBSAN) OOM_ARGS+=(--ubsan) ;;
+esac
 if ! bash "${SCRIPT_DIR}/tools/test_lua_longjmp_oom.sh" "${OOM_ARGS[@]}"; then
     echo "ÉCHEC : le test OOM Lua / RAII C++ a échoué."
     exit 1
@@ -389,7 +572,7 @@ fi
 # Pour un binaire ASan, le runtime AddressSanitizer doit rester le premier
 # objet chargé ; sinon le loader arrête le processus avant même main().
 ASAN_RUNTIME=""
-if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+if [ "${ASAN_ENABLED}" -eq 1 ]; then
     ASAN_RUNTIME=$(ldd "${BINARY}" 2>/dev/null \
         | awk '/asan/ && $3 ~ /^\// { print $3; exit }')
     if [ -z "${ASAN_RUNTIME}" ] || [ ! -f "${ASAN_RUNTIME}" ]; then
@@ -559,7 +742,7 @@ modes_total=$((modes_total + 1))
 # million de valeurs JSON. Il s'exécute une seule fois : mode dossier du build
 # normal. Les autres modes forcent explicitement la variable à vide pour qu'un
 # environnement utilisateur ne puisse pas répéter ce test lourd.
-if [ "${ENABLE_SANITIZERS}" -eq 0 ]; then
+if [ "${SANITIZERS_ENABLED}" -eq 0 ]; then
     WORKERS_NODE_LIMIT_TEST=1
 else
     WORKERS_NODE_LIMIT_TEST=
@@ -1214,6 +1397,14 @@ local function read_pid(path)
     return pid
 end
 
+local trace_path = "${EXEC_ROOT}/test6-stage.txt"
+local function mark_stage(name)
+    local f = assert(io.open(trace_path, "a"))
+    f:write(name, "\n")
+    f:close()
+end
+
+mark_stage("exec")
 local t0 = babet.monotonic()
 local r, e = babet.exec("true", {}, {
     cwd = "${EXEC_ROOT}/slow_cwd",
@@ -1234,6 +1425,7 @@ local sync_command =
     "sh -c 'trap \"\" TERM; while :; do sleep 1; done' "
     .. ">/dev/null 2>&1 & echo \$! > " .. sync_descendant_path
     .. "; echo \$\$ > " .. sync_pid_path .. "; exec sleep 5"
+mark_stage("pipeline")
 t0 = babet.monotonic()
 r, e = babet.pipeline({
     { "sh", { "-c", sync_command } },
@@ -1266,6 +1458,7 @@ local stream_command =
     "sh -c 'trap \"\" TERM; while :; do sleep 1; done' "
     .. ">/dev/null 2>&1 & echo \$! > " .. stream_descendant_path
     .. "; echo \$\$ > " .. stream_pid_path .. "; exec sleep 5"
+mark_stage("spawnPipeline")
 t0 = babet.monotonic()
 local pipeline, spawn_err = babet.spawnPipeline({
     { "sh", { "-c", stream_command } },
@@ -1311,20 +1504,61 @@ LUA
         echo "  -> ÉCHEC (compilation du preload)"
         test6_ok=0
     else
-        t6_out=$(LD_PRELOAD="$(babet_test_preload "${EXEC_ROOT}/slow_chdir.so")" \
-            BABET_TEST_SLOW_CHDIR=1 \
-            BABET_TEST_SLOW_CHDIR_TARGET="${EXEC_ROOT}/slow_cwd" \
-            "${BINARY}" "${EXEC_ROOT}/test.lua" 2>&1)
-        t6_rc=$?
-        if [ ${t6_rc} -eq 0 ] \
-            && echo "${t6_out}" | grep -q "EXEC_PRELAUNCH_TIMEOUT_OK" \
-            && echo "${t6_out}" | grep -q "PIPELINE_PRELAUNCH_TIMEOUT_OK" \
-            && echo "${t6_out}" | grep -q "SPAWN_PIPELINE_PRELAUNCH_TIMEOUT_OK"; then
-            echo "  -> timeout de lancement exec/pipeline/spawnPipeline : OK"
-            echo "  -> rollback d'un pipeline partiellement lancé : OK"
+        if [ "${ASAN_ENABLED}" -eq 1 ]; then
+            # Les scénarios slow_chdir reposent sur une interposition LD_PRELOAD
+            # volontairement hostile. Sur AArch64 + ASan, cette combinaison a
+            # montré un blocage reproductible dans poll() avant que le timeout
+            # de lancement testé puisse rendre la main. Comme pour l'injection
+            # poll ci-dessous, ce n'est pas un signal fiable sur le runtime
+            # instrumenté. La campagne --release rejoue obligatoirement le même
+            # scénario sur le build normal final, où il reste pleinement testé.
+            echo "  -> timeout de lancement exec/pipeline/spawnPipeline : différé au build normal final (ASan/LD_PRELOAD)"
+            echo "  -> rollback d'un pipeline partiellement lancé : différé au build normal final (ASan/LD_PRELOAD)"
         else
-            echo "  -> ÉCHEC (rc=${t6_rc}, sortie=${t6_out})"
-            test6_ok=0
+            T6_WATCHDOG_SECONDS=20
+            T6_WATCHDOG_KILL_AFTER=5
+            T6_STAGE_FILE="${EXEC_ROOT}/test6-stage.txt"
+            rm -f -- "${T6_STAGE_FILE}"
+            if ! command -v timeout >/dev/null 2>&1; then
+                echo "  -> ÉCHEC (commande timeout absente pour le watchdog du Test 6)"
+                test6_ok=0
+            else
+                t6_out=$(timeout --signal=TERM --kill-after="${T6_WATCHDOG_KILL_AFTER}s" \
+                    "${T6_WATCHDOG_SECONDS}s" \
+                    env LD_PRELOAD="$(babet_test_preload "${EXEC_ROOT}/slow_chdir.so")" \
+                    BABET_TEST_SLOW_CHDIR=1 \
+                    BABET_TEST_SLOW_CHDIR_TARGET="${EXEC_ROOT}/slow_cwd" \
+                    "${BINARY}" "${EXEC_ROOT}/test.lua" 2>&1)
+                t6_rc=$?
+                t6_stage=$(tail -n 1 "${T6_STAGE_FILE}" 2>/dev/null || printf '%s' 'unknown')
+                if [ ${t6_rc} -eq 0 ] \
+                    && echo "${t6_out}" | grep -q "EXEC_PRELAUNCH_TIMEOUT_OK" \
+                    && echo "${t6_out}" | grep -q "PIPELINE_PRELAUNCH_TIMEOUT_OK" \
+                    && echo "${t6_out}" | grep -q "SPAWN_PIPELINE_PRELAUNCH_TIMEOUT_OK"; then
+                    echo "  -> timeout de lancement exec/pipeline/spawnPipeline : OK"
+                    echo "  -> rollback d'un pipeline partiellement lancé : OK"
+                else
+                    if [ ${t6_rc} -eq 124 ] || [ ${t6_rc} -eq 137 ]; then
+                        echo "  -> ÉCHEC watchdog Test 6 (phase=${t6_stage}, rc=${t6_rc}, limite=${T6_WATCHDOG_SECONDS}s)"
+                    else
+                        echo "  -> ÉCHEC (phase=${t6_stage}, rc=${t6_rc}, sortie=${t6_out})"
+                    fi
+                    for pid_file in \
+                        "${EXEC_ROOT}/pipeline_sync.pid" \
+                        "${EXEC_ROOT}/pipeline_sync_descendant.pid" \
+                        "${EXEC_ROOT}/pipeline_stream.pid" \
+                        "${EXEC_ROOT}/pipeline_stream_descendant.pid"; do
+                        if [ -f "${pid_file}" ]; then
+                            t6_pid=$(cat "${pid_file}" 2>/dev/null || true)
+                            case "${t6_pid}" in
+                                ''|*[!0-9]*) ;;
+                                *) kill -KILL "${t6_pid}" 2>/dev/null || true ;;
+                            esac
+                        fi
+                    done
+                    test6_ok=0
+                fi
+            fi
         fi
 
         CLOSED_STDIO_MARKER="${EXEC_ROOT}/closed_stdio.ok"
@@ -1354,14 +1588,14 @@ LUA
             test6_ok=0
         fi
 
-        if [ "${ENABLE_SANITIZERS}" -eq 1 ]; then
+        if [ "${ASAN_ENABLED}" -eq 1 ]; then
             # Le runtime ASan intercepte poll() avant les bibliothèques de
             # test chargées ensuite par LD_PRELOAD. Forcer notre hook avant
             # ASan fait au contraire refuser le démarrage du processus.
             #
             # Ce test d'injection artificielle n'est donc pas fiable dans
             # un processus ASan. La commande --release l'exécute
-            # obligatoirement à l'étape 3 avec le build normal, tandis que
+            # obligatoirement avec le build normal final, tandis que
             # tous les chemins ordinaires de babet.exec restent couverts
             # ici par ASan/UBSan et par le harnais Lua complet.
             echo "  -> erreur poll injectée : différée au build normal final (ASan/LD_PRELOAD incompatibles)"

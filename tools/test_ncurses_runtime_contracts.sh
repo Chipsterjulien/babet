@@ -162,6 +162,10 @@ require "PTY Ctrl-Z stop observation comes from child WIFSTOPPED" tools/test_cur
     '__BABET_JOB_STOPPED__'
 require "PTY Ctrl-Z scenario enables real job-control topology" tools/test_curses_pty.sh \
     'require_stop=True, job_control=True'
+require "PTY Ctrl-Z injection is armed after readKey readiness" tools/test_curses_pty.sh \
+    'state\["ctrlz_due"\] = time\.monotonic\(\) \+ 0\.5'
+require "PTY Ctrl-Z fixture requires readKey interruption after resume" tools/test_curses_pty.sh \
+    'reason == "interrupted"'
 
 printf 'ncurses runtime structural contracts: %d PASS / %d FAIL\n' "${pass}" "${fail}"
 [ "${fail}" -eq 0 ]

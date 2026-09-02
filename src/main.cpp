@@ -4,7 +4,9 @@
 #include "lua_bindings/native_plugin.hpp"
 #include "lua_bindings/workers.hpp"
 
+#ifndef BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION
 #include "project_core/archive_backend.hpp"
+#endif
 #include "project_core/bundled_modules.hpp"
 #include "project_core/create_executable.hpp"
 #include "project_core/embedded_searcher.hpp"
@@ -125,6 +127,7 @@ static int run_tool_script(const fs::path &anchorDir,
 
 int main(int argc, char *argv[])
 {
+#ifndef BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION
     // === ÉTAPE -1 : vérifier les backends d'archive liés ============
     // La 2.8.0 utilise libarchive, zlib, liblzma, libbz2 et libzstd
     // statiquement pour TAR/gzip/xz/bzip2/zstd, tout en conservant miniz pour
@@ -220,6 +223,8 @@ int main(int argc, char *argv[])
                   << std::endl;
         return 1;
     }
+
+#endif
 
     // === ÉTAPE 0 : capturer le thread principal partagé ==============
     // Doit être fait avant tout spawn de worker. Signal, curses et les

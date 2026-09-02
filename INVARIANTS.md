@@ -236,24 +236,32 @@ teardown between CLI, workers and embedding.
 
 ### 3.5 Optional GUI
 
-Lot 7 records the reviewed comparison in [GUI_STUDY.md](GUI_STUDY.md). A future
-GUI is a separate companion host consuming the standalone `libbabet` SDK; the
-normal `babet` executable, its bootstrap and its `--create-exe` semantics do not
-acquire any GUI toolkit dependency.
+The active GUI contract is [GUI_DESIGN.md](GUI_DESIGN.md). `babet.gui` is an
+optional system-dependent feature, not a statically linked toolkit and not a
+native-plugin companion. The normal Babet build must not link, download or
+require GTK development files. The first implementation target is GTK 4, loaded
+lazily from the system with `dlopen()` / `dlsym()` only when GUI use is
+explicitly requested.
 
-FLTK 1.4.x is the preferred **first prototype** because it best matches the
-small/modular, cross-platform and static-friendly constraints. wxWidgets 3.2.x
-is the first fallback when native widget integration matters more than the
-smallest practical deployment surface. GTK 4 and Qt 6 remain capable toolkits
-but are not selected as Babet's default GUI host under the current constraints.
-The preference is not a permanent dependency decision: a real prototype must
-measure its stripped binary and dynamic dependency closure first.
+A script that never initializes `babet.gui` must keep the same runtime behaviour
+and autonomy on a machine without GTK. A generated GUI application still
+consists of exactly one file, but GTK 4 becomes an explicit target-system
+runtime dependency; this is the only accepted autonomy exception for that GUI
+feature. Missing GTK or display initialization must fail through a controlled
+Babet/Lua diagnostic rather than an abort.
 
-Lot 10 supplies the narrow host-function registration boundary required by the
-FLTK prototype. It remains scalar and C-only, exposes no `lua_State *`, and does
-not force GUI support into the CLI. Lot 11 native plugins are a separate
-extension mechanism for specialised/vendor SDKs and private or third-party
-integrations; they are not the GUI implementation path.
+GUI work is main-thread only. An active GUI session and an active ncurses
+session are mutually exclusive, Lua callbacks from the toolkit must remain
+inside a protected Lua-call boundary, and Lua widget handles must be invalidated
+when their native widget dies. GTK initialization must use
+`gtk_disable_setlocale()` followed by `gtk_init_check()`, never uncontrolled
+`gtk_init()`.
+
+The 2.23.0 FLTK companion prototype is retired from the active source after
+having served its embedding/API experiment. `libbabet`, the host-function API
+and their non-GUI embedding examples remain independent supported experimental
+work. No FLTK, wxWidgets or other second GUI backend is promised until a real
+need justifies it.
 
 ### 3.6 Native plugins
 

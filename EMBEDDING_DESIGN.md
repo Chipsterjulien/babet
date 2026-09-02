@@ -225,7 +225,7 @@ CMake builds:
 - an `EXCLUDE_FROM_ALL` C smoke host used only by the embedding regression.
 
 After a normal build, `build_local.sh` also creates a relocatable static SDK in
-`build/embedding-sdk/`. Its public surface is intentionally tiny:
+`build/sdk/`. Its public surface is intentionally tiny:
 
 - `include/babet/babet.h`;
 - one flattened `libbabet.a` under `lib/` containing the Babet runtime plus the
@@ -236,7 +236,7 @@ After a normal build, `build_local.sh` also creates a relocatable static SDK in
 
 The flattening step stages every archive under a space-free temporary name
 before using `ar` MRI mode, so a checkout or SDK path containing spaces cannot
-change the result. The SDK is a normal-build artifact only: ASan/UBSan builds
+change the result. The SDK is a normal-build artifact only: instrumented sanitizer builds
 exercise the instrumented in-tree library but are not presented as a
 redistributable SDK.
 
@@ -290,7 +290,8 @@ The following are not part of the first embedding slice:
 - loading native plugins from arbitrary embedding hosts;
 - automatic module/dependency discovery;
 - Windows DLL work;
-- a product GUI layer (the FLTK prototype remains a separate optional host).
+- a GUI host API as part of the embedding ABI; post-2.23 `babet.gui` is a
+  separate Lua-facing runtime feature and does not widen the public embedding C ABI.
 
 They are reconsidered only after the minimal C host path has been validated in
 real use. Lot 11 separately adds a narrow native `.so` ABI to the original Babet
@@ -315,7 +316,9 @@ section 11.
 
 ## 13. Lot 10 validation status
 
-Lot 10 adds the narrow Lua -> host callback surface and reworks the optional FLTK
-prototype to consume it. Structural and local syntax checks are part of the
-implementation candidate; final maintainer closure requires the normal Babet
-validation plus the separate FLTK runtime test from a clean Linux build.
+Lot 10 added the narrow Lua -> host callback surface and reworked the then-optional
+FLTK prototype to consume it. The 2.23.0 maintainer validation closed that work
+with the normal Babet campaign and the separate FLTK runtime regression green.
+The FLTK prototype was subsequently retired from the active source tree; the
+public host-function API remains exercised by the maintained non-GUI embedding
+examples and runtime regressions.

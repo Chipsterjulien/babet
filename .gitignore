@@ -18,3 +18,6 @@ GITHUB_RELEASE_*.md
 MODIFIED_FILES.txt
 
 babet-fltk-tests.txt
+.babet-native-validation-watchdog.state
+.babet-native-validation-watchdog.restore
+.babet-native-validation-watchdog.guard.ready

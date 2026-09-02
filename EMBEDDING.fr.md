@@ -13,7 +13,7 @@ de petits programmes autonomes avant toute promesse de stabilité ABI.
 Un build normal de Babet produit :
 
 ```text
-build/embedding-sdk/
+build/sdk/
 ├── include/babet/babet.h
 ├── lib/libbabet.a
 ├── EMBEDDING.md
@@ -295,9 +295,11 @@ La première API n'expose pas encore :
 Ces capacités d'embedding restent différées jusqu'à ce qu'un consommateur réel
 démontre le besoin. Le Lot 11 définit séparément une ABI étroite de plugins
 natifs pour le CLI Babet original ; il n'élargit pas la frontière de chargement
-de l'embedding. Le prototype FLTK séparé est maintenant le premier consommateur réel de
-l'API publique de fonctions hôte : Lua change le libellé du bouton via
-`babet.host.set_button_label()` sans pont privé.
+de l'embedding. Le prototype FLTK séparé de la 2.23.0, désormais retiré de
+l'arbre actif, a été le premier consommateur réel de l'API publique de fonctions
+hôte : Lua changeait le libellé du bouton via `babet.host.set_button_label()`
+sans pont privé. Les exemples SDK non-GUI restent les consommateurs d'embedding
+maintenus après le retrait de ce prototype.
 
 ## 13. Exemples exécutables
 

@@ -30,9 +30,9 @@ prepare_fixture() {
     cat > "${dir}/run_tests.sh" <<'SH'
 #!/bin/bash
 printf 'run_tests:%s\n' "$*" >> "${BABET_FLOW_LOG}"
-if [ "${1:-}" = "--sanitizers" ]; then
-    exit "${BABET_FAKE_SANITIZERS_RC:-0}"
-fi
+case "${1:-}" in
+    --sanitizers|--ubsan) exit "${BABET_FAKE_SANITIZERS_RC:-0}" ;;
+esac
 exit "${BABET_FAKE_NORMAL_RC:-0}"
 SH
 
@@ -51,6 +51,7 @@ run_fixture() {
     local sanitizer_rc="$2"
     local normal_rc="$3"
     local network_rc="$4"
+    local validate_arch="${5:-x86_64}"
     local dir="${TMP_ROOT}/${name}"
     local output="${dir}/output.txt"
     local flow="${dir}/flow.txt"
@@ -62,6 +63,7 @@ run_fixture() {
     BABET_FAKE_SANITIZERS_RC="${sanitizer_rc}" \
     BABET_FAKE_NORMAL_RC="${normal_rc}" \
     BABET_FAKE_NETWORK_RC="${network_rc}" \
+    BABET_VALIDATE_ARCH="${validate_arch}" \
         bash "${dir}/validate_release.sh" > "${output}" 2>&1 || rc=$?
 
     printf '%s\n%s\n%s\n' "${rc}" "${flow}" "${output}"
@@ -78,12 +80,43 @@ else
     fail "all top-level run_tests modes publish the stable text log"
 fi
 
+# Le Test 6 injecte volontairement des interpositions LD_PRELOAD. Sous ASan,
+# ces scénarios artificiels doivent être reportés au build normal final, et le
+# vrai scénario normal doit rester protégé par un watchdog externe.
+if grep -Fq 'différé au build normal final (ASan/LD_PRELOAD)' "${SCRIPT_DIR}/run_tests.sh"; then
+    pass "Test 6 defers hostile LD_PRELOAD launch-timeout injection under sanitizers"
+else
+    fail "Test 6 defers hostile LD_PRELOAD launch-timeout injection under sanitizers"
+fi
+
+if grep -Fq 'T6_WATCHDOG_SECONDS=20' "${SCRIPT_DIR}/run_tests.sh" \
+    && grep -Fq 'timeout --signal=TERM --kill-after=' "${SCRIPT_DIR}/run_tests.sh" \
+    && grep -Fq 'test6-stage.txt' "${SCRIPT_DIR}/run_tests.sh"; then
+    pass "Test 6 has a bounded external watchdog with phase diagnostics"
+else
+    fail "Test 6 has a bounded external watchdog with phase diagnostics"
+fi
+
 # run_tests.sh doit exposer un code distinct pour les échecs de build.
 if grep -q '^BUILD_FAILURE_EXIT_CODE=2$' "${SCRIPT_DIR}/run_tests.sh" \
     && grep -q 'exit "${BUILD_FAILURE_EXIT_CODE}"' "${SCRIPT_DIR}/run_tests.sh"; then
     pass "run_tests exposes a dedicated compilation failure exit code"
 else
     fail "run_tests exposes a dedicated compilation failure exit code"
+fi
+
+# linux-armhf doit utiliser UBSan seul et ne jamais revendiquer ASan.
+mapfile -t result < <(run_fixture armhf_policy 0 0 0 armv6l)
+rc=${result[0]}
+flow=${result[1]}
+output=${result[2]}
+if [ "${rc}" -eq 0 ] \
+    && [ "$(sed -n '1p' "${flow}")" = "run_tests:--ubsan" ] \
+    && grep -q 'UBSan (linux-armhf)' "${output}" \
+    && grep -q 'ASan non revendiqué' "${output}"; then
+    pass "armhf release validation selects UBSan-only explicitly"
+else
+    fail "armhf release validation selects UBSan-only explicitly"
 fi
 
 # Une compilation sanitizer échouée doit arrêter avant le build normal.

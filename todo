@@ -1,5 +1,5 @@
-Babet current roadmap (2.23.0 release)
-=====================================
+Babet current roadmap (post-2.23.0)
+====================================
 
 Legend: [ ] todo, [~] in progress/pending validation, [x] completed.
 The ZIP supplied for each work session is the primary source of truth for
@@ -595,14 +595,178 @@ Post-audit hardening — Lots 10/11
     public tag sets from `babet.h` and compare them against every exhaustive
     validator, symbolic-name mapper and scalar converter. Future tag additions
     must update all relevant handlers before release validation can pass.
-[x] Re-run `./run_tests.sh --release` and `./prototypes/fltk/test.sh` after the
-    final ABI-tag coverage guard. Final 2026-08-25 validation is green:
-    embedding structural contracts 230/0, host-function contracts 58/0,
-    native-plugin structural contracts 108/0, ASan/UBSan embedding runtime
-    10/0, normal embedding runtime 16/0, native-plugin runtime 6/0, folder
-    3810/0, embedded 3796/0, embedded-via-PATH 3796/0, 9/9 top-level modes,
-    network smoke tests 11/0/0 WARN and the separate FLTK event-loop regression
-    green at 15,349,512 stripped bytes with no dynamic FLTK dependency.
+[x] Re-run the final 2.23.0 release validation after the ABI-tag coverage guard.
+    The release campaign completed green on 2026-08-25 and Babet 2.23.0 was
+    published; the historical FLTK prototype regression was also green before
+    that prototype was retired from the active source tree.
+
+Post-2.23.0 GUI direction — Lua-facing optional GTK 4
+--------------------------------------------------------
+
+[x] Retire the separate FLTK companion prototype as the active GUI direction;
+    keep `libbabet`, `babet.host` and the non-GUI embedding examples because
+    those capabilities are independent and remain exercised.
+[x] Freeze `GUI_DESIGN.md`: `babet.gui` is optional, GTK 4 is the only initial
+    Linux backend, and the normal Babet build must not link/download/require GTK.
+[x] Select lazy `dlopen()` / `dlsym()` from the Babet runtime rather than a
+    `babet-gtk.so` plugin, preserving one-file `--create-exe` publication.
+[x] Freeze the autonomy exception: a GUI-generated application remains one file
+    but requires GTK 4 on the target; non-GUI Babet remains fully autonomous.
+[x] Freeze lifecycle rules before implementation: main-thread GUI only, GUI and
+    ncurses mutually exclusive, `gtk_disable_setlocale()` + `gtk_init_check()`,
+    protected Lua callbacks, and invalidated dead-widget handles.
+[x] Keep the first API deliberately narrow and do not promise FLTK/wxWidgets or
+    another backend until a real need justifies that maintenance surface.
+[x] GUI Lot 1: write red structural tests first, then implement and isolate-test
+    the lazy GTK loader/initialization slice. Loader regression reaches 9/0
+    without GTK development headers or a real graphical desktop.
+[x] GUI Lot 2: window/box/label/button handles, safe lifetime invalidation,
+    protected callbacks, bounded GLib loop wakeups and GUI/ncurses ownership are
+    implemented; structural contracts reach 28/0 and the complete x86_64
+    maintainer build/run is green on 2026-08-26.
+[x] GUI Lot 3: the post-build runtime regression exercises folder mode and
+    `--create-exe`, source removal, callback recovery, dead handles, one-file
+    publication and an `ldd` no-GUI-dependency guard. The x86_64 maintainer run
+    is green at 9/0 on 2026-08-26; the complete Babet campaign remains 3810/0
+    folder, 3796/0 embedded, 3796/0 embedded-via-PATH and 9/9 top-level modes.
+[ ] Only after those lots are green, decide whether the MVP needs any additional
+    widgets/capabilities; do not widen the GTK dispatch table speculatively.
+
+Release/architecture follow-up retained after the GUI MVP
+---------------------------------------------------------
+
+[x] Publish the standalone developer SDK as an official release artefact per
+    supported architecture (x86_64, aarch64, armhf), with headers, `libbabet.a`,
+    docs/examples, licence/notices and checksums. The release helpers are covered
+    by architecture-independent packaging regressions; each real architecture
+    is still validated by its native release run.
+[x] Add concise bilingual architecture documents explaining `--create-exe`,
+    native plugins, `libbabet` embedding and the optional system-GUI exception
+    (`ARCHITECTURE.md` / `ARCHITECTURE.fr.md`).
+[x] Rename the general developer package from embedding-specific public/build
+    names to `build/sdk` and `babet-X.Y.Z-linux-<arch>-sdk.tar.gz`; keep the
+    historical 2.23.0 changelog wording intact and ship the architecture overview
+    in the SDK.
+[x] Add Phase 1 size attribution without changing features: opt-in GNU linker map,
+    shell/awk analyser, coarse component buckets, non-additive warning, and
+    deterministic parser regression.
+[x] Harden the Phase 1 analyser after the first real x86_64 `--size-audit` run
+    exposed a locale-dependent assumption: do not require the English GNU ld
+    heading, exercise a localized/wrapped map fixture, and surface parser errors
+    instead of collapsing them to a generic build failure.
+[x] Run `./build_local.sh --size-audit` on x86_64 and record `build/size-audit.txt`;
+    use it only to shortlist candidates for one-feature-at-a-time differential
+    builds.
+[x] Complete Candidate 8 differential measurements on x86_64. The eight-row
+    15,559,496-byte / OpenSSL 3.5.6 campaign measures hashing alone at 32,768
+    bytes, isolates a 5,544,064-byte shared network↔hashing/OpenSSL effect, and
+    reaches a 3,830,560-byte experimental floor when the four large blocks plus
+    hashing are absent.
+[x] Close the public-profile question for now: do NOT introduce
+    `minimal`/`standard`/`full`. `--create-exe` inherits the builder runtime, so
+    these would be reduced installations rather than per-application trimming;
+    the permanent capability/test/distribution cost fails the second half of the
+    size-vs-complexity criterion. Keep the CMake switches as maintainer
+    measurement/custom-build scaffolding only.
+[x] Candidate 9 — OpenSSL composition/protection study. First update the vendored
+    security baseline to OpenSSL 3.5.8 with the published SHA-256 and exact-version
+    cache detection, then analyse the exact `--size-audit` map by
+    `libcrypto.a`/`libssl.a` archive member, strengthen deterministic TLS coverage
+    (root→intermediate→leaf, TLS 1.2/1.3, RSA/ECDSA, RSA-PSS, X25519/P-256/P-384,
+    AES-GCM/ChaCha20-Poly1305, X25519MLKEM768 when available), and audit the
+    existing Linux trust-store probing contract. No OpenSSL `no-*` option yet.
+[x] Review Candidate 9's measured OpenSSL families: the capability-safe review
+    ceiling remains below 512 KiB, so STOP without any Configure trimming. Keep
+    OpenSSL 3.5.8 and the 7/0/0 deterministic TLS matrix.
+[x] Candidate 10 — section-GC experiment completed. A (`--gc-sections` only)
+    saves 1,118,208 bytes (7.18%); B adds only 61,440 bytes and is STOP. C shows
+    a larger OpenSSL-related delta but is not attributable because the OpenSSL
+    experimental rebuild lacked a fresh production-control witness.
+[x] Candidate 11 — final GC adoption review completed. The production-control
+    witness reproduces A exactly at 14,445,384 bytes; D measures 13,842,952
+    bytes, saves 602,432 bytes over A and 1,720,640 bytes over the 15,563,592
+    baseline. TLS 7/7, real-locale, normal, ASan/UBSan and release/network gates
+    all pass. Adopt linker --gc-sections + OpenSSL function/data sections; keep
+    Babet-owned source section splitting rejected.
+[x] Integrate the Candidate 11 decision into the normal 2.23.0 build: explicit
+    production GC link option, OpenSSL section flags, cache-contract stamp and
+    permanent structural/runtime guards. Build only `build_libs` plus the vendored `apps/openssl` validation CLI so
+    the OpenSSL test suite and unrelated programs are not built.
+[x] Complete the final native release-validation matrix from one identical
+    source tree on all three official Linux architectures. The ARMHF-validated
+    source snapshot propagated to x86_64 and AArch64 has SHA-256
+    `8757524730661e81bb3e26cde1c0226d8140fa57227900e4fdad52f07213ce73`.
+    All three native runs complete the pre-release campaign, verify the adopted
+    GC/OpenSSL production contract, pass the deterministic TLS matrix at
+    7 PASS / 0 FAIL / 0 SKIP, package the exact validated normal binary, verify
+    release/SDK checksums and execute all seven examples from the packaged SDK.
+[x] Record final `linux-x86_64` native release evidence: ASan+UBSan,
+    13,842,952 stripped bytes, binary SHA-256
+    `98340269ced1c84ddeccbe7708572a3f0b16cb9e6d25d79daf9ce336aede1b76`,
+    release tarball SHA-256
+    `4159115b0ebc4e38bfd1db798aaabbcda8f2555b8eb647eede0bdf586f7894ca`,
+    SDK tarball SHA-256
+    `023bcdeaf4f53ac319e1b434db2eab03fedf380ca2231cc2dc9e1e8f7dcc023b`.
+[x] Record final native aarch64 (`linux-aarch64`) release evidence: ASan+UBSan,
+    12,487,256 stripped bytes, binary SHA-256
+    `4c75175ef4d1f71f61de53d700ed7c164c6fa4ef196e8ba77f9e97287960867a`,
+    release tarball SHA-256
+    `7b156518a8d538438c471188afedf8328610908ef515b6bd9c1d76c66dd86519`,
+    SDK tarball SHA-256
+    `75224706619a6facb5ac9f6106e7b1dbf2e3b674adc70d1dc06013a2aceb2f5d`.
+[x] Diagnose the native ARMHF sanitizer limitation independently of Babet.
+    On the ARMv6 Pi Zero/GCC 12 builder, ASan fails before `main()` through the
+    ASan/libatomic runtime while standalone UBSan succeeds. Keep the official
+    `linux-armhf` release gate UBSan-only; do not manufacture an ASan PASS by
+    changing Babet runtime behaviour.
+[x] Keep the maintainer sanitizer model split into OFF / ASAN_UBSAN / UBSAN.
+    `--sanitizers` retains its historical ASan+UBSan meaning, `--ubsan` selects
+    UBSan alone, and separate build directories are used.
+[x] Keep explicit native-runner watchdog suspension for constrained ARM builders.
+    `--suspend-watchdog` records the initially active feeders, starts a detached
+    privileged restore guard, stops feeders without disabling/masking them,
+    verifies hardware disarm where available and restores the exact state after
+    normal exit, signal, parent disappearance or next-run recovery.
+[x] Fix the intermittent ARMHF TLS positive-test skip at its canonical source.
+    `build_local.sh` recreates `test/` from `examples/`, so
+    `examples/selftest/suites/network/tls.lua` is the source of truth. Replace
+    local RSA-2048 test-certificate generation with EC P-256 and retain a
+    60-second timeout as a hang guard. Five consecutive embedded runs preserve
+    the full 3792 common-test count, and the final ARMHF/x86_64/AArch64 native
+    validations all pass the deterministic TLS matrix at 7/0/0.
+[x] Record final `linux-armhf` native release evidence from the Raspberry Pi Zero
+    hard-float builder: UBSan-only, 9,861,000 stripped bytes, binary SHA-256
+    `2ba942ecfa1012f66300ca9f4ea445c9fc3ee703069fc4ab8b1aa121196d4f2a`,
+    release tarball SHA-256
+    `b813f7289fb1d3adb752fd8a6057250540002b7b65463cb6f99ea3afd4871c2e`,
+    SDK tarball SHA-256
+    `9393559d2debf0e89ec5ca0410a9ef57b7a59a6700679e67a0163af7a5d08515`.
+    Hard-float ABI verification passes and the watchdog restore guard restores
+    the machine state after the complete validation.
+[x] Close the native 2.23.0 architecture-validation follow-up. No official Linux
+    architecture remains pending and `BINARY_SIZE.md` now records the three
+    final native production measurements from the identical validated tree.
+[ ] Consider a separate maintainer dependency-freshness check for pinned
+    security-sensitive libraries so an OpenSSL security release cannot remain
+    unnoticed; keep it out of normal offline builds.
+
+
+Post-validation Linux host/service follow-up
+--------------------------------------------
+
+[ ] Fix the Raspberry Pi watchdog systemd startup configuration where an
+    `ExecStartPre=/bin/sleep 120` delay can exceed the service start timeout and
+    leave `wd_keepalive` feeding the hardware watchdog instead of the intended
+    daemon. Treat this as host installation/service hardening, not a Babet
+    runtime release blocker.
+[ ] Fix `mediamtx_monitor` service command lookup: do not rely on a literal
+    `$PATH` in the systemd environment; call `/bin/systemctl` directly or define
+    an explicit service PATH.
+[ ] Fix the QoS installer so configuring `eth0` and `wlan0` cannot sequentially
+    overwrite the same service/nftables configuration. Make the selected
+    interface explicit or otherwise mutually exclusive and add regression
+    coverage for the installer state.
+
 
 Deferred Windows port
 ---------------------

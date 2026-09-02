@@ -12,7 +12,7 @@ small standalone programs before any ABI-stability promise is made.
 A normal Babet build creates:
 
 ```text
-build/embedding-sdk/
+build/sdk/
 ├── include/babet/babet.h
 ├── lib/libbabet.a
 ├── EMBEDDING.md
@@ -286,10 +286,11 @@ The first API intentionally does not expose:
 
 These embedding capabilities remain deferred until a concrete consumer demonstrates the need.
 Lot 11 separately defines a narrow native-plugin ABI for the original Babet CLI;
-it does not widen the embedding loader boundary. The
-separate FLTK prototype is now the first real consumer of the public host-function
-API: Lua changes a button label through `babet.host.set_button_label()` instead
-of relying on a private bridge.
+it does not widen the embedding loader boundary. The retired 2.23.0 FLTK prototype was the first real consumer of the public
+host-function API: Lua changed a button label through
+`babet.host.set_button_label()` instead of relying on a private bridge. The
+non-GUI SDK examples remain the maintained embedding consumers after that
+prototype was removed from the active source tree.
 
 ## 13. Executable examples
 

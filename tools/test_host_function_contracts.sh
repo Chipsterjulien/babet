@@ -17,7 +17,6 @@ DESIGN="HOST_FUNCTIONS_DESIGN.md"
 SMOKE="tests/embedding_smoke.c"
 EXT="tests/embedding_external_smoke.c"
 CPP_SMOKE="tests/embedding_cpp_callback_smoke.cpp"
-FLTK="prototypes/fltk/main.cpp"
 EXAMPLE="examples/embedding/07_host_functions.c"
 
 check "host-function design contract exists" test -f "$DESIGN"
@@ -77,11 +76,6 @@ check "external SDK smoke consumes host registration API" contains "$EXT" 'babet
 check "standalone SDK ships a host-function example" test -f "$EXAMPLE"
 check "host-function example returns a copied temporary string" contains "$EXAMPLE" 'Babet copies the temporary buffer synchronously here.'
 
-check "FLTK prototype registers a public host function" contains "$FLTK" 'babet_context_register_host_function'
-check "FLTK Lua fixture calls the host function" contains "$FLTK" 'babet.host.set_button_label'
-check "FLTK host function updates the widget" contains "$FLTK" 'state->button->copy_label(label.c_str())'
-check "FLTK prototype still avoids global polling" not_contains "$FLTK" 'babet_context_get_global'
-check "FLTK prototype still avoids global mutation bridge" not_contains "$FLTK" 'babet_context_set_global'
 
 echo "host-function contracts: ${pass} PASS / ${fail} FAIL"
 exit "$fail"
