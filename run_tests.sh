@@ -1881,7 +1881,9 @@ local ok, err = babet.setAttributes(
     target, before.owner, before.group, tonumber("600", 8))
 local saved_mode = babet.getMode(saved)
 local victim_mode = babet.getMode(victim)
-local link = babet.exec("readlink", { target })
+local link = babet.exec("readlink", { target }, {
+    env = { LD_PRELOAD = "" },
+})
 
 if ok == true and err == nil
     and saved_mode == tonumber("600", 8)
