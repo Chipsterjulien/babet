@@ -17,11 +17,22 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.24.0**. Voir le
+Version actuelle : **2.24.2**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.24.2 aligne la version compilée et la documentation de publication
+après l'incohérence de la publication 2.24.1. Elle conserve les correctifs
+de l'audit décrits ci-dessous.
+
+Babet 2.24.1 regroupe les corrections de l'audit : préservation des fichiers,
+réseau et processus, durée de vie des ressources Lua, validation de l'image
+exécutable et installation atomique. Voir les
+[notes de compatibilité](CHANGELOG.fr.md#2241---2026-10-05), notamment les
+quatre valeurs renvoyées par `db:query` et la reconstruction des applications
+générées avec le nouveau runtime.
 
 Babet 2.24.0 ajoute le backend GTK 4 optionnel [`babet.gui`](GUI_DESIGN.md),
 chargé paresseusement depuis le système cible au lieu d'être lié dans Babet.

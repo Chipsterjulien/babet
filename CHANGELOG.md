@@ -9,6 +9,33 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+## [2.24.2] - 2026-10-05
+
+### Release version consistency
+
+- synchronize the CMake project version, README files, manual indexes and
+  regenerated PDFs at `2.24.2` following the version mismatch reported for
+  the published `v2.24.1` tag;
+- retain that published tag and all audit fixes and compatibility notes
+  listed under 2.24.1. This release changes no runtime implementation.
+
+## [2.24.1] - 2026-10-05
+
+### Audit fixes and compatibility notes
+
+- collect the audit corrections detailed below: file preservation, network
+  and process handling, Lua resource lifetimes, executable image identity
+  and atomic deployment;
+- **SQLite compatibility**: successful `db:query` returns
+  `stmt, nil, nil, stmt`. When passing only its iterator to another function,
+  use a local variable or parentheses, for example
+  `table.insert(t, (db:query(sql)))`. Keep all four values in generic `for`;
+- rebuild generated applications with this runtime to include the fixes.
+  Package with `--create-exe`; manually appending a ZIP is no longer supported.
+  Strip the bare runtime before packaging and do not compress it with UPX;
+- document that atomic deployment replaces a symbolic link at
+  `/usr/local/bin/babet` without changing the file it pointed to.
+
 ### September 25, 2026 audit — batch 17c: executed filename in the test
 
 - also preserve the on-disk name `sleep` for the copy used by `running-inode`,

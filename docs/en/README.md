@@ -15,7 +15,7 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for **Babet 2.24.0** plus current post-release work.
+Documentation for **Babet 2.24.2**.
 
 Babet 2.22.2 adds a native RFC 6455 client through `babet.websocket`, with
 `ws://` and verified `wss://`, strict handshakes, bounded framing, automatic

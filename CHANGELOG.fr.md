@@ -9,6 +9,35 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+## [2.24.2] - 2026-10-05
+
+### Cohérence de la version publiée
+
+- aligne à `2.24.2` la version CMake, les README, les index des manuels et
+  les PDF régénérés, après l'incohérence de version signalée pour le tag
+  publié `v2.24.1` ;
+- conserve ce tag publié ainsi que les correctifs et notes de compatibilité
+  détaillés sous 2.24.1. Cette version ne change aucune implémentation du runtime.
+
+## [2.24.1] - 2026-10-05
+
+### Correctifs de l'audit et notes de compatibilité
+
+- regroupe les corrections détaillées ci-dessous : préservation des fichiers,
+  réseau et processus, durée de vie des ressources Lua, identité de l'image
+  exécutable et déploiement atomique ;
+- **Compatibilité SQLite** : en cas de succès, `db:query` renvoie
+  `stmt, nil, nil, stmt`. Pour passer uniquement son itérateur à une autre
+  fonction, utiliser une variable locale ou des parenthèses, par exemple
+  `table.insert(t, (db:query(sql)))`. Conserver les quatre valeurs dans un
+  `for` générique ;
+- reconstruire les applications générées avec ce runtime pour y intégrer les
+  correctifs. Utiliser `--create-exe` : l'ajout manuel d'un ZIP n'est plus pris
+  en charge. Appliquer `strip` au runtime nu avant le packaging et ne pas
+  compresser ce runtime avec UPX ;
+- précise que le déploiement atomique remplace un lien symbolique à
+  `/usr/local/bin/babet` sans modifier le fichier vers lequel il pointait.
+
 ### Audit du 25 septembre 2026 — lot 17c : nom du fichier exécuté dans le test
 
 - conserve aussi le nom `sleep` sur disque pour la copie utilisée dans le

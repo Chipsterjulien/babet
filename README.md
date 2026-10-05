@@ -16,11 +16,20 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.24.0**. See the
+Current release: **2.24.2**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.24.2 aligns the compiled version and release documentation after the
+2.24.1 publication mismatch. It retains the audit fixes described below.
+
+Babet 2.24.1 includes the audit fixes for file preservation, network and
+process handling, Lua resource lifetimes, executable image validation and
+atomic installation. See the [compatibility notes](CHANGELOG.md#2241---2026-10-05),
+especially the four return values of `db:query` and rebuilding generated
+applications with the new runtime.
 
 Babet 2.24.0 adds the optional [`babet.gui`](GUI_DESIGN.md) GTK 4 backend,
 loaded lazily from the target system rather than linked into Babet. It also
