@@ -62,12 +62,68 @@ Package a script and its modules into a self-contained binary :
 Version-control metadata directories `.git`, `.svn`, and `.hg` are
 automatically excluded at any depth.
 
-Internally, Babet appends a ZIP to its own binary, and reads
-`main.lua` (plus any `require`d module) from that ZIP at runtime.
-The resulting `myapp` is fully self-contained — no Babet install
-needed on the target machine, just glibc. A generated application is a final
-artifact: invoking it with `--create-exe` or `-c` is rejected before its
+Internally, Babet appends a ZIP to its own binary and reads `main.lua` and
+packaged Lua modules from it. The target machine does not need a separate
+Babet installation. Platform dependencies still apply; an application using
+the [GUI](modules/gui.md) also requires GTK4 at runtime.
+A generated application is a final artifact: invoking it with `--create-exe`
+or `-c` is rejected before its
 `main.lua` runs. Use the original Babet binary to create another executable.
+
+**Module sources.** For a module that `require` has not already loaded,
+`package.preload` is checked before the ZIP. The embedded loader searches
+`name.lua`, then `name/init.lua`. If both entries are absent, the ordinary Lua
+loaders remain active: `package.path` can supply a disk Lua module and
+`package.cpath` a native module compatible with the Lua ABI. A read or compile
+error in a module found in the ZIP stops loading; it does not trigger this disk
+fallback. These rules also apply to workers in generated applications.
+
+`package.loadlib` remains available to load a native library explicitly from
+disk. This Lua API is distinct from the Babet plugin API, which remains
+unavailable in generated applications. Packaging therefore does not guarantee
+that all loading comes exclusively from the ZIP and does not create a
+[sandbox](security.md). To distribute a self-contained application, include its
+Lua modules in the packaged project and check its external resource or library
+requirements.
+
+Embedded `main.lua` and modules support the same initial UTF-8 BOM and `#`
+comment/shebang line as disk-loaded Lua files, including in workers. Source
+line numbers are preserved; Lua bytecode remains loadable with these prefixes.
+Modules are read from the running executable's inode: replacing or deleting
+its pathname does not mix the current application's modules with a new version.
+
+Startup requires an accessible, readable `/proc/self/exe`. An image open or
+read failure stops Babet with status 1 and a diagnostic; it does not turn a
+generated application into the Babet CLI or builder.
+
+The builder now writes a descriptor in its runtime copy identifying the output
+as an application and recording the ZIP offset and size. Startup reads this
+identity from the loaded image: incidental ZIP bytes in a bare runtime cannot
+change its mode. An application with a truncated ZIP, extra trailing data,
+unreadable payload or missing `main.lua` is rejected before processing arguments.
+
+Rebuild applications with the new Babet binary to obtain this protection.
+Existing executables retain their bundled runtime. Use `--create-exe`: manually
+concatenating a ZIP to the new runtime no longer turns it into an application.
+If desired, run `strip` on the bare runtime **before** packaging, then preserve
+the generated application file.
+
+Do not compress the runtime with UPX: this hides the descriptor in the file
+and prevents `--create-exe` from working. `build_and_deploy.sh` now preserves
+the built binary even when UPX is installed, and checks that it can create and
+run a small application before replacing the installed Babet binary.
+This check uses a temporary directory under `build/`, so it also works when
+`TMPDIR` is mounted `noexec`. Installation prepares a file with mode `0755`
+in the target directory, then replaces the target by atomic rename: an already
+running Babet keeps its old binary and a failed copy leaves the previous
+installation intact.
+
+Each embedded Lua file (`*.lua`, including `main.lua` and `*/init.lua`) is
+limited to **16 MiB uncompressed**, inclusive. Packaging rejects larger scripts
+with their archive filename before publishing the executable and preserves any
+previous output. The completed ZIP is checked too, covering source growth
+during packaging. Non-Lua assets retain their existing size policy. The loader
+also enforces the limit on altered archives carrying a valid descriptor.
 
 ### 3. Embedded via PATH (folder + auto-detect)
 

@@ -65,7 +65,7 @@ int lua_chdir(lua_State *L)
     // CORRECTIF (option A validée, revue Gemini triée) : le CWD est
     // PROCESS-WIDE — un chdir, même depuis le main thread, change la
     // résolution des chemins relatifs de TOUS les workers en vol.
-    // Même règle que setenv : autorisé avant le premier spawn,
+    // Même règle que setenv : autorisé avant le premier spawn/chargement GTK,
     // interdit ensuite, sous le même verrou. AUCUNE opération Lua
     // sous le verrou (résultat capturé dans une locale).
     std::optional<std::string> res;
@@ -73,9 +73,9 @@ int lua_chdir(lua_State *L)
                                { res = chdir(path); }))
     {
         return push_fail_protected(L,
-                         "chdir: forbidden after workers.spawn (the working "
+                         "chdir: forbidden after workers.spawn or GTK loading (the working "
                          "directory is shared across threads; change it "
-                         "before spawning workers)");
+                         "before workers or gui.available/gui.init)");
     }
     return push_action_result_protected(L, res);
 }

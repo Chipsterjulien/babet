@@ -9,6 +9,263 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+### Audit du 25 septembre 2026 — lot 17c : nom du fichier exécuté dans le test
+
+- conserve aussi le nom `sleep` sur disque pour la copie utilisée dans le
+  scénario `running-inode`, afin de couvrir une sélection de l'utilitaire par
+  le chemin exécuté. Le lot 17b ne préservait que `argv[0]` ;
+- adapte les contrôles du temporaire à cette destination privée de test et
+  conserve les vérifications d'installation atomique et les 17 contrôles ;
+- affiche `deployment preflight lot17c` au démarrage pour identifier la révision
+  effectivement exécutée. Aucun changement du runtime ou du déploiement réel.
+
+### Audit du 25 septembre 2026 — lot 17b : portabilité du test de déploiement
+
+- conserve `sleep` comme nom de commande lors du lancement de sa copie nommée
+  `babet` dans le test d'installation sur un exécutable actif. Les coreutils
+  multicommandes peuvent ainsi sélectionner la bonne fonction ; le test
+  continue d'exécuter l'inode copié qui sera remplacé pendant l'installation ;
+- conserve les 17 contrôles et les vérifications de survie du processus,
+  d'identité et de contenu de l'ancien fichier. Aucun changement du runtime
+  ou du script de déploiement.
+
+### Audit du 25 septembre 2026 — lot 17 : installation atomique
+
+- crée l'application de vérification dans `build/deploy-smoke.*`, sans dépendre
+  d'un `$TMPDIR` autorisant l'exécution ;
+- prépare le runtime avec les permissions `0755` dans un fichier temporaire
+  du dossier cible, puis le publie par renommage atomique. Une copie échouée
+  ou interrompue conserve l'installation précédente ; les processus déjà
+  lancés gardent leur ancien inode. Le temporaire est nettoyé sur sortie
+  normale, erreur et signaux HUP/INT/TERM ;
+- étend le préflight à 16 scénarios de déploiement et un contrôle des règles
+  Python du `.gitignore`. Le correctif livre à nouveau ce fichier caché,
+  déjà présent dans le ZIP du lot 16, pour éviter une extraction incomplète.
+
+### Audit du 25 septembre 2026 — lot 16 : déploiement et UPX
+
+- retire la compression UPX automatique de `build_and_deploy.sh`, incompatible
+  avec le descripteur d'image du lot 15 ; vérifie la création et l'exécution
+  d'une petite application avant de remplacer le binaire installé ;
+- précise le diagnostic d'un descripteur absent : runtime possiblement compressé
+  ou réécrit (UPX), à reconstruire et utiliser sans compression ;
+- ajoute huit scénarios isolés du script de déploiement et un test réel UPX
+  optionnel dans le build normal. L'absence d'UPX, un format non accepté par
+  l'outil ou le build instrumenté sont signalés explicitement comme SKIP ;
+- ignore `__pycache__/` et `*.py[cod]` dans Git. Ces règles n'effacent pas les
+  caches existants et ne filtrent pas automatiquement les ZIP créés à la main.
+
+### Audit du 25 septembre 2026 — lot 15 : identité des applications et suppression EXDEV
+
+- distingue le runtime nu d'une application par un descripteur dans l'image
+  chargée, renseigné par le builder avant publication atomique ; les signatures
+  ZIP accidentelles ne bloquent plus le runtime nu ;
+- contrôle les bornes de l'archive, sa fin et `main.lua` pour une application
+  marquée : une troncature, des données ajoutées ou une archive invalide ne
+  permettent plus de retomber dans la CLI ou le builder ; conserve les erreurs
+  explicites d'ouverture et de lecture de l'image ;
+- refuse les descripteurs absents, ambigus ou invalides pendant la génération,
+  sans remplacer une sortie existante ; conserve le packaging sans toolchain
+  externe et le fonctionnement après copie, renommage ou strip du runtime nu ;
+- **format des exécutables** : reconstruire les applications existantes avec
+  ce runtime pour obtenir ces protections. Une concaténation manuelle runtime
+  + ZIP ne produit plus une application reconnue. Faire le strip du runtime
+  avant le packaging, pas de l'application générée ;
+- garde l'inode copié ouvert jusqu'à la suppression EXDEV de `moveTree` et
+  compare son identité à celle du chemin source avant `unlink`. Un remplacement
+  détecté est conservé et signalé ; `lstat` puis `unlink` ne sont pas atomiques ;
+- ajoute 22 scénarios d'identité d'image et 5 scénarios de suppression EXDEV ;
+  adapte les archives malformées de test au nouveau format et l'injection de
+  lecture aux appels stdio renforcés. Le hook de signaux déjà activé conserve
+  le comportement documenté du lot 14.
+
+### Audit du 25 septembre 2026 — lot 14 : régressions confirmées par la seconde revue
+
+- retire l'activation automatique du hook d'instructions au démarrage : un
+  `signal.handle(name, fn)` ou `curses.start()` réussi l'active à la demande ;
+  conserve la restauration des hooks du thread principal et de l'appelant,
+  ainsi que leur héritage par les coroutines créées ensuite. Les coroutines
+  créées auparavant doivent être prises en compte explicitement, comme décrit
+  dans les guides signaux/curses ; le hook déjà activé n'est pas désinstallé ;
+- distingue une absence de ZIP des échecs d'ouverture, de lecture et des autres
+  erreurs d'initialisation du lecteur : une image exécutable inaccessible ne
+  permet plus de basculer une application générée en CLI ou builder ;
+- fait sortir `curses.readKey` avec `nil, "interrupted"` si un callback arrête
+  curses, avant tout nouvel accès à l'écran, aux deux points de dispatch ;
+- vérifie les sources de copie avec `O_PATH` et ouvre ensuite uniquement
+  l'inode régulier vérifié via procfs, avec `O_NOCTTY`. Les périphériques ne
+  sont plus ouverts en lecture avant leur refus dans le fallback EXDEV ;
+- **compatibilité SQLite (changement du lot 5)** : `db:query` renvoie désormais
+  quatre valeurs en succès au lieu d'une (`stmt, nil, nil, stmt`). Les appels
+  qui propagent tous les résultats, tels que `table.insert(t, db:query(sql))`,
+  doivent être adaptés : `table.insert(t, (db:query(sql)))` ou variable locale
+  pour ne garder que l'itérateur. Le `for` générique doit conserver les quatre
+  valeurs pour bénéficier de la fermeture déterministe ; les échecs restent
+  `(nil, err)` et `prepared:query` est inchangé ;
+- ajoute des tests du démarrage et des hooks dans les trois modes, des erreurs
+  de lecture injectées, des courses déterministes curses sous PTY et des
+  sources de copie remplacées, plus un vrai périphérique PTY privé.
+
+### Audit du 25 septembre 2026 — lot 13 : bilan et précision du guide
+
+- corrige le guide de démarrage : les modules Lua empaquetés sont lus dans
+  le ZIP, mais les chargeurs disque et `package.loadlib` restent disponibles ;
+  distingue ces modules natifs Lua des plugins Babet et précise le besoin GTK4
+  des applications GUI ; aucun comportement du runtime n'est modifié ;
+- ajoute `AUDIT_2026-09-28.fr.md`, bilan des corrections, de la validation
+  pré-release du lot 12 et des contrats conservés, pour la prochaine revue.
+
+### Audit du 25 septembre 2026 — lot 12 : état partagé et chargement GTK
+
+- étend la protection de `setenv`, `chdir` et des mutations `os.setlocale`
+  à la première tentative de chargement GTK, y compris `gui.available()` ;
+  le verrouillage précède `dlopen` et reste permanent même après un échec ;
+- partage le même verrou avec les workers et les consultations de locale,
+  sans le garder pendant les constructeurs natifs ou les appels GTK ;
+- documente la configuration à effectuer avant workers/GUI et la responsabilité
+  des hôtes et plugins pour leurs propres threads et appels directs à la libc ;
+- ajoute des régressions avec un vrai thread natif démarré par une bibliothèque
+  GTK de test, des échecs de chargement/initialisation, des coroutines et workers,
+  ainsi qu'un test de sérialisation des mutations avec le verrouillage.
+
+### Audit du 25 septembre 2026 — lot 11 : contrats des autorités TLS
+
+- corrige la documentation HTTP : un `ca_cert` non vide remplace les autorités
+  par défaut de la requête, y compris pour `download` ; TLS socket, STARTTLS et
+  WebSocket ajoutent les CA personnalisées aux autorités déjà chargées ;
+- précise le cas des chaînes vides, l'isolation par appel, la vérification de
+  l'identité et la différence avec le pinning de certificat ou de clé ;
+- ajoute des régressions locales avec deux CA distinctes et plusieurs
+  certificats, en modes fichier, dossier et embarqué, dans l'état principal
+  et des workers simultanés. Les politiques de confiance du runtime sont
+  conservées ; seule leur documentation et leur couverture de tests changent.
+
+### Audit du 25 septembre 2026 — lot 10 : commandes standard des workers
+
+- lance `os.execute` et `io.popen` des workers avec un masque de signaux vide
+  dans l'enfant, y compris lorsque le shell conserve le masque hérité ;
+- évite que `os.execute` d'un worker ignore temporairement `SIGINT` et
+  `SIGQUIT` dans tout le processus ; conserve les dispositions du parent ;
+- conserve les résultats et fichiers Lua, attend l'enfant à la fermeture et
+  ferme les ressources sur les échecs natifs ou d'allocation ; empêche les
+  lancements suivants d'hériter des extrémités de pipe conservées par le parent ;
+- ajoute des tests natifs avec erreurs injectées et des tests de vrais workers
+  en modes fichier, dossier et embarqué aux validations normale et instrumentée.
+  Les appels restent bloquants ; les fonctions de l'état principal sont inchangées.
+
+### Audit du 25 septembre 2026 — lot 9 : sortie contrôlée du programme
+
+- restaure curses lors de `os.exit`, avec ou sans fermeture Lua, en modes
+  fichier, dossier et exécutable généré ; neutralise les callbacks GUI ;
+- conserve les règles Lua des arguments et codes de sortie, le vidage des
+  buffers de fichiers et les finaliseurs demandés par `close` ; évite une
+  seconde fermeture de la VM si un finaliseur appelle lui-même `os.exit` ;
+- remplace la terminaison native après `os.exit` par `_Exit` : pas de callbacks
+  `atexit` ni de destructeurs statiques concurrents avec les threads encore
+  actifs. Le retour normal conserve le nettoyage natif habituel. Ce changement
+  de contrat est détaillé dans `docs/fr/runtime-exit.md` ;
+- ajoute des régressions PTY, coroutines, finaliseurs, sorties avec workers
+  actifs et plugin natif. L'embedding et le refus de sortie des workers
+  conservent leur politique existante.
+
+### Audit du 25 septembre 2026 — lot 8 : performances de fusion des tables
+
+- remplace les parcours quadratiques de `mergeTables` par une copie directe
+  des listes denses et un tri borné en O(k log k) des clés positives creuses ;
+- conserve l'ordre par source, le compactage, les écrasements de clés-map,
+  les références partagées et l'accès brut ; préserve les clés 64 bits sur ARM32 ;
+- confie le stockage temporaire à Lua, borne les écritures même si un finaliseur
+  modifie la source et protège l'incrément de l'indice du résultat ;
+- ajoute aux validations normale et instrumentée des tests de contrat,
+  de comparaison à une référence, de nombre de parcours et d'erreurs mémoire.
+
+### Audit du 25 septembre 2026 — lot 7 : chargement embarqué et manque de mémoire
+
+- protège la construction des résultats du searcher embarqué : une allocation
+  Lua échouée libère les chemins, diagnostics et buffers C++ avant de remonter ;
+- convertit les exceptions natives en erreurs Lua après nettoyage C++, sans
+  arrêter le processus ni charger un module disque après un échec natif ;
+- ferme l'archive embarquée sur chaque sortie C++, même si la construction du
+  diagnostic manque de mémoire lors du traitement d'une première erreur ;
+- ajoute aux validations pré-release des échecs d'allocation Lua/C++ avec
+  comptage des buffers et descripteurs, de vrais ZIP et des tests de require.
+
+### Audit du 25 septembre 2026 — lot 6 : sortie des workers et locale partagée
+
+- fait lever une erreur Lua à `os.exit` dans les workers au lieu d'arrêter le
+  processus, y compris via les coroutines, les alias et les workers imbriqués ;
+- interdit les mutations Lua `os.setlocale` après la première tentative de
+  spawn validée, sous le verrou existant de l'état processus ; conserve les
+  consultations, copie leurs résultats sous verrou et maintient la restriction
+  après recréation d'un contexte d'intégration ;
+- conserve `os.exit` standard dans l'état principal et la configuration de la
+  locale avant le premier spawn ; documente `return` pour terminer un worker ;
+- ajoute 60 vérifications en modes dossier/embarqué et deux tests d'intégration
+  aux validations pré-release normale et instrumentée.
+
+### Audit du 25 septembre 2026 — lot 5 : durée de vie du runtime et des curseurs
+
+- installe les hooks d’instructions signaux/terminal par thread Lua au démarrage,
+  permet leur héritage par les coroutines et restaure les hooks réels du thread
+  principal et de l’appelant lors d’un handle, sans marqueur global périmé ;
+- finalise les curseurs SQLite temporaires dès la sortie du for générique ou
+  d’une portée `<close>`, y compris sur erreur ou fermeture de coroutine ;
+  conserve close explicite, les échecs `(nil, err)` et les statements réutilisables ;
+- réserve le créneau du contexte d’embedding jusqu’à la fin de sa destruction,
+  sans garder le mutex pendant les finaliseurs Lua : un create réentrant ou
+  concurrent renvoie BUSY sans interblocage ;
+- ajoute 16 régressions SQLite en modes dossier et généré et 12 régressions
+  signaux/cycle de vie via l’hôte C aux validations normale et instrumentée.
+
+### Audit du 25 septembre 2026 — lot 4 : cohérence des exécutables générés
+
+- lit l’inode exécuté via `/proc/self/exe`, y compris les modules des workers
+  existants/nouveaux et la copie du runtime par le builder, malgré un
+  remplacement atomique ou une suppression du chemin de l’exécutable ;
+- aligne les loaders embarqués sur le chargement Lua depuis un fichier pour
+  le BOM UTF-8, les lignes initiales `#`, les numéros de ligne et le bytecode ;
+- refuse les fichiers Lua dépassant 16 Mio avant publication, vérifie aussi
+  le ZIP terminé en cas de croissance d’une source et préserve l’ancienne sortie ;
+- conserve les limites du loader pour les ZIP externes/anciens et ajoute des
+  régressions comportementales aux validations normale et instrumentée.
+
+### Audit du 25 septembre 2026 — lot 3 : état des flux réseau
+
+- ferme un socket TLS après l'abandon d'un `send` ayant tenté `SSL_write`,
+  même si aucun octet applicatif n'a encore été annoncé comme envoyé ;
+- ferme les WebSocket dont une émission a été abandonnée, y compris entre
+  fragments ou pendant Ping/Pong, avant de dispatcher un callback de signal ;
+- préserve les connexions après les erreurs de validation avant émission et
+  les sockets TLS après un timeout précédant toute tentative `SSL_write` ;
+- découpe les lignes déjà conservées par `recv_all` avant toute attente réseau,
+  conserve la suite et applique la limite de 8 Mio aux données tamponnées ;
+- ajoute 32 régressions TCP/TLS/WS/WSS à la validation normale et instrumentée.
+
+### Audit du 25 septembre 2026 — lot 2 : signaux réseau et processus
+
+- protège les appels TLS de socket, WebSocket et HTTP contre les arrêts par
+  `SIGPIPE`, y compris pendant connexion, lecture et fermeture ; le masque
+  du thread est restauré, la disposition du signal et les signaux déjà en
+  attente sont conservés ;
+- remet le masque des signaux à vide dans les enfants de `exec`, `spawn`,
+  `pipeline` et `spawnPipeline` avant `execve`, y compris depuis un worker,
+  pour que les programmes externes puissent recevoir notamment `SIGTERM` ;
+- ajoute des tests comportementaux de masque, de terminaison par signal et
+  d'erreur d'écriture TLS, exécutés dans les deux builds de `--release`.
+
+### Audit du 25 septembre 2026 — lot 1 : préservation des fichiers
+
+- refuse les racines symboliques avec suffixe `/` ou `/.` dans `rmdir` et
+  `rmdirAll`, sans parcourir ni supprimer leur cible ;
+- refuse `copyTree` et `moveTree` vers un ancêtre de la source avant toute
+  modification, en complément du refus des descendants et de la source ;
+- remplace le balayage récursif final de `moveTree` par la suppression des
+  seuls liens scannés et des dossiers vides, avec revérification des identités :
+  les nouvelles entrées non transférées sont conservées et signalées ;
+- empêche le fallback de copie inter-filesystems de bloquer sur une FIFO ;
+- ajoute des tests fonctionnels dans les auto-tests dossier/embarqué et des
+  injections déterministes après scan, exécutées par `run_tests.sh`.
+
 ## [2.24.0] - 2026-09-02
 
 ### Release / architecture — suite

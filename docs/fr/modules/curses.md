@@ -44,6 +44,13 @@ assert(babet.curses.stop())
 non vide et qu'une locale `LC_CTYPE` UTF-8 soit disponible. Il doit être appelé
 sur le thread principal de Babet. Une seconde session simultanée est refusée.
 
+Un `start()` réussi active à la demande le hook Lua partagé des signaux et du
+terminal sur le thread Lua principal et la coroutine appelante. Les nouvelles
+coroutines héritent du hook de leur créatrice ; les autres coroutines déjà
+existantes ne sont pas modifiées. Démarre curses avant de créer les coroutines
+qui doivent servir les événements pendant des boucles Lua pures. Le hook reste
+installé après `stop()` ; voir son [contrat et son coût](signal.md#signal-debug-hook).
+
 `stop()` est idempotent. Si un enfant interactif possède alors le terminal,
 `stop()` termine la session curses logique **sans reprendre le TTY à l'enfant**.
 Le gestionnaire de processus normal restaurera ensuite le terminal parent quand
@@ -54,6 +61,11 @@ les terminaisons par défaut `SIGINT`/`SIGTERM`/`SIGHUP` restaurent le terminal
 avant la sortie de Babet. Un crash fatal ou `SIGKILL` ne peut offrir cette
 garantie ; la commande `reset` reste le recours manuel classique après un
 terminal endommagé.
+
+Dans le CLI et les exécutables générés, `os.exit(...)` restaure aussi curses,
+même sans demander la fermeture Lua. Les codes de sortie sont conservés.
+Voir le [contrat de sortie](../runtime-exit.md) pour les finaliseurs, les
+workers actifs et les callbacks natifs.
 
 ## Opérations d'écran
 
@@ -91,6 +103,10 @@ Une autre touche spéciale reconnue par ncurses renvoie `"special"`.
 
 `SIGWINCH` est coalescé puis traité sur le thread principal. Une fois la nouvelle
 taille appliquée, `readKey()` renvoie l'événement symbolique `"resize"`.
+
+Si un callback de signal appelle `curses.stop()` pendant `readKey`, la lecture
+renvoie `nil, "interrupted"`, même sans timeout. Elle n'accède plus à l'écran
+libéré, y compris si une touche avait été lue juste avant le callback.
 
 ## Processus enfants interactifs
 

@@ -1,5 +1,6 @@
 #include "copyTree.hpp"
 #include "lua_utils.hpp"
+#include "nofollow_path.hpp"
 #include "secure_destination.hpp"
 
 #include <iostream>
@@ -59,8 +60,14 @@ copy_directory(const fs::path &source, const fs::path &destination,
     std::error_code ec;
     bool has_warnings = false;
 
+    // A trailing slash (or terminal /.) makes POSIX follow a final symlink
+    // before symlink_status sees it.  Strip only those terminal spellings so
+    // the documented "source root must not be a symlink" guard cannot be
+    // bypassed with e.g. "link/".
+    const fs::path source_nofollow = nofollow_final_component_path(source);
     std::error_code src_ec;
-    const fs::file_status source_status = fs::symlink_status(source, src_ec);
+    const fs::file_status source_status =
+        fs::symlink_status(source_nofollow, src_ec);
     if (src_ec == std::errc::no_such_file_or_directory)
     {
         return "source directory does not exist: " + source.string();
@@ -99,6 +106,13 @@ copy_directory(const fs::path &source, const fs::path &destination,
         return "destination cannot be inside source: '" +
                destination.string() + "' resolves inside '" +
                source.string() + "'";
+    }
+    if (is_within(destination_real, source_real))
+    {
+        // Merging into an ancestor can overwrite a source entry before it
+        // has been copied. Reject before creating or changing any destination.
+        return "destination cannot be an ancestor of source: '" +
+               destination.string() + "' contains '" + source.string() + "'";
     }
 
     SecureDestination secure_destination;

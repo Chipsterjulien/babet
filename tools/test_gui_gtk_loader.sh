@@ -12,16 +12,18 @@ fail() { echo "[FAIL] $1"; FAIL=$((FAIL + 1)); }
 compile_fake() {
     local source="$1" outdir="$2"
     mkdir -p "$outdir"
-    cc -std=c99 -Wall -Wextra -Werror -fPIC -shared \
+    cc -std=c11 -Wall -Wextra -Werror -fPIC -shared -pthread \
         -Wl,-soname,libgtk-4.so.1 \
-        "$ROOT/$source" -o "$outdir/libgtk-4.so.1"
+        "$ROOT/$source" -ldl -o "$outdir/libgtk-4.so.1"
 }
 
 if ! c++ -std=c++23 -Wall -Wextra -Werror -pedantic \
     -I"$ROOT/src/lua_bindings" \
     "$ROOT/tests/gui/gtk_loader_probe.cpp" \
     "$ROOT/src/lua_bindings/gui_gtk_loader.cpp" \
-    -ldl -o "$TMP/probe"; then
+    "$ROOT/src/lua_bindings/process_state.cpp" \
+    -Wl,--wrap=dlopen -Wl,--export-dynamic-symbol=babet_test_mutation_allowed \
+    -ldl -pthread -o "$TMP/probe"; then
     echo "[FAIL] GTK loader standalone probe compiles"
     exit 1
 fi
@@ -30,6 +32,27 @@ pass "GTK loader standalone probe compiles without GTK headers"
 compile_fake tests/gui/fake_gtk4_good.c "$TMP/good" || exit 1
 compile_fake tests/gui/fake_gtk4_init_fail.c "$TMP/init-fail" || exit 1
 compile_fake tests/gui/fake_gtk4_missing_symbol.c "$TMP/missing" || exit 1
+compile_fake tests/gui/fake_gtk4_process_state.c "$TMP/native-thread" || exit 1
+
+if [ "$("$TMP/probe" concurrent-freeze)" = "CONCURRENT_FREEZE_OK" ]; then
+    pass "process-state freeze waits for in-flight mutations and preserves queries"
+else
+    fail "process-state freeze waits for in-flight mutations and preserves queries"
+fi
+
+if OUT="$(LD_LIBRARY_PATH="$TMP/native-thread" "$TMP/probe" load 2>&1)" && [ "$OUT" = "LOAD_OK" ]; then
+    pass "process state is frozen before native constructors and without holding its mutex"
+else
+    fail "process state is frozen before native constructors and without holding its mutex"
+fi
+
+OUT="$(BABET_TEST_GTK_LOAD_FAILURE=1 "$TMP/probe" load 2>&1)"
+RC=$?
+if [ "$RC" -eq 2 ] && grep -Fq 'LOAD_FAIL' <<<"$OUT"; then
+    pass "failed dlopen also retains the process-state freeze"
+else
+    fail "failed dlopen also retains the process-state freeze"
+fi
 
 LOG="$TMP/good.log"
 OUT="$(LD_LIBRARY_PATH="$TMP/good" BABET_FAKE_GTK_LOG="$LOG" "$TMP/probe" load 2>&1)"

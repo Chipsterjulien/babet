@@ -203,6 +203,11 @@ The socket TLS context attempts OpenSSL defaults, OpenSSL environment
 variables, and several known Linux/BSD CA locations. Per-call `ca_cert` and
 `ca_path` are then added.
 
+This applies to both `connect_tls` and `starttls`. An empty string adds no
+custom trust. In contrast, a non-empty [`HTTP`](http.md#http-tls) `ca_cert`
+replaces the default authorities for that request; the identically named
+options therefore have different trust policies across these modules.
+
 Custom trust is isolated per connection:
 
 ```lua
@@ -259,6 +264,14 @@ Once `SSL_connect` begins, any failure closes the socket: timeout,
 interruption, certificate failure, alert, protocol, or I/O error. A ClientHello
 may already have been sent and peer bytes consumed, so falling back to
 plaintext would be unsafe. This is intentionally fail-closed.
+
+After the first `SSL_write` attempt in `send`, abandoning that call because of
+a timeout, interruption or error closes the transport. OpenSSL may have begun
+a record without reporting application bytes written, so checking a positive
+byte counter is insufficient. The original error is retained; subsequent I/O
+reports a closed socket, and `close()` stays idempotent. Closure happens before
+any signal callback is dispatched. A timeout before the first `SSL_write`
+attempt leaves the socket usable.
 
 <a id="tls-examples"></a>
 ## Complete examples
@@ -334,6 +347,11 @@ preconditions.
 
 OpenSSL wording varies. Compare stable states such as `"timeout"` and
 `"interrupted"`; log full messages for diagnosis.
+
+OpenSSL writes are protected against `SIGPIPE`, including during handshake,
+read and shutdown. Transport failures are reported through the API instead of
+terminating the program; `close()` remains best-effort. The application’s
+`babet.signal` handler is not replaced.
 
 <a id="tls-design"></a>
 ## Security and limitations

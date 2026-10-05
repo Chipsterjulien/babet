@@ -229,6 +229,12 @@ La première API autorise volontairement **un seul contexte vivant par
 processus**. Un second `babet_context_create()` simultané renvoie
 `BABET_STATUS_BUSY`.
 
+Le créneau reste occupé pendant toute la destruction, y compris les finaliseurs
+Lua et le nettoyage du terminal/runtime. Un create tenté depuis le callback
+hôte d’un finaliseur ou un autre thread renvoie `BABET_STATUS_BUSY` ; il devient
+possible après la destruction complète. Le mutex des contextes n’est pas
+conservé pendant l’exécution des finaliseurs Lua.
+
 Un appel réalisé depuis un autre thread que celui ayant créé le contexte renvoie
 `BABET_STATUS_WRONG_THREAD` lorsque l'API peut associer l'appel à ce contexte.
 Voir [`examples/embedding/06_lifecycle_threads.c`](examples/embedding/06_lifecycle_threads.c).

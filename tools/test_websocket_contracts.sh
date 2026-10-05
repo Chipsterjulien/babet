@@ -78,6 +78,13 @@ check("fragmented messages and interleaved control frames are supported",
       and "new data frame during fragmented message" in source
       and "frame.opcode == 0x9" in source
       and "send_frame(ws, 0xa" in source)
+check("receive timeouts preserve frame and fragmented-message parser state",
+      "ws->recv_pending.insert(0, destination, offset)" in source
+      and "consumed_header" in source
+      and "recv_fragmented" in source
+      and "recv_message_data" in source
+      and "timeout-mid-frame" in server
+      and "timeout-between-fragments" in server)
 check("outgoing messages are fragmented into bounded frames",
       "SEND_FRAGMENT_BYTES" in source
       and "first ? opcode : 0x0" in source)
@@ -119,6 +126,8 @@ check("runtime regression covers framing, protocol errors and WSS",
       and "masked server frame is rejected" in runtime
       and "oversized announced frame is rejected" in runtime
       and "invalid UTF-8 Close reason is rejected with close code 1007" in runtime
+      and "recv timeout mid-frame preserves framing and binary payload" in runtime
+      and "recv timeout between fragments preserves message state" in runtime
       and "wss accepts a locally trusted certificate" in runtime)
 check("runtime handshake negatives are served deterministically",
       "Sec-WebSocket-Extensions: permessage-deflate" in server

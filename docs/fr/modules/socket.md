@@ -404,6 +404,12 @@ Une erreur après l'envoi de certains octets ne fournit pas le nombre partiel à
 Lua. Pour un protocole nécessitant une reprise transactionnelle, ajoute un
 mécanisme applicatif d'identifiant ou d'acquittement.
 
+Sur un socket TLS, un échec après la première tentative `SSL_write` ferme la
+connexion, y compris si OpenSSL n'a encore annoncé aucun octet envoyé. Le
+premier appel garde son diagnostic (`timeout`, `interrupted` ou erreur TLS),
+puis les appels suivants signalent un socket fermé. Un timeout avant toute
+tentative d'écriture TLS laisse la connexion utilisable.
+
 <a id="socket-recv"></a>
 ## `sock:recv(count, timeout?)`
 
@@ -469,12 +475,18 @@ hello\r\n -> "hello"
 
 Un CR situé ailleurs dans la ligne est conservé.
 
+Les lignes complètes déjà conservées par `recv_all` sont traitées avant toute
+attente réseau. Un appel extrait une seule ligne et garde tous les octets
+suivants pour `recv_line`, `recv` ou `recv_all`.
+
 ### Limite de ligne
 
-Une ligne est limitée à **8 MiB**. Une ligne plus longue renvoie une erreur
+Une ligne est limitée à **8 MiB**, avant retrait du CR éventuel et sans compter
+le LF. Cette limite s'applique aussi aux lignes déjà tamponnées par `recv_all`. Une ligne plus longue renvoie une erreur
 `line too long`. Les octets de cette ligne surdimensionnée ne sont pas exposés
 comme résultat partiel ; ferme généralement la connexion, car le protocole est
-alors désynchronisé.
+alors désynchronisé. Lorsqu'une ligne complète trop longue est déjà tamponnée,
+elle est retirée jusqu'au LF inclus et les données suivantes sont conservées.
 
 ### EOF avant LF
 

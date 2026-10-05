@@ -546,6 +546,7 @@ endif()
 # explicitly after Babet itself is ready.
 add_executable(babet_embedding_smoke EXCLUDE_FROM_ALL
     tests/embedding_smoke.c
+    tests/embedding_lifecycle.c
 )
 target_link_libraries(babet_embedding_smoke PRIVATE
     ${BABET_RUNTIME_TARGET}

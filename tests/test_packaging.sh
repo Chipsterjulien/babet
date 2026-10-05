@@ -1,13 +1,11 @@
 #!/bin/bash
-# Runtime + structural contracts for Babet --create-exe.
+# Runtime contracts for Babet --create-exe.
 # Usage: tests/test_packaging.sh /absolute/path/to/babet
 
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-MODE_OR_BINARY="${1:-}"
-BINARY="${MODE_OR_BINARY}"
+BINARY="${1:-}"
 PASS=0
 FAIL=0
 
@@ -25,46 +23,6 @@ finish() {
     echo "packaging regression: ${PASS} PASS / ${FAIL} FAIL"
     [ "${FAIL}" -eq 0 ]
 }
-
-# Structural assertion: the refusal lives inside the existing `if (fileData)`
-# branch, i.e. it is driven by the exact same embedded-main.lua detection that
-# chooses packaged execution. Also reject a future parallel identity marker.
-if python3 - "${PROJECT_DIR}/src/main.cpp" <<'PY'
-import pathlib
-import sys
-
-source = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-embedded = source.find("if (fileData)")
-if embedded < 0:
-    raise SystemExit("missing existing if (fileData) packaged identity branch")
-
-lua_state = source.find("lua_State *L = luaL_newstate();", embedded)
-if lua_state < 0:
-    raise SystemExit("cannot locate packaged runtime setup")
-
-branch_prefix = source[embedded:lua_state]
-for needle in ('"--create-exe"', '"-c"', "n'est pas disponible dans un exécutable généré"):
-    if needle not in branch_prefix:
-        raise SystemExit(f"packaged builder refusal is not driven directly by fileData: {needle}")
-
-# The product contract forbids a second, persistent identity source beside the
-# embedded-payload detection. Comments mention these names explicitly to state
-# that they are forbidden, so only reject declaration/assignment-like forms.
-for forbidden in ("bool generated_executable", "bool embedded_payload",
-                  "generated_executable = true", "embedded_payload = true"):
-    if forbidden in source:
-        raise SystemExit(f"parallel packaged identity marker introduced: {forbidden}")
-PY
-then
-    pass "generated-app refusal reuses the existing embedded payload identity"
-else
-    fail "generated-app refusal reuses the existing embedded payload identity"
-fi
-
-if [ "${MODE_OR_BINARY}" = "--structural-only" ]; then
-    finish
-    exit $?
-fi
 
 if [ -z "${BINARY}" ] || [ ! -x "${BINARY}" ]; then
     fail "Babet test binary is available" "${BINARY:-missing argument}"

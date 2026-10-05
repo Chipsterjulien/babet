@@ -1,3 +1,6 @@
+#ifndef _LARGEFILE64_SOURCE
+#define _LARGEFILE64_SOURCE 1
+#endif
 #include "zip_utils.hpp"
 #include "miniz.h"
 
@@ -9,9 +12,13 @@
 #include <cerrno>
 #include <exception>
 #include <array>
+#include <algorithm>
 #include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
+#include <memory>
+#include <limits>
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -21,6 +28,78 @@ namespace fs = std::filesystem;
 
 namespace
 {
+    struct ImageMarker { unsigned char bytes[64]; };
+
+    constexpr std::uint64_t marker_integer(const ImageMarker &marker,
+                                           std::size_t offset)
+    {
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < 8; ++i)
+            value |= std::uint64_t(marker.bytes[offset + i]) << (8 * i);
+        return value;
+    }
+
+    constexpr void marker_integer(ImageMarker &marker, std::size_t offset,
+                                  std::uint64_t value)
+    {
+        for (unsigned i = 0; i < 8; ++i)
+            marker.bytes[offset + i] = static_cast<unsigned char>(value >> (8 * i));
+    }
+
+    constexpr std::uint64_t marker_checksum(const ImageMarker &marker)
+    {
+        std::uint64_t value = 14695981039346656037ull;
+        for (std::size_t i = 0; i < 56; ++i)
+            value = (value ^ marker.bytes[i]) * 1099511628211ull;
+        return value;
+    }
+
+    constexpr ImageMarker initial_marker()
+    {
+        ImageMarker marker{};
+        constexpr char magic[] = "BABET_IMAGE_15_f419b2a67e8c930d!";
+        static_assert(sizeof(magic) == 33);
+        for (std::size_t i = 0; i < 32; ++i) marker.bytes[i] = magic[i];
+        marker_integer(marker, 32, 1); // version 1, bare-runtime flag 0
+        marker_integer(marker, 56, marker_checksum(marker));
+        return marker;
+    }
+
+    // Volatile forces reads from the patched, loaded bytes even with LTO.
+    // The live reference in runningEmbeddedImageLayout keeps this section
+    // reachable under --gc-sections; 'used' alone would not be sufficient.
+    __attribute__((used, section(".babet_image")))
+    const volatile ImageMarker image_marker = initial_marker();
+
+    ImageMarker loaded_marker()
+    {
+        ImageMarker marker{};
+        for (std::size_t i = 0; i < sizeof(marker.bytes); ++i)
+            marker.bytes[i] = image_marker.bytes[i];
+        return marker;
+    }
+
+    std::optional<EmbeddedImageLayout> decode_marker(const ImageMarker &marker)
+    {
+        const auto tag = marker_integer(marker, 32);
+        if ((tag != 1 && tag != (1ull | (1ull << 32))) ||
+            marker_integer(marker, 56) != marker_checksum(marker))
+            return std::nullopt;
+        EmbeddedImageLayout layout{tag != 1, marker_integer(marker, 40),
+                                   marker_integer(marker, 48)};
+        if (!layout.generated)
+        {
+            if (layout.archive_offset || layout.archive_size) return std::nullopt;
+        }
+        else if (layout.archive_offset < sizeof(ImageMarker) ||
+                 layout.archive_size < 22 ||
+                 layout.archive_size > std::uint64_t(std::numeric_limits<off64_t>::max()) ||
+                 layout.archive_offset >
+                     std::uint64_t(std::numeric_limits<off64_t>::max()) - layout.archive_size)
+            return std::nullopt;
+        return layout;
+    }
+
     class UniqueFd
     {
     public:
@@ -77,6 +156,66 @@ namespace
     [[noreturn]] void throw_errno(const std::string &operation, int error)
     {
         throw std::system_error(error, std::generic_category(), operation);
+    }
+
+    void read_at(int fd, unsigned char *bytes, std::size_t count, off64_t offset)
+    {
+        while (count)
+        {
+            const ssize_t n = ::pread64(fd, bytes, count, offset);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) throw_errno("read executable image descriptor", n < 0 ? errno : EIO);
+            bytes += n; count -= static_cast<std::size_t>(n); offset += n;
+        }
+    }
+
+    void patch_generated_marker(int fd, off64_t prefix_size, off64_t total_size)
+    {
+        if (prefix_size < static_cast<off64_t>(sizeof(ImageMarker)) ||
+            total_size < prefix_size || total_size - prefix_size < 22)
+            throw std::runtime_error("invalid executable or archive size");
+        const ImageMarker pattern = loaded_marker();
+        std::array<unsigned char, 64 * 1024 + 31> buffer{};
+        off64_t offset = 0, marker_offset = -1;
+        std::size_t carry = 0;
+        while (offset < prefix_size)
+        {
+            const auto count = static_cast<std::size_t>(
+                std::min<off64_t>(64 * 1024, prefix_size - offset));
+            read_at(fd, buffer.data() + carry, count, offset);
+            const std::size_t available = carry + count;
+            for (std::size_t i = 0; i + 32 <= available; ++i)
+            {
+                if (std::memcmp(buffer.data() + i, pattern.bytes, 32) != 0) continue;
+                if (marker_offset >= 0)
+                    throw std::runtime_error("ambiguous executable image descriptor");
+                marker_offset = offset - static_cast<off64_t>(carry) + static_cast<off64_t>(i);
+            }
+            carry = std::min<std::size_t>(31, available);
+            std::memmove(buffer.data(), buffer.data() + available - carry, carry);
+            offset += static_cast<off64_t>(count);
+        }
+        if (marker_offset < 0 ||
+            marker_offset > prefix_size - static_cast<off64_t>(sizeof(ImageMarker)))
+            throw std::runtime_error("missing executable image descriptor; runtime may be compressed or rewritten (UPX?); rebuild and use an uncompressed runtime");
+        ImageMarker marker{};
+        read_at(fd, marker.bytes, sizeof(marker.bytes), marker_offset);
+        const auto layout = decode_marker(marker);
+        if (!layout || layout->generated)
+            throw std::runtime_error("builder requires an unmodified bare runtime descriptor");
+        marker_integer(marker, 32, 1ull | (1ull << 32));
+        marker_integer(marker, 40, static_cast<std::uint64_t>(prefix_size));
+        marker_integer(marker, 48, static_cast<std::uint64_t>(total_size - prefix_size));
+        marker_integer(marker, 56, marker_checksum(marker));
+        std::size_t written = 0;
+        while (written < sizeof(marker.bytes))
+        {
+            const ssize_t n = ::pwrite64(fd, marker.bytes + written,
+                sizeof(marker.bytes) - written, marker_offset + static_cast<off64_t>(written));
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) throw_errno("write executable image descriptor", n < 0 ? errno : EIO);
+            written += static_cast<std::size_t>(n);
+        }
     }
 
     void set_cloexec(int fd, const std::string &path)
@@ -150,6 +289,60 @@ namespace
         // throw and are handled by the outer scan catch: packaging must fail
         // explicitly rather than silently omit an unreadable subtree.
         return entry.is_directory();
+    }
+
+    bool is_embedded_lua_path(const std::string &path)
+    {
+        return path.size() >= 4 && path.compare(path.size() - 4, 4, ".lua") == 0;
+    }
+
+    bool check_embedded_lua_size(const std::string &path, mz_uint64 size)
+    {
+        if (is_embedded_lua_path(path) && size > MAX_EMBEDDED_FILE_SIZE)
+        {
+            std::cerr << "embedded file '" << path
+                      << "' exceeds maximum embedded file size of 16 MiB"
+                      << std::endl;
+            return false;
+        }
+        return true;
+    }
+
+    bool validate_packaged_lua_sizes(const std::string &zipFileName)
+    {
+        mz_zip_archive reader = {};
+        if (!mz_zip_reader_init_file(&reader, zipFileName.c_str(), 0))
+        {
+            std::cerr << "Error reopening completed ZIP for validation" << std::endl;
+            return false;
+        }
+        struct ReaderGuard
+        {
+            mz_zip_archive *zip;
+            ~ReaderGuard() { mz_zip_reader_end(zip); }
+        } guard{&reader};
+
+        for (mz_uint i = 0; i < mz_zip_reader_get_num_files(&reader); ++i)
+        {
+            mz_zip_archive_file_stat info{};
+            const mz_uint length = mz_zip_reader_get_filename(&reader, i, nullptr, 0);
+            if (length == 0 || !mz_zip_reader_file_stat(&reader, i, &info))
+            {
+                std::cerr << "Error inspecting completed ZIP" << std::endl;
+                return false;
+            }
+            // m_filename in file_stat is bounded; get the complete name so
+            // deeply nested paths cannot hide their .lua suffix.
+            std::vector<char> name(length);
+            if (mz_zip_reader_get_filename(&reader, i, name.data(), length) != length)
+            {
+                std::cerr << "Error reading completed ZIP filename" << std::endl;
+                return false;
+            }
+            if (!check_embedded_lua_size(std::string(name.data()), info.m_uncomp_size))
+                return false;
+        }
+        return true;
     }
 } // namespace
 
@@ -278,6 +471,15 @@ bool createZipFromDirectory(const std::string &dir, const std::string &zipFileNa
             std::string relativePath =
                 entry.path().lexically_relative(dir).string();
 
+            // Reject unusable scripts before doing compression work. Assets
+            // with other suffixes retain their existing packaging contract.
+            if (is_embedded_lua_path(relativePath) &&
+                !check_embedded_lua_size(relativePath, entry.file_size()))
+            {
+                mz_zip_writer_end(&zip);
+                return false;
+            }
+
             if (!mz_zip_writer_add_file(&zip, relativePath.c_str(),
                                         entry.path().string().c_str(),
                                         nullptr, 0, MZ_BEST_COMPRESSION))
@@ -303,7 +505,26 @@ bool createZipFromDirectory(const std::string &dir, const std::string &zipFileNa
         return false;
     }
     mz_zip_writer_end(&zip);
-    return true;
+    try
+    {
+        // Check the bytes actually archived too: a source file may grow
+        // between the initial file_size() and miniz opening it. Publication
+        // is only allowed after the completed archive passes this check.
+        return validate_packaged_lua_sizes(zipFileName);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error validating completed ZIP: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+std::optional<EmbeddedImageLayout> runningEmbeddedImageLayout(std::string *error)
+{
+    if (error) error->clear();
+    const auto layout = decode_marker(loaded_marker());
+    if (!layout && error) *error = "invalid loaded executable image descriptor";
+    return layout;
 }
 
 void mergeFiles(const std::string &exe, const std::string &zip,
@@ -400,7 +621,12 @@ void mergeFiles(const std::string &exe, const std::string &zip,
     set_cloexec(temp_fd.get(), temp_display);
 
     copy_fd_contents(exe_fd.get(), temp_fd.get(), exe, temp_display);
+    const off64_t prefix_size = ::lseek64(temp_fd.get(), 0, SEEK_CUR);
+    if (prefix_size < 0) throw_errno("measure executable image", errno);
     copy_fd_contents(zip_fd.get(), temp_fd.get(), zip, temp_display);
+    const off64_t total_size = ::lseek64(temp_fd.get(), 0, SEEK_CUR);
+    if (total_size < 0) throw_errno("measure packaged image", errno);
+    patch_generated_marker(temp_fd.get(), prefix_size, total_size);
 
     // Le mode final est posé AVANT le rename, mais seulement après que le
     // contenu complet a été écrit. Un temporaire partiel reste ainsi privé
@@ -438,27 +664,103 @@ void mergeFiles(const std::string &exe, const std::string &zip,
 std::optional<std::vector<char>> readEmbeddedFile(
     const std::string &exePath,
     const std::string &archivePath,
-    std::string *error)
+    std::string *error,
+    const EmbeddedImageLayout *layout)
 {
     if (error != nullptr)
     {
         error->clear();
     }
 
-    mz_zip_archive zip = {};
-
-    // miniz scanne depuis la fin du fichier pour trouver l'EOCD, donc un zip
-    // appendé à un exécutable est trouvé automatiquement. Une init qui échoue
-    // signifie aussi légitimement « binaire Babet nu » : pas d'erreur ici.
-    if (!mz_zip_reader_init_file(&zip, exePath.c_str(), 0))
+    // Keep the stream available after a failed miniz initialization: miniz
+    // can report "central directory not found" even when a read failed.
+    // Linux/glibc's 'e' mode makes this descriptor close-on-exec atomically.
+    struct FileCloser
     {
+        void operator()(FILE *stream) const noexcept { std::fclose(stream); }
+    };
+    // Match miniz's large-file stdio API on 32-bit Linux too.
+    std::unique_ptr<FILE, FileCloser> input(::fopen64(exePath.c_str(), "rbe"));
+    if (!input)
+    {
+        const int open_error = errno;
+        if (error != nullptr)
+            *error = "cannot open executable image '" + exePath + "': " +
+                     std::strerror(open_error);
         return std::nullopt;
     }
+
+    auto image_error = [&](const char *detail)
+    {
+        if (error) *error = "cannot inspect executable image '" + exePath + "': " + detail;
+    };
+    if (::fseeko64(input.get(), 0, SEEK_END) != 0)
+    {
+        image_error("cannot seek executable image");
+        return std::nullopt;
+    }
+    const off64_t image_size = ::ftello64(input.get());
+    if (image_size < 0)
+    {
+        image_error("cannot measure executable image");
+        return std::nullopt;
+    }
+    if (layout && layout->generated &&
+        (layout->archive_offset > static_cast<std::uint64_t>(image_size) ||
+         static_cast<std::uint64_t>(image_size) - layout->archive_offset != layout->archive_size))
+    {
+        image_error("generated application size mismatch (truncated or appended data)");
+        return std::nullopt;
+    }
+    std::array<unsigned char, 22> trailer{};
+    if (image_size >= static_cast<off64_t>(trailer.size()))
+    {
+        if (::fseeko64(input.get(), image_size - static_cast<off64_t>(trailer.size()), SEEK_SET) != 0 ||
+            std::fread(trailer.data(), 1, trailer.size(), input.get()) != trailer.size() ||
+            std::ferror(input.get()) || std::feof(input.get()))
+        {
+            image_error("read failure or truncated image");
+            return std::nullopt;
+        }
+    }
+    // The loaded descriptor, not coincidental PK bytes in ELF data, identifies
+    // a bare runtime. Still check image access/I/O before processing arguments.
+    if (layout && !layout->generated) return std::nullopt;
+    if (image_size < static_cast<off64_t>(trailer.size()) ||
+        std::memcmp(trailer.data(), "PK\005\006", 4) != 0 || trailer[20] || trailer[21])
+    {
+        if (layout && layout->generated) image_error("missing or invalid generated ZIP trailer");
+        return std::nullopt;
+    }
+    const off64_t archive_start = layout ? static_cast<off64_t>(layout->archive_offset) : 0;
+    if (::fseeko64(input.get(), archive_start, SEEK_SET) != 0)
+    {
+        image_error("cannot seek embedded archive");
+        return std::nullopt;
+    }
+    mz_zip_archive zip = {};
+    if (!mz_zip_reader_init_cfile(&zip, input.get(), layout ? layout->archive_size : 0, 0))
+    {
+        const mz_zip_error reason = mz_zip_get_last_error(&zip);
+        const bool read_failed = std::ferror(input.get()) || std::feof(input.get());
+        if (error != nullptr)
+            *error = "cannot inspect executable image '" + exePath + "': " +
+                     (read_failed ? "read failure or truncated image"
+                                  : mz_zip_get_error_string(reason));
+        return std::nullopt;
+    }
+    // Error-message construction can itself throw under memory pressure.
+    // Keep the archive and its file descriptor owned until every return or
+    // C++ exception has left this function, including the allocation catch.
+    struct ReaderGuard
+    {
+        mz_zip_archive *zip;
+        ~ReaderGuard() { mz_zip_reader_end(zip); }
+    } guard{&zip};
 
     int idx = mz_zip_reader_locate_file(&zip, archivePath.c_str(), nullptr, 0);
     if (idx < 0)
     {
-        mz_zip_reader_end(&zip);
         return std::nullopt;
     }
 
@@ -469,7 +771,6 @@ std::optional<std::vector<char>> readEmbeddedFile(
         {
             *error = "cannot inspect embedded file '" + archivePath + "'";
         }
-        mz_zip_reader_end(&zip);
         return std::nullopt;
     }
 
@@ -480,7 +781,6 @@ std::optional<std::vector<char>> readEmbeddedFile(
             *error = "embedded file '" + archivePath +
                      "' exceeds maximum embedded file size of 16 MiB";
         }
-        mz_zip_reader_end(&zip);
         return std::nullopt;
     }
 
@@ -496,7 +796,6 @@ std::optional<std::vector<char>> readEmbeddedFile(
             *error = "cannot allocate memory for embedded file '" +
                      archivePath + "': " + e.what();
         }
-        mz_zip_reader_end(&zip);
         return std::nullopt;
     }
 
@@ -506,10 +805,8 @@ std::optional<std::vector<char>> readEmbeddedFile(
         {
             *error = "cannot extract embedded file '" + archivePath + "'";
         }
-        mz_zip_reader_end(&zip);
         return std::nullopt;
     }
 
-    mz_zip_reader_end(&zip);
     return data;
 }

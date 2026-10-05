@@ -8,6 +8,7 @@
 #include "http_download_file.hpp"
 #include "http.hpp"
 #include "lua_utils.hpp"
+#include "sigpipe_guard.hpp"
 
 #include <chrono>
 #include <climits>
@@ -837,6 +838,15 @@ namespace
                 }
             }
 
+            // Enclose the entire client lifetime, including TLS handshake,
+            // reads and destructor shutdown. Result builders below are
+            // protected calls: C++ unwinding always restores this mask.
+            babet_io::SigpipeGuard sigpipe_guard;
+            if (sigpipe_guard.error() != 0)
+            {
+                return push_fail_protected(L,
+                    "http: cannot protect transport from SIGPIPE");
+            }
             httplib::Client cli(parts.origin);
             cli.set_follow_location(follow);
             cli.enable_server_certificate_verification(verify);

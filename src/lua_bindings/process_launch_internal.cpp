@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <csignal>
 #include <cstdlib>
 #include <memory>
 #include <unordered_set>
@@ -309,6 +310,17 @@ bool prepare_command(
 
 int exec_prepared_command(const PreparedCommand &prepared) noexcept
 {
+    // A worker blocks Babet's managed signals in its own thread. That mask
+    // survives fork and exec, but must not make the external program ignore
+    // SIGTERM/SIGINT/SIGPIPE. Every Babet-launched command starts unblocked.
+    // sigprocmask is async-signal-safe; this path does not allocate after fork.
+    sigset_t empty_mask;
+    ::sigemptyset(&empty_mask);
+    if (::sigprocmask(SIG_SETMASK, &empty_mask, nullptr) != 0)
+    {
+        return errno;
+    }
+
     bool saw_eacces = false;
     for (const std::string &path : prepared.executable_paths)
     {

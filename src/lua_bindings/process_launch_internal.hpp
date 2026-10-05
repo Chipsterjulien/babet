@@ -46,6 +46,7 @@ bool prepare_command(
 
 // N'alloue rien : essaie les chemins préparés avec execve() et reproduit la
 // priorité Linux ENOENT/ENOTDIR/EACCES. Retourne uniquement en cas d'échec.
+// Dans l'enfant uniquement : remet d'abord le masque des signaux à vide.
 int exec_prepared_command(const PreparedCommand &prepared) noexcept;
 
 // Hooks de test internes, non documentés. Le marqueur O_EXCL garantit que le

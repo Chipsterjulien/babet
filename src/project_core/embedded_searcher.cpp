@@ -1,5 +1,7 @@
 #include "embedded_searcher.hpp"
+#include "embedded_lua.hpp"
 #include "zip_utils.hpp"
+#include "../lua_bindings/lua_utils.hpp"
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -12,7 +14,7 @@ static int embedded_read_error_loader(lua_State *L)
     return luaL_error(L, "%s", message ? message : "embedded file read error");
 }
 
-static int embedded_lua_searcher(lua_State *L)
+static int embedded_lua_searcher_impl(lua_State *L)
 {
     size_t module_len = 0;
     const char *moduleName = luaL_checklstring(L, 1, &module_len);
@@ -23,97 +25,82 @@ static int embedded_lua_searcher(lua_State *L)
         return 1;
     }
 
-    // CORRECTIF longjmp (post-revue Gemini) : si luaL_loadbuffer
-    // échoue (erreur de syntaxe dans un .lua embarqué), on doit
-    // appeler lua_error() qui fait un longjmp. Ce longjmp ne déroule
-    // PAS les destructeurs C++ — donc base / candidates / tried / data
-    // fuiraient. On force la destruction de TOUS les objets C++
-    // AVANT d'appeler lua_error, via un scope dédié et un retour
-    // différé : on note si le load a échoué, on sort du scope (les
-    // destructeurs tournent), PUIS on appelle lua_error.
-    //
-    // Note pratique : ce bug est de toute façon terminal (un module
-    // embarqué avec une erreur de syntaxe = binaire qui meurt au
-    // require()). Mais on respecte la cohérence avec le reste du
-    // code, et ça nous évite une fuite microscopique au cas où un
-    // futur appelant attraperait l'erreur via pcall.
-    bool load_failed = false;
-    bool found = false;
+    // All allocating Lua operations below run under a protected builder.
+    // A Lua longjmp becomes a C++ marker: buffers and strings unwind before
+    // the searcher's exception boundary re-raises the original Lua error.
+    // Merely putting the owners in a scope before lua_error is insufficient:
+    // lua_pushlstring/lua_pushcclosure can themselves raise LUA_ERRMEM.
 
+    // "foo.bar" -> "foo/bar"
+    std::string base(moduleName, module_len);
+    std::replace(base.begin(), base.end(), '.', '/');
+
+    // Standard Lua order: foo/bar.lua, then foo/bar/init.lua.
+    const std::string candidates[] = {
+        base + ".lua",
+        base + "/init.lua",
+    };
+
+    std::string tried;
+
+    for (const auto &path : candidates)
     {
-        // "foo.bar" -> "foo/bar"
-        std::string base(moduleName, module_len);
-        std::replace(base.begin(), base.end(), '.', '/');
-
-        // On tente, dans l'ordre, les deux conventions Lua standard :
-        //   1. foo/bar.lua
-        //   2. foo/bar/init.lua
-        // Identique à package.path en mode dossier.
-        const std::string candidates[] = {
-            base + ".lua",
-            base + "/init.lua",
-        };
-
-        std::string tried;
-
-        for (const auto &path : candidates)
+        std::string read_error;
+        auto data = readEmbeddedFile(exePath, path, &read_error);
+        if (!read_error.empty())
         {
-            std::string read_error;
-            auto data = readEmbeddedFile(exePath, path, &read_error);
-            if (!read_error.empty())
+            // A broken entry must stop require(), never fall through to a
+            // same-named disk module. Preserve the existing error loader.
+            auto builder = [&](lua_State *state) noexcept -> int
             {
-                // L'entrée existe mais ne peut pas être chargée (taille
-                // excessive, archive corrompue, allocation impossible).
-                // Renvoyer un loader qui lève garantit que require() ne
-                // contourne pas l'erreur en cherchant un module homonyme
-                // dans package.path après l'archive embarquée.
-                lua_pushlstring(L, read_error.data(), read_error.size());
-                lua_pushcclosure(L, embedded_read_error_loader, 1);
-                lua_pushlstring(L, path.data(), path.size());
-                found = true;
-                break;
-            }
-            if (data)
-            {
-                found = true;
-                if (luaL_loadbuffer(L, data->data(), data->size(),
-                                    path.c_str()) != LUA_OK)
-                {
-                    // L'erreur est déjà sur la pile Lua (poussée par
-                    // luaL_loadbuffer). On note l'échec et on sort
-                    // du scope pour laisser les destructeurs tourner.
-                    load_failed = true;
-                    break;
-                }
-                lua_pushstring(L, path.c_str());
-                // Tous les objets C++ vont être détruits proprement
-                // en sortie de scope, puis on return 2.
-                break;
-            }
-            tried += "\n\tno embedded file '" + path + "'";
+                lua_pushlstring(state, read_error.data(), read_error.size());
+                lua_pushcclosure(state, embedded_read_error_loader, 1);
+                lua_pushlstring(state, path.data(), path.size());
+                return 2;
+            };
+            return lua_build_results_protected(L, builder, 2);
         }
-
-        if (!found)
+        if (data)
         {
-            // Aucun candidat : on push le message agrégé. Lua le
-            // concatènera aux messages des autres searchers.
-            lua_pushstring(L, tried.c_str());
-            // Idem : les destructeurs tournent en sortie de scope,
-            // puis return 1.
+            auto builder = [&](lua_State *state) noexcept -> int
+            {
+                if (load_embedded_lua(state, data->data(), data->size(),
+                                      path.c_str()) != LUA_OK)
+                    return lua_error(state);
+                lua_pushlstring(state, path.data(), path.size());
+                return 2;
+            };
+            return lua_build_results_protected(L, builder, 2);
         }
-    } // ← base, candidates[], tried, data tous détruits ici.
+        tried += "\n\tno embedded file '" + path + "'";
+    }
 
-    if (load_failed)
+    return push_string_protected(L, tried);
+}
+
+struct EmbeddedSearcherExceptionReporter
+{
+    int operator()(lua_State *L, LuaCxxExceptionKind kind,
+                   const char *detail) const
     {
-        // Maintenant que la pile C++ est nettoyée, le longjmp de
-        // lua_error est sûr. L'erreur est déjà sur la pile Lua.
+        if (kind == LuaCxxExceptionKind::lua_error_pending)
+            return lua_error(L);
+        if (kind == LuaCxxExceptionKind::out_of_memory)
+            lua_pushliteral(L, "embedded module loader: out of memory");
+        else if (kind == LuaCxxExceptionKind::protected_builder_failure)
+            lua_pushstring(L, detail);
+        else
+            lua_pushliteral(L, "embedded module loader: internal C++ failure");
+        // Report after C++ exception destruction, and stop require() rather
+        // than treating a native failure as an absent embedded module.
         return lua_error(L);
     }
-    if (!found)
-    {
-        return 1; // message d'agrégation déjà poussé
-    }
-    return 2; // (chunk, path) déjà poussés
+};
+
+static int embedded_lua_searcher(lua_State *L)
+{
+    return invoke_lua_cfunction_with_exception_boundary<embedded_lua_searcher_impl>(
+        L, EmbeddedSearcherExceptionReporter{});
 }
 
 void register_embedded_searcher(lua_State *L, const char *exePath)

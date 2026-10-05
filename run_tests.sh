@@ -202,15 +202,15 @@ if ! bash "${SCRIPT_DIR}/tools/test_selftest_accounting.sh"; then
     exit 1
 fi
 
-print_preflight_stage "Préflight — identité des exécutables packagés"
-if ! bash "${SCRIPT_DIR}/tests/test_packaging.sh" --structural-only; then
-    echo "ÉCHEC : le préflight d'identité des exécutables packagés a échoué."
-    exit 1
-fi
-
 print_preflight_stage "Préflight — nettoyage des artefacts locaux"
 if ! bash "${SCRIPT_DIR}/tools/test_clear_code_contracts.sh"; then
     echo "ÉCHEC : le préflight de nettoyage des artefacts locaux a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — chemins et liens symboliques des arborescences"
+if ! bash "${SCRIPT_DIR}/tools/test_filesystem_symlink_contracts.sh"; then
+    echo "ÉCHEC : le contrat des chemins d'arborescences a échoué."
     exit 1
 fi
 
@@ -364,6 +364,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_release_builder_contracts.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — déploiement sans compression du runtime"
+if ! python3 "${SCRIPT_DIR}/tools/test_deploy.py"; then
+    echo "ÉCHEC : le contrôle du déploiement a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — étude taille et profils de build"
 if ! bash "${SCRIPT_DIR}/tools/test_size_audit_contracts.sh"; then
     echo "ÉCHEC : le préflight de l'étude taille/profils a échoué."
@@ -497,6 +503,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_gui_runtime.sh" "${BINARY}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — état processus après chargement GTK"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_process_state.py" "${BINARY}"; then
+    echo "ÉCHEC : la protection de l'état processus après chargement GTK a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — analyseur de taille du linker"
 if ! bash "${SCRIPT_DIR}/tools/test_size_audit_runtime.sh" "${BINARY}"; then
     echo "ÉCHEC : la régression de l'analyseur de taille a échoué."
@@ -544,6 +556,24 @@ if ! bash "${SCRIPT_DIR}/tools/test_lua_longjmp_oom.sh" "${OOM_ARGS[@]}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — erreurs mémoire des modules embarqués"
+if ! bash "${SCRIPT_DIR}/tools/test_embedded_oom.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : le nettoyage mémoire/archives des modules embarqués a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — mergeTables, parcours et erreurs mémoire"
+if ! bash "${SCRIPT_DIR}/tools/test_merge_tables.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : la régression de mergeTables a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — commandes standard des workers, ressources et erreurs mémoire"
+if ! bash "${SCRIPT_DIR}/tools/test_worker_process_native.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : la régression native des commandes standard des workers a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — spawn interactif sous pseudo-terminal"
 if ! bash "${SCRIPT_DIR}/tools/test_spawn_pty.sh" "${BINARY}"; then
     echo "ÉCHEC : le test PTY de babet.spawn a échoué."
@@ -553,6 +583,18 @@ fi
 print_preflight_stage "Régression — ncursesw sous pseudo-terminal"
 if ! bash "${SCRIPT_DIR}/tools/test_curses_pty.sh" "${BINARY}"; then
     echo "ÉCHEC : le test PTY/runtime ncursesw a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — arrêt curses par callback et sources de copie"
+if ! bash "${SCRIPT_DIR}/tools/test_runtime_safety_native.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : les régressions natives curses/sources de copie ont échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — os.exit, finaliseurs et restauration du terminal"
+if ! python3 "${SCRIPT_DIR}/tools/test_cli_exit.py" "${BINARY}"; then
+    echo "ÉCHEC : le test de sortie contrôlée du CLI a échoué."
     exit 1
 fi
 
@@ -597,6 +639,72 @@ print_preflight_stage "Régression — disparition concurrente dans babet.find"
 if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
     bash "${SCRIPT_DIR}/tools/test_find_disappearing_directory.sh" "${BINARY}"; then
     echo "ÉCHEC : le test de disparition concurrente dans babet.find a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — conservation des données dans moveTree"
+if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
+    python3 "${SCRIPT_DIR}/tools/test_tree_safety.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression de conservation des arborescences a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — SIGPIPE TLS et signaux des processus enfants"
+if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
+    python3 "${SCRIPT_DIR}/tools/test_signal_runtime.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression des signaux réseau/processus a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — autorités TLS, isolation des CA et identité serveur"
+if ! python3 "${SCRIPT_DIR}/tools/test_ca_trust.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression des politiques de confiance TLS a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — envois abandonnés et tampon de réception"
+if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
+    python3 "${SCRIPT_DIR}/tools/test_network_recovery.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression des états réseau a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — identité, loaders et limites des exécutables embarqués"
+if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
+    python3 "${SCRIPT_DIR}/tools/test_embedded_runtime.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression des exécutables embarqués a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — hook initial et erreurs de lecture du binaire"
+if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
+    python3 "${SCRIPT_DIR}/tools/test_startup_state.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression du hook initial ou de l'identité du binaire a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — identité embarquée et applications endommagées"
+if ! BABET_TEST_ASAN_RUNTIME="${ASAN_RUNTIME}" \
+    python3 "${SCRIPT_DIR}/tools/test_image_identity.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression d'identité des exécutables a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — fermeture déterministe des curseurs SQLite"
+if ! python3 "${SCRIPT_DIR}/tools/test_lifecycle_runtime.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression du cycle de vie SQLite a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — sortie des workers et locale partagée"
+if ! python3 "${SCRIPT_DIR}/tools/test_worker_process_state.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression de l'état processus des workers a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — commandes standard et signaux des workers"
+if ! python3 "${SCRIPT_DIR}/tools/test_worker_standard_process.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression des commandes standard des workers a échoué."
     exit 1
 fi
 

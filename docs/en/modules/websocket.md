@@ -67,8 +67,8 @@ be strings, and unknown fields are rejected.
 | --- | ---: | --- |
 | `timeout` | `0` | finite seconds `>= 0`; one deadline for TCP, TLS and HTTP Upgrade |
 | `verify` | `true` | verify the certificate chain and reference identity for `wss://` |
-| `ca_cert` | none | explicit PEM CA file for this connection |
-| `ca_path` | none | explicit CA directory for this connection |
+| `ca_cert` | none | PEM CA file added to default authorities for this connection |
+| `ca_path` | none | OpenSSL CA directory added to default authorities for this connection |
 | `hostname` | URL host | TLS identity/SNI override |
 | `min_version` | `"1.2"` | `"1.2"` or `"1.3"` |
 | `max_message_bytes` | 16 MiB | complete reassembled message ceiling |
@@ -96,6 +96,18 @@ local ws = assert(babet.websocket.connect("wss://automation.internal/events", {
     ca_cert = "/etc/myapp/automation-ca.pem",
 }))
 ```
+
+For WSS, `ca_cert` and `ca_path` **add** authorities to those already loaded
+from OpenSSL defaults, its environment variables, and recognized distribution
+locations. They do not restrict trust to the supplied file or directory. An
+empty string adds nothing; a call's custom authorities are not retained by
+subsequent connections.
+
+This matches [`socket TLS`](tls.md#tls-ca) and differs from
+[`HTTP`](http.md#http-tls), where a non-empty `ca_cert` file replaces the default
+authorities. This is not leaf-certificate or public-key pinning: several
+certificates issued by one CA can be accepted. With `verify = true`, the
+server's identity is still checked.
 
 Use a directory of OpenSSL-compatible CA certificates:
 
@@ -193,6 +205,16 @@ Large messages are automatically fragmented into continuation frames. Every
 client frame is masked with a fresh unpredictable 32-bit key obtained from
 OpenSSL's cryptographic RNG, including frames sent over TLS.
 
+Once sending a frame has been attempted, abandoning it because of a timeout,
+interruption or transport error closes the connection. This also covers
+fragmented messages, Ping and automatic Pong replies during `recv`. The first
+call keeps its error; subsequent operations return `closed` and `close()` stays
+idempotent. Closure happens before any signal callback is dispatched.
+
+Validation errors before transmission (UTF-8, message size, arguments) leave
+the connection usable. A receive timeout that does not abandon a write keeps
+the receive state and remains resumable.
+
 ## Sending binary data
 
 ```lua
@@ -270,6 +292,10 @@ Babet fails closed:
 Transport failures and timeouts remain `(nil, err)` results. A handled POSIX
 signal interrupts the current wait, dispatches the pending callback, then
 returns `(nil, "interrupted")`.
+
+For `wss://`, internal TLS writes during handshake, send and receive are
+protected against `SIGPIPE`. A transport failure does not terminate the
+program or replace the application’s signal handler.
 
 ## WebDriver BiDi example
 

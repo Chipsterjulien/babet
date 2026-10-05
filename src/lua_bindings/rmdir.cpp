@@ -1,5 +1,6 @@
 #include "rmdir.hpp"
 #include "lua_utils.hpp"
+#include "nofollow_path.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -14,12 +15,12 @@ namespace fs = std::filesystem;
 
 namespace
 {
-std::optional<std::string> require_real_directory(std::string_view path)
+std::optional<std::string> require_real_directory(const fs::path &path)
 {
     struct stat status
     {
     };
-    const std::string owned(path);
+    const std::string owned = path.string();
     if (::lstat(owned.c_str(), &status) != 0)
     {
         return "cannot inspect directory '" + owned + "': " +
@@ -35,12 +36,15 @@ std::optional<std::string> require_real_directory(std::string_view path)
 
 std::optional<std::string> rmdir(std::string_view path)
 {
-    if (auto error = require_real_directory(path); error)
+    // A final slash or /. hides a symlink from lstat. Use the same guarded
+    // spelling for the check and the removal; never normalize interior '..'.
+    const fs::path guarded = nofollow_final_component_path(fs::path(path));
+    if (auto error = require_real_directory(guarded); error)
     {
         return error;
     }
 
-    const std::string owned(path);
+    const std::string owned = guarded.string();
     if (::rmdir(owned.c_str()) != 0)
     {
         return "cannot remove directory '" + owned + "': " +
@@ -51,13 +55,14 @@ std::optional<std::string> rmdir(std::string_view path)
 
 std::optional<std::string> rmdir_all(std::string_view path)
 {
-    if (auto error = require_real_directory(path); error)
+    const fs::path guarded = nofollow_final_component_path(fs::path(path));
+    if (auto error = require_real_directory(guarded); error)
     {
         return error;
     }
 
     std::error_code ec;
-    const auto count = fs::remove_all(fs::path(path), ec);
+    const auto count = fs::remove_all(guarded, ec);
     if (ec)
     {
         return "cannot remove directory '" + std::string(path) + "': " +

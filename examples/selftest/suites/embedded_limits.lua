@@ -7,8 +7,8 @@ print("=== embedded ZIP size limit (lot 3) ===")
 do
     -- La construction d'un exécutable n'est disponible qu'en mode dossier.
     -- Le test produit un module Lua de 16 MiB + quelques octets, très
-    -- compressible, puis vérifie que le binaire embarqué le refuse avant
-    -- toute allocation géante ou compilation Lua.
+    -- compressible, puis vérifie que le builder le refuse sans publier
+    -- un exécutable que le loader ne pourrait pas charger.
     if not (arg and arg[-1] ~= nil) then
         print("[INFO] LOT 3 ZIP limit: ignoré en mode embarqué "
             .. "(testé en mode dossier)")
@@ -78,20 +78,17 @@ do
             local built = babet.exec(current_exe, {
                 "--create-exe", project, output,
             }, { timeout = 60 })
-            ok_in("folder", "LOT 3 ZIP limit: executable built",
-                type(built) == "table" and built.code == 0,
-                "code=" .. tostring(built and built.code)
-                .. " stderr=" .. tostring(built and built.stderr))
-
-            local launched = babet.exec(output, {}, { timeout = 15 })
-            ok_in("folder", "LOT 3 ZIP limit: oversized embedded module rejected",
-                type(launched) == "table" and launched.code ~= 0
-                and type(launched.stderr) == "string"
-                and launched.stderr:find(
+            ok_in("folder", "LOT 3 ZIP limit: oversized module rejected at packaging",
+                type(built) == "table" and built.code ~= 0
+                and type(built.stderr) == "string"
+                and built.stderr:find("huge.lua", 1, true) ~= nil
+                and built.stderr:find(
                     "exceeds maximum embedded file size of 16 MiB",
                     1, true) ~= nil,
-                "code=" .. tostring(launched and launched.code)
-                .. " stderr=" .. tostring(launched and launched.stderr))
+                "code=" .. tostring(built and built.code)
+                .. " stderr=" .. tostring(built and built.stderr))
+            ok_in("folder", "LOT 3 ZIP limit: unusable executable not published",
+                not babet.fileExists(output))
         end
 
         babet.rmdirAll(root)

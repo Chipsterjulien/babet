@@ -1,4 +1,5 @@
 #include "secure_destination.hpp"
+#include "nofollow_path.hpp"
 
 #include <atomic>
 #include <cerrno>
@@ -126,8 +127,15 @@ SecureDestination::open_root(const fs::path &root)
         root_fd_ = -1;
     }
 
+    // `open("symlink/", O_NOFOLLOW|O_DIRECTORY)` follows the symlink on
+    // Linux because the slash turns it into an intermediate component.
+    // Use the same de-suffixed spelling for both the lstat-style check and
+    // the protected open, otherwise a forbidden destination root symlink can
+    // redirect all subsequent *at() writes outside the requested root.
+    const fs::path root_nofollow = nofollow_final_component_path(root);
+
     std::error_code ec;
-    fs::file_status status = fs::symlink_status(root, ec);
+    fs::file_status status = fs::symlink_status(root_nofollow, ec);
     if (ec && ec != std::errc::no_such_file_or_directory)
     {
         return "cannot inspect destination root '" + root.string() +
@@ -144,7 +152,7 @@ SecureDestination::open_root(const fs::path &root)
         (!ec && !fs::exists(status)))
     {
         ec.clear();
-        fs::create_directories(root, ec);
+        fs::create_directories(root_nofollow, ec);
         if (ec)
         {
             return "cannot create destination root '" + root.string() +
@@ -157,8 +165,8 @@ SecureDestination::open_root(const fs::path &root)
                root.string() + "'";
     }
 
-    int fd = ::open(root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                                      O_NOFOLLOW);
+    int fd = ::open(root_nofollow.c_str(),
+                    O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
     {
         return destination_error(root, "cannot securely open destination root",
@@ -166,7 +174,7 @@ SecureDestination::open_root(const fs::path &root)
     }
 
     root_fd_ = fd;
-    root_path_ = root;
+    root_path_ = root_nofollow;
     return std::nullopt;
 }
 
@@ -371,7 +379,34 @@ std::optional<std::string>
 SecureDestination::copy_regular_file(
     const fs::path &source, const fs::path &relative_destination)
 {
-    int source_fd = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+    return copy_regular_file(source, relative_destination, nullptr);
+}
+
+std::optional<std::string>
+SecureDestination::copy_regular_file(
+    const fs::path &source, const fs::path &relative_destination, int *copied_fd)
+{
+    // O_PATH pins the inode without opening a device/FIFO for I/O. The scan
+    // alone cannot protect against a later replacement of the source path.
+    const int pinned_fd = ::open(source.c_str(), O_PATH | O_CLOEXEC | O_NOFOLLOW);
+    if (pinned_fd < 0)
+        return destination_error(source, "cannot inspect source file", errno);
+    struct PinGuard
+    {
+        int fd;
+        ~PinGuard() { if (fd >= 0) ::close(fd); }
+    } pin{pinned_fd};
+    struct stat pinned_stat{};
+    if (::fstat(pinned_fd, &pinned_stat) != 0)
+        return destination_error(source, "cannot inspect source file", errno);
+    if (!S_ISREG(pinned_stat.st_mode))
+        return "source is not a regular file: '" + source.string() + "'";
+
+    // Reopen that exact regular inode, not the possibly replaced pathname.
+    // Like executable-image loading, this Linux path requires procfs.
+    const std::string pinned_path = "/proc/self/fd/" + std::to_string(pinned_fd);
+    int source_fd = ::open(pinned_path.c_str(),
+                           O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
     if (source_fd < 0)
     {
         return destination_error(source, "cannot open source file", errno);
@@ -384,10 +419,21 @@ SecureDestination::copy_regular_file(
         ::close(source_fd);
         return destination_error(source, "cannot inspect source file", e);
     }
-    if (!S_ISREG(source_stat.st_mode))
+    if (!S_ISREG(source_stat.st_mode) ||
+        source_stat.st_dev != pinned_stat.st_dev ||
+        source_stat.st_ino != pinned_stat.st_ino)
     {
         ::close(source_fd);
         return "source is not a regular file: '" + source.string() + "'";
+    }
+
+    const int source_flags = ::fcntl(source_fd, F_GETFL);
+    if (source_flags < 0 ||
+        ::fcntl(source_fd, F_SETFL, source_flags & ~O_NONBLOCK) != 0)
+    {
+        const int e = errno;
+        ::close(source_fd);
+        return destination_error(source, "cannot configure source file", e);
     }
 
     int parent_fd = -1;
@@ -514,6 +560,11 @@ SecureDestination::copy_regular_file(
 
     ::close(parent_fd);
     ::close(source_fd);
+    if (copied_fd)
+    {
+        *copied_fd = pinned_fd;
+        pin.fd = -1;
+    }
     return std::nullopt;
 }
 
@@ -560,10 +611,24 @@ SecureDestination::move_entry(const fs::path &source,
                                  "cannot move source entry", rename_error);
     }
 
-    if (auto error = copy_regular_file(source, relative_destination); error)
+    int copied_fd = -1;
+    if (auto error = copy_regular_file(source, relative_destination, &copied_fd); error)
     {
         return error;
     }
+    struct CopiedPinGuard
+    {
+        int fd;
+        ~CopiedPinGuard() { ::close(fd); }
+    } copied_pin{copied_fd};
+    struct stat copied{}, current{};
+    if (::fstat(copied_fd, &copied) != 0 || ::lstat(source.c_str(), &current) != 0)
+        return destination_error(source, "cannot inspect source file before removal", errno);
+    if (current.st_dev != copied.st_dev || current.st_ino != copied.st_ino ||
+        (current.st_mode & S_IFMT) != (copied.st_mode & S_IFMT))
+        return "source entry changed during move: '" + source.string() + "'";
+    // Consistency guard, like remove_scanned_entry: lstat + unlink is not an
+    // atomic conditional unlink against arbitrary concurrent writers.
     if (::unlink(source.c_str()) != 0)
     {
         return destination_error(source,

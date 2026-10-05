@@ -290,7 +290,7 @@ if babet.which("ffmpeg") then
 end
 ```
 
-`PATH` is read at call time. A change made with `setenv` before workers is
+`PATH` is read at call time. A change made with `setenv` before workers and GTK loading is
 therefore visible to later calls.
 
 ```lua
@@ -452,7 +452,8 @@ Babet does not currently expose `unsetenv`. A variable cannot be removed with
 <a id="env-workers"></a>
 ### Interaction with workers
 
-`setenv` is allowed only before the first `workers.spawn()`.
+`setenv` is allowed only before the first `workers.spawn()` and before the
+first GTK loading attempt (`gui.available()` or `gui.init()`).
 
 ```lua
 assert(babet.setenv("APP_MODE", "production"))
@@ -475,7 +476,9 @@ local ok, err = babet.setenv("APP_MODE", "test")
 
 The restriction lasts for the whole process, including when the first spawn
 failed. Prepare `PATH`, application variables, and the current directory before
-starting workers.
+starting workers or loading GTK. A failed GTK load or initialization also
+retains the freeze. Reading values through `babet.env` remains possible; see
+the [GUI contract](gui.md).
 
 <a id="sys-memory"></a>
 ## Lua VM memory

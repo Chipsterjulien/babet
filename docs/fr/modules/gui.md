@@ -32,6 +32,25 @@ rouvrent pas GTK. `init()` empêche GTK de modifier la locale globale du process
 puis utilise son chemin d'initialisation récupérable. Ces deux appels sont
 réservés au thread OS principal de Babet.
 
+La première tentative de chargement GTK, via `available()` ou `init()`,
+verrouille définitivement les mutations de l'état partagé : `babet.setenv` et
+`babet.chdir` renvoient `nil, err`, et `os.setlocale(locale, catégorie)` lève
+une erreur si `locale` n'est pas `nil`. Configure donc l'environnement, le
+répertoire courant et la locale **avant** ces appels. `babet.env`,
+`babet.currentDir` et `os.setlocale(nil, catégorie)` restent consultables.
+
+Le verrouillage précède `dlopen`, car le chargement et l'initialisation de GTK
+peuvent exécuter du code natif et créer des threads indépendants des workers
+Babet. Il reste actif même si GTK est absent, si un symbole manque ou si
+l'affichage ne peut pas être initialisé, ainsi qu'après fermeture des fenêtres
+ou recréation d'un contexte d'embedding. Un appel refusé avant le chargement
+(arguments invalides, mauvais thread) ne déclenche pas ce verrouillage.
+
+La protection couvre les points d'entrée Lua de Babet. Un hôte ou un plugin
+natif doit aussi coordonner ses propres mutations et threads ; Babet
+n'intercepte pas les appels directs à la libc. Voir les précautions de
+[GLib sur les threads et l'état global](https://docs.gtk.org/glib/threads.html).
+
 Si GTK 4 manque, le diagnostic nomme le runtime absent et donne des exemples
 d'installation Debian/Ubuntu, Arch Linux et Fedora. Si GTK est installé mais
 qu'aucun affichage graphique n'est initialisable, `init()` renvoie un diagnostic

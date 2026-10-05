@@ -9,6 +9,254 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+### September 25, 2026 audit — batch 17c: executed filename in the test
+
+- also preserve the on-disk name `sleep` for the copy used by `running-inode`,
+  covering utility selection from the executed path. Batch 17b preserved only
+  `argv[0]`;
+- adapt temporary-file checks to that private test destination and retain
+  the atomic-installation assertions and all 17 checks;
+- print `deployment preflight lot17c` at startup to identify the revision
+  actually running. No change to the runtime or real deployment.
+
+### September 25, 2026 audit — batch 17b: deployment-test portability
+
+- preserve `sleep` as the command name when launching its copy named `babet`
+  in the running-executable installation test. Multicall coreutils can then
+  select the correct utility; the test still executes the copied inode that
+  installation will replace;
+- retain all 17 checks, including process survival and the old file's identity
+  and contents. No change to the runtime or deployment script.
+
+### September 25, 2026 audit — batch 17: atomic installation
+
+- create the smoke application under `build/deploy-smoke.*`, without requiring
+  an executable `$TMPDIR` filesystem;
+- prepare the runtime with mode `0755` in a temporary file in the target
+  directory, then publish it by atomic rename. A failed or interrupted copy
+  preserves the previous installation; running processes keep their old inode.
+  Clean the temporary file on normal exit, errors and HUP/INT/TERM signals;
+- extend the preflight to 16 deployment scenarios plus a check of the Python
+  rules in `.gitignore`. Include this hidden file again, although it was already
+  present in the batch 16 ZIP, to catch incomplete patch extraction.
+
+### September 25, 2026 audit — batch 16: deployment and UPX
+
+- remove automatic UPX compression from `build_and_deploy.sh`, which conflicts
+  with batch 15's image descriptor; check creation and execution of a small
+  application before replacing the installed binary;
+- clarify the missing-descriptor diagnostic: the runtime may be compressed or
+  rewritten (UPX) and must be rebuilt and used without compression;
+- add eight isolated deployment-script scenarios and an optional real UPX test
+  in the normal build. Missing UPX, a format rejected by the tool or a sanitizer
+  build are explicitly reported as SKIP;
+- ignore `__pycache__/` and `*.py[cod]` in Git. These rules neither remove
+  existing caches nor automatically filter manually created ZIP archives.
+
+### September 25, 2026 audit — batch 15: application identity and EXDEV removal
+
+- identify bare runtimes and generated applications through a loaded image
+  descriptor patched by the builder before atomic publication; incidental ZIP
+  signatures no longer prevent a bare runtime from starting;
+- validate archive bounds, trailer and `main.lua` for marked applications:
+  truncation, appended bytes and invalid archives cannot enable CLI or builder
+  mode; retain explicit image open/read failure diagnostics;
+- reject missing, ambiguous or invalid descriptors during packaging without
+  replacing existing output; retain packaging without an external toolchain
+  and support for copied, renamed or stripped bare runtimes;
+- **executable format**: rebuild existing applications with this runtime to
+  obtain these protections. Manually concatenating a runtime and ZIP no longer
+  creates a recognized application. Strip the runtime before packaging, not
+  the generated application;
+- keep the copied inode pinned through `moveTree`'s EXDEV cleanup and compare
+  its identity with the source path before `unlink`. Detected replacements are
+  preserved and reported; `lstat` followed by `unlink` is not atomic;
+- add 22 image-identity scenarios and 5 EXDEV cleanup scenarios; adapt malformed
+  archive fixtures to the new format and read-fault injection to fortified
+  stdio calls. An already activated signal hook retains batch 14's documented
+  behavior.
+
+### September 25, 2026 audit — batch 14: confirmed second-review regressions
+
+- remove automatic startup instruction tracing: successful
+  `signal.handle(name, fn)` or `curses.start()` enables the hook on demand;
+  retain restoration on the main and calling Lua threads and inheritance by
+  later coroutines. Earlier coroutines need explicit handling as documented
+  in the signal/curses guides; an activated hook is not uninstalled;
+- distinguish an absent ZIP from image open/read failures and other reader
+  initialization errors: an inaccessible executable image can no longer turn
+  a generated application into the Babet CLI or builder;
+- return `nil, "interrupted"` from `curses.readKey` if a callback stops curses,
+  before any further screen access, at both dispatch points;
+- inspect copy sources through `O_PATH`, then open only the verified regular
+  inode through procfs with `O_NOCTTY`. EXDEV fallback no longer opens devices
+  for reading before rejecting their type;
+- **SQLite compatibility (batch 5 change)**: successful `db:query` now returns
+  four values instead of one (`stmt, nil, nil, stmt`). Calls forwarding all
+  results, such as `table.insert(t, db:query(sql))`, need adaptation: use
+  `table.insert(t, (db:query(sql)))` or a local variable to keep only the
+  iterator. Generic `for` must retain all four values for deterministic
+  closure; failures still return `(nil, err)` and `prepared:query` is unchanged;
+- add startup/hook tests in all three modes, injected image I/O failures,
+  deterministic curses races under a PTY, copy-source replacement and a real
+  private PTY device.
+### September 25, 2026 audit — batch 13: review summary and guide clarification
+
+- correct the getting-started guide: packaged Lua modules are read from the
+  ZIP, but disk loaders and `package.loadlib` remain available; distinguish
+  native Lua modules from Babet plugins and clarify the GTK4 requirement for
+  GUI applications; runtime behavior is unchanged;
+- add `AUDIT_2026-09-28.fr.md`, the French summary of fixes, batch 12 release
+  validation and retained contracts, for the next review.
+
+### September 25, 2026 audit — batch 12: process state and GTK loading
+
+- extend `setenv`, `chdir` and mutating `os.setlocale` guards to the first GTK
+  loading attempt, including `gui.available()`; freeze before `dlopen` and
+  retain the permanent restriction even on failure;
+- share the guard with workers and locale queries without holding its mutex
+  across native constructors or GTK calls;
+- document configuration before workers/GUI and the responsibility of native
+  hosts/plugins for their own threads and direct libc calls;
+- add regressions with a real native thread started by a GTK test library,
+  loading/initialization failures, coroutines and workers, plus mutation/freeze
+  serialization tests.
+
+### September 25, 2026 audit — batch 11: TLS authority contracts
+
+- correct HTTP documentation: non-empty `ca_cert` replaces default request
+  authorities, including for `download`; socket TLS, STARTTLS and WebSocket
+  add custom authorities to those already loaded;
+- clarify empty strings, per-call isolation, identity verification, and the
+  distinction from leaf-certificate or public-key pinning;
+- add local regressions with two distinct CAs and multiple certificates in
+  file, folder and embedded modes, in the main state and concurrent workers.
+  Runtime trust policies are preserved; only documentation and test coverage
+  change.
+
+### September 25, 2026 audit — batch 10: worker standard process functions
+
+- launch worker `os.execute` and `io.popen` children with an empty signal mask,
+  including when the shell preserves the inherited mask;
+- prevent worker `os.execute` from temporarily ignoring `SIGINT` and `SIGQUIT`
+  throughout the process; retain the parent's dispositions;
+- retain Lua results and files, reap children on close and release resources
+  on native or allocation errors; prevent subsequent commands from inheriting
+  pipe ends retained by the parent;
+- add native fault-injection tests and real-worker regressions in file, folder
+  and embedded modes to normal and sanitizer validation. Calls remain blocking;
+  the main state's standard functions are unchanged.
+
+### September 25, 2026 audit — batch 9: controlled program exit
+
+- restore curses on `os.exit`, with or without Lua closure, in file, folder
+  and generated-executable modes; disable GUI callbacks before exit;
+- retain Lua argument/status rules, file-buffer flushing and the finalizers
+  requested through `close`; prevent a second VM closure when a finalizer
+  itself calls `os.exit`;
+- use `_Exit` after explicit cleanup: no native `atexit` callbacks or static
+  destructors run concurrently with surviving threads. Normal return retains
+  ordinary native teardown. This contract change is documented in
+  `docs/en/runtime-exit.md`;
+- add PTY, coroutine, finalizer, active-worker and native-plugin regressions.
+  Embedding and worker exit rejection retain their existing policies.
+
+### September 25, 2026 audit — batch 8: table merge performance
+
+- replace quadratic repeated scans in `mergeTables` with direct dense-list
+  copying and bounded O(k log k) sorting of sparse positive integer keys;
+- retain per-source ordering, compaction, map overwrites, shallow values and
+  raw table access; preserve full-width integer keys on 32-bit platforms;
+- keep temporary key storage owned by Lua, bound writes even if a finalizer
+  changes the source, and guard result-index overflow;
+- add contract, reference-comparison, traversal-count and allocation-failure
+  regressions to normal and sanitizer release validation.
+
+### September 25, 2026 audit — batch 7: embedded loading under memory pressure
+
+- protect embedded searcher result construction so Lua allocation failures
+  release C++ path strings, diagnostics and module buffers before propagating;
+- translate native exceptions into Lua errors after C++ cleanup, preventing
+  process termination or fallback to a disk module after a native failure;
+- close the embedded archive on every C++ exit, including failure to allocate
+  an error message while handling an earlier allocation or extraction error;
+- exercise Lua and C++ allocation failures with live-buffer/descriptor checks,
+  real ZIP fixtures, and require fallback/retry checks in release validation.
+
+### September 25, 2026 audit — batch 6: worker exit and shared locale
+
+- make `os.exit` raise a Lua error in workers instead of terminating the
+  process, including through coroutines, aliases and nested workers;
+- freeze Lua `os.setlocale` mutations after the first validated spawn attempt,
+  using the existing process-state lock; retain queries, copy their results
+  under the lock and preserve the freeze across embedding context recreation;
+- retain standard main-state `os.exit` and pre-spawn locale behavior; document
+  `return` for worker completion and configuration before starting workers;
+- add 60 folder/embedded process-state checks and two embedding checks to the
+  normal and sanitizer release validation.
+
+### September 25, 2026 audit — batch 5: runtime and cursor lifetimes
+
+- install signal/terminal instruction hooks per Lua thread at runtime setup,
+  let coroutines inherit them, and restore the actual main/calling-thread
+  hooks on handler registration instead of trusting a process-global flag;
+- finalize temporary SQLite query cursors on generic-for exits and `<close>`
+  scope exits, including exceptions and coroutine closure; preserve explicit
+  close, `(nil, err)` failures and reusable prepared-statement semantics;
+- keep the embedding context slot occupied until destruction completes while
+  leaving the mutex unlocked during Lua finalizers, so reentrant/concurrent
+  create returns BUSY without deadlocking;
+- add 16 SQLite regressions in folder and generated modes and 12 C-host
+  lifecycle/signal regressions to normal and sanitizer release validation.
+
+### September 25, 2026 audit — batch 4: generated executable consistency
+
+- read the running executable through `/proc/self/exe`, including module
+  loads in existing/new workers and the builder's runtime copy, so atomic
+  replacement or unlink cannot change the application image being read;
+- align embedded main/module loading with Lua file loading for UTF-8 BOM,
+  initial `#` lines, diagnostic line numbers and prefixed Lua bytecode;
+- reject Lua entries exceeding 16 MiB before executable publication, check
+  the completed ZIP against source growth, and preserve previous outputs;
+- keep runtime size checks for legacy/external ZIPs and add behavioral
+  regressions to normal and instrumented release validation.
+
+### September 25, 2026 audit — batch 3: network stream state
+
+- close a TLS socket after abandoning a `send` that attempted `SSL_write`,
+  even if no application bytes have been reported as written;
+- close WebSocket connections after abandoned sends, including fragmented
+  messages and Ping/Pong, before dispatching signal callbacks;
+- keep connections usable after pre-send validation failures, and TLS sockets
+  after a timeout occurring before the first `SSL_write` attempt;
+- split complete lines already retained by `recv_all` before polling the
+  network, preserve following data and enforce the 8 MiB buffered line limit;
+- add 32 TCP/TLS/WS/WSS regressions to normal and instrumented validation.
+
+### September 25, 2026 audit — batch 2: network and process signals
+
+- protect socket, WebSocket and HTTP TLS calls against termination by
+  `SIGPIPE`, including connect, read and shutdown; restore the calling
+  thread's mask and preserve signal dispositions and already pending signals;
+- clear the child signal mask before `execve` in `exec`, `spawn`, `pipeline`
+  and `spawnPipeline`, including worker launches, so external programs can
+  receive signals such as `SIGTERM`;
+- add behavioral mask, signal termination and TLS write-error regressions
+  executed on both builds by `--release`.
+
+### September 25, 2026 audit — batch 1: file preservation
+
+- reject symlink roots with trailing `/` or `/.` in `rmdir` and `rmdirAll`
+  without traversing or deleting their targets;
+- reject `copyTree` and `moveTree` into a source ancestor before any mutation,
+  in addition to rejecting the source itself and its descendants;
+- replace `moveTree`'s recursive final sweep with removal of scanned symlinks
+  and empty directories only, checking their identities again: new entries
+  that were not transferred are preserved and reported;
+- prevent cross-filesystem copy fallback from blocking when opening a FIFO;
+- add folder/embedded self-tests and deterministic after-scan runtime
+  injections, integrated into `run_tests.sh`.
+
 ## [2.24.0] - 2026-09-02
 
 ### Release / architecture follow-up

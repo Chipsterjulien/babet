@@ -1,4 +1,5 @@
 #include "gui_gtk_loader.hpp"
+#include "process_state.hpp"
 
 #include <cstring>
 #include <dlfcn.h>
@@ -133,6 +134,11 @@ bool gtk4_load(std::string &error)
         return false;
     }
 
+    // dlopen can run constructors, and GTK initialization can start native
+    // threads independently of workers.spawn. Freeze before either runs,
+    // without holding the guard across dlopen or GTK callbacks. Keep the
+    // freeze on every failure: partial native initialization is not rolled back.
+    babet_runtime::freeze_process_state();
     (void)::dlerror();
     void *handle = ::dlopen(GTK4_SONAME, RTLD_NOW | RTLD_LOCAL);
     if (!handle)

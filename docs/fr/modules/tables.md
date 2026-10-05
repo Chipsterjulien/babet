@@ -218,9 +218,11 @@ local ok, err = pcall(babet.deepCopyTable, 42)
   partagée.
 - L'ordre des clés de map n'est pas défini. Seul l'ordre des clés entières
   positives de `mergeTables` est garanti.
-- La sélection ordonnée des clés-listes de `mergeTables` privilégie un code sûr
-  face aux erreurs Lua ; son coût est quadratique par source en nombre de clés
-  entières positives. Ce helper vise donc surtout des tables de taille modérée.
+- `mergeTables` copie directement les clés entières positives denses `1..n`.
+  Les clés positives creuses sont triées dans un stockage temporaire possédé
+  par Lua, récupérable même après une erreur d'allocation. Pour une source de
+  `m` entrées dont `k` clés entières positives, le parcours coûte O(m) si ces
+  clés sont denses, sinon O(m + k log k), avec O(k) de stockage temporaire.
 
 <a id="tables-not-exposed"></a>
 ## Hors v1

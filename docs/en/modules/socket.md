@@ -308,6 +308,12 @@ If a transport error happens after some bytes were written, no partial count is
 returned. Protocols needing safe retries must use application-level IDs or
 acknowledgements.
 
+On a TLS socket, a failure after the first `SSL_write` attempt closes the
+connection, even if OpenSSL has not yet reported any application bytes written.
+The original call keeps its diagnostic (`timeout`, `interrupted` or TLS error),
+then subsequent I/O reports a closed socket. A timeout before any TLS write
+attempt leaves the connection usable.
+
 <a id="socket-recv"></a>
 ## `sock:recv(count, timeout?)`
 
@@ -351,8 +357,15 @@ hello\n   -> "hello"
 hello\r\n -> "hello"
 ```
 
-The line limit is 8 MiB. Oversized lines return a `line too long` error and the
-protocol should generally be considered desynchronised.
+Complete lines already buffered by `recv_all` are handled before polling the
+network. Each call extracts one line and keeps all following bytes for
+`recv_line`, `recv` or `recv_all`.
+
+The line limit is 8 MiB before removing an optional CR, excluding LF. It applies
+to buffered lines too. Oversized lines return a `line too long` error and the
+protocol should generally be considered desynchronised. If the complete
+oversized line was already buffered, it is discarded through LF and following
+data is preserved.
 
 EOF before LF returns three values:
 

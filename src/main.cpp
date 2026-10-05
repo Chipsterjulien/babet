@@ -10,6 +10,7 @@
 #include "project_core/bundled_modules.hpp"
 #include "project_core/create_executable.hpp"
 #include "project_core/embedded_searcher.hpp"
+#include "project_core/embedded_lua.hpp"
 #include "project_core/executable_path.hpp"
 #include "project_core/loadLuaFile.hpp"
 #include "project_core/runtime_registration.hpp"
@@ -95,6 +96,7 @@ static int run_tool_script(const fs::path &anchorDir,
     auto setup_runtime = [&](lua_State *state)
     {
         luaL_openlibs(state);
+        register_cli_process_exit(state);
         register_bundled_modules(state);
         register_babet(state, &plugin_runtime, NativePluginMode::allowed);
         prepend_babet_package_path(state, package_prefix);
@@ -233,51 +235,45 @@ int main(int argc, char *argv[])
     babet_runtime::register_main_thread();
 
     // === ÉTAPE 1 : IDENTITÉ (avant toute lecture de argv) ===========
-    // Un binaire « packagé » = un binaire qui contient un main.lua
-    // embarqué. Dans ce cas il EST l'application finale : les flags
+    // Le descripteur de l'image chargée indique si ce binaire est une
+    // application générée, même si son ZIP a été tronqué. Les flags
     // applicatifs appartiennent à son main.lua, pas au mode outil Babet.
     // Une seule exception est volontairement réservée au runtime :
     // --create-exe / -c, car une application générée est un artefact final
     // et ne doit jamais redevenir builder.
     //
-    // On résout donc cette identité en testant la présence de l'archive
-    // AVANT d'interpréter le moindre argument. (Avant ce correctif, la
+    // On contrôle cette identité et l'intégrité du chargement AVANT
+    // d'interpréter le moindre argument. (Avant ce correctif, la
     // détection se faisait sur `argc < 2` : un exécutable packagé lancé
     // avec des arguments — ./mon_app --port 8080 — basculait à tort en
     // mode outil et cherchait un dossier nommé "--port".)
     {
-        // getExecutablePath() lit /proc/self/exe (chemin canonique du
-        // binaire courant) et PAS argv[0], qui peut n'être qu'un
-        // basename si l'exe est dans le PATH — auquel cas miniz ne
-        // saurait pas le retrouver sur le disque pour lire le zip.
-        std::string exePath;
-        try
+        // Lire l'inode réellement exécuté : le chemin affiché par readlink
+        // peut déjà désigner une autre version après un remplacement atomique.
+        const char *exePath = RUNNING_EXECUTABLE_CONTENT;
+
+        // Une application marquée ne peut jamais revenir au mode outil,
+        // même si le ZIP ou main.lua manque. Un runtime nu ne prend pas une
+        // constante ZIP de ses sections ELF pour une application.
+        std::string embedded_error;
+        const auto image_layout = runningEmbeddedImageLayout(&embedded_error);
+        if (!image_layout)
         {
-            exePath = getExecutablePath();
-        }
-        catch (const std::exception &e)
-        {
-            std::cerr << "Erreur : impossible de localiser l'exécutable - "
-                      << e.what() << std::endl;
+            std::cerr << "Erreur : " << embedded_error << std::endl;
             return 1;
         }
-
-        // optional vide = pas de zip / pas de main.lua embarqué : ce
-        // n'est PAS une erreur, juste « je ne suis pas packagé » -> on
-        // bascule en mode outil Babet (étape 2).
-        std::string embedded_error;
-        auto fileData = readEmbeddedFile(exePath, "main.lua", &embedded_error);
+        auto fileData = readEmbeddedFile(exePath, "main.lua", &embedded_error, &*image_layout);
+        if (!fileData && embedded_error.empty() && image_layout->generated)
+            embedded_error = "generated application has no embedded main.lua";
         if (!fileData && !embedded_error.empty())
         {
             std::cerr << "Erreur : " << embedded_error << std::endl;
             return 1;
         }
-        if (fileData)
+        if (image_layout->generated)
         {
-            // `fileData` EST déjà la source de vérité qui définit ce binaire
-            // comme application packagée. On réutilise directement cette
-            // détection pour interdire le builder ; aucun marqueur parallèle
-            // generated_executable / embedded_payload n'est introduit.
+            // Le descripteur généré et le chargement valide sont requis.
+            // Les arguments applicatifs ne peuvent pas activer le builder.
             if (argc >= 2 &&
                 (std::strcmp(argv[1], "--create-exe") == 0 ||
                  std::strcmp(argv[1], "-c") == 0))
@@ -298,10 +294,11 @@ int main(int argc, char *argv[])
             auto setup_runtime = [&](lua_State *state)
             {
                 luaL_openlibs(state);
+                register_cli_process_exit(state);
                 register_bundled_modules(state);
                 register_babet(state, nullptr,
                                NativePluginMode::generated_application);
-                register_embedded_searcher(state, exePath.c_str());
+                register_embedded_searcher(state, exePath);
                 // Binaire packagé = l'application elle-même est le script :
                 // arg[0] = binaire, arg[1..n] = ses arguments.
                 push_lua_arg(state, argc, argv, 0);
@@ -322,7 +319,7 @@ int main(int argc, char *argv[])
             // les workers (cf. set_workers_init_context).
             set_workers_init_context("", exePath, true);
 
-            if (luaL_loadbuffer(L, fileData->data(), fileData->size(), "main.lua") || lua_pcall(L, 0, LUA_MULTRET, 0))
+            if (load_embedded_lua(L, fileData->data(), fileData->size(), "main.lua") || lua_pcall(L, 0, LUA_MULTRET, 0))
             {
                 const std::string execution_error =
                     "Erreur : " + lua_value_to_display_string(L, -1);

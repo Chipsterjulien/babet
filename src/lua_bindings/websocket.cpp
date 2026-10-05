@@ -1,3 +1,4 @@
+#include "sigpipe_guard.hpp"
 #include "websocket.hpp"
 #include "lua_utils.hpp"
 #include "signal.hpp"
@@ -83,6 +84,12 @@ struct WebSocket
     bool received_close = false;
     bool closed = false;
     std::string recv_pending;
+
+    // Message receive state must survive recv() timeouts.  A timeout can occur
+    // after one or more complete fragments have already been consumed.
+    bool recv_fragmented = false;
+    std::uint8_t recv_message_opcode = 0;
+    std::string recv_message_data;
 };
 
 struct WebSocketUserdata
@@ -544,7 +551,31 @@ void close_transport(WebSocket *ws) noexcept
     }
     ws->closed = true;
     ws->recv_pending.clear();
+    ws->recv_fragmented = false;
+    ws->recv_message_opcode = 0;
+    ws->recv_message_data.clear();
 }
+
+// Frames and fragmented messages cannot be restarted with another buffer.
+// These guards run in C++-only scopes, before any Lua signal callback/result.
+class AbandonedSend
+{
+public:
+    explicit AbandonedSend(WebSocket *ws) noexcept : ws_(ws) {}
+    ~AbandonedSend() noexcept
+    {
+        if (started_)
+            close_transport(ws_);
+    }
+    AbandonedSend(const AbandonedSend &) = delete;
+    AbandonedSend &operator=(const AbandonedSend &) = delete;
+    void start() noexcept { started_ = true; }
+    void complete() noexcept { started_ = false; }
+
+private:
+    WebSocket *ws_;
+    bool started_ = false;
+};
 
 WebSocket *push_empty_ws(lua_State *L)
 {
@@ -802,7 +833,9 @@ bool setup_tls(WebSocket *ws, const ParsedUrl &url, const ConnectOptions &opts,
     for (;;)
     {
         ERR_clear_error();
-        const int rc = SSL_connect(ws->ssl);
+        const int rc = babet_io::without_sigpipe([&] {
+            return SSL_connect(ws->ssl);
+        });
         if (rc == 1)
             break;
         const int ssl_error = SSL_get_error(ws->ssl, rc);
@@ -855,7 +888,9 @@ bool transport_send_all(WebSocket *ws, const char *data, std::size_t size,
             ERR_clear_error();
             const int chunk = static_cast<int>(std::min<std::size_t>(
                 size - offset, static_cast<std::size_t>(INT_MAX)));
-            const int rc = SSL_write(ws->ssl, data + offset, chunk);
+            const int rc = babet_io::without_sigpipe([&] {
+                return SSL_write(ws->ssl, data + offset, chunk);
+            });
             if (rc > 0)
             {
                 offset += static_cast<std::size_t>(rc);
@@ -968,7 +1003,9 @@ bool transport_recv_some(WebSocket *ws, char *buffer, std::size_t capacity,
             ERR_clear_error();
             const int cap = static_cast<int>(std::min<std::size_t>(
                 capacity, static_cast<std::size_t>(INT_MAX)));
-            const int rc = SSL_read(ws->ssl, buffer, cap);
+            const int rc = babet_io::without_sigpipe([&] {
+                return SSL_read(ws->ssl, buffer, cap);
+            });
             if (rc > 0)
             {
                 received = static_cast<std::size_t>(rc);
@@ -1053,7 +1090,15 @@ bool recv_exact(WebSocket *ws, char *destination, std::size_t size,
         std::size_t got = 0;
         if (!transport_recv_some(ws, destination + offset, size - offset,
                                  deadline, got, err))
+        {
+            // recv_frame() is retryable after timeout/interruption.  Do not
+            // permanently consume the prefix read by this recv_exact() call:
+            // otherwise the next recv() starts parsing in the middle of a
+            // WebSocket frame.
+            if (offset != 0)
+                ws->recv_pending.insert(0, destination, offset);
             return false;
+        }
         offset += got;
     }
     return true;
@@ -1410,6 +1455,8 @@ bool send_frame(WebSocket *ws, std::uint8_t opcode, bool fin,
     for (unsigned char c : mask)
         header[header_size++] = c;
 
+    AbandonedSend pending_frame(ws);
+    pending_frame.start();
     if (!transport_send_all(ws, reinterpret_cast<const char *>(header.data()),
                             header_size, deadline, err))
         return false;
@@ -1427,6 +1474,7 @@ bool send_frame(WebSocket *ws, std::uint8_t opcode, bool fin,
             return false;
         offset += count;
     }
+    pending_frame.complete();
     return true;
 }
 
@@ -1452,6 +1500,7 @@ bool send_message(WebSocket *ws, std::uint8_t opcode, std::string_view payload,
     if (payload.empty())
         return send_frame(ws, opcode, true, {}, deadline, err);
 
+    AbandonedSend pending_message(ws);
     std::size_t offset = 0;
     bool first = true;
     while (offset < payload.size())
@@ -1463,17 +1512,38 @@ bool send_message(WebSocket *ws, std::uint8_t opcode, std::string_view payload,
         if (!send_frame(ws, frame_opcode, fin, payload.substr(offset, count),
                         deadline, err))
             return false;
+        // A completed non-final fragment still commits this message. Failure
+        // before the next frame's first byte (e.g. RAND_bytes) must close too.
+        pending_message.start();
         first = false;
         offset += count;
     }
+    pending_message.complete();
     return true;
 }
 
 bool recv_frame(WebSocket *ws, Deadline deadline, Frame &frame, std::string &err)
 {
+    // Header bytes may have been fully consumed before a later read of the
+    // extended length or payload times out.  Keep at most the 10-byte RFC
+    // header so it can be put back in front of recv_pending on failure.
+    std::string consumed_header;
+    consumed_header.reserve(10);
+
+    auto recv_header_piece = [&](char *destination, std::size_t size)
+    {
+        if (!recv_exact(ws, destination, size, deadline, err))
+        {
+            if (!consumed_header.empty())
+                ws->recv_pending.insert(0, consumed_header);
+            return false;
+        }
+        consumed_header.append(destination, size);
+        return true;
+    };
+
     std::array<unsigned char, 2> first{};
-    if (!recv_exact(ws, reinterpret_cast<char *>(first.data()), first.size(),
-                    deadline, err))
+    if (!recv_header_piece(reinterpret_cast<char *>(first.data()), first.size()))
         return false;
 
     frame.fin = (first[0] & 0x80U) != 0;
@@ -1504,8 +1574,7 @@ bool recv_frame(WebSocket *ws, Deadline deadline, Frame &frame, std::string &err
     if (length == 126)
     {
         std::array<unsigned char, 2> ext{};
-        if (!recv_exact(ws, reinterpret_cast<char *>(ext.data()), ext.size(),
-                        deadline, err))
+        if (!recv_header_piece(reinterpret_cast<char *>(ext.data()), ext.size()))
             return false;
         length = (static_cast<std::uint64_t>(ext[0]) << 8) | ext[1];
         if (length < 126)
@@ -1517,8 +1586,7 @@ bool recv_frame(WebSocket *ws, Deadline deadline, Frame &frame, std::string &err
     else if (length == 127)
     {
         std::array<unsigned char, 8> ext{};
-        if (!recv_exact(ws, reinterpret_cast<char *>(ext.data()), ext.size(),
-                        deadline, err))
+        if (!recv_header_piece(reinterpret_cast<char *>(ext.data()), ext.size()))
             return false;
         if ((ext[0] & 0x80U) != 0)
         {
@@ -1550,7 +1618,11 @@ bool recv_frame(WebSocket *ws, Deadline deadline, Frame &frame, std::string &err
     frame.payload.resize(static_cast<std::size_t>(length));
     if (length != 0 && !recv_exact(ws, frame.payload.data(), frame.payload.size(),
                                     deadline, err))
+    {
+        if (!consumed_header.empty())
+            ws->recv_pending.insert(0, consumed_header);
         return false;
+    }
     return true;
 }
 
@@ -1631,8 +1703,6 @@ bool recv_message(WebSocket *ws, Deadline deadline, std::string &type,
                   std::string &data, std::optional<std::uint16_t> &close_code,
                   std::string &close_reason, std::string &err)
 {
-    bool fragmented = false;
-    std::uint8_t message_opcode = 0;
     data.clear();
 
     for (;;)
@@ -1690,21 +1760,23 @@ bool recv_message(WebSocket *ws, Deadline deadline, std::string &type,
 
         if (frame.opcode == 0x0)
         {
-            if (!fragmented)
+            if (!ws->recv_fragmented)
                 return fail_protocol(ws, 1002, "unexpected continuation frame",
                                      deadline, err);
         }
         else
         {
-            if (fragmented)
+            if (ws->recv_fragmented)
                 return fail_protocol(ws, 1002,
                                      "new data frame during fragmented message",
                                      deadline, err);
-            message_opcode = frame.opcode;
-            fragmented = !frame.fin;
+            ws->recv_message_opcode = frame.opcode;
+            ws->recv_message_data.clear();
+            ws->recv_fragmented = !frame.fin;
         }
 
-        if (frame.payload.size() > ws->max_message_bytes - data.size())
+        if (frame.payload.size() >
+            ws->max_message_bytes - ws->recv_message_data.size())
         {
             std::string ignored;
             (void)fail_protocol(ws, 1009, "message exceeds max_message_bytes",
@@ -1712,17 +1784,22 @@ bool recv_message(WebSocket *ws, Deadline deadline, std::string &type,
             err = "websocket: incoming message exceeds max_message_bytes";
             return false;
         }
-        data.append(frame.payload);
+        ws->recv_message_data.append(frame.payload);
 
         if (frame.fin)
         {
-            if (message_opcode == 0x1 && !is_valid_utf8(data))
+            if (ws->recv_message_opcode == 0x1 &&
+                !is_valid_utf8(ws->recv_message_data))
                 return fail_protocol(ws, 1007, "text message is not valid UTF-8",
                                      deadline, err);
-            type = message_opcode == 0x1 ? "text" : "binary";
+            type = ws->recv_message_opcode == 0x1 ? "text" : "binary";
+            data = std::move(ws->recv_message_data);
+            ws->recv_message_data.clear();
+            ws->recv_message_opcode = 0;
+            ws->recv_fragmented = false;
             return true;
         }
-        fragmented = true;
+        ws->recv_fragmented = true;
     }
 }
 

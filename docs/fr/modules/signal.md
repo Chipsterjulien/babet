@@ -249,9 +249,9 @@ Le callback Lua est exécuté plus tard, depuis un point sûr :
 <a id="signal-main-thread"></a>
 ### Thread principal et contexte sûr
 
-Le callback tourne toujours dans l'état Lua principal, jamais dans le handler
-POSIX et jamais dans un worker. Il peut donc utiliser normalement Lua et les
-modules Babet.
+Le callback tourne dans la coroutine Lua active du thread système principal,
+jamais dans le handler POSIX ou un worker. Les callbacks partagent la registry
+de cet état Lua et peuvent utiliser normalement Lua et les modules Babet.
 
 ```lua
 babet.signal.handle("USR1", function()
@@ -370,23 +370,41 @@ attente au lieu de produire un faux `"interrupted"`.
 ## Interaction avec `debug.sethook`
 
 En dehors des fonctions bloquantes intégrées, Babet utilise un hook Lua de type
-`count`, déclenché environ toutes les 10 000 instructions, pour vérifier les
-flags en attente.
+count, déclenché environ toutes les 10 000 instructions, pour traiter les flags
+et les événements du terminal. Il est installé à la demande par un
+`signal.handle(name, fn)` réussi ou par `curses.start()`. Au démarrage,
+`debug.gethook()` reste `nil`, y compris dans un contexte d'embedding recréé.
+Les scripts qui n'utilisent aucune de ces fonctions ne paient donc pas le coût
+du hook. Un hook count actif ralentit aussi le chemin d'interprétation entre
+ses callbacks ; augmenter seulement son intervalle ne supprime pas ce coût.
 
-Lua ne permet qu'un hook actif par état. Par conséquent :
+Les nouvelles coroutines héritent du hook courant de leur créatrice. Active
+les signaux ou curses avant de créer les coroutines qui doivent traiter les
+événements pendant une boucle Lua pure. Les coroutines déjà créées ne reçoivent
+pas rétroactivement le hook : un appel `signal.handle(name, fn)` depuis la
+coroutine équipe celle-ci et le thread Lua principal. Les appels bloquants
+intégrés conservent leurs points de traitement des signaux. Les workers
+n'installent pas ce hook réservé au thread système principal.
 
-- le premier `signal.handle(...)` remplace un hook utilisateur déjà installé ;
-- un appel ultérieur à `debug.sethook(...)` remplace le hook de Babet ;
-- après ce remplacement, les callbacks ne seront plus dispatchés par le compte
-  d'instructions, mais pourront encore l'être à la sortie des appels bloquants
-  intégrés ;
-- retirer tous les callbacks avec `handle(name, nil)`, `ignore(name)` ou
-  `default(name)` ne désinstalle pas le hook de Babet et ne restaure pas un hook
-  utilisateur précédemment remplacé. Le hook reste actif, mais ne fait rien tant
-  qu'aucun callback Babet n'est enregistré.
+Lua ne permet qu’un hook actif par thread Lua. Par conséquent :
 
-Évite de combiner `babet.signal` et un hook de debug personnalisé dans le même
-état Lua, sauf si cette interaction est volontaire et maîtrisée.
+- `signal.handle(name, fn)` vérifie et restaure si nécessaire le hook Babet
+  sur le thread Lua principal et la coroutine appelante, en remplaçant un
+  éventuel hook personnalisé ;
+- un `debug.sethook(...)` ultérieur remplace le hook de sa coroutine cible :
+  le dispatch par instructions s’y arrête jusqu’à sa restauration, mais les
+  appels bloquants intégrés peuvent encore dispatcher les signaux ;
+- cette restauration ne modifie pas les autres coroutines déjà créées ; une
+  coroutine dont le hook a été remplacé volontairement doit appeler elle-même
+  `signal.handle(name, fn)` pour retrouver le dispatch automatique ;
+- retirer les callbacks avec `handle(name, nil)`, `ignore` ou `default` laisse
+  un hook déjà installé actif et ne restaure pas un ancien hook utilisateur ;
+  ces appels n'installent pas de hook s'il n'y en avait pas. `curses.stop()`
+  ne désinstalle pas non plus le hook partagé, dont le coût peut donc persister.
+
+Évite de combiner `babet.signal` et un hook de debug personnalisé sauf si cette
+interaction est voulue. Le hook du runtime sert aussi les événements curses,
+même si aucun callback de signal n’a été enregistré.
 
 <a id="signal-examples"></a>
 ## Exemples complets

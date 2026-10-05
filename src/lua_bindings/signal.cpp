@@ -18,7 +18,6 @@ extern "C"
 #include <cstring>
 #include <string.h>
 #include <errno.h>
-#include <pthread.h>
 
 namespace
 {
@@ -97,14 +96,6 @@ namespace
     // classique Lua C).
     char g_callbacks_key = 0;
 
-    // Indique si on a déjà installé le debug hook qui scanne g_pending.
-    // Le mutex protège contre une double installation si plusieurs
-    // threads appelaient handle() simultanément (improbable mais
-    // possible si l'utilisateur en fait dans son worker — qui aura ses
-    // signaux bloqués, mais le code lua_sethook reste appelé).
-    bool g_hook_installed = false;
-    pthread_mutex_t g_hook_mutex = PTHREAD_MUTEX_INITIALIZER;
-
     // ============================================================
     // Handler C (async-signal-safe — STRICT minimum)
     // ============================================================
@@ -165,21 +156,29 @@ namespace
         signal_dispatch_pending(L);
     }
 
+    void install_hook_on_thread(lua_State *L)
+    {
+        // The hook belongs to a Lua thread, not to the process. Inspect the
+        // real hook so recreation and replacement through debug.sethook are
+        // handled without a stale global "installed" flag.
+        if (lua_gethook(L) != hook_dispatch ||
+            lua_gethookmask(L) != LUA_MASKCOUNT || lua_gethookcount(L) != 10000)
+        {
+            lua_sethook(L, hook_dispatch, LUA_MASKCOUNT, 10000);
+        }
+    }
+
     void ensure_hook_installed_impl(lua_State *L)
     {
-        pthread_mutex_lock(&g_hook_mutex);
-        if (!g_hook_installed)
-        {
-            // Hook "count" : déclenché toutes les ~10000 instructions
-            // Lua. Trade-off réactivité / overhead :
-            //   - 1000  : ~1 ms de latence max, overhead ~3-5%
-            //   - 10000 : ~10 ms de latence max, overhead < 1%
-            //   - 100000: ~100 ms de latence max, overhead négligeable
-            // 10000 est un bon compromis pour du scripting d'admin.
-            lua_sethook(L, hook_dispatch, LUA_MASKCOUNT, 10000);
-            g_hook_installed = true;
-        }
-        pthread_mutex_unlock(&g_hook_mutex);
+        lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+        lua_State *main = lua_tothread(L, -1);
+        lua_pop(L, 1);
+        // debug.getregistry() can expose even this reserved entry. Do not
+        // dereference a null thread if user code has overwritten it.
+        if (main != nullptr)
+            install_hook_on_thread(main);
+        if (L != main)
+            install_hook_on_thread(L);
     }
 
     // ============================================================
@@ -291,9 +290,9 @@ namespace
         }
         store_callback(L, signum);
 
-        // Installer le hook si pas encore fait. Seulement utile quand
-        // on enregistre un vrai callback : si on désinstalle tout, le
-        // hook continue à tourner mais ne fait rien (coût négligeable).
+        // Install only for a real callback. Keep the actual-thread check:
+        // removing callbacks does not remove inherited coroutine hooks.
+        // Even an infrequent count hook has a per-instruction VM cost.
         if (t == LUA_TFUNCTION)
         {
             ensure_hook_installed_impl(L);
@@ -457,6 +456,10 @@ void signal_ensure_dispatch_hook(lua_State *L)
 
 void register_signal(lua_State *L)
 {
+    // Registering the API must not activate instruction tracing. handle(fn)
+    // and curses.start() install the hook on demand on the main Lua thread
+    // and their caller; later coroutines inherit their creator's current hook.
+
     // Les trois fonctions publiques ne conservent aucun propriétaire C++
     // non trivial autour d'une API Lua susceptible d'allouer. Elles peuvent
     // donc rester enregistrées directement : leurs erreurs de programmation

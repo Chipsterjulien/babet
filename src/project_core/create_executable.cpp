@@ -134,13 +134,12 @@ bool createExecutableWithDir(const std::string &dir, const std::string &output)
         return false;
     }
 
-    // getExecutablePath() et mergeFiles() peuvent tous deux lever une
-    // exception (lecture de /proc/self/exe, erreurs d'I/O). On les
-    // englobe dans un seul try et on attrape std::exception largement.
+    // La copie doit lire l'inode exécuté, même si son nom a été remplacé
+    // ou supprimé pendant le zippage. Les erreurs d'I/O restent attrapées.
     // Le ZIP temporaire est anonyme et sera détruit par ScopedFd.
     try
     {
-        std::string exe = getExecutablePath();
+        const std::string exe = RUNNING_EXECUTABLE_CONTENT;
         // CORRECTIF (revue ChatGPT post-audit v21, vérifié) : refuser
         // une sortie ÉQUIVALENTE au binaire en cours d'exécution.
         // Même si mergeFiles publie maintenant par rename atomique, on

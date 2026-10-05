@@ -21,3 +21,7 @@ babet-fltk-tests.txt
 .babet-native-validation-watchdog.state
 .babet-native-validation-watchdog.restore
 .babet-native-validation-watchdog.guard.ready
+
+# Caches Python (lot 17)
+__pycache__/
+*.py[cod]

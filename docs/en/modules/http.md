@@ -113,7 +113,7 @@ local response, err = babet.http.post(url, nil, opts)
 | `query` | table | absent | string keys; string/number values |
 | `timeout` | finite number `> 0` | library defaults | seconds, connect plus global budget |
 | `verify` | strict boolean | `true` | HTTPS certificate verification |
-| `ca_cert` | string | OpenSSL trust store | CA file path |
+| `ca_cert` | string | default OpenSSL authorities | PEM file used instead of the default authorities for this request |
 | `follow_redirects` | strict boolean | `false` | follow redirects automatically |
 | `max_body_size` | integer `1..2 GiB` | `64 MiB` | in-memory cap for `request`/`get`/`post` |
 | `max_file_size` | positive integer | `8 GiB` | received-file cap for `download` |
@@ -425,9 +425,25 @@ local response = assert(babet.http.get("https://internal.example/", {
 }))
 ```
 
-HTTP exposes `ca_cert`, not `ca_path`, and does not run the socket TLS module's
-manual distro-path probing. It relies on the embedded OpenSSL defaults,
-environment, and the supplied CA file.
+With a non-empty `ca_cert`, HTTP uses that file's authorities **instead of the
+default authorities** for the request. When `ca_cert` is absent or `""`, it
+loads OpenSSL defaults, honoring `SSL_CERT_FILE` and `SSL_CERT_DIR`. An explicit
+file is not added to default trust. This also applies to `http.download`.
+
+This differs from [`socket.connect_tls` and `starttls`](tls.md#tls-ca), and
+[`websocket.connect`](websocket.md), which **add** custom authorities to those
+already loaded. HTTP does not expose `ca_path` or perform their additional
+probing of known distribution CA locations.
+
+For example, if A is a default authority and the supplied file contains only
+B, HTTP accepts a server signed by B and rejects one signed only by A. Socket
+TLS and WSS continue to accept both A and B. In every case, `verify = true`
+also checks server identity. A call's configuration does not make B trusted
+for subsequent calls.
+
+Selecting a CA file is not leaf-certificate or public-key pinning: multiple
+certificates signed by an authority in the file can be accepted, subject to
+the other TLS checks.
 
 ```lua
 local response = assert(babet.http.get("https://127.0.0.1:8443/", {
@@ -718,6 +734,11 @@ converted internal exceptions. Allocation failure returns
 
 Any received HTTP status, including 3xx/4xx/5xx, returns a normal response.
 For `download`, only 2xx is saved; all other statuses return `saved = false`.
+
+Internal network operations, including TLS handshake and shutdown, are
+protected against `SIGPIPE` without replacing the application’s signal handler.
+Transport failures surface as HTTP errors; a best-effort shutdown failure does
+not discard an already received response.
 
 <a id="http-design"></a>
 ## Security and limitations

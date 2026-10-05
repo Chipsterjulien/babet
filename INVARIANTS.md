@@ -63,9 +63,11 @@ and nothing else must be required for Babet-specific runtime support.
 An executable produced by `--create-exe` is a final application. It must refuse
 an attempt to invoke Babet's `--create-exe` builder mode.
 
-The refusal must use the same internal source of truth that identifies an
-embedded payload. Babet must not introduce a second independent marker such as
-`generated_executable = true` beside the existing embedded-payload detection.
+The refusal and the execution mode must use one source of truth. Since audit
+batch 15, this is the descriptor in the loaded executable image, patched by
+the builder before publication. ZIP contents validate the application payload;
+they do not determine its identity. A marked application with a damaged or
+missing ZIP/main.lua must fail before interpreting any CLI arguments.
 
 Renaming or copying the original Babet executable must not remove its builder
 capability:
@@ -77,10 +79,38 @@ cp babet toto
 
 must remain valid.
 
-**Current development status after Lot 3:** this contract is enforced. Once the
-existing embedded `main.lua` detection identifies a packaged application, the
-runtime reserves `--create-exe` / `-c` and refuses builder mode before executing
-the embedded script. No second generated-executable identity marker is used.
+**Current development status after audit batch 15:** the loaded descriptor
+replaces the historical `main.lua`-presence identity test, which could turn a
+truncated application into a builder. The runtime reserves `--create-exe` / `-c`
+in valid generated applications and refuses damaged applications at startup.
+The original runtime remains a builder when copied, renamed or stripped before
+packaging. Existing generated executables retain their bundled older runtime;
+rebuild them to obtain the new format and protection.
+
+The version-1 descriptor occupies 64 bytes in the loaded `.babet_image`
+section: a 32-byte magic, little-endian 32-bit version and flag, little-endian
+64-bit ZIP offset and size, then an FNV-1a-64 checksum over the first 56 bytes.
+It uses volatile reads and a live code reference so optimization and section
+garbage collection retain the actual patched data; `used` alone is insufficient
+for linker garbage collection. The builder requires exactly one occurrence
+in the copied runtime prefix, validates it as bare, patches the private output,
+then publishes atomically. The checksum detects accidental descriptor damage;
+it is not cryptographic authentication. ZIP bounds must exactly match EOF.
+The image itself is still opened through `/proc/self/exe`: reading the identity
+from memory does not add support for launching without procfs. Strip the bare
+runtime before packaging; rewriting a generated image can invalidate its bounds.
+UPX compression of a bare runtime is unsupported for `--create-exe`: the loaded
+identity survives decompression, but the builder cannot patch a descriptor
+hidden in the compressed file. `build_and_deploy.sh` must preserve the built
+runtime and check packaging/execution before installing it. Its regression
+uses an UPX command trap and redirects privileged installation into a private
+fixture; optional runtime coverage exercises actual UPX when available.
+The deployment smoke application runs under the build tree, so a noexec
+`TMPDIR` does not prevent installation. Prepare mode `0755` in a temporary file
+in the installation directory, then atomically rename it onto the final path.
+Never overwrite the installed inode in place: running processes must retain
+their original image and a failed copy must preserve the previous installation.
+This is atomic visibility, not an fsync-based power-loss durability guarantee.
 
 ### 1.5 A generated application contains the complete Babet runtime
 
@@ -101,7 +131,7 @@ coverage that the test suite does not provide.
 | `--create-exe` needs no external toolchain at use time | `tests/test_packaging.sh` invokes the real builder with an empty `PATH` and requires executable creation to succeed, protecting against accidental PATH-resolved compiler/linker/tool dependencies. | Keep this focused packaging regression in the normal/release harness. |
 | Official Babet remains autonomous | Lot 1 records the published binary `ldd` baseline; Lot 6 `tools/test_embedding_runtime.sh` additionally rejects any dynamic `libbabet.so` dependency on the freshly built official binary while the CLI links the reusable runtime statically at build time. | Keep the release baseline and the focused embedding autonomy check. |
 | `--create-exe` produces one autonomous application file | `tests/test_packaging.sh` requires exactly one published application file, deletes the source project, and runs that file from an unrelated empty directory. `run_tests.sh` also retains its broader embedded-mode/PATH integration coverage. | Keep both focused and broad integration coverage. |
-| Generated application is not a builder | `tests/test_packaging.sh` structurally verifies that the refusal is inside the existing `if (fileData)` packaged-identity branch, rejects parallel identity markers, and checks at runtime that generated applications refuse both `--create-exe` and `-c` before `main.lua` runs. It also proves a copied/renamed original Babet remains a builder. | Keep this contract tied to the embedded-payload source of truth. |
+| Generated application is not a builder | `tests/test_packaging.sh` checks refusal of both builder flags and preserves the copied/renamed runtime's builder capability. `tools/test_image_identity.py` exercises false ZIP signatures, truncation, trailing data, corrupt metadata, missing main.lua, duplicate descriptors and stripped runtimes. | Keep the loaded descriptor as the single identity source and validate its archive before executing Lua. |
 | Generated application contains the complete runtime | Broadly exercised indirectly by the embedded-mode self-test suite, which runs the packaged executable against the Babet APIs. There is **no focused contract test** asserting a particular binary composition. | Keep the contract architectural; add a focused test only if a simple stable assertion becomes useful. |
 | Embedding public boundary is controlled and C-only | `tools/test_embedding_contracts.sh` requires an opaque context, no public Lua/STL/C++ implementation types, explicit status codes, one-context/same-thread first semantics, static-first `libbabet.a`, and no shared-library build claim. The runtime smoke host is written in C. | Keep the ABI experimental until real host use justifies freezing/expanding it. |
 

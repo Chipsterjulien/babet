@@ -167,6 +167,10 @@ OpenSSL, mais n'est pas envoyé comme SNI, conformément au rôle DNS du champ
 
 Ces options ajoutent des autorités à celles déjà chargées pour cet appel. Elles
 ne remplacent pas le trust store système et ne constituent pas du pinning.
+Cela vaut pour `connect_tls` comme pour `starttls`. Une chaîne vide n'ajoute
+aucune autorité. À l'inverse, le `ca_cert` non vide de [`HTTP`](http.md#http-tls)
+remplace les autorités par défaut pour la requête ; les options de même nom
+n'ont donc pas une politique identique entre les deux modules.
 
 ```lua
 local sock = assert(babet.socket.connect_tls("service.internal", 443, {
@@ -468,6 +472,17 @@ if not ok then
 end
 ```
 
+### `send` après une tentative d'écriture TLS
+
+Après le premier `SSL_write` d'un appel `send`, tout abandon (timeout,
+interruption ou erreur) ferme le transport. OpenSSL peut avoir commencé un
+record sans encore annoncer d'octets applicatifs écrits : il ne suffit donc
+pas de tester si un compteur d'envoi est positif. Le diagnostic initial est
+conservé ; les appels suivants signalent un socket fermé et `close()` reste
+idempotent. La fermeture précède l'appel d'un éventuel callback de signal.
+
+Un timeout avant toute tentative `SSL_write` laisse le socket utilisable.
+
 <a id="tls-examples"></a>
 ## Exemples complets
 
@@ -575,6 +590,11 @@ Le host doit être une string stricte et le port un entier Lua strict.
 Les messages OpenSSL peuvent varier selon la version. Teste les états stables
 comme `"timeout"` ou `"interrupted"`, et journalise le message complet pour le
 diagnostic.
+
+Les écritures internes à OpenSSL sont protégées contre `SIGPIPE`, y compris
+pendant le handshake, la lecture et la fermeture. Une erreur de transport est
+rapportée par l’API au lieu de tuer le programme ; `close()` reste une fermeture
+best-effort. Le gestionnaire `babet.signal` de l’application n’est pas remplacé.
 
 <a id="tls-design"></a>
 ## Sécurité et limites

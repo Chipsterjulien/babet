@@ -171,7 +171,7 @@ int lua_sys_setenv(lua_State *L)
     // parfois rien selon l'état du process — exactement le « muet »
     // qu'on évite).
     // CORRECTIF (option A validée, revue Gemini triée) : mutation
-    // d'état PROCESS-WIDE, interdite dès qu'un worker a été lancé.
+    // d'état PROCESS-WIDE, interdite après workers.spawn ou chargement GTK.
     // setenv(3) peut réallouer `environ` pendant qu'un worker le lit
     // (getenv, exec, résolution DNS) -> course de données, SIGSEGV
     // possible. Le syscall s'exécute sous le verrou partagé avec
@@ -184,9 +184,9 @@ int lua_sys_setenv(lua_State *L)
             saved = errno; }))
     {
         return push_fail_protected(
-            L, "setenv: forbidden after workers.spawn (the process "
+            L, "setenv: forbidden after workers.spawn or GTK loading (the process "
                "environment is shared across threads; set it before "
-               "spawning workers)");
+               "workers or gui.available/gui.init)");
     }
     if (rc != 0)
     {

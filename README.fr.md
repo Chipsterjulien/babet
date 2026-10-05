@@ -17,24 +17,27 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.23.0**. Voir le
+Version actuelle : **2.24.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
 
-Babet 2.23.0 ajoute le SDK développeur statique `libbabet`, une API étroite Lua
-vers hôte, la première ABI expérimentale de plugins natifs Linux, le support
+Babet 2.24.0 ajoute le backend GTK 4 optionnel [`babet.gui`](GUI_DESIGN.md),
+chargé paresseusement depuis le système cible au lieu d'être lié dans Babet.
+Cette version formalise aussi les artefacts de release du SDK développeur par
+architecture et conserve le durcissement post-audit GUI/embedding ainsi que le
+contrat de build OpenSSL/GC de sections validé par le harnais de release. Babet
+sans GUI et les applications `--create-exe` sans GUI conservent leur autonomie ;
+une application GUI reste mono-fichier mais exige explicitement GTK 4 sur la
+cible.
+
+Babet 2.23.0 a introduit le SDK développeur statique `libbabet`, l'API étroite
+Lua vers hôte, la première ABI expérimentale de plugins natifs Linux, le support
 terminal `ncursesw` statique et l'expérience de prototype FLTK séparé désormais
 retirée. Les plugins natifs restent des bibliothèques partagées explicitement
 chargées et totalement de confiance, réservées au CLI original ; les
 applications générées, workers et contextes d'embedding refusent leur chargement.
-
-Le développement post-2.23 remplace la direction du compagnon FLTK par un design
-[`babet.gui`](GUI_DESIGN.md) beaucoup plus étroit : GTK 4 est chargé
-paresseusement depuis le système cible au lieu d'être lié dans Babet. Babet sans
-GUI et les applications `--create-exe` sans GUI conservent leur autonomie ; une
-application GUI reste mono-fichier mais exige explicitement GTK 4 sur la cible.
 
 Babet 2.22.2 ajoute un client WebSocket RFC 6455 natif via
 `babet.websocket`. Il prend en charge `ws://` et `wss://` vérifié, la

@@ -48,6 +48,15 @@ allowed.
 
 ## GTK initialization and process state
 
+Before the first `dlopen` attempt, freeze Babet's Lua mutations of environment,
+current directory and process locale using the same serialized guard as
+`workers.spawn`. This includes `gui.available()`: native constructors can run
+during loading. Release the guard before calling native code. Keep the freeze
+on load/symbol/display failure and after GUI or embedding teardown; do not
+assume partially initialized native state or background threads disappear.
+Queries remain available. Invalid calls rejected before loading do not freeze
+state. Arbitrary native plugin/host libc calls remain their own responsibility.
+
 GTK initialization is main-thread only. The implementation must call
 `gtk_disable_setlocale()` before GTK initialization so optional GUI use does not
 silently change Babet's process-global locale.

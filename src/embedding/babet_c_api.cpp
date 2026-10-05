@@ -1435,12 +1435,19 @@ extern "C" babet_status babet_context_destroy(babet_context *context)
             std::lock_guard<std::mutex> lock(g_context_mutex);
             if (g_active_context != context)
                 return BABET_STATUS_INVALID_ARGUMENT;
-            g_active_context = nullptr;
         }
 
+        // Keep the single-context slot occupied until all Lua finalizers and
+        // shared-runtime cleanup finish. Do not hold the mutex across Lua:
+        // a finalizer can call the host, which may try to create a context.
+        // Such a call must return BUSY instead of deadlocking or succeeding.
         close_babet_lua_state(context->lua);
         context->lua = nullptr;
-        delete context;
+        {
+            std::lock_guard<std::mutex> lock(g_context_mutex);
+            delete context;
+            g_active_context = nullptr;
+        }
         return BABET_STATUS_OK;
     }
     catch (...)

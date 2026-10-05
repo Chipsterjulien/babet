@@ -21,6 +21,10 @@ RELEASE="${ROOT}/release.sh"
 CMAKE="${ROOT}/CMakeLists.txt"
 IGNORE="${ROOT}/.gitignore"
 RELEASING="${ROOT}/RELEASING.md"
+README_EN="${ROOT}/README.md"
+README_FR="${ROOT}/README.fr.md"
+DOCS_EN="${ROOT}/docs/en/README.md"
+DOCS_FR="${ROOT}/docs/fr/README.md"
 
 mapfile -t versions < <(
     sed -nE \
@@ -32,6 +36,25 @@ if [ "${#versions[@]}" -eq 1 ]; then
     pass "CMakeLists exposes exactly one semantic project version"
 else
     fail "CMakeLists exposes exactly one semantic project version"
+fi
+
+if [ "${#versions[@]}" -eq 1 ]; then
+    cmake_version="${versions[0]}"
+    readme_en_version="$(sed -nE 's/^Current release: \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*\..*$/\1/p' "${README_EN}")"
+    readme_fr_version="$(sed -nE 's/^Version actuelle : \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*\..*$/\1/p' "${README_FR}")"
+    docs_en_version="$(sed -nE 's/^Documentation for \*\*Babet ([0-9]+\.[0-9]+\.[0-9]+)\*\*.*$/\1/p' "${DOCS_EN}")"
+    docs_fr_version="$(sed -nE 's/^Documentation de \*\*Babet ([0-9]+\.[0-9]+\.[0-9]+)\*\*.*$/\1/p' "${DOCS_FR}")"
+
+    if [ "${readme_en_version}" = "${cmake_version}" ] \
+        && [ "${readme_fr_version}" = "${cmake_version}" ] \
+        && [ "${docs_en_version}" = "${cmake_version}" ] \
+        && [ "${docs_fr_version}" = "${cmake_version}" ]; then
+        pass "README and manual indexes match the CMake project version"
+    else
+        fail "README and manual indexes match the CMake project version"
+    fi
+else
+    fail "README and manual indexes match the CMake project version"
 fi
 
 if grep -Fq 'CMAKE_VERSION="${CMAKE_VERSIONS[0]}"' "${RELEASE}" \

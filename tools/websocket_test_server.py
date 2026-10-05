@@ -5,6 +5,7 @@ import hashlib
 import socket
 import ssl
 import struct
+import time
 from pathlib import Path
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -199,6 +200,35 @@ def run_invalid_close_utf8(conn, pending):
         raise RuntimeError("client did not close invalid UTF-8 reason with 1007")
 
 
+def run_timeout_mid_frame(conn, pending):
+    # One binary frame whose payload suffix is itself a syntactically valid
+    # text frame header+payload.  The first recv() is expected to time out
+    # after consuming the real binary header and the first payload byte.  A
+    # desynchronised client will then report the suffix as text "X".
+    conn.sendall(bytes([0x82, 0x04, 0xAA]))
+    time.sleep(0.20)
+    conn.sendall(bytes([0x81, 0x01, ord("X")]))
+
+    opcode, payload, _, _ = read_message(conn, pending)
+    if opcode != 0x8 or close_code(payload) != 1000:
+        raise RuntimeError("client did not close normally after timeout-mid-frame")
+    send_frame(conn, 0x8, payload)
+
+
+def run_timeout_between_fragments(conn, pending):
+    # A complete non-final fragment may already be consumed when recv() times
+    # out waiting for the continuation.  The next recv() must resume the same
+    # message rather than reject the continuation as a fresh frame.
+    send_frame(conn, 0x2, b"AB", fin=False)
+    time.sleep(0.20)
+    send_frame(conn, 0x0, b"CD", fin=True)
+
+    opcode, payload, _, _ = read_message(conn, pending)
+    if opcode != 0x8 or close_code(payload) != 1000:
+        raise RuntimeError("client did not close normally after fragmented timeout")
+    send_frame(conn, 0x8, payload)
+
+
 def run_secure(conn, pending):
     send_frame(conn, 0x1, b"secure")
     opcode, payload, _, _ = read_message(conn, pending)
@@ -210,7 +240,7 @@ def run_secure(conn, pending):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", required=True,
-                        choices=["roundtrip", "bad-handshake", "unsolicited-extension", "unsolicited-protocol", "malformed-header", "masked-server", "oversize", "invalid-close-utf8", "secure"])
+                        choices=["roundtrip", "bad-handshake", "unsolicited-extension", "unsolicited-protocol", "malformed-header", "masked-server", "oversize", "invalid-close-utf8", "timeout-mid-frame", "timeout-between-fragments", "secure"])
     parser.add_argument("--port-file", required=True)
     parser.add_argument("--cert")
     parser.add_argument("--key")
@@ -249,6 +279,10 @@ def main():
             run_oversize(conn, pending)
         elif args.mode == "invalid-close-utf8":
             run_invalid_close_utf8(conn, pending)
+        elif args.mode == "timeout-mid-frame":
+            run_timeout_mid_frame(conn, pending)
+        elif args.mode == "timeout-between-fragments":
+            run_timeout_between_fragments(conn, pending)
         elif args.mode == "secure":
             run_secure(conn, pending)
     finally:

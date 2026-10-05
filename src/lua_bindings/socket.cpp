@@ -1,3 +1,4 @@
+#include "sigpipe_guard.hpp"
 #include "socket.hpp"
 #include "lua_utils.hpp"
 #include "signal.hpp"
@@ -980,7 +981,7 @@ namespace
         for (;;)
         {
             ERR_clear_error();
-            int rc = SSL_connect(ssl);
+            int rc = babet_io::without_sigpipe([&] { return SSL_connect(ssl); });
             if (rc == 1)
             {
                 return true; // handshake OK
@@ -1067,7 +1068,7 @@ namespace
         // Best-effort : on tente une fois, on ne boucle pas. Si le
         // peer ne répond pas dans le délai noyau, tant pis : on libère.
         // Le FD est fermé juste après par l'appelant.
-        SSL_shutdown(ssl);
+        babet_io::without_sigpipe([&] { return SSL_shutdown(ssl); });
         SSL_free(ssl);
         ERR_clear_error();
     }
@@ -1241,7 +1242,9 @@ namespace
         const size_t chunk = std::min(
             len, static_cast<size_t>(INT_MAX));
         ERR_clear_error();
-        int n = SSL_write(ssl, data, static_cast<int>(chunk));
+        int n = babet_io::without_sigpipe([&] {
+            return SSL_write(ssl, data, static_cast<int>(chunk));
+        });
         if (n > 0)
         {
             return n;
@@ -1284,7 +1287,9 @@ namespace
             return 0;
         }
         ERR_clear_error();
-        int n = SSL_read(ssl, buf, static_cast<int>(cap));
+        int n = babet_io::without_sigpipe([&] {
+            return SSL_read(ssl, buf, static_cast<int>(cap));
+        });
         if (n > 0)
         {
             return n;
@@ -1310,6 +1315,67 @@ namespace
             err = format_tls_error("SSL_read failed");
             return TLS_IO_FATAL;
         }
+    }
+
+    // Once SSL_write has been attempted, an abandoned call cannot be resumed
+    // with a different Lua buffer: WANT_READ/WANT_WRITE may hide a partially
+    // written record even when OpenSSL reported no application bytes at all.
+    // Keep this scope free of Lua calls, and close before dispatching signals.
+    bool tls_send_all(Sock *s, const char *data, size_t len,
+                      Deadline deadline, std::string &err)
+    {
+        struct AbandonedWrite
+        {
+            Sock *sock;
+            bool started = false;
+            ~AbandonedWrite() noexcept
+            {
+                if (started)
+                    close_sock_resources(sock);
+            }
+        } pending{s};
+
+        size_t total = 0;
+        short events = POLLOUT;
+        while (total < len)
+        {
+            const int ready = wait_ready_deadline(s->fd, events, deadline);
+            if (ready == WAIT_INTERRUPTED)
+            {
+                err = "interrupted";
+                return false;
+            }
+            if (ready == 0)
+            {
+                err = "timeout";
+                return false;
+            }
+            if (ready < 0)
+            {
+                err = "socket: send: ";
+                err += std::strerror(errno);
+                return false;
+            }
+            pending.started = true;
+            const int rc = tls_send_some(s->ssl, data + total, len - total, err);
+            if (rc > 0)
+            {
+                total += static_cast<size_t>(rc);
+                events = POLLOUT;
+            }
+            else if (rc == TLS_IO_WANT_READ)
+                events = POLLIN;
+            else if (rc == TLS_IO_WANT_WRITE)
+                events = POLLOUT;
+            else
+            {
+                if (rc == TLS_IO_EOF)
+                    err = "closed";
+                return false;
+            }
+        }
+        pending.started = false;
+        return true;
     }
 
     // =================================================================
@@ -1363,50 +1429,31 @@ namespace
                              "socket: send: cannot send on a listening socket");
         }
 
-        // Boucle d'écriture : send() peut écrire partiellement, on
-        // continue jusqu'à tout envoyer ou timeout. MSG_NOSIGNAL :
-        // pas de SIGPIPE sur peer fermé (on reçoit EPIPE).
-        //
-        // CORRECTIF (post-revue ChatGPT) : si un timeout est actif,
-        // on force MSG_DONTWAIT pour que send() lui-même ne bloque
-        // PAS dans le noyau quand le peer lit lentement. Sans ça,
-        // poll() nous disait "prêt pour au moins 1 octet" mais
-        // send() pouvait quand même bloquer pour écrire un gros
-        // buffer entier. EAGAIN/EWOULDBLOCK -> on reboucle sur
-        // poll() avec le timeout restant. Si pas de timeout
-        // (s->timeout_ms == 0), comportement bloquant pur conservé,
-        // pas de MSG_DONTWAIT (sinon send() retournerait
-        // immédiatement EAGAIN au lieu de bloquer comme attendu).
-        //
-        // DEADLINE GLOBALE (post-revue 2) : on calcule la deadline
-        // UNE FOIS au début ; chaque tour de boucle utilise le temps
-        // restant. timeout = durée max de l'APPEL complet (cohérent
-        // avec http set_max_timeout, sémantique unifiée Babet).
-        //
-        // TLS (Chantier 7, sous-étape 1.3) : si s->ssl est non-null,
-        // le socket est en mode TLS. Le FD est en O_NONBLOCK depuis
-        // connect_tls/starttls (corrigé post-revue) : SSL_write ne
-        // peut PAS bloquer dans le noyau au-delà de la deadline. Si
-        // le buffer noyau est plein, SSL_write retourne WANT_WRITE ;
-        // si une renégociation TLS interne demande des bytes du peer,
-        // SSL_write retourne WANT_READ. tls_send_some traduit ces
-        // cas en codes TLS_IO_WANT_* qu'on gère ci-dessous avec
-        // wait_ready_deadline + retry. Garantie : deadline globale
-        // respectée comme pour TCP brut.
+        const Deadline deadline = make_deadline(s->timeout_ms);
+        if (s->ssl != nullptr)
+        {
+            std::string err;
+            if (!tls_send_all(s, data, len, deadline, err))
+            {
+                // tls_send_all has already released an abandoned TLS stream.
+                // A callback may safely inspect or close this same userdata.
+                if (err == "interrupted")
+                    signal_dispatch_pending(L);
+                return push_fail_protected(L, err);
+            }
+            lua_pushinteger(L, static_cast<lua_Integer>(len));
+            return 1;
+        }
+
+        // Plain TCP retains its existing contract. MSG_NOSIGNAL prevents
+        // SIGPIPE; MSG_DONTWAIT keeps the whole-call deadline enforceable.
         size_t total = 0;
-        const bool is_tls = (s->ssl != nullptr);
-        const bool use_nonblock = (!is_tls) && (s->timeout_ms > 0);
+        const bool use_nonblock = s->timeout_ms > 0;
         const int send_flags = MSG_NOSIGNAL |
                                (use_nonblock ? MSG_DONTWAIT : 0);
-        Deadline deadline = make_deadline(s->timeout_ms);
-        std::string tls_err;
         while (total < len)
         {
-            // Direction du poll : POLLOUT par défaut. En TLS, un
-            // SSL_write peut demander POLLIN (renégociation), géré
-            // dans la branche TLS via le code retour WANT_READ.
-            short poll_events = POLLOUT;
-            int r = wait_ready_deadline(s->fd, poll_events, deadline);
+            int r = wait_ready_deadline(s->fd, POLLOUT, deadline);
             if (r == WAIT_INTERRUPTED)
             {
                 signal_dispatch_pending(L);
@@ -1419,40 +1466,6 @@ namespace
             if (r == 0)
             {
                 return push_fail_protected(L, "timeout");
-            }
-
-            if (is_tls)
-            {
-                int rc = tls_send_some(s->ssl, data + total,
-                                       len - total, tls_err);
-                if (rc > 0)
-                {
-                    total += static_cast<size_t>(rc);
-                    continue;
-                }
-                if (rc == TLS_IO_EOF)
-                {
-                    return push_fail_protected(L, "closed");
-                }
-                if (rc == TLS_IO_WANT_READ)
-                {
-                    int wr = wait_ready_deadline(s->fd, POLLIN, deadline);
-                    if (wr == WAIT_INTERRUPTED)
-                    {
-                        signal_dispatch_pending(L);
-                        return push_fail_protected(L, "interrupted");
-                    }
-                    if (wr == 0)
-                        return push_fail_protected(L, "timeout");
-                    if (wr < 0)
-                        return push_errno_fail(L, "send");
-                    continue;
-                }
-                if (rc == TLS_IO_WANT_WRITE)
-                {
-                    continue; // déjà attendu POLLOUT, reboucle
-                }
-                return push_fail_protected(L, tls_err); // FATAL
             }
 
             // Branche TCP brut (inchangée).
@@ -1685,6 +1698,34 @@ namespace
         const bool is_tls = (s->ssl != nullptr);
         Deadline deadline = make_deadline(effective_timeout_ms);
 
+        constexpr size_t MAX_LINE_BYTES = 8 * 1024 * 1024;
+
+        // recv_all can leave several complete lines here after a timeout or
+        // size-limit failure. Extract one BEFORE polling the network, and keep
+        // the rest for any of the three receive methods. Apply the same cap as
+        // the byte-by-byte path (the LF is not counted, a preceding CR is).
+        const size_t newline = s->recv_pending.find('\n');
+        if (newline != std::string::npos)
+        {
+            if (newline > MAX_LINE_BYTES)
+            {
+                s->recv_pending.erase(0, newline + 1);
+                return push_fail_protected(L, "line too long");
+            }
+            std::string line(s->recv_pending.data(), newline);
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            // Own the result and advance the buffer before any allocating Lua
+            // call, which can run a user finalizer that re-enters this socket.
+            s->recv_pending.erase(0, newline + 1);
+            return push_string_protected(L, line);
+        }
+        if (s->recv_pending.size() > MAX_LINE_BYTES)
+        {
+            s->recv_pending.clear();
+            return push_fail_protected(L, "line too long");
+        }
+
         // CORRECTIF (post-bug bot IRC) : reprendre les octets déjà
         // lus lors d'un timeout précédent. Si recv_pending est
         // vide (cas normal), acc démarre vide ; sinon on reprend
@@ -1848,7 +1889,6 @@ namespace
             // On vide pending pour qu'un futur appel ne retombe pas
             // sur la même donnée empoisonnée — le contrat est que
             // "line too long" jette aussi les octets accumulés.
-            constexpr size_t MAX_LINE_BYTES = 8 * 1024 * 1024;
             if (acc.size() >= MAX_LINE_BYTES)
             {
                 s->recv_pending.clear();

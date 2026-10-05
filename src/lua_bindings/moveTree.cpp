@@ -1,11 +1,16 @@
 #include "moveTree.hpp"
 #include "lua_utils.hpp"
+#include "nofollow_path.hpp"
 #include "secure_destination.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstring>
 #include <system_error>
 #include <utility>
 #include <vector>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -15,12 +20,14 @@ namespace
     {
         fs::path source_path;
         fs::path relative_path;
+        struct stat identity{};
     };
 
     struct SymlinkMapping
     {
         fs::path relative_path;
         fs::path target;
+        struct stat identity{};
     };
 
     struct TreeScan
@@ -91,22 +98,22 @@ namespace
             while (it != end)
             {
                 const fs::path path = it->path();
-                fs::file_status status = it->symlink_status(ec);
-                if (ec)
+                struct stat status{};
+                if (::lstat(path.c_str(), &status) != 0)
                 {
                     return "cannot inspect '" + path.string() + "': " +
-                           ec.message();
+                           std::strerror(errno);
                 }
 
                 fs::path relative_path = path.lexically_relative(source);
 
-                if (fs::is_directory(status) && !fs::is_symlink(status))
+                if (S_ISDIR(status.st_mode))
                 {
                     scan.directories.push_back(
-                        {path, relative_path});
+                        {path, relative_path, status});
                     pending_directories.push_back(path);
                 }
-                else if (fs::is_symlink(status))
+                else if (S_ISLNK(status.st_mode))
                 {
                     fs::path old_target = fs::read_symlink(path, ec);
                     if (ec)
@@ -134,7 +141,7 @@ namespace
                     }
 
                     scan.symlinks.push_back(
-                        {relative_path, new_target});
+                        {relative_path, new_target, status});
                     scan.has_retargeted_symlink =
                         scan.has_retargeted_symlink || retargeted;
                 }
@@ -144,7 +151,7 @@ namespace
                     // ni symlink est déplacé via rename, avec fallback
                     // copy_file pour les fichiers traversant un filesystem.
                     scan.movable_entries.push_back(
-                        {path, relative_path});
+                        {path, relative_path, status});
                 }
 
                 it.increment(ec);
@@ -177,6 +184,37 @@ namespace
             destination.remove_entry_best_effort(*it);
         }
     }
+
+    std::string remove_scanned_entry(const fs::path &path,
+                                     const struct stat &scanned,
+                                     bool directory)
+    {
+        struct stat current{};
+        if (::lstat(path.c_str(), &current) != 0)
+        {
+            return "cannot inspect source entry before cleanup '" +
+                   path.string() + "': " + std::strerror(errno);
+        }
+        // Never knowingly unlink a file/link substituted after the scan.
+        // This is a consistency check, not a filesystem-wide transaction.
+        if (current.st_dev != scanned.st_dev ||
+            current.st_ino != scanned.st_ino ||
+            (current.st_mode & S_IFMT) != (scanned.st_mode & S_IFMT))
+        {
+            return "source entry changed during move: '" + path.string() + "'";
+        }
+
+        // rmdir, unlike remove_all, preserves every untransferred entry that
+        // appeared after the scan. ENOTEMPTY is an error, never a reason to
+        // retry recursively. unlink removes only the scanned symlink itself.
+        const int rc = directory ? ::rmdir(path.c_str()) : ::unlink(path.c_str());
+        if (rc != 0)
+        {
+            return "cannot remove source entry '" + path.string() +
+                   "': " + std::strerror(errno);
+        }
+        return "";
+    }
 } // namespace
 
 /**
@@ -192,7 +230,7 @@ namespace
  *      - créer les dossiers de destination ;
  *      - créer tous les symlinks AVANT de supprimer ceux de la source ;
  *      - déplacer les autres entrées ;
- *      - supprimer l'arborescence source résiduelle en dernier.
+ *      - supprimer les liens scannés, puis les dossiers devenus vides.
  *
  * Si la création d'un symlink échoue, les symlinks déjà créés par cet appel
  * sont retirés et la source n'a encore subi aucune modification.
@@ -200,22 +238,22 @@ namespace
 std::string moveTree(const fs::path &source, const fs::path &destination)
 {
     // Validations préalables.
-    std::error_code src_ec;
-    const fs::file_status source_status = fs::symlink_status(source, src_ec);
-    if (src_ec == std::errc::no_such_file_or_directory)
+    const fs::path source_nofollow = nofollow_final_component_path(source);
+    struct stat source_status{};
+    if (::lstat(source_nofollow.c_str(), &source_status) != 0)
     {
-        return "source path does not exist: " + source.string();
-    }
-    if (src_ec)
-    {
+        if (errno == ENOENT)
+        {
+            return "source path does not exist: " + source.string();
+        }
         return "cannot inspect source path '" + source.string() +
-               "': " + src_ec.message();
+               "': " + std::strerror(errno);
     }
-    if (fs::is_symlink(source_status))
+    if (S_ISLNK(source_status.st_mode))
     {
         return "source root must not be a symlink: '" + source.string() + "'";
     }
-    if (!fs::is_directory(source_status))
+    if (!S_ISDIR(source_status.st_mode))
     {
         return "source path is not a directory: " + source.string();
     }
@@ -242,10 +280,17 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
                destination.string() + "' resolves inside '" +
                source.string() + "'";
     }
+    if (is_within(destination_real, source_real))
+    {
+        return "destination cannot be an ancestor of source: '" +
+               destination.string() + "' contains '" + source.string() + "'";
+    }
 
+    const fs::path destination_nofollow =
+        nofollow_final_component_path(destination);
     std::error_code dst_ec;
     fs::file_status destination_status =
-        fs::symlink_status(destination, dst_ec);
+        fs::symlink_status(destination_nofollow, dst_ec);
     if (dst_ec && dst_ec != std::errc::no_such_file_or_directory)
     {
         return "cannot inspect destination path '" + destination.string() +
@@ -260,7 +305,7 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
         !dst_ec && fs::exists(destination_status);
 
     TreeScan scan;
-    if (std::string err = scan_tree(source, source_real,
+    if (std::string err = scan_tree(source_nofollow, source_real,
                                     destination_real, scan);
         !err.empty())
     {
@@ -274,7 +319,7 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
     if (!destination_exists && !scan.has_retargeted_symlink)
     {
         std::error_code rename_ec;
-        fs::rename(source, destination, rename_ec);
+        fs::rename(source_nofollow, destination, rename_ec);
         if (!rename_ec)
         {
             return "";
@@ -333,24 +378,33 @@ std::string moveTree(const fs::path &source, const fs::path &destination)
             // Ne pas retirer les symlinks destination : cela aggraverait
             // l'état partiel et pourrait supprimer le seul lien utile côté
             // destination. Les liens source restent présents jusqu'au
-            // remove_all final.
+            // nettoyage final des seuls liens et dossiers scannés.
             return *move_error;
         }
     }
 
-    std::error_code ec;
-
-    // Source résiduelle = dossiers + symlinks. Les liens destination sont
-    // déjà tous présents, donc un échec de suppression ne provoque plus de
-    // perte du seul exemplaire du lien.
-    fs::remove_all(source, ec);
-    if (ec)
+    // Do not sweep the current tree: it may now contain files that were never
+    // transferred. Remove only known symlinks, then empty directories in
+    // reverse depth order. Any new entry makes rmdir fail without deleting it.
+    for (const SymlinkMapping &mapping : scan.symlinks)
     {
-        return "cannot remove source directory '" + source.string() +
-               "': " + ec.message();
+        if (auto err = remove_scanned_entry(
+                source_nofollow / mapping.relative_path, mapping.identity, false);
+            !err.empty())
+        {
+            return err;
+        }
+    }
+    for (auto it = scan.directories.rbegin(); it != scan.directories.rend(); ++it)
+    {
+        if (auto err = remove_scanned_entry(it->source_path, it->identity, true);
+            !err.empty())
+        {
+            return err;
+        }
     }
 
-    return "";
+    return remove_scanned_entry(source_nofollow, source_status, true);
 }
 
 /**

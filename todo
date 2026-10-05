@@ -116,6 +116,9 @@ Lot 3 — secure --create-exe as a final-application builder
 [x] Use exactly the existing embedded-payload identity mechanism as the source
     of truth: the refusal is inside the existing `if (fileData)` branch and no
     parallel generated_executable marker is introduced.
+    Historical implementation: audit batch 15 replaces this identity source
+    with the loaded image descriptor after reproducing CLI fallback from a
+    truncated application. Payload validation no longer selects CLI identity.
 [x] Preserve builder capability when the original Babet binary is copied or
     renamed.
 [x] Create dedicated `tests/test_packaging.sh`, separate from exception-boundary

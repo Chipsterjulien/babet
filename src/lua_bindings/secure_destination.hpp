@@ -37,6 +37,13 @@ public:
         const std::filesystem::path &relative_destination) noexcept;
 
 private:
+    // When requested, transfer the O_PATH pin to the mover so the copied
+    // inode cannot be recycled before its source identity is checked.
+    std::optional<std::string>
+    copy_regular_file(const std::filesystem::path &source,
+                      const std::filesystem::path &relative_destination,
+                      int *copied_fd);
+
     int root_fd_ = -1;
     std::filesystem::path root_path_;
 

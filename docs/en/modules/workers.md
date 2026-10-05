@@ -379,13 +379,15 @@ In the new Lua state:
 A channel placed in `args` remains non-serializable userdata and is rejected.
 
 <a id="workers-process-lock"></a>
-### When `setenv` and `chdir` become locked
+### When `setenv`, `chdir` and `os.setlocale` become locked
 
 After validating types and capacities, the first `spawn` marks the process as
 having used workers. From then on:
 
 - `babet.setenv(...)` is permanently rejected;
 - `babet.chdir(...)` is permanently rejected;
+- `os.setlocale(locale, category)` raises a Lua error when `locale` is not
+  `nil`, including `""` and the already active locale;
 - the restriction remains after `join()`;
 - it remains even if `args` serialization, queue initialization, or
   `pthread_create` later fails.
@@ -393,7 +395,21 @@ having used workers. From then on:
 A call rejected **before** this mark — for example `spawn(42)` or a non-integer
 capacity — does not lock the environment.
 
-Configure the current directory and environment before the first worker.
+The first GTK loading attempt through `gui.available()` or `gui.init()`
+triggers the same freeze before entering the native library, even if loading
+or initialization fails. This also covers GTK-created threads without a
+`workers.spawn` call; see the [GUI contract](gui.md).
+
+Configure the current directory, environment and locale before the first
+worker or GUI loading call. `os.setlocale()` and `os.setlocale(nil, category)`
+remain available
+as queries in every state. Before the freeze, the standard Lua contract is
+preserved: a locale name on success, or one `nil` for an unavailable locale.
+Argument validation remains the same as in Lua.
+
+The freeze also survives destruction and recreation of an embedding context.
+These rules guard Babet's Lua entry points; native plugins and embedding hosts
+remain responsible for their own process-wide mutations and threads.
 
 <a id="workers-transfer"></a>
 ## Transferable values
@@ -1094,11 +1110,22 @@ Lua states are isolated, but threads belong to the same process:
 - same PID;
 - same process-wide current directory;
 - same process-wide environment;
+- same process-wide C locale;
 - same filesystem and accessible external resources;
 - Lua memory measured separately in each state.
 
-Babet rejects cwd and environment mutations after the first `spawn`, stabilizing
-those two global states.
+Babet rejects cwd, environment and locale mutations through these Lua APIs
+after the first `spawn` or GTK loading attempt.
+
+`os.exit(...)` raises a Lua error inside every worker, including its coroutines
+and nested workers. An uncaught error makes `job:join()` return `(false, err)`;
+`pcall` can catch it without closing the worker's Lua state. Use `return` to
+finish a worker normally. This also applies to `require("os").exit` and saved
+aliases. In the CLI and generated executables, `os.exit` retains Lua's argument
+rules, restores the UI and terminates without native `atexit` callbacks.
+Without `close=true` it does not join workers; a truthy `close` requests Lua
+closure, which can wait for non-cooperative native calls in workers.
+See the [exit contract](../runtime-exit.md), including the embedding policy.
 
 <a id="workers-cpu-count"></a>
 ## Available CPU count
@@ -1825,11 +1852,37 @@ All six signals managed by `babet.signal` are blocked in worker pthreads.
 `babet.signal.handle`, `ignore`, and `default` raise inside a worker. The main
 thread remains the only owner of POSIX callbacks.
 
+### `os.execute` and `io.popen` inside a worker
+
+In worker states, both functions launch `/bin/sh -c` with an empty child
+signal mask. Signals blocked to protect worker threads therefore remain
+unblocked in the command even when the shell normally preserves its inherited
+mask. The worker's own mask is unchanged. Explicitly ignored dispositions
+remain inheritable under the ordinary rules for executing programs.
+
+Launching and waiting for `os.execute` in a worker does not change the global
+`SIGINT` or `SIGQUIT` dispositions, so it does not temporarily disable the
+main thread's signal handler.
+
+Lua contracts remain available: `os.execute()` returns a boolean indicating
+shell availability; a terminated command returns `true` or `nil`, followed by
+`"exit"` or `"signal"` and the corresponding code. A native launch or wait
+failure returns `nil, message, errno`. `io.popen` accepts `"r"` and `"w"` and
+returns an ordinary Lua file, or `nil, message, errno` on launch failure.
+Its methods, `io.type`, `close`, `<close>` and GC continue to work; closing
+waits for and reaps the child. Pipe ends retained by the parent are not
+inherited across another `exec`.
+
+These calls remain blocking. Neither `job:cancel()` nor a `job:join(timeout)`
+timeout automatically terminates the command; closing an `io.popen` file,
+including during GC, can wait for the command to finish. The main Lua state's
+functions retain their standard implementation.
+
 ### Environment and cwd
 
 `setenv` and `chdir` change process-wide state that cannot safely be mutated
 while other threads use it. Babet therefore rejects both after the first
-`spawn`.
+`spawn` or GTK loading attempt.
 
 ### External resources
 

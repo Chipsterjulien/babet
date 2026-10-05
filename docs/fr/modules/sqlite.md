@@ -383,7 +383,7 @@ local restored = assert(babet.sqlite.open("state-restored.db"))
 | --- | --- |
 | `db:exec(sql)` | `(true, nil)` \| `(nil, err)` — plusieurs instructions acceptées |
 | `db:exec(sql, params)` | `(true, nil)` \| `(nil, err)` — **une seule** instruction |
-| `db:query(sql, params?)` | `stmt` temporaire appelable \| `(nil, err)` |
+| `db:query(sql, params?)` | `stmt, nil, nil, stmt` \| `(nil, err)` |
 | `stmt:close()` | `(true, nil)` — idempotent |
 
 #### `db:exec`
@@ -412,10 +412,21 @@ for row in db:query("SELECT id, name FROM users ORDER BY id") do
 end
 ```
 
-Chaque ligne est une table indexée par nom de colonne. L'itérateur renvoie
-`nil` une fois épuisé puis finalise automatiquement son statement.
-`stmt:close()` permet de le libérer plus tôt. Le ramasse-miettes finalise aussi
-un itérateur abandonné après un `break`.
+Chaque ligne est une table indexée par nom de colonne. L’itérateur renvoie
+`nil` et finalise l’instruction lorsqu’il est épuisé. En succès, `query` renvoie
+`stmt, nil, nil, stmt` : la quatrième valeur permet à Lua de fermer le curseur
+dès toute sortie du `for` générique (`break`, `return`, `goto`, erreur ou
+fermeture de coroutine). Les échecs renvoient toujours exactement `(nil, err)` ;
+`local iter, err = db:query(...)` garde donc son usage habituel.
+
+Si seule la première valeur est conservée, `for row in iter do` ne reçoit pas
+de quatrième valeur à fermer. Utilise `local iter <close> = assert(db:query(...))`
+pour fermer à la sortie de portée, ou appelle explicitement `iter:close()`.
+Les parenthèses `(db:query(...))` ne conservent elles aussi que la première valeur.
+`__close` et `close()` sont idempotents : les références conservées restent des
+itérateurs épuisés valides. `__gc` reste le filet de sécurité des curseurs
+abandonnés. Le contrat de reset/réutilisation explicite des statements préparés
+`prepared:query` reste inchangé.
 
 `query` n'est pas limité aux `SELECT`. Une instruction DDL ou DML est exécutée
 au premier appel, puis l'itérateur se termine sans produire de ligne.
@@ -992,8 +1003,10 @@ stmt:finalize()
 ```
 
 Les itérateurs temporaires de `db:query` et les statements préparés possèdent
-un `__gc` qui finalise leur handle. Une fermeture explicite reste préférable
-pour libérer immédiatement verrous et ressources.
+un `__gc` de secours. Les boucles directes `for row in db:query(...)` et les
+variables `<close>` finalisent les curseurs temporaires de façon déterministe.
+Pour les itérateurs conservés séparément et les statements préparés, utilise
+close/finalize explicitement pour libérer rapidement les ressources.
 
 Les statements ne conservent volontairement ni référence Lua ni pointeur
 `Db*` brut vers le userdata parent. SQLite maintient lui-même la connexion

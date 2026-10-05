@@ -653,6 +653,15 @@ int l_read_key(lua_State *L)
         const bool handled_pending = signal_any_handled_pending();
         signal_dispatch_pending(L);
 
+        // A signal can arrive after the pending snapshot, and its Lua
+        // callback can stop curses. Never touch the released screen again.
+        if (!g_active.load(std::memory_order_acquire) || !g_state.screen)
+        {
+            lua_pushnil(L);
+            lua_pushstring(L, "interrupted");
+            return 2;
+        }
+
         if (g_state.resize_event_pending)
         {
             g_state.resize_event_pending = false;
@@ -705,6 +714,13 @@ int l_read_key(lua_State *L)
 
         const bool handled_after_read = signal_any_handled_pending();
         signal_dispatch_pending(L);
+
+        if (!g_active.load(std::memory_order_acquire) || !g_state.screen)
+        {
+            lua_pushnil(L);
+            lua_pushstring(L, "interrupted");
+            return 2;
+        }
 
         if (g_state.resize_event_pending)
         {

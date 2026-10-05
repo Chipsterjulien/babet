@@ -311,7 +311,10 @@ symlinks are resolved before changing directory.
 
 The working directory is shared by all threads. Consequently, `chdir` is
 permanently rejected after the first `babet.workers.spawn()`, even after that
-worker has completed.
+worker has completed. The first GTK loading attempt through `gui.available()`
+or `gui.init()` triggers the same rule, even on failure. Configure the directory
+before those calls; `babet.currentDir()` remains available as a query. See the
+[GUI contract](gui.md).
 
 ```lua
 assert(babet.chdir("/srv/my-app")) -- do this before any spawn
@@ -523,7 +526,7 @@ It rejects:
 
 - a non-empty directory;
 - a file;
-- a symlink, even when it points to a directory;
+- a symlink, even when it points to a directory or ends in `/` or `/.`;
 - a missing path.
 
 ```lua
@@ -540,7 +543,7 @@ assert(babet.rmdirAll("temporary-build"))
 ```
 
 The root must exist and be a real directory. A file or a symlink to a
-directory is rejected.
+directory is rejected, including paths ending in `/`, `/.` or `/./`.
 
 Symlinks *inside* the removed directory are deleted as directory entries;
 their external targets are not traversed.
@@ -1020,7 +1023,8 @@ local ok, err = babet.copyTree("source", "destination", true)
 - existing regular files are replaced;
 - a pre-existing destination symlink, either as an intermediate component or
   final file, is rejected;
-- the destination cannot be inside the source;
+- the trees must be disjoint: the destination must not be the source itself,
+  one of its descendants, or one of its ancestors;
 - source and destination roots must not be symlinks.
 
 #### Metadata
@@ -1071,17 +1075,41 @@ link needs rewriting, Babet uses an entry-by-entry fallback:
 - create destination directories;
 - create destination symlinks;
 - move other entries;
-- remove the residual source tree.
+- remove only scanned symlinks, then empty directories from deepest to root.
+
+Final cleanup never recursively deletes the remaining contents. A file added
+after the scan stays in the source: its non-empty directory makes the move
+fail even if other entries have already been transferred. Link and directory
+identities are checked again before removal; this does not make the overall
+operation transactional against concurrent mutations.
 
 In this fallback, a file copied to a new inode preserves ordinary `rwx` bits
 but not special bits, owner, group, or timestamps. Created directories follow
 the umask.
 
+Across filesystems, only regular files support the copy-and-remove fallback.
+A FIFO is rejected without waiting for a writer. Renaming a FIFO within one
+filesystem remains supported.
+
+Before opening a copy source for reading, Babet inspects its inode through a
+Linux `O_PATH` descriptor, which does not open devices for I/O. Only a regular
+file is then opened through `/proc/self/fd`, retaining that inode even if its
+pathname has been replaced. This step, shared by `copyTree` and `moveTree`'s
+fallback, requires procfs; failure rejects the copy without publishing its
+destination file.
+
+After an EXDEV copy, `moveTree` keeps the source inode pinned and compares its
+identity with the source pathname before removal. A detected replacement
+returns an error, preserving the replacement and the already published copy.
+This does not make `lstat` followed by `unlink` atomic: avoid concurrent changes
+to the source tree during the move.
+
 #### Safety checks
 
 - source must be a real directory, not a symlink;
 - destination root must not be a symlink;
-- destination cannot be inside source;
+- destination cannot be the source, a descendant, or an ancestor of the
+  source, including after path resolution;
 - a pre-existing symlink in a merge destination is rejected;
 - internal links use the same rewriting rules as `copyTree`.
 

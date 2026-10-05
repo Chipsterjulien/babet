@@ -1223,6 +1223,17 @@ A descendant that deliberately calls `setsid` or changes process group can
 escape this strategy. `babet.exec` is not a sandbox and does not replace
 systemd, cgroups, namespaces, or resource limits.
 
+### Child signal mask
+
+`exec`, `spawn`, `pipeline` and `spawnPipeline` start external programs with an
+empty signal mask, from both the main thread and workers. The worker’s internal
+mask therefore does not block `SIGTERM`, `SIGINT` or `SIGPIPE` in the child.
+The calling thread’s mask stays unchanged.
+
+This does not change POSIX inheritance of signal dispositions: an explicitly
+ignored signal may remain ignored after `execve`. This policy applies to the
+four Babet APIs, not the standard Lua `os.execute` and `io.popen` functions.
+
 ### Interaction with `babet.signal`
 
 `babet.exec` is not signal-aware. A handled signal received while the call is

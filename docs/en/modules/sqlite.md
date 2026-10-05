@@ -370,7 +370,7 @@ local restored = assert(babet.sqlite.open("state-restored.db"))
 | --- | --- |
 | `db:exec(sql)` | `(true, nil)` \| `(nil, err)` — multiple statements allowed |
 | `db:exec(sql, params)` | `(true, nil)` \| `(nil, err)` — **one** statement |
-| `db:query(sql, params?)` | callable temporary `stmt` \| `(nil, err)` |
+| `db:query(sql, params?)` | `stmt, nil, nil, stmt` \| `(nil, err)` |
 | `stmt:close()` | `(true, nil)` — idempotent |
 
 #### `db:exec`
@@ -398,8 +398,19 @@ end
 ```
 
 Each row is a table keyed by column name. The iterator returns `nil` when it is
-exhausted and automatically finalizes its statement. `stmt:close()` releases it
-earlier, and garbage collection finalizes an iterator abandoned after `break`.
+exhausted and automatically finalizes its statement. On success `query` returns
+`stmt, nil, nil, stmt`: the fourth value lets Lua close the cursor immediately
+on every generic-for exit (`break`, `return`, `goto`, error or coroutine closure).
+Failures still return exactly `(nil, err)`; `local iter, err = db:query(...)`
+therefore keeps its usual meaning.
+
+If you retain only the first result, `for row in iter do` has no fourth closing
+value. Use `local iter <close> = assert(db:query(...))` to close it at scope exit,
+or call `iter:close()` explicitly. Parenthesizing `(db:query(...))` also keeps
+only the first result. `__close` and explicit close are idempotent; surviving
+references remain valid exhausted iterators. `__gc` is the fallback for cursors
+abandoned without deterministic closure. Reusable `prepared:query` statements
+retain their existing explicit reset/reuse contract.
 
 `query` also accepts DDL and DML. Such a statement runs on the first call and
 then ends without yielding a row.
@@ -962,9 +973,10 @@ end
 stmt:finalize()
 ```
 
-Temporary `db:query` iterators and prepared statements both finalize their
-handles from `__gc`. Explicit close/finalize is still preferable because it
-releases locks and resources immediately.
+Temporary `db:query` iterators and prepared statements both have a `__gc`
+fallback. Direct `for row in db:query(...)` loops and `<close>` locals finalize
+temporary cursors deterministically. For separately retained iterators and
+prepared statements, use explicit close/finalize to release resources promptly.
 
 Statements deliberately hold no Lua reference and no raw `Db*` pointer to
 their parent userdata. SQLite itself keeps the native zombie connection alive,

@@ -99,6 +99,36 @@ do
     ok_act("  cleanup real target directory",
         babet.rmdir(sb("lot6_dir_target")))
 
+    -- Audit 2026-09, lot 1: a trailing slash or /. must never turn a
+    -- rejected directory symlink into a recursive deletion of its target.
+    do
+        local root = sb("lot1_remove_suffix")
+        assert(babet.mkdir(root .. "/target/sub"))
+        local precious = root .. "/target/sub/precious.txt"
+        local f = assert(io.open(precious, "wb"))
+        f:write("KEEP"); f:close()
+        local ln = assert(babet.exec("ln", {"-s", "target", root .. "/link"}))
+        assert(ln.code == 0)
+        for _, method in ipairs({"rmdir", "rmdirAll"}) do
+            for _, suffix in ipairs({"", "/", "//", "/.", "/./", "/././"}) do
+                local value, err = babet[method](root .. "/link" .. suffix)
+                ok_fail("LOT 1 " .. method .. " rejects symlink suffix " .. suffix,
+                    value, err)
+                local kept = io.open(precious, "rb")
+                local data = kept and kept:read("*a")
+                if kept then kept:close() end
+                ok("LOT 1 symlink target data preserved after " .. method .. suffix,
+                    data == "KEEP")
+            end
+        end
+        assert(babet.mkdir(root .. "/empty"))
+        ok_act("LOT 1 rmdir accepts real directory with terminal /.",
+            babet.rmdir(root .. "/empty/./"))
+        ok_act("LOT 1 rmdirAll accepts real directory with terminal /.",
+            babet.rmdirAll(root .. "/target/./"))
+        ok_act("LOT 1 remove suffix fixture cleanup", babet.rmdirAll(root))
+    end
+
     babet.exec("ln", { "-s", "missing_target", sb("lot6_broken") })
     ok_act("LOT 6 remove(dangling symlink) succeeds",
         babet.remove(sb("lot6_broken")))
@@ -326,6 +356,50 @@ do
     -- nettoyage
     babet.rmdirAll(sb("nested_src"))
 
+    -- Reverse overlap is just as dangerous: a copy must not overwrite its
+    -- own input, and moveTree must not delete files it has just moved upward.
+    do
+        local root = sb("lot1_ancestor")
+        assert(babet.mkdir(root .. "/parent/a/a"))
+        local function write(path, text)
+            local f = assert(io.open(path, "wb")); f:write(text); f:close()
+        end
+        local function read(path)
+            local f = io.open(path, "rb")
+            if not f then return nil end
+            local text = f:read("*a"); f:close(); return text
+        end
+        write(root .. "/parent/a/f", "ORIGINAL")
+        write(root .. "/parent/a/a/f", "OTHER")
+        local ln = assert(babet.exec("ln", {"-s", "parent", root .. "/alias"}))
+        assert(ln.code == 0)
+        for _, source in ipairs({root .. "/parent/a", root .. "/alias/a/./"}) do
+            for _, continue_on_error in ipairs({false, true}) do
+                local value, err = babet.copyTree(source, root .. "/parent",
+                    continue_on_error)
+                ok_fail("LOT 1 copyTree rejects ancestor before any write", value, err)
+                ok("LOT 1 ancestor copy leaves both source files intact",
+                    read(root .. "/parent/a/f") == "ORIGINAL"
+                    and read(root .. "/parent/a/a/f") == "OTHER"
+                    and not babet.fileExists(root .. "/parent/f"))
+            end
+            local value, err = babet.moveTree(source, root .. "/parent")
+            ok_fail("LOT 1 moveTree rejects ancestor before any move", value, err)
+            ok("LOT 1 ancestor move leaves both source files intact",
+                read(root .. "/parent/a/f") == "ORIGINAL"
+                and read(root .. "/parent/a/a/f") == "OTHER"
+                and not babet.fileExists(root .. "/parent/f"))
+        end
+        -- Component comparison must still allow a sibling with a shared prefix.
+        ok_act("LOT 1 copyTree permits sibling with same name prefix",
+            babet.copyTree(root .. "/parent/a", root .. "/parent/a2", false))
+        ok_act("LOT 1 moveTree permits sibling with same name prefix",
+            babet.moveTree(root .. "/parent/a2", root .. "/parent/a3"))
+        ok("LOT 1 sibling move preserves nested content",
+            read(root .. "/parent/a3/a/f") == "OTHER")
+        ok_act("LOT 1 ancestor fixture cleanup", babet.rmdirAll(root))
+    end
+
     -- --- durcissement symlinks (résolution réelle des chemins) -----
     -- Tout est confiné sous sb("sym") et nettoyé par UN seul rmdirAll :
     -- remove_all ne suit pas les liens et ne dépend pas de l'ordre, donc
@@ -398,6 +472,65 @@ do
         ok("  lien source et cible restent intacts après refus",
             readlink(sb("sym/srcvia")) == abs(sb("sym/rs"))
             and babet.isFile(sb("sym/rs/data.txt")) == true)
+
+        -- B2) Régression : un slash terminal (ou /.) ne doit pas transformer
+        --     une racine symlinkée en répertoire acceptable. POSIX suit le
+        --     lien avant symlink_status/O_NOFOLLOW dans cette écriture.
+        local src_slash_copy, src_slash_copy_err = babet.copyTree(
+            sb("sym/srcvia") .. "/", sb("sym/slash_src_copy_rejected"), false)
+        ok_fail("copyTree: racine source symlink + slash refusée",
+            src_slash_copy, src_slash_copy_err)
+        ok("  erreur source + slash mentionne symlink",
+            type(src_slash_copy_err) == "string"
+            and src_slash_copy_err:find("symlink", 1, true) ~= nil,
+            tostring(src_slash_copy_err))
+
+        local src_dot_copy, src_dot_copy_err = babet.copyTree(
+            sb("sym/srcvia") .. "/./", sb("sym/dot_src_copy_rejected"), false)
+        ok_fail("copyTree: racine source symlink + /./ refusée",
+            src_dot_copy, src_dot_copy_err)
+
+        local src_slash_move, src_slash_move_err = babet.moveTree(
+            sb("sym/srcvia") .. "/", sb("sym/slash_src_move_rejected"))
+        ok_fail("moveTree: racine source symlink + slash refusée",
+            src_slash_move, src_slash_move_err)
+
+        -- Même bypass sur la racine destination : avant correction,
+        -- open("dstlink/", O_NOFOLLOW|O_DIRECTORY) ouvrait réellement la
+        -- cible du lien et copyTree pouvait écraser un fichier extérieur.
+        babet.mkdir(sb("sym/slash_dst_src"))
+        do
+            local f = assert(io.open(sb("sym/slash_dst_src/file.txt"), "wb"))
+            f:write("NEW")
+            f:close()
+        end
+        babet.mkdir(sb("sym/slash_dst_outside"))
+        do
+            local f = assert(io.open(sb("sym/slash_dst_outside/file.txt"), "wb"))
+            f:write("ORIGINAL")
+            f:close()
+        end
+        mklink(abs(sb("sym/slash_dst_outside")), sb("sym/slash_dst_link"))
+
+        local dst_slash_copy, dst_slash_copy_err = babet.copyTree(
+            sb("sym/slash_dst_src"), sb("sym/slash_dst_link") .. "/", false)
+        ok_fail("copyTree: racine destination symlink + slash refusée",
+            dst_slash_copy, dst_slash_copy_err)
+        local outside_file = io.open(sb("sym/slash_dst_outside/file.txt"), "rb")
+        local outside_content = outside_file and outside_file:read("*a") or nil
+        if outside_file then outside_file:close() end
+        ok("  destination extérieure inchangée après refus",
+            outside_content == "ORIGINAL",
+            "content=" .. tostring(outside_content))
+
+        babet.mkdir(sb("sym/slash_move_src"))
+        babet.touch(sb("sym/slash_move_src/file.txt"))
+        local dst_slash_move, dst_slash_move_err = babet.moveTree(
+            sb("sym/slash_move_src"), sb("sym/slash_dst_link") .. "/")
+        ok_fail("moveTree: racine destination symlink + slash refusée",
+            dst_slash_move, dst_slash_move_err)
+        ok("  source moveTree intacte après refus destination + slash",
+            babet.fileExists(sb("sym/slash_move_src/file.txt")) == true)
 
         -- Les liens internes restent, eux, pris en charge et retargetés.
         local rc, rc_err = babet.copyTree(sb("sym/rs"), sb("sym/viad"))

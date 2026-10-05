@@ -209,9 +209,11 @@ local ok, err = pcall(babet.deepCopyTable, 42)
 - A weak metatable (`__mode`) remains weak on the copy because it is shared.
 - Map-key order is undefined. Only the positive-integer ordering of
   `mergeTables` is guaranteed.
-- The ordered list-key selection in `mergeTables` favors safety across Lua
-  errors; its cost is quadratic per source in the number of positive integer
-  keys. This helper is therefore intended mainly for moderately sized tables.
+- `mergeTables` copies dense positive integer keys `1..n` directly. Sparse
+  positive keys are sorted in temporary storage owned by Lua, which remains
+  reclaimable after an allocation error. For a source with `m` entries and
+  `k` positive integer keys, the traversal costs O(m) for dense keys and
+  O(m + k log k) for sparse keys, with O(k) temporary storage in the latter case.
 
 <a id="tables-not-exposed"></a>
 ## Not in v1

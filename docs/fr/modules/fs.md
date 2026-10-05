@@ -314,7 +314,10 @@ les symlinks sont résolus avant le changement.
 
 Le répertoire courant est partagé par tous les threads. Pour cette raison,
 `chdir` est définitivement refusé dès que le premier `babet.workers.spawn()` a
-été effectué, même si le worker est déjà terminé.
+été effectué, même si le worker est déjà terminé. La première tentative de
+chargement GTK via `gui.available()` ou `gui.init()` déclenche la même règle,
+même si elle échoue. Configure le répertoire avant ces appels ;
+`babet.currentDir()` reste disponible en lecture. Voir le [contrat GUI](gui.md).
 
 ```lua
 assert(babet.chdir("/srv/mon-app")) -- à faire avant tout spawn
@@ -532,7 +535,7 @@ La fonction refuse :
 
 - un dossier non vide ;
 - un fichier ;
-- un symlink, même s’il pointe vers un dossier ;
+- un symlink, même s’il pointe vers un dossier ou se termine par `/` ou `/.` ;
 - un chemin absent.
 
 ```lua
@@ -549,7 +552,7 @@ assert(babet.rmdirAll("build-temp"))
 ```
 
 La racine doit exister et être un dossier réel. Un fichier ou un symlink vers
-un dossier est refusé.
+un dossier est refusé, y compris avec un suffixe `/`, `/.` ou `/./`.
 
 Les symlinks situés *à l’intérieur* du dossier supprimé sont supprimés comme
 des entrées ; leur cible extérieure n’est pas parcourue.
@@ -1043,7 +1046,8 @@ local ok, err = babet.copyTree("source", "destination", true)
 - les fichiers réguliers existants sont remplacés ;
 - un symlink déjà présent dans la destination, comme composant intermédiaire
   ou comme fichier final, est refusé ;
-- la destination ne peut pas être située à l’intérieur de la source ;
+- les deux arborescences doivent être disjointes : la destination ne peut être
+  ni la source elle-même, ni un de ses descendants, ni un de ses ancêtres ;
 - la racine source et la racine destination ne doivent pas être des symlinks.
 
 #### Métadonnées
@@ -1097,17 +1101,43 @@ entrée :
 - création des dossiers de destination ;
 - création des symlinks de destination ;
 - déplacement des autres entrées ;
-- suppression de l’arbre source résiduel.
+- suppression des seuls liens scannés, puis des dossiers devenus vides,
+  du plus profond jusqu’à la racine.
+
+Le nettoyage final ne supprime jamais récursivement le contenu restant. Un
+fichier ajouté après le scan reste dans la source : le dossier non vide fait
+échouer le déplacement, même si d’autres entrées ont déjà été transférées.
+Les identités des liens et dossiers sont revérifiées avant leur suppression ;
+cela ne rend pas l’ensemble de l’opération transactionnel face aux mutations
+concurrentes.
 
 Dans ce fallback, un fichier copié vers un nouvel inode conserve ses bits
 `rwx` ordinaires, mais pas les bits spéciaux, l’owner, le group ou les dates.
 Les dossiers créés suivent l’umask.
 
+Entre deux filesystems, seuls les fichiers réguliers bénéficient du fallback
+copie puis suppression. Une FIFO est refusée sans attendre un écrivain. Sur
+un même filesystem, son déplacement par renommage reste possible.
+
+Avant une ouverture en lecture pour copier, Babet vérifie l'inode au moyen
+d'un descripteur Linux `O_PATH`, qui n'ouvre pas les périphériques pour leurs
+opérations d'entrée/sortie. Seul un fichier régulier est ensuite ouvert via
+`/proc/self/fd`, en conservant le même inode même si son chemin a été remplacé.
+Cette étape partagée par `copyTree` et le fallback de `moveTree` nécessite
+procfs ; son échec refuse la copie sans publier le fichier de destination.
+
+Après une copie EXDEV, `moveTree` garde l'inode source épinglé et compare son
+identité avec le chemin source avant la suppression. Un remplacement détecté
+provoque une erreur en conservant le remplaçant et la copie déjà publiée. Ce
+contrôle ne rend pas `lstat` puis `unlink` atomiques : il reste nécessaire
+d'éviter les modifications concurrentes de l'arbre pendant le déplacement.
+
 #### Garde-fous
 
 - la source doit être un vrai dossier, pas un symlink ;
 - la destination racine ne doit pas être un symlink ;
-- la destination ne peut pas se trouver dans la source ;
+- la destination ne peut être ni la source, ni un descendant, ni un ancêtre
+  de la source, y compris après résolution des chemins ;
 - un symlink préexistant dans la destination de fusion est refusé ;
 - les liens internes utilisent les mêmes règles de réécriture que `copyTree`.
 

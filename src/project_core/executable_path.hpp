@@ -14,6 +14,13 @@
  */
 std::string getExecutablePath();
 
+// Open this magic link directly when reading executable bytes. The path
+// returned by getExecutablePath() is only a presentation/location path:
+// after rename/unlink it can name a different inode or no longer exist.
+// Linux keeps /proc/self/exe attached to the running image, including in
+// worker threads. Do not canonicalize it before opening it.
+inline constexpr const char *RUNNING_EXECUTABLE_CONTENT = "/proc/self/exe";
+
 /**
  * @brief Gets the directory of the currently running executable.
  *

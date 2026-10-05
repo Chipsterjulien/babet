@@ -1,6 +1,7 @@
 #ifndef WORKERS_HPP
 #define WORKERS_HPP
 
+#include "process_state.hpp"
 #include <lua.hpp>
 #include <functional>
 #include <string>
@@ -50,6 +51,11 @@
  *   worker.recv(t?)    -> (true, value) | (false, reason)
  *   worker.cancelled() -> bool
  *
+ * os.exit raises a Lua error in workers; return ends a worker normally.
+ * os.setlocale mutations are forbidden in every state after the first valid
+ * spawn attempt or GTK loading attempt. Queries remain available. These guards cover Babet's Lua
+ * entry points, not arbitrary native/host calls into libc.
+ *
  * join(timeout?) attend sur une condition monotone. Un timeout renvoie
  * (nil, "timeout") sans joindre la pthread ni consommer le résultat. status()
  * ne consomme jamais. poll() reste compatible et consomme done/error ; il ne
@@ -96,17 +102,19 @@ void set_workers_init_context(std::string projectDir,
                               bool embedded);
 
 /**
- * @brief Exécute une mutation process-wide avant le premier spawn.
+ * @brief Protection process-wide partagée avec le chargeur GTK.
  *
- * setenv(3) et chdir(2) modifient un état partagé par tous les threads. Le
- * premier workers.spawn valide marque donc définitivement le processus :
+ * setenv(3), chdir(2) et setlocale(3) modifient un état partagé par tous les
+ * threads. os.setlocale utilise le même verrou et le même marquage. Le
+ * premier workers.spawn valide ou la première tentative de chargement GTK
+ * marque donc définitivement le processus :
  * toute mutation ultérieure est refusée, même après join et même si ce spawn
  * échoue plus tard pendant sérialisation, initialisation ou pthread_create.
  *
- * `fn` est exécutée sous le verrou uniquement si aucun spawn n'a encore marqué
+ * `fn` est exécutée sous le verrou uniquement si aucun déclencheur n'a marqué
  * l'état. Elle ne doit effectuer aucune opération Lua : un longjmp sous verrou
  * laisserait le mutex détenu.
  */
-bool with_process_env_lock(const std::function<void()> &fn);
+// with_process_env_lock is declared in process_state.hpp.
 
 #endif // WORKERS_HPP

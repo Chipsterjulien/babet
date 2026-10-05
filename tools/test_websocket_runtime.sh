@@ -179,7 +179,44 @@ else
     record_fail "invalid UTF-8 Close reason is rejected with close code 1007"
 fi
 
-# 9. WSS local : CA explicite + hostname/IP verification.
+# 9. Un timeout au milieu d'une frame ne doit jamais désynchroniser le parseur.
+start_server timeout-mid-frame
+cat > "${TMP_ROOT}/timeout_mid_frame.lua" <<EOF
+local ws = assert(babet.websocket.connect("ws://127.0.0.1:${PORT}/", { timeout = 5 }))
+local msg1, err1 = ws:recv(0.05)
+assert(msg1 == nil and err1 == "timeout", tostring(err1))
+local msg2, err2 = ws:recv(2)
+assert(msg2, err2)
+assert(msg2.type == "binary", "type=" .. tostring(msg2.type))
+assert(msg2.data == string.char(0xAA, 0x81, 0x01, 0x58),
+       "binary payload changed across timeout")
+assert(ws:close(1000, "done", 2))
+EOF
+if run_lua "${TMP_ROOT}/timeout_mid_frame.lua" && finish_server; then
+    record_pass "recv timeout mid-frame preserves framing and binary payload"
+else
+    record_fail "recv timeout mid-frame preserves framing and binary payload"
+fi
+
+# 10. L'état d'un message fragmenté doit lui aussi survivre au timeout.
+start_server timeout-between-fragments
+cat > "${TMP_ROOT}/timeout_between_fragments.lua" <<EOF
+local ws = assert(babet.websocket.connect("ws://127.0.0.1:${PORT}/", { timeout = 5 }))
+local msg1, err1 = ws:recv(0.05)
+assert(msg1 == nil and err1 == "timeout", tostring(err1))
+local msg2, err2 = ws:recv(2)
+assert(msg2, err2)
+assert(msg2.type == "binary" and msg2.data == "ABCD",
+       "fragmented message did not resume after timeout")
+assert(ws:close(1000, "done", 2))
+EOF
+if run_lua "${TMP_ROOT}/timeout_between_fragments.lua" && finish_server; then
+    record_pass "recv timeout between fragments preserves message state"
+else
+    record_fail "recv timeout between fragments preserves message state"
+fi
+
+# 11. WSS local : CA explicite + hostname/IP verification.
 CERT="${TMP_ROOT}/cert.pem"
 KEY="${TMP_ROOT}/key.pem"
 cat > "${TMP_ROOT}/openssl.cnf" <<'EOF'

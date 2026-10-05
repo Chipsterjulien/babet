@@ -20,7 +20,7 @@ struct lua_State;
  *
  * Le vrai handler POSIX est async-signal-safe et ne fait que poser un flag
  * sig_atomic_t. Les callbacks Lua, sans argument, sont dispatchés plus tard
- * dans le main lua_State depuis un hook count ou la sortie d'un appel Babet
+ * dans la coroutine active du thread principal depuis un hook count ou un appel Babet
  * interrompu. Les occurrences identiques sont coalescées ; plusieurs types
  * pending sont traités dans l'ordre fixe TERM, INT, HUP, USR1, USR2, PIPE.
  * Une erreur du callback est volontairement avalée après lua_pcall.
@@ -39,7 +39,10 @@ void signal_dispatch_pending(lua_State *L);
 /**
  * @brief Installe le hook main-thread partagé signal/terminal.
  *
- * Idempotent. Le binding curses l'utilise même sans callback babet.signal afin
+ * Vérifie le hook réel du thread Lua principal et de la coroutine appelante.
+ * Installé à la demande par handle(fn) ou curses.start(), il est hérité par les
+ * coroutines créées ensuite depuis un thread équipé. Les autres coroutines
+ * déjà existantes ne sont pas modifiées. curses l'utilise sans callback afin
  * que SIGWINCH/SIGTSTP et les terminaisons différées soient servis pendant une
  * boucle Lua pure.
  */

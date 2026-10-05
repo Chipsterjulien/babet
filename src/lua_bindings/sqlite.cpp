@@ -1439,8 +1439,9 @@ namespace
     //                 tôt, retourne nil (signal de fin pour for-loop).
     //   erreur      → finalize, puis luaL_error pour propager.
     //
-    // Le Stmt est aussi finalize par __gc en cas de break, exception,
-    // ou simple oubli de l'itérateur (GC du Lua qui ramasse l'iter).
+    // db:query renvoie aussi le Stmt comme quatrième valeur du for générique :
+    // __close le finalise dès la sortie de boucle, y compris break/exception.
+    // __gc reste le filet de sécurité pour un itérateur conservé séparément.
     //
     // ---------------------------------------------------------------
     // Lifetime vs Db
@@ -1644,6 +1645,20 @@ namespace
         return 0;
     }
 
+    // Lua passes (self, error) to __close. Do not use stmt_close's strict
+    // one-argument contract or destroy the userdata: references can survive
+    // the scope, and __gc must remain safe after deterministic finalization.
+    int stmt_scope_close(lua_State *L)
+    {
+        Stmt *s = check_stmt(L, 1);
+        if (s->handle)
+        {
+            sqlite3_finalize(s->handle);
+            s->handle = nullptr;
+        }
+        return 0;
+    }
+
     int stmt_tostring(lua_State *L)
     {
         Stmt *s = check_stmt(L, 1);
@@ -1658,7 +1673,7 @@ namespace
         return 1;
     }
 
-    // db:query(sql, params?) → stmt (callable iterator) | (nil, err)
+    // db:query(sql, params?) → stmt, nil, nil, stmt | (nil, err)
     //
     // Prépare le SQL, bind les params si fournis, retourne un Stmt
     // callable. Une erreur de préparation renvoie (nil, err) ; une
@@ -1780,7 +1795,12 @@ namespace
             }
         }
 
-        return 1;
+        // Lua 5.4+ closes the fourth generic-for value on all loop exits.
+        // The second value stays nil, preserving `local iter, err = query()`.
+        lua_pushnil(L);
+        lua_pushnil(L);
+        lua_pushvalue(L, -3);
+        return 4;
     }
 
 
@@ -3495,6 +3515,9 @@ namespace
         // __gc : finalize le sqlite3_stmt si pas déjà fait.
         lua_pushcfunction(L, sqlite_gc_boundary<stmt_gc>);
         lua_setfield(L, -2, "__gc");
+
+        lua_pushcfunction(L, sqlite_lua_boundary<stmt_scope_close>);
+        lua_setfield(L, -2, "__close");
 
         // __tostring : print(iter) lisible.
         lua_pushcfunction(L, sqlite_lua_boundary<stmt_tostring>);

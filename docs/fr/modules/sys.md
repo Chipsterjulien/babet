@@ -291,7 +291,7 @@ end
 ```
 
 `PATH` est lu au moment de l'appel. Une modification effectuée avec `setenv`
-avant les workers est donc prise en compte par les appels suivants.
+avant les workers et le chargement GTK est donc prise en compte par les appels suivants.
 
 ```lua
 local old_path = babet.env("PATH")
@@ -453,7 +453,8 @@ une erreur Lua.
 <a id="env-workers"></a>
 ### Interaction avec les workers
 
-`setenv` est autorisé uniquement avant le premier `workers.spawn()`.
+`setenv` est autorisé uniquement avant le premier `workers.spawn()` et avant
+la première tentative de chargement GTK (`gui.available()` ou `gui.init()`).
 
 ```lua
 assert(babet.setenv("APP_MODE", "production"))
@@ -476,7 +477,9 @@ local ok, err = babet.setenv("APP_MODE", "test")
 
 L'interdiction est permanente pour la durée du processus, y compris si le
 premier spawn a échoué. Prépare donc `PATH`, les variables d'application et le
-répertoire courant avant de lancer les workers.
+répertoire courant avant de lancer les workers ou de charger GTK. Un échec de
+chargement ou d'initialisation GTK conserve aussi le verrouillage. Consulter
+les valeurs avec `babet.env` reste possible ; voir le [contrat GUI](gui.md).
 
 <a id="sys-memory"></a>
 ## Mémoire de la VM Lua

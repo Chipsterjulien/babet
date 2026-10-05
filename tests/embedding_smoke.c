@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+int babet_test_lifecycle(void);
+
 typedef struct thread_probe
 {
     babet_context *context;
@@ -945,6 +947,9 @@ int main(void)
         return 1;
     if (!expect_status("destroy call-first context",
                        babet_context_destroy(context), BABET_STATUS_OK))
+        return 1;
+
+    if (!babet_test_lifecycle())
         return 1;
 
     puts("embedding C API smoke: PASS");

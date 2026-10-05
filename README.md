@@ -16,24 +16,26 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.23.0**. See the
+Current release: **2.24.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
 
-Babet 2.23.0 adds the static `libbabet` developer SDK, a narrow Lua-to-host
-callback API, the first experimental Linux native plugin ABI, static `ncursesw`
-terminal UI support, and the now-retired separate FLTK prototype experiment.
-Native plugins remain explicit trusted in-process shared objects for the
-original CLI only; generated applications, workers and embedding contexts reject
-plugin loading.
+Babet 2.24.0 adds the optional [`babet.gui`](GUI_DESIGN.md) GTK 4 backend,
+loaded lazily from the target system rather than linked into Babet. It also
+formalises architecture-specific developer SDK release artifacts and keeps the
+post-audit GUI/embedding hardening and production section-GC/OpenSSL build
+contract validated by the release harness. Non-GUI Babet and non-GUI
+`--create-exe` applications keep their existing autonomy; a GUI application
+remains a single file but explicitly requires GTK 4 on the target.
 
-Post-2.23 development replaces the FLTK companion-host direction with a much
-narrower optional [`babet.gui` design](GUI_DESIGN.md): GTK 4 is loaded
-lazily from the target system rather than linked into Babet. Non-GUI Babet and
-non-GUI `--create-exe` applications keep their existing autonomy; a GUI
-application remains a single file but explicitly requires GTK 4 on the target.
+Babet 2.23.0 introduced the static `libbabet` developer SDK, the narrow
+Lua-to-host callback API, the first experimental Linux native plugin ABI,
+static `ncursesw` terminal UI support, and the now-retired separate FLTK
+prototype experiment. Native plugins remain explicit trusted in-process shared
+objects for the original CLI only; generated applications, workers and
+embedding contexts reject plugin loading.
 
 Babet 2.22.2 adds a native RFC 6455 WebSocket client through
 `babet.websocket`. It supports `ws://` and verified `wss://`, strict Upgrade

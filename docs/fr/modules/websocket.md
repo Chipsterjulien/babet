@@ -68,8 +68,8 @@ les noms d'options doivent être des chaînes et les champs inconnus sont refus�
 | --- | ---: | --- |
 | `timeout` | `0` | secondes finies `>= 0`; une deadline pour TCP, TLS et HTTP Upgrade |
 | `verify` | `true` | vérifie la chaîne du certificat et l'identité pour `wss://` |
-| `ca_cert` | aucun | fichier CA PEM explicite pour cette connexion |
-| `ca_path` | aucun | dossier CA explicite pour cette connexion |
+| `ca_cert` | aucun | fichier CA PEM ajouté aux autorités par défaut pour cette connexion |
+| `ca_path` | aucun | dossier CA OpenSSL ajouté aux autorités par défaut pour cette connexion |
 | `hostname` | hôte de l'URL | override d'identité TLS/SNI |
 | `min_version` | `"1.2"` | `"1.2"` ou `"1.3"` |
 | `max_message_bytes` | 16 Mio | plafond du message complet réassemblé |
@@ -97,6 +97,18 @@ local ws = assert(babet.websocket.connect("wss://automation.internal/events", {
     ca_cert = "/etc/myapp/automation-ca.pem",
 }))
 ```
+
+Pour WSS, `ca_cert` et `ca_path` **ajoutent** des autorités à celles déjà
+chargées depuis les chemins par défaut d'OpenSSL, ses variables d'environnement
+et les emplacements de distributions reconnus. Ils ne limitent pas la
+confiance au fichier ou dossier fourni. Une chaîne vide n'ajoute rien ; les
+CA d'un appel ne sont pas conservées par les connexions suivantes.
+
+Cette politique correspond à [`TLS socket`](tls.md#tls-ca) et diffère de
+[`HTTP`](http.md#http-tls), dont le fichier `ca_cert` non vide remplace les
+autorités par défaut. Ce n'est pas du pinning de certificat ou de clé :
+plusieurs certificats d'une même CA peuvent être acceptés. Avec `verify = true`,
+l'identité du serveur reste vérifiée.
 
 Utiliser un dossier de certificats CA compatible avec OpenSSL :
 
@@ -196,6 +208,16 @@ Les gros messages sont automatiquement fragmentés en frames de continuation.
 Chaque frame cliente est masquée avec une nouvelle clé aléatoire 32 bits issue
 du générateur cryptographique OpenSSL, y compris en `wss://`.
 
+Une fois l'émission d'une frame tentée, un abandon (timeout, interruption ou
+erreur de transport) ferme la connexion. Cette règle couvre aussi les messages
+fragmentés, Ping et les réponses Pong automatiques pendant `recv`. Le premier
+appel garde son erreur ; les opérations suivantes renvoient `closed` et
+`close()` reste idempotent. La fermeture précède tout callback de signal.
+
+Les erreurs de validation avant émission (UTF-8, taille du message, arguments)
+laissent la connexion utilisable. Un timeout de réception qui n'abandonne
+aucune écriture conserve l'état de réception et reste reprenable.
+
 ## Envoyer du binaire
 
 ```lua
@@ -273,6 +295,10 @@ Babet échoue de manière conservative :
 Les pannes de transport et expirations restent `(nil, err)`. Un signal POSIX
 géré interrompt l'attente, déclenche le callback différé puis renvoie
 `(nil, "interrupted")`.
+
+Sur `wss://`, les écritures TLS internes au handshake, à l’envoi et à la
+lecture sont protégées contre `SIGPIPE`. Une erreur de transport ne tue pas
+le programme et ne remplace pas le gestionnaire de signal de l’application.
 
 ## Exemple WebDriver BiDi
 

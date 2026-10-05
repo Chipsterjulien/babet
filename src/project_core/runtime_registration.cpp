@@ -79,9 +79,45 @@
 #include "version.hpp"
 
 #include <lua.hpp>
+#include <cstdio>
+#include <cstdlib>
 
 namespace
 {
+// Also covers os.exit called by a finalizer during ordinary top-level close.
+// A second lua_close on that same VM would invalidate the active traversal.
+thread_local bool lua_state_close_in_progress = false;
+
+int lua_cli_os_exit(lua_State *L)
+{
+    // Match Lua 5.5's argument rules; validate before any cleanup. There are
+    // no C++ owners across these checks, which can raise a Lua error.
+    const int status = lua_isboolean(L, 1)
+        ? (lua_toboolean(L, 1) ? EXIT_SUCCESS : EXIT_FAILURE)
+        : static_cast<int>(luaL_optinteger(L, 1, EXIT_SUCCESS));
+    const bool close_requested = lua_toboolean(L, 2) != 0;
+
+    if (close_requested && !lua_state_close_in_progress)
+    {
+        close_babet_lua_state(L);
+        // L (including a calling coroutine) is now invalid. Do not use it.
+    }
+    else
+    {
+        if (!lua_state_close_in_progress)
+            babet_gui::cleanup_on_main_thread(L);
+        babet_curses::cleanup_on_main_thread();
+    }
+
+    // Preserve buffered C/Lua file output, but do not run atexit callbacks or
+    // C++ static destructors while workers/native threads may still be using
+    // process-wide libraries. The OS terminates the remaining threads and
+    // reclaims their resources. close=true explicitly opts into Lua finalizers
+    // and their existing (potentially blocking) worker joins above.
+    (void)std::fflush(nullptr);
+    std::_Exit(status);
+}
+
 template <int (*Fn)(lua_State *)>
 int babet_lua_boundary(lua_State *L)
 {
@@ -90,6 +126,14 @@ int babet_lua_boundary(lua_State *L)
         "babet: unknown internal failure");
 }
 } // namespace
+
+void register_cli_process_exit(lua_State *L)
+{
+    lua_getglobal(L, "os");
+    lua_pushcfunction(L, babet_lua_boundary<lua_cli_os_exit>);
+    lua_setfield(L, -2, "exit");
+    lua_pop(L, 1);
+}
 
 void prepend_babet_package_path(lua_State *L, std::string_view prefix)
 {
@@ -449,6 +493,9 @@ void close_babet_lua_state(lua_State *L) noexcept
     if (!L)
         return;
 
+    const bool previously_closing = lua_state_close_in_progress;
+    lua_state_close_in_progress = true;
+
     // GUI callback/widget state must be neutralized before Lua disappears.
     // Lot 1 only releases logical ownership; later widget lots extend this
     // same hook without moving toolkit cleanup behind lua_close().
@@ -460,4 +507,5 @@ void close_babet_lua_state(lua_State *L) noexcept
     lua_close(L);
     babet_curses::service_terminal_events();
     babet_curses::cleanup_on_main_thread();
+    lua_state_close_in_progress = previously_closing;
 }

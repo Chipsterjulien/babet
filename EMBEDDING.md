@@ -222,6 +222,11 @@ and [`HOST_FUNCTIONS_DESIGN.md`](HOST_FUNCTIONS_DESIGN.md).
 
 The first embedding API intentionally allows **one live context per process**.
 A second simultaneous `babet_context_create()` returns `BABET_STATUS_BUSY`.
+
+The slot remains occupied throughout destruction, including Lua finalizers and
+terminal/runtime cleanup. A create attempted from a finalizer's host callback
+or another thread returns `BABET_STATUS_BUSY`; it becomes possible after destroy
+has completed. The context mutex is not held while Lua finalizers run.
 Calls made from a thread other than the creating thread return
 `BABET_STATUS_WRONG_THREAD` where the API can associate the call with a context.
 

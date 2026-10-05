@@ -3,6 +3,7 @@
 #endif
 
 #include "workers.hpp"
+#include "worker_process.hpp"
 #include "embedded_workers_pool.hpp"
 #include "lua_utils.hpp"
 #include "sqlite.hpp"
@@ -19,6 +20,7 @@
 #include <atomic>
 #include <bit>
 #include <cerrno>
+#include <clocale>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -896,11 +898,77 @@ namespace
     // au-delà, on consomme trop de pile C++ via la récursion, ce qui
     // a déclenché des SIGSEGV sur Linux x86_64 avec pile par défaut
     // 8 MB déjà partiellement consommée par Lua + OpenSSL.
-    // État processus partagé (option A validée) : voir workers.hpp.
-    // Le verrou sérialise « marquer le premier spawn » avec les
-    // mutations setenv/chdir de sys.cpp et chdir.cpp.
-    std::mutex g_process_state_mu;
-    bool g_worker_ever_spawned = false;
+    int lua_worker_os_exit(lua_State *L)
+    {
+        // A worker is a pthread, not a process. Calling the stock os.exit
+        // would terminate every Lua state, including while other threads
+        // are using native libraries. Do not close this state here either:
+        // worker_thread_main owns its cleanup after lua_pcall returns.
+        return luaL_error(L,
+            "os.exit: unavailable in a worker; return from the worker instead");
+    }
+
+    int lua_process_setlocale(lua_State *L)
+    {
+        static const int categories[] = {
+            LC_ALL, LC_COLLATE, LC_CTYPE, LC_MONETARY, LC_NUMERIC, LC_TIME};
+        static const char *const names[] = {
+            "all", "collate", "ctype", "monetary", "numeric", "time", nullptr};
+        // Match the standard Lua arguments, including nil queries and
+        // default category. Validate before constructing any C++ owner.
+        const char *locale = luaL_optstring(L, 1, nullptr);
+        const int category = luaL_checkoption(L, 2, "all", names);
+        bool forbidden = false;
+        {
+            std::string result;
+            bool available = false;
+            forbidden = !babet_runtime::with_process_state_lock(
+                locale != nullptr, [&]()
+                {
+                    // Even queries may return shared libc storage (notably
+                    // a composite LC_ALL string). Copy it under the lock.
+                    const char *value = std::setlocale(categories[category], locale);
+                    if (value != nullptr)
+                    {
+                        result = value;
+                        available = true;
+                    }
+                });
+            if (!forbidden)
+            {
+                if (available)
+                    return push_string_protected(L, result);
+                lua_pushnil(L); // standard Lua: unavailable locale -> nil
+                return 1;
+            }
+        }
+        // No lock or C++ owner survives this Lua longjmp.
+        return luaL_error(L,
+            "os.setlocale: forbidden after workers.spawn or GTK loading; configure the locale before workers or gui.available/gui.init");
+    }
+
+    struct LocaleExceptionReporter
+    {
+        int operator()(lua_State *L, LuaCxxExceptionKind kind,
+                       const char *detail) const
+        {
+            // os.setlocale is a standard-library function: preserve its
+            // single-result contract and raise on internal failures.
+            if (kind == LuaCxxExceptionKind::lua_error_pending)
+                return lua_error(L);
+            if (kind == LuaCxxExceptionKind::out_of_memory)
+                return luaL_error(L, "os.setlocale: out of memory");
+            if (kind == LuaCxxExceptionKind::protected_builder_failure)
+                return luaL_error(L, "os.setlocale: %s", detail);
+            return luaL_error(L, "os.setlocale: internal C++ failure");
+        }
+    };
+
+    int lua_process_setlocale_boundary(lua_State *L)
+    {
+        return invoke_lua_cfunction_with_exception_boundary<lua_process_setlocale>(
+            L, LocaleExceptionReporter{});
+    }
 
     constexpr int MAX_SERIALIZATION_DEPTH = 32;
 
@@ -1843,6 +1911,11 @@ namespace
         auto setup_libraries = [](lua_State *state)
         {
             luaL_openlibs(state);
+            register_worker_process_functions(state);
+            lua_getglobal(state, "os");
+            lua_pushcfunction(state, lua_worker_os_exit);
+            lua_setfield(state, -2, "exit");
+            lua_pop(state, 1);
 
             // L'ORDRE COMPTE : register_bundled_modules pose
             // package.preload avant que babet ou le code utilisateur ne
@@ -2285,16 +2358,13 @@ namespace
 
         // État processus (option A validée) : marquer « un worker a
         // été lancé » AVANT toute création effective, sous le MÊME
-        // verrou que les mutations d'environnement/cwd — aucun worker
-        // ne peut naître pendant un setenv/chdir, et réciproquement.
+        // verrou que les mutations d'environnement/cwd/locale — aucun
+        // worker ne peut naître pendant ces mutations, et réciproquement.
         // Placé après la validation des arguments (un spawn mal typé
         // lève sans déclencher la restriction) mais avant tout le
         // reste ; définitif même si ce spawn échoue ensuite (règle
         // simple, sans course).
-        {
-            std::lock_guard<std::mutex> lk(g_process_state_mu);
-            g_worker_ever_spawned = true;
-        }
+        babet_runtime::freeze_process_state();
 
         // From this point on, every C++ owner belongs to a Lua userdata.
         // If a later Lua allocation raises LUA_ERRMEM, __gc can still run
@@ -3331,21 +3401,16 @@ namespace
 
 } // namespace
 
-// Voir le contrat détaillé dans workers.hpp. fn ne doit faire aucune
-// opération Lua (longjmp sous verrou interdit).
-bool with_process_env_lock(const std::function<void()> &fn)
-{
-    std::lock_guard<std::mutex> lk(g_process_state_mu);
-    if (g_worker_ever_spawned)
-    {
-        return false;
-    }
-    fn();
-    return true;
-}
 
 void register_workers(lua_State *L)
 {
+    // Installed in every runtime, before any user code can save an alias.
+    // The process-lifetime freeze also applies to recreated embedding states.
+    lua_getglobal(L, "os");
+    lua_pushcfunction(L, lua_process_setlocale_boundary);
+    lua_setfield(L, -2, "setlocale");
+    lua_pop(L, 1);
+
     luaL_newmetatable(L, CHANNEL_META);
     {
         lua_pushvalue(L, -1);

@@ -126,7 +126,7 @@ local response, err = babet.http.post(url, nil, opts)
 | `query` | table | absente | clés string, valeurs string ou number |
 | `timeout` | nombre fini `> 0` | défauts internes | secondes, connexion + budget global |
 | `verify` | booléen strict | `true` | vérification du certificat HTTPS |
-| `ca_cert` | string | trust store OpenSSL | fichier CA supplémentaire/configuré |
+| `ca_cert` | string | autorités par défaut d'OpenSSL | fichier PEM utilisé à la place des autorités par défaut pour cette requête |
 | `follow_redirects` | booléen strict | `false` | suit les redirections |
 | `max_body_size` | entier `1..2 Gio` | `64 MiB` | cap mémoire pour `request`/`get`/`post` |
 | `max_file_size` | entier positif | `8 Gio` | cap du fichier reçu par `download` |
@@ -548,10 +548,27 @@ local response = assert(babet.http.get("https://internal.example/", {
 }))
 ```
 
-`ca_cert` configure le chemin de CA utilisé par le client HTTP. Contrairement à
-l'API socket TLS, HTTP n'expose pas `ca_path` et n'exécute pas le même probing
-manuel de plusieurs chemins de distributions. Il dépend du trust store par
-défaut de l'OpenSSL embarqué, des variables OpenSSL et du fichier fourni.
+Avec un `ca_cert` non vide, HTTP utilise les autorités de ce fichier **à la
+place des autorités par défaut** pour la requête. Sans `ca_cert`, ou avec
+`ca_cert = ""`, il charge les autorités par défaut d'OpenSSL, en tenant compte
+de `SSL_CERT_FILE` et `SSL_CERT_DIR`. Le fichier explicite n'est pas ajouté
+aux autorités par défaut. Cette règle s'applique aussi à `http.download`.
+
+Cette politique diffère de [`socket.connect_tls` et `starttls`](tls.md#tls-ca),
+ainsi que de [`websocket.connect`](websocket.md), qui **ajoutent** leurs CA
+personnalisées aux autorités déjà chargées. HTTP n'expose pas `ca_path` et
+n'effectue pas leur recherche supplémentaire des emplacements de CA connus
+des distributions.
+
+Exemple : si A appartient aux autorités par défaut et si le fichier fourni
+contient uniquement B, HTTP accepte un serveur signé par B et rejette un
+serveur signé uniquement par A. TLS socket et WSS continuent d'accepter A et
+B. Dans tous les cas, `verify = true` vérifie aussi l'identité du serveur.
+La configuration d'un appel ne rend pas B fiable pour les appels suivants.
+
+Choisir un fichier de CA n'est pas du pinning d'un certificat serveur ou
+d'une clé : plusieurs certificats signés par une autorité du fichier peuvent
+être acceptés, à condition de réussir les autres vérifications TLS.
 
 ### Désactiver la vérification
 
@@ -889,6 +906,11 @@ babet.http.download(url, "fichier", "pas une table")
 Un statut 1xx, 3xx, 4xx ou 5xx reçu produit une table normale. Pour `download`,
 seul un 2xx est enregistré ; les autres statuts renvoient `saved = false`.
 L'application définit sa propre politique.
+
+Les opérations réseau internes, y compris le handshake et la fermeture TLS,
+sont protégées contre `SIGPIPE` sans remplacer le gestionnaire de signal de
+l’application. Une rupture de transport remonte comme une erreur HTTP ; une
+erreur de fermeture best-effort ne retire pas une réponse déjà reçue.
 
 <a id="http-design"></a>
 ## Sécurité et limites

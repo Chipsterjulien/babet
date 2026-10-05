@@ -31,6 +31,23 @@ fails. The load result is memoized, so later calls do not reopen GTK. `init()`
 disables GTK's process-global locale change and then uses the recoverable GTK
 initialization path. Both calls are restricted to Babet's main OS thread.
 
+The first GTK loading attempt, through `available()` or `init()`, permanently
+freezes process-wide mutations: `babet.setenv` and `babet.chdir` return
+`nil, err`, and `os.setlocale(locale, category)` raises when `locale` is not
+`nil`. Configure the environment, current directory and locale **before**
+these calls. `babet.env`, `babet.currentDir` and
+`os.setlocale(nil, category)` remain available as queries.
+
+The freeze precedes `dlopen`: loading and initializing GTK can execute native
+code and create threads independently of Babet workers. It remains even if
+GTK is absent, a symbol is missing, or display initialization fails, and after
+windows close or an embedding context is recreated. A call rejected before
+loading (invalid arguments or wrong thread) does not trigger this freeze.
+
+The guard covers Babet's Lua entry points. Hosts and native plugins must also
+coordinate their own mutations and threads; Babet does not intercept direct
+libc calls. See [GLib's threading and global-state guidance](https://docs.gtk.org/glib/threads.html).
+
 If GTK 4 is absent, the diagnostic identifies the missing runtime and includes
 installation examples for common Debian/Ubuntu, Arch Linux, and Fedora systems.
 If GTK is installed but no graphical display can be initialized, `init()`

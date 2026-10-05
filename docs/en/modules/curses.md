@@ -43,6 +43,12 @@ assert(babet.curses.stop())
 `TERM`, and a usable UTF-8 `LC_CTYPE` locale. It must run on Babet's main thread.
 Starting a second session raises an error.
 
+A successful `start()` enables the shared signal/terminal Lua hook on demand
+on the main Lua thread and the calling coroutine. New coroutines inherit their
+creator's hook; other existing coroutines are not changed. Start curses before
+creating coroutines that must service events during pure Lua loops. The hook
+remains installed after `stop()`; see its [contract and cost](signal.md#signal-debug-hook).
+
 `stop()` is idempotent. If an interactive child currently owns the terminal,
 `stop()` ends the logical curses session **without taking the TTY back from the
 child**. The normal process handoff code later restores the parent terminal when
@@ -52,6 +58,11 @@ Normal completion, uncaught Lua errors, controlled C++ exceptions, and default
 `SIGINT`/`SIGTERM`/`SIGHUP` termination restore terminal mode before Babet exits.
 A fatal crash or `SIGKILL` cannot provide this guarantee; `reset` is the usual
 manual recovery command for a damaged terminal.
+
+In the CLI and generated executables, `os.exit(...)` also restores curses,
+even without requesting Lua state closure. Exit status codes are preserved.
+See the [exit contract](../runtime-exit.md) for finalizers, active workers and
+native callbacks.
 
 ## Screen operations
 
@@ -88,6 +99,10 @@ An otherwise recognized ncurses special key is returned as `"special"`.
 
 `SIGWINCH` is coalesced and handled on the main thread. After the terminal size
 has been applied, `readKey()` reports the symbolic `"resize"` event.
+
+If a signal callback calls `curses.stop()` during `readKey`, the read returns
+`nil, "interrupted"`, including without a timeout. It no longer accesses the
+released screen, even if a key was read immediately before the callback.
 
 ## Interactive child processes
 
