@@ -33,6 +33,11 @@ void *gtk4_label_new(const char *text) noexcept;
 void gtk4_label_set_text(void *label, const char *text) noexcept;
 void *gtk4_button_new_with_label(const char *text) noexcept;
 void gtk4_button_set_label(void *button, const char *text) noexcept;
+void *gtk4_entry_new() noexcept;
+void gtk4_entry_set_placeholder(void *entry, const char *text) noexcept;
+void gtk4_editable_set_text(void *entry, const char *text) noexcept;
+const char *gtk4_editable_get_text(void *entry) noexcept;
+void gtk4_editable_set_editable(void *entry, bool editable) noexcept;
 void *gtk4_widget_get_parent(void *widget) noexcept;
 
 void *gtk4_object_ref_sink(void *object) noexcept;

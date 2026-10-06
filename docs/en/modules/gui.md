@@ -95,8 +95,9 @@ The initial surface is intentionally small:
 - `babet.gui.box([options])`
 - `babet.gui.label(text)`
 - `babet.gui.button(text)`
+- `babet.gui.entry([options])`
 - `container:add(child)` for windows and boxes
-- `label:setText(text)` / `button:setText(text)`
+- `label:setText(text)` / `button:setText(text)` / `entry:setText(text)`
 - `button:onClick(function)`
 - `window:show()` / `window:close()`
 - `babet.gui.run()` / `babet.gui.quit()`
@@ -105,6 +106,64 @@ The initial surface is intentionally small:
 integer `height`. `box` options accept `orientation = "vertical"|"horizontal"`
 and a non-negative integer `spacing`. GTK-facing strings reject embedded NUL
 bytes because the toolkit APIs consume C strings.
+
+## Entry: single-line text input
+
+```lua
+local entry = assert(gui.entry {
+    text = "",             -- default: empty
+    placeholder = "Name", -- default: empty
+    editable = true,        -- default: true
+})
+assert(column:add(entry))
+
+assert(entry:onChanged(function()
+    print("Current text:", entry:getText())
+end))
+assert(entry:onActivate(function()
+    print("Submitted:", entry:getText())
+end))
+```
+
+Create the entry after `gui.init()` and keep its window alive while running the
+event loop. `entry()` and `entry(nil)` use the defaults. Options are read from
+the table itself, without invoking `__index`.
+
+| Method | Contract |
+| --- | --- |
+| `entry:getText()` | Returns one Lua string: a snapshot of the current text. |
+| `entry:setText(text)` | Replaces the text; may synchronously invoke `onChanged`. |
+| `entry:setPlaceholder(text)` | Sets the hint for an empty, unfocused entry; `""` clears it. |
+| `entry:setEditable(boolean)` | Enables/disables user editing; programmatic `setText` remains allowed. |
+| `entry:onChanged(function_or_nil)` | Replaces the text-change callback; explicit `nil` removes it. |
+| `entry:onActivate(function_or_nil)` | Replaces the activation callback, normally triggered by Enter; explicit `nil` removes it. |
+
+Setters and callback registrations return `true, nil`. Creation returns a widget,
+or `nil, diagnostic` on a controlled runtime failure. Invalid arguments or a
+destroyed/wrong widget raise a Lua error. Text and placeholder must be strings
+containing UTF-8 suitable for GTK, without embedded NUL bytes; numbers are not
+converted to strings. `editable` requires an actual boolean. These operations
+do not parse numbers or validate application data.
+
+Callbacks receive no arguments: capture the entry and call `getText()` when
+needed. The two callbacks are independent, and registering one does not invoke
+it. A `setText()` notification runs before the setter returns, on the calling
+Lua thread (including a coroutine resumed on the main OS thread). Events
+processed by `gui.run()` use the main Lua thread. Callbacks cannot yield across
+the GTK boundary. Errors, including an attempted yield, are reported and
+contained. A callback may replace/remove itself or close its window; native
+and Lua state remain valid until an active setter has returned. Changing text
+from `onChanged` can trigger another notification: avoid unconditional recursive
+updates, or temporarily remove the handler.
+
+See [`examples/gui_entry/main.lua`](../../../examples/gui_entry/main.lua) for a
+complete example with live text, Enter submission and a read-only toggle:
+
+```sh
+babet examples/gui_entry
+babet --create-exe examples/gui_entry ./gui-entry-app
+./gui-entry-app
+```
 
 ## Event loop and callbacks
 
@@ -118,7 +177,7 @@ Babet inserts a small bounded GLib wake source so its deferred Unix-signal
 callbacks continue to be serviced while GTK owns the loop. Workers may continue
 to perform non-GUI work, but they must not call GUI methods directly.
 
-Lua button callbacks execute under `lua_pcall`. An error is reported to stderr
+Lua button and entry callbacks execute under `lua_pcall`. An error is reported to stderr
 with a `babet.gui callback error:` prefix and does not unwind across GTK's C
 stack; the event loop remains usable.
 
@@ -133,6 +192,10 @@ pointer.
 Dropping an unparented widget handle releases its construction reference.
 Dropping a top-level window handle destroys that window. During Lua-state
 shutdown, GUI callback ownership is neutralized before `lua_close()`.
+
+Callbacks belong to their Lua widget handle. Capturing that same widget in its
+callback does not permanently root it: an unreachable widget/callback cycle is
+collectable. A live parent still keeps its child handles and callbacks alive.
 
 ## `--create-exe`
 

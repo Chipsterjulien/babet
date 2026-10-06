@@ -24,6 +24,7 @@ docs/en/modules/argparse.md
 docs/en/modules/exec.md
 docs/en/modules/pipeline.md
 docs/en/modules/fs.md
+docs/en/modules/gui.md
 docs/en/modules/write-file-atomic.md
 docs/en/modules/http.md
 docs/en/modules/inotify.md

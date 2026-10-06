@@ -98,8 +98,9 @@ La première surface reste volontairement petite :
 - `babet.gui.box([options])`
 - `babet.gui.label(texte)`
 - `babet.gui.button(texte)`
+- `babet.gui.entry([options])`
 - `conteneur:add(enfant)` pour fenêtres et boxes
-- `label:setText(texte)` / `button:setText(texte)`
+- `label:setText(texte)` / `button:setText(texte)` / `entry:setText(texte)`
 - `button:onClick(fonction)`
 - `window:show()` / `window:close()`
 - `babet.gui.run()` / `babet.gui.quit()`
@@ -109,6 +110,68 @@ et `height` entier positif. Les options de `box` acceptent
 `orientation = "vertical"|"horizontal"` et `spacing` entier positif ou nul.
 Les chaînes transmises à GTK refusent les NUL embarqués, car le toolkit attend
 des chaînes C.
+
+## Entry : saisie de texte sur une ligne
+
+```lua
+local saisie = assert(gui.entry {
+    text = "",             -- par défaut : vide
+    placeholder = "Nom",  -- par défaut : vide
+    editable = true,        -- par défaut : true
+})
+assert(colonne:add(saisie))
+
+assert(saisie:onChanged(function()
+    print("Texte courant :", saisie:getText())
+end))
+assert(saisie:onActivate(function()
+    print("Texte validé :", saisie:getText())
+end))
+```
+
+Créer le champ après `gui.init()` et conserver sa fenêtre pendant la boucle
+événementielle. `entry()` et `entry(nil)` utilisent les valeurs par défaut.
+Les options sont lues directement dans la table, sans appeler `__index`.
+
+| Méthode | Contrat |
+| --- | --- |
+| `entry:getText()` | Renvoie une seule chaîne Lua : une copie du texte courant. |
+| `entry:setText(texte)` | Remplace le texte ; peut appeler `onChanged` immédiatement. |
+| `entry:setPlaceholder(texte)` | Définit l'indication du champ vide et sans focus ; `""` la supprime. |
+| `entry:setEditable(booléen)` | Autorise/interdit la saisie utilisateur ; `setText` reste utilisable par le programme. |
+| `entry:onChanged(fonction_ou_nil)` | Remplace le callback de changement de texte ; `nil` explicite le retire. |
+| `entry:onActivate(fonction_ou_nil)` | Remplace le callback de validation, normalement déclenché par Entrée ; `nil` explicite le retire. |
+
+Les setters et les enregistrements de callbacks renvoient `true, nil`. La
+création renvoie un widget, ou `nil, diagnostic` en cas d'échec runtime contrôlé.
+Un argument incorrect ou un widget détruit/de mauvais type lève une erreur Lua.
+Le texte et l'indication doivent être des chaînes UTF-8 adaptées à GTK, sans
+NUL embarqué ; les nombres ne sont pas convertis en chaînes. `editable` exige
+un véritable booléen. Ces opérations ne convertissent pas les nombres et ne
+valident pas les données métier.
+
+Les callbacks ne reçoivent aucun argument : capturer le champ et utiliser
+`getText()` pour lire sa valeur. Les deux callbacks sont indépendants et leur
+enregistrement ne les déclenche pas. Une notification de `setText()` s'exécute
+avant le retour du setter, sur son thread Lua appelant, y compris une coroutine
+reprise sur le thread OS principal. Les événements traités par `gui.run()`
+utilisent le thread Lua principal. Un callback ne peut pas faire de `yield`
+à travers GTK. Les erreurs, y compris une tentative de yield, sont signalées
+et contenues. Un callback peut se remplacer, se retirer ou fermer sa fenêtre ;
+les états natif et Lua restent valides jusqu'au retour d'un setter en cours.
+Modifier le texte depuis `onChanged` peut déclencher une nouvelle notification :
+éviter une mise à jour récursive inconditionnelle, ou retirer temporairement
+le callback.
+
+Voir [`examples/gui_entry/main.lua`](../../../examples/gui_entry/main.lua) pour
+un exemple complet : texte en direct, validation par Entrée et bascule en
+lecture seule.
+
+```sh
+babet examples/gui_entry
+babet --create-exe examples/gui_entry ./gui-entry-app
+./gui-entry-app
+```
 
 ## Boucle événementielle et callbacks
 
@@ -124,7 +187,7 @@ servir ses callbacks de signaux Unix différés pendant que GTK possède la bouc
 Les workers peuvent poursuivre des calculs non graphiques, mais ne doivent
 jamais appeler directement les méthodes GUI.
 
-Les callbacks Lua des boutons sont exécutés sous `lua_pcall`. Une erreur est
+Les callbacks Lua des boutons et des champs Entry sont exécutés sous `lua_pcall`. Une erreur est
 signalée sur stderr avec le préfixe `babet.gui callback error:` et ne traverse
 jamais la pile C de GTK ; la boucle événementielle reste utilisable.
 
@@ -139,6 +202,11 @@ pointeur natif périmé.
 La collecte d'un widget non parenté libère sa référence de construction. La
 collecte d'une fenêtre top-level détruit cette fenêtre. À la fermeture de l'état
 Lua, les callbacks GUI sont neutralisés avant `lua_close()`.
+
+Les callbacks appartiennent au handle Lua du widget. Capturer ce même widget
+dans son callback ne le conserve pas indéfiniment : un cycle widget/callback
+devenu inaccessible peut être collecté. Un parent vivant conserve bien ses
+handles enfants et leurs callbacks.
 
 ## `--create-exe`
 

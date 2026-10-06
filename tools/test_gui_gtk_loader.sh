@@ -33,6 +33,18 @@ compile_fake tests/gui/fake_gtk4_good.c "$TMP/good" || exit 1
 compile_fake tests/gui/fake_gtk4_init_fail.c "$TMP/init-fail" || exit 1
 compile_fake tests/gui/fake_gtk4_missing_symbol.c "$TMP/missing" || exit 1
 compile_fake tests/gui/fake_gtk4_process_state.c "$TMP/native-thread" || exit 1
+mkdir -p "$TMP/missing-entry"
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+    -DBABET_FAKE_GTK_MISSING_ENTRY -Wl,-soname,libgtk-4.so.1 \
+    "$ROOT/tests/gui/fake_gtk4_good.c" -o "$TMP/missing-entry/libgtk-4.so.1" || exit 1
+
+OUT="$(LD_LIBRARY_PATH="$TMP/missing-entry" "$TMP/probe" load 2>&1)"
+RC=$?
+if [ "$RC" -eq 2 ] && grep -Fq "missing GTK 4 dependency symbol 'gtk_editable_get_text'" <<<"$OUT"; then
+    pass "missing Entry symbol is diagnosed without initializing GTK"
+else
+    fail "missing Entry symbol is diagnosed without initializing GTK"
+fi
 
 if [ "$("$TMP/probe" concurrent-freeze)" = "CONCURRENT_FREEZE_OK" ]; then
     pass "process-state freeze waits for in-flight mutations and preserves queries"

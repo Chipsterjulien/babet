@@ -27,6 +27,11 @@ using GtkLabelNew = void *(*)(const char *);
 using GtkLabelSetText = void (*)(void *, const char *);
 using GtkButtonNewWithLabel = void *(*)(const char *);
 using GtkButtonSetLabel = void (*)(void *, const char *);
+using GtkEntryNew = void *(*)();
+using GtkEntrySetPlaceholder = void (*)(void *, const char *);
+using GtkEditableSetText = void (*)(void *, const char *);
+using GtkEditableGetText = const char *(*)(void *);
+using GtkEditableSetEditable = void (*)(void *, int);
 using GtkWidgetGetParent = void *(*)(void *);
 using GObjectRefSink = void *(*)(void *);
 using GObjectUnref = void (*)(void *);
@@ -54,6 +59,11 @@ struct GtkApi
     GtkLabelSetText label_set_text = nullptr;
     GtkButtonNewWithLabel button_new_with_label = nullptr;
     GtkButtonSetLabel button_set_label = nullptr;
+    GtkEntryNew entry_new = nullptr;
+    GtkEntrySetPlaceholder entry_set_placeholder = nullptr;
+    GtkEditableSetText editable_set_text = nullptr;
+    GtkEditableGetText editable_get_text = nullptr;
+    GtkEditableSetEditable editable_set_editable = nullptr;
     GtkWidgetGetParent widget_get_parent = nullptr;
     GObjectRefSink object_ref_sink = nullptr;
     GObjectUnref object_unref = nullptr;
@@ -176,6 +186,11 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(label_set_text, "gtk_label_set_text");
     BABET_GTK_RESOLVE(button_new_with_label, "gtk_button_new_with_label");
     BABET_GTK_RESOLVE(button_set_label, "gtk_button_set_label");
+    BABET_GTK_RESOLVE(entry_new, "gtk_entry_new");
+    BABET_GTK_RESOLVE(entry_set_placeholder, "gtk_entry_set_placeholder_text");
+    BABET_GTK_RESOLVE(editable_set_text, "gtk_editable_set_text");
+    BABET_GTK_RESOLVE(editable_get_text, "gtk_editable_get_text");
+    BABET_GTK_RESOLVE(editable_set_editable, "gtk_editable_set_editable");
     BABET_GTK_RESOLVE(widget_get_parent, "gtk_widget_get_parent");
     BABET_GTK_RESOLVE(object_ref_sink, "g_object_ref_sink");
     BABET_GTK_RESOLVE(object_unref, "g_object_unref");
@@ -228,6 +243,11 @@ void *gtk4_label_new(const char *t) noexcept { return g_gtk.label_new(t); }
 void gtk4_label_set_text(void *l, const char *t) noexcept { g_gtk.label_set_text(l, t); }
 void *gtk4_button_new_with_label(const char *t) noexcept { return g_gtk.button_new_with_label(t); }
 void gtk4_button_set_label(void *b, const char *t) noexcept { g_gtk.button_set_label(b, t); }
+void *gtk4_entry_new() noexcept { return g_gtk.entry_new(); }
+void gtk4_entry_set_placeholder(void *e, const char *t) noexcept { g_gtk.entry_set_placeholder(e, t); }
+void gtk4_editable_set_text(void *e, const char *t) noexcept { g_gtk.editable_set_text(e, t); }
+const char *gtk4_editable_get_text(void *e) noexcept { return g_gtk.editable_get_text(e); }
+void gtk4_editable_set_editable(void *e, bool v) noexcept { g_gtk.editable_set_editable(e, v ? 1 : 0); }
 void *gtk4_widget_get_parent(void *w) noexcept { return g_gtk.widget_get_parent(w); }
 void *gtk4_object_ref_sink(void *o) noexcept { return g_gtk.object_ref_sink(o); }
 void gtk4_object_unref(void *o) noexcept { g_gtk.object_unref(o); }

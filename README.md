@@ -16,11 +16,18 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.24.2**. See the
+Current release: **2.25.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.25.0 adds [`babet.gui.entry`](docs/en/modules/gui.md), a single-line
+text input with change/activation callbacks, placeholder text and a read-only
+mode. It also fixes self-capturing widget/callback lifetime cycles. See
+[`examples/gui_entry`](examples/gui_entry/main.lua) for a complete example.
+GTK 4 remains optional and loaded from the target system only when requested.
+Numeric inputs, calendars and drawing widgets are planned separately.
 
 Babet 2.24.2 aligns the compiled version and release documentation after the
 2.24.1 publication mismatch. It retains the audit fixes described below.
@@ -490,7 +497,7 @@ side effects rather than sandboxed state. The practical developer guide is [`EMB
 
 The separate FLTK companion shipped as a 2.23.0 experiment has completed its
 job of exercising `libbabet` and the Lua-to-host callback API and is no longer
-the active GUI direction. Post-2.23 work instead defines an optional Lua-facing
+the active GUI direction. Babet now provides an optional Lua-facing
 `babet.gui` whose initial Linux backend is GTK 4 loaded lazily from the system.
 GTK is not a normal Babet link dependency, and GUI use is the explicit exception
 where a one-file generated application may require a target-system runtime. See

@@ -131,8 +131,8 @@ build_one() {
     local build_dir="$SCRIPT_DIR/build_$lang"
     local preprocess="$SCRIPT_DIR/preprocess_pdf.py"
 
-    if [ ! -x "$preprocess" ]; then
-        echo "build_doc: preprocess script not found or not executable: $preprocess" >&2
+    if [ ! -f "$preprocess" ] || [ ! -r "$preprocess" ]; then
+        echo "build_doc: preprocess script not found or not readable: $preprocess" >&2
         return 1
     fi
 

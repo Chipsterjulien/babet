@@ -503,6 +503,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_gui_runtime.sh" "${BINARY}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — GUI Entry, callbacks et durée de vie"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_entry.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression GUI Entry a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — état processus après chargement GTK"
 if ! python3 "${SCRIPT_DIR}/tools/test_gui_process_state.py" "${BINARY}"; then
     echo "ÉCHEC : la protection de l'état processus après chargement GTK a échoué."

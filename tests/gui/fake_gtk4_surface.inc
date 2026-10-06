@@ -16,6 +16,13 @@ void *gtk_label_new(const char *t) { (void)t; return (void *)0x3; }
 void gtk_label_set_text(void *l, const char *t) { (void)l; (void)t; }
 void *gtk_button_new_with_label(const char *t) { (void)t; return (void *)0x4; }
 void gtk_button_set_label(void *b, const char *t) { (void)b; (void)t; }
+void *gtk_entry_new(void) { return (void *)0x5; }
+void gtk_entry_set_placeholder_text(void *e, const char *t) { (void)e; (void)t; }
+void gtk_editable_set_text(void *e, const char *t) { (void)e; (void)t; }
+#ifndef BABET_FAKE_GTK_MISSING_ENTRY
+const char *gtk_editable_get_text(void *e) { (void)e; return ""; }
+#endif
+void gtk_editable_set_editable(void *e, int v) { (void)e; (void)v; }
 void *gtk_widget_get_parent(void *w) { (void)w; return NULL; }
 void *g_object_ref_sink(void *o) { return o; }
 void g_object_unref(void *o) { (void)o; }

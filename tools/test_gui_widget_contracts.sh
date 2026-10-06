@@ -26,7 +26,7 @@ check "dead widget use has a stable diagnostic" contains "$IMPL" 'has already be
 check "non-window widgets sink floating references" contains "$IMPL" 'gtk4_object_ref_sink'
 check "parenting releases Babet construction ownership" contains "$IMPL" 'release_construction_reference'
 check "container add rejects already-parented widgets" contains "$IMPL" 'gtk4_widget_get_parent'
-check "button callback is stored in Lua registry" contains "$IMPL" 'callback_ref'
+check "widget callback belongs to the Lua handle" contains "$IMPL" 'lua_rawseti(L, -2, PRIMARY_CALLBACK)'
 check "button callbacks run through lua_pcall" contains "$IMPL" 'lua_pcall'
 check "button callback diagnostics are contained" contains "$IMPL" 'babet.gui callback error'
 check "GUI event loop uses GLib main context" contains "$IMPL" 'gtk4_main_context_iteration'

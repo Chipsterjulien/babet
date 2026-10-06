@@ -26,6 +26,9 @@ namespace
 
 constexpr const char *WIDGET_META = "BabetGuiWidget";
 constexpr unsigned int GUI_WAKE_INTERVAL_MS = 25;
+char widget_handles_key;
+constexpr lua_Integer PRIMARY_CALLBACK = -1;
+constexpr lua_Integer ACTIVATE_CALLBACK = -2;
 
 enum class WidgetKind : unsigned char
 {
@@ -33,6 +36,7 @@ enum class WidgetKind : unsigned char
     box,
     label,
     button,
+    entry,
 };
 
 struct WidgetState
@@ -40,7 +44,8 @@ struct WidgetState
     void *native = nullptr;
     lua_State *owner = nullptr; // main Lua thread of the owning Lua state
     WidgetKind kind = WidgetKind::label;
-    int callback_ref = LUA_NOREF;
+    void *handle_key = nullptr; // weak Lua handle lookup; never dereferenced
+    lua_State *callback_thread = nullptr; // synchronous setters use their caller
     int references = 1; // Lua userdata; native signal handlers retain as needed
     bool owns_reference = false; // construction ref for non-toplevel widgets
     WidgetState *previous = nullptr;
@@ -124,6 +129,7 @@ const char *kind_name(WidgetKind kind) noexcept
     case WidgetKind::box: return "box";
     case WidgetKind::label: return "label";
     case WidgetKind::button: return "button";
+    case WidgetKind::entry: return "entry";
     }
     return "widget";
 }
@@ -145,7 +151,8 @@ WidgetState *check_kind(lua_State *L, int index, WidgetKind kind,
 {
     WidgetState *state = check_widget(L, index, api);
     if (state->kind != kind)
-        luaL_error(L, "%s: expected a %s handle", api, kind_name(kind));
+        luaL_error(L, "%s: expected %s %s handle", api,
+                   kind == WidgetKind::entry ? "an" : "a", kind_name(kind));
     return state;
 }
 
@@ -205,16 +212,14 @@ void button_signal_released(void *data, void *) noexcept
         release_state(state);
 }
 
-void button_clicked(void *, void *data) noexcept
+void dispatch_widget_callback(WidgetState *state, lua_Integer slot) noexcept
 {
-    auto *state = static_cast<WidgetState *>(data);
-    if (!state || !state->native || !state->owner ||
-        state->callback_ref == LUA_NOREF || state->callback_ref == LUA_REFNIL)
+    if (!state || !state->native || !state->owner || !state->handle_key)
         return;
 
-    lua_State *L = state->owner;
+    lua_State *L = state->callback_thread ? state->callback_thread : state->owner;
     const int base = lua_gettop(L);
-    if (!lua_checkstack(L, 1))
+    if (!lua_checkstack(L, 4))
     {
         static constexpr char message[] =
             "babet.gui callback error: cannot grow Lua stack\n";
@@ -222,7 +227,24 @@ void button_clicked(void *, void *data) noexcept
         return;
     }
 
-    lua_rawgeti(L, LUA_REGISTRYINDEX, state->callback_ref);
+    // A callback belongs to its Lua userdata, not to a permanent registry root.
+    // Self-capturing callbacks must not keep unparented widgets alive forever.
+    // Resolve through weak values, then keep the handle/function on this stack
+    // until the protected call finishes (including a close or a GC in it).
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &widget_handles_key);
+    lua_rawgetp(L, -1, state->handle_key);
+    if (lua_type(L, -1) != LUA_TUSERDATA)
+    {
+        lua_settop(L, base);
+        return;
+    }
+    lua_getiuservalue(L, -1, 1);
+    lua_rawgeti(L, -1, slot);
+    if (lua_type(L, -1) != LUA_TFUNCTION)
+    {
+        lua_settop(L, base);
+        return;
+    }
     if (lua_pcall(L, 0, 0, 0) != LUA_OK)
     {
         report_callback_error(L);
@@ -230,6 +252,21 @@ void button_clicked(void *, void *data) noexcept
         return;
     }
     lua_settop(L, base);
+}
+
+void button_clicked(void *, void *data) noexcept
+{
+    dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
+}
+
+void entry_changed(void *, void *data) noexcept
+{
+    dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
+}
+
+void entry_activated(void *, void *data) noexcept
+{
+    dispatch_widget_callback(static_cast<WidgetState *>(data), ACTIVATE_CALLBACK);
 }
 
 bool attach_destroy_signal(WidgetState *state) noexcept
@@ -259,6 +296,12 @@ WidgetUserdata *push_empty_widget_userdata(lua_State *L)
 
     luaL_getmetatable(L, WIDGET_META);
     lua_setmetatable(L, -2);
+
+    // All Lua allocations for the weak lookup happen before acquiring GTK.
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &widget_handles_key);
+    lua_pushvalue(L, -2);
+    lua_rawsetp(L, -2, userdata);
+    lua_pop(L, 1);
     return userdata;
 }
 
@@ -282,8 +325,17 @@ int push_native_widget(lua_State *L, WidgetKind kind, void *native,
     if (!native)
         return push_fail_protected(L, "babet.gui: GTK 4 failed to create widget");
 
-    WidgetState *state = new WidgetState();
+    WidgetState *state = new (std::nothrow) WidgetState();
+    if (!state)
+    {
+        if (kind == WidgetKind::window)
+            detail::gtk4_window_destroy(native);
+        else
+            detail::gtk4_object_unref(detail::gtk4_object_ref_sink(native));
+        return push_fail_protected(L, "babet.gui: out of memory");
+    }
     state->native = native;
+    state->handle_key = userdata;
     state->kind = kind;
     state->owns_reference = take_construction_reference;
     if (take_construction_reference)
@@ -312,6 +364,8 @@ int push_native_widget(lua_State *L, WidgetKind kind, void *native,
                 g_live_windows.fetch_sub(1, std::memory_order_acq_rel);
         }
         release_state(state);
+        if (g_live_widgets.load(std::memory_order_acquire) == 0)
+            g_gui_owner = nullptr;
         return push_fail_protected(L,
             "babet.gui: cannot attach GTK widget lifetime signal");
     }
@@ -518,6 +572,64 @@ int l_button(lua_State *L)
     return 1;
 }
 
+int l_entry(lua_State *L)
+{
+    if (!lua_arity_between(L, 0, 1) ||
+        (lua_gettop(L) == 1 && !lua_isnil(L, 1) && lua_type(L, 1) != LUA_TTABLE))
+        return luaL_error(L, "gui.entry expects an optional options table");
+    require_gui_initialized(L, "gui.entry");
+    const char *text = "";
+    const char *placeholder = "";
+    bool editable = true;
+    if (lua_type(L, 1) == LUA_TTABLE)
+    {
+        // Keep option strings on the stack until GTK has copied them, even
+        // when a finalizer mutates the caller's options table.
+        lua_pushliteral(L, "text");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1))
+            strict_c_string(L, -1, "gui.entry text", text);
+        lua_pushliteral(L, "placeholder");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1))
+            strict_c_string(L, -1, "gui.entry placeholder", placeholder);
+        lua_pushliteral(L, "editable");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_boolean(L, -1))
+                return luaL_error(L, "gui.entry editable must be a boolean");
+            editable = lua_toboolean(L, -1) != 0;
+        }
+    }
+
+    push_empty_widget_userdata(L);
+    void *entry = detail::gtk4_entry_new();
+    const int result = push_native_widget(L, WidgetKind::entry, entry, true);
+    if (result != 1)
+        return result;
+    detail::gtk4_editable_set_text(entry, text);
+    detail::gtk4_entry_set_placeholder(entry, placeholder);
+    detail::gtk4_editable_set_editable(entry, editable);
+
+    auto *userdata = static_cast<WidgetUserdata *>(lua_touserdata(L, -1));
+    const detail::GtkCallback callbacks[] = {
+        gtk_callback(&entry_changed), gtk_callback(&entry_activated)};
+    const char *signals[] = {"changed", "activate"};
+    for (unsigned int i = 0; i < 2; ++i)
+    {
+        retain_state(userdata->state);
+        if (detail::gtk4_signal_connect(entry, signals[i], callbacks[i],
+                userdata->state, &button_signal_released) == 0)
+        {
+            release_state(userdata->state);
+            release_construction_reference(userdata->state);
+            return push_fail_protected(L, "babet.gui: cannot attach entry signal");
+        }
+    }
+    return 1;
+}
+
 int widget_add(lua_State *L)
 {
     if (!lua_arity_is(L, 2))
@@ -565,8 +677,22 @@ int widget_set_text(lua_State *L)
         detail::gtk4_label_set_text(state->native, text);
     else if (state->kind == WidgetKind::button)
         detail::gtk4_button_set_label(state->native, text);
+    else if (state->kind == WidgetKind::entry)
+    {
+        // GTK can emit changed synchronously. A Lua callback may close the
+        // containing window or even explicitly finalize this userdata. Keep
+        // native and logical state alive until the GTK setter has returned.
+        retain_state(state);
+        void *native = detail::gtk4_object_ref_sink(state->native);
+        lua_State *previous = state->callback_thread;
+        state->callback_thread = L;
+        detail::gtk4_editable_set_text(native, text);
+        state->callback_thread = previous;
+        detail::gtk4_object_unref(native);
+        release_state(state);
+    }
     else
-        return luaL_error(L, "gui widget:setText: only label and button support text");
+        return luaL_error(L, "gui widget:setText: only label, button and entry support text");
     return push_ok_protected(L);
 }
 
@@ -574,15 +700,63 @@ int button_on_click(lua_State *L)
 {
     if (!lua_arity_is(L, 2) || lua_type(L, 2) != LUA_TFUNCTION)
         return luaL_error(L, "gui button:onClick expects one function");
-    WidgetState *state = check_kind(L, 1, WidgetKind::button, "gui button:onClick");
+    (void)check_kind(L, 1, WidgetKind::button, "gui button:onClick");
 
+    lua_getiuservalue(L, 1, 1);
     lua_pushvalue(L, 2);
-    const int new_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    const int old_ref = state->callback_ref;
-    state->callback_ref = new_ref;
-    if (old_ref != LUA_NOREF && old_ref != LUA_REFNIL)
-        luaL_unref(L, LUA_REGISTRYINDEX, old_ref);
+    lua_rawseti(L, -2, PRIMARY_CALLBACK);
     return push_ok_protected(L);
+}
+
+int entry_get_text(lua_State *L)
+{
+    if (!lua_arity_is(L, 1))
+        return luaL_error(L, "gui entry:getText expects no arguments");
+    WidgetState *state = check_kind(L, 1, WidgetKind::entry, "gui entry:getText");
+    // Own a snapshot before any Lua allocation/GC can change the GTK buffer.
+    const std::string text(detail::gtk4_editable_get_text(state->native));
+    return push_string_protected(L, text);
+}
+
+int entry_set_placeholder(lua_State *L)
+{
+    if (!lua_arity_is(L, 2))
+        return luaL_error(L, "gui entry:setPlaceholder expects one string");
+    WidgetState *state = check_kind(L, 1, WidgetKind::entry, "gui entry:setPlaceholder");
+    const char *text = nullptr;
+    strict_c_string(L, 2, "gui entry:setPlaceholder", text);
+    detail::gtk4_entry_set_placeholder(state->native, text);
+    return push_ok_protected(L);
+}
+
+int entry_set_editable(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || !lua_is_strict_boolean(L, 2))
+        return luaL_error(L, "gui entry:setEditable expects one boolean");
+    WidgetState *state = check_kind(L, 1, WidgetKind::entry, "gui entry:setEditable");
+    detail::gtk4_editable_set_editable(state->native, lua_toboolean(L, 2) != 0);
+    return push_ok_protected(L);
+}
+
+int entry_on_signal(lua_State *L, lua_Integer slot, const char *api)
+{
+    if (!lua_arity_is(L, 2) || (!lua_isnil(L, 2) && lua_type(L, 2) != LUA_TFUNCTION))
+        return luaL_error(L, "%s expects one function or nil", api);
+    (void)check_kind(L, 1, WidgetKind::entry, api);
+    lua_getiuservalue(L, 1, 1);
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, slot);
+    return push_ok_protected(L);
+}
+
+int entry_on_changed(lua_State *L)
+{
+    return entry_on_signal(L, PRIMARY_CALLBACK, "gui entry:onChanged");
+}
+
+int entry_on_activate(lua_State *L)
+{
+    return entry_on_signal(L, ACTIVATE_CALLBACK, "gui entry:onActivate");
 }
 
 int window_show(lua_State *L)
@@ -686,12 +860,7 @@ int widget_gc(lua_State *L) noexcept
     WidgetState *state = userdata->state;
     userdata->state = nullptr;
 
-    if (state->callback_ref != LUA_NOREF && state->callback_ref != LUA_REFNIL &&
-        state->owner)
-    {
-        luaL_unref(state->owner, LUA_REGISTRYINDEX, state->callback_ref);
-        state->callback_ref = LUA_NOREF;
-    }
+    state->handle_key = nullptr;
 
     if (state->native)
     {
@@ -748,6 +917,19 @@ void cleanup_on_main_thread(lua_State *L) noexcept
 
 void register_gui(lua_State *L)
 {
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &widget_handles_key);
+    if (lua_isnil(L, -1))
+    {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_newtable(L);
+        lua_pushliteral(L, "v");
+        lua_setfield(L, -2, "__mode");
+        lua_setmetatable(L, -2);
+        lua_pushvalue(L, -1);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &widget_handles_key);
+    }
+    lua_pop(L, 1);
     if (luaL_newmetatable(L, WIDGET_META))
     {
         lua_pushvalue(L, -1);
@@ -758,6 +940,16 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "add");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_text>);
         lua_setfield(L, -2, "setText");
+        lua_pushcfunction(L, gui_lua_boundary<entry_get_text>);
+        lua_setfield(L, -2, "getText");
+        lua_pushcfunction(L, gui_lua_boundary<entry_set_placeholder>);
+        lua_setfield(L, -2, "setPlaceholder");
+        lua_pushcfunction(L, gui_lua_boundary<entry_set_editable>);
+        lua_setfield(L, -2, "setEditable");
+        lua_pushcfunction(L, gui_lua_boundary<entry_on_changed>);
+        lua_setfield(L, -2, "onChanged");
+        lua_pushcfunction(L, gui_lua_boundary<entry_on_activate>);
+        lua_setfield(L, -2, "onActivate");
         lua_pushcfunction(L, gui_lua_boundary<button_on_click>);
         lua_setfield(L, -2, "onClick");
         lua_pushcfunction(L, gui_lua_boundary<window_show>);
@@ -780,6 +972,8 @@ void register_gui(lua_State *L)
     lua_setfield(L, -2, "label");
     lua_pushcfunction(L, gui_lua_boundary<l_button>);
     lua_setfield(L, -2, "button");
+    lua_pushcfunction(L, gui_lua_boundary<l_entry>);
+    lua_setfield(L, -2, "entry");
     lua_pushcfunction(L, gui_lua_boundary<l_run>);
     lua_setfield(L, -2, "run");
     lua_pushcfunction(L, gui_lua_boundary<l_quit>);

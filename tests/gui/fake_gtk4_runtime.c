@@ -10,8 +10,9 @@ typedef int (*FakeSourceCallback)(void *);
 typedef void (*WidgetSignal)(void *, void *);
 
 typedef struct FakeWidget {
-    int kind; /* 1 window, 2 box, 3 label, 4 button */
+    int kind; /* 1 window, 2 box, 3 label, 4 button, 5 entry */
     int refs;
+    int floating;
     int alive;
     int clicked;
     struct FakeWidget *parent;
@@ -20,7 +21,15 @@ typedef struct FakeWidget {
     FakeCallback clicked_cb;
     void *clicked_data;
     FakeClosureNotify clicked_destroy_notify;
-    char text[256];
+    FakeCallback changed_cb;
+    void *changed_data;
+    FakeClosureNotify changed_destroy_notify;
+    FakeCallback activate_cb;
+    void *activate_data;
+    FakeClosureNotify activate_destroy_notify;
+    int activated;
+    int editable;
+    char *text;
 } FakeWidget;
 
 static FakeWidget *widgets[MAX_WIDGETS];
@@ -41,17 +50,22 @@ static void log_line(const char *prefix, const char *value)
 
 static FakeWidget *make_widget(int kind, const char *text)
 {
-    if (widget_count >= MAX_WIDGETS) return NULL;
+    size_t slot = 0;
+    while (slot < widget_count && widgets[slot]) ++slot;
+    if (slot == MAX_WIDGETS) return NULL;
     FakeWidget *w = (FakeWidget *)calloc(1, sizeof(*w));
     if (!w) return NULL;
     w->kind = kind;
     w->refs = 1;
+    w->floating = kind != 1;
     w->alive = 1;
-    if (text) {
-        strncpy(w->text, text, sizeof(w->text) - 1);
-        w->text[sizeof(w->text) - 1] = '\0';
-    }
-    widgets[widget_count++] = w;
+    w->editable = 1;
+    if (!text) text = "";
+    w->text = (char *)malloc(strlen(text) + 1);
+    if (!w->text) { free(w); return NULL; }
+    strcpy(w->text, text);
+    widgets[slot] = w;
+    if (slot == widget_count) ++widget_count;
     return w;
 }
 
@@ -83,10 +97,29 @@ static void destroy_widget(FakeWidget *w)
         log_line("closure-notify:clicked", NULL);
         notify(w->clicked_data, NULL);
     }
+    if (w->changed_destroy_notify) {
+        log_line("closure-notify:changed", NULL);
+        w->changed_destroy_notify(w->changed_data, NULL);
+    }
+    if (w->activate_destroy_notify) {
+        log_line("closure-notify:activate", NULL);
+        w->activate_destroy_notify(w->activate_data, NULL);
+    }
+    if (w->kind == 5) log_line("destroy:entry", NULL);
     for (size_t i = 0; i < widget_count; ++i) {
         if (widgets[i] == w) { widgets[i] = NULL; break; }
     }
+    free(w->text);
     free(w);
+}
+
+static void set_text(FakeWidget *w, const char *text)
+{
+    char *copy = (char *)malloc(strlen(text) + 1);
+    if (!copy) abort();
+    strcpy(copy, text);
+    free(w->text);
+    w->text = copy;
 }
 
 void gtk_disable_setlocale(void) { log_line("disable_setlocale", NULL); }
@@ -121,8 +154,7 @@ void gtk_label_set_text(void *p, const char *text)
 {
     FakeWidget *w = (FakeWidget *)p;
     if (!w || !w->alive) return;
-    strncpy(w->text, text, sizeof(w->text) - 1);
-    w->text[sizeof(w->text) - 1] = '\0';
+    set_text(w, text);
     log_line("label:", text);
 }
 void *gtk_button_new_with_label(const char *text) { return make_widget(4, text); }
@@ -130,8 +162,29 @@ void gtk_button_set_label(void *p, const char *text)
 {
     FakeWidget *w = (FakeWidget *)p;
     if (!w || !w->alive) return;
-    strncpy(w->text, text, sizeof(w->text) - 1);
-    w->text[sizeof(w->text) - 1] = '\0';
+    set_text(w, text);
+}
+void *gtk_entry_new(void) { return make_widget(5, ""); }
+void gtk_entry_set_placeholder_text(void *p, const char *text)
+{ (void)p; log_line("placeholder:", text); }
+void gtk_editable_set_text(void *p, const char *text)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive) abort();
+    if (strcmp(w->text, text) == 0) return;
+    set_text(w, text);
+    if (w->changed_cb) as_widget_signal(w->changed_cb)(w, w->changed_data);
+    // A setter still uses the object after synchronous notification. The
+    // binding must pin it if a callback closes its parent or finalizes Lua.
+    if (!w->alive) abort();
+    log_line("entry-after-change:", w->text);
+}
+const char *gtk_editable_get_text(void *p)
+{ return ((FakeWidget *)p)->text; }
+void gtk_editable_set_editable(void *p, int editable)
+{
+    ((FakeWidget *)p)->editable = editable;
+    log_line("editable:", editable ? "true" : "false");
 }
 void *gtk_widget_get_parent(void *p)
 {
@@ -139,7 +192,13 @@ void *gtk_widget_get_parent(void *p)
     return w ? w->parent : NULL;
 }
 
-void *g_object_ref_sink(void *p) { return p; }
+void *g_object_ref_sink(void *p)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (w->floating) w->floating = 0;
+    else ++w->refs;
+    return p;
+}
 void g_object_unref(void *p)
 {
     FakeWidget *w = (FakeWidget *)p;
@@ -154,6 +213,8 @@ unsigned long g_signal_connect_data(void *instance, const char *signal,
     (void)flags;
     FakeWidget *w = (FakeWidget *)instance;
     if (!w || !signal || !cb) return 0;
+    const char *fail_signal = getenv("BABET_FAKE_GTK_FAIL_SIGNAL");
+    if (fail_signal && strcmp(fail_signal, signal) == 0) return 0;
     if (strcmp(signal, "destroy") == 0) {
         w->destroy_cb = cb; w->destroy_data = data; return 1;
     }
@@ -163,6 +224,14 @@ unsigned long g_signal_connect_data(void *instance, const char *signal,
         w->clicked_destroy_notify = destroy_notify;
         return 2;
     }
+    if (strcmp(signal, "changed") == 0) {
+        w->changed_cb = cb; w->changed_data = data;
+        w->changed_destroy_notify = destroy_notify; return 3;
+    }
+    if (strcmp(signal, "activate") == 0) {
+        w->activate_cb = cb; w->activate_data = data;
+        w->activate_destroy_notify = destroy_notify; return 4;
+    }
     return 0;
 }
 
@@ -171,6 +240,12 @@ int g_main_context_iteration(void *context, int may_block)
     (void)context; (void)may_block;
     for (size_t i = 0; i < widget_count; ++i) {
         FakeWidget *w = widgets[i];
+        if (w && w->alive && w->kind == 5 && !w->activated && w->activate_cb) {
+            w->activated = 1;
+            WidgetSignal cb = as_widget_signal(w->activate_cb);
+            cb(w, w->activate_data);
+            return 1;
+        }
         if (w && w->alive && w->kind == 4 && !w->clicked && w->clicked_cb) {
             w->clicked = 1;
             WidgetSignal cb = as_widget_signal(w->clicked_cb);

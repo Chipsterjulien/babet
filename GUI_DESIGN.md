@@ -90,6 +90,14 @@ A normal Lua callback error is captured and reported by Babet; the GUI loop
 remains structurally valid and can continue unless an explicit application
 policy requests termination.
 
+Entry text setters may emit callbacks synchronously. Dispatch them on the
+calling Lua thread, keep the native object and logical state alive until the
+setter returns, and contain errors/attempted yields. A callback may close the
+window, replace itself or reenter a setter. Event-loop callbacks run on the
+main Lua thread. Callback storage belongs to the widget userdata; the native
+bridge resolves it through weak Lua handles so self-capturing callback cycles
+remain collectable.
+
 Do not keep binding-owned C++ RAII objects alive across an unprotected Lua API
 operation that may raise. The existing Babet Lua/C++ exception and protected-
 builder discipline applies unchanged to the GUI binding.
@@ -121,9 +129,12 @@ The first runtime implementation is intentionally small. The target surface is:
 - `babet.gui.box()`
 - `babet.gui.label()`
 - `babet.gui.button()`
+- `babet.gui.entry()`
 - `container:add()`
 - `widget:setText()`
 - `button:onClick()`
+- `entry:getText()` / `entry:setPlaceholder()` / `entry:setEditable()`
+- `entry:onChanged()` / `entry:onActivate()`
 - `window:show()`
 - `window:close()`
 - `babet.gui.run()`
@@ -131,7 +142,9 @@ The first runtime implementation is intentionally small. The target surface is:
 
 The runtime MVP now freezes the following shapes after red structural tests:
 `window({title=?, width=?, height=?})`, `box({orientation=?, spacing=?})`,
-`label(text)`, and `button(text)`. Mutating operations return Babet's usual
+`label(text)`, `button(text)`, and `entry({text=?, placeholder=?, editable=?})`.
+Entry callback registration accepts a function or explicit `nil` to remove
+that handler; `getText()` returns one copied string. Mutating operations return Babet's usual
 `true, nil` success pair; controlled runtime failures return `nil, diagnostic`.
 GTK-facing strings reject embedded NUL bytes. Do not add checkboxes, menus, tree
 views, dialogs, clipboard, CSS, drag-and-drop, OpenGL, or a generic GObject
@@ -141,6 +154,22 @@ Typed GTK constructors/functions are preferred over generic variadic creation
 such as `g_object_new()`. GObject Introspection is deliberately out of scope:
 loading typelibs, generic dynamic conversion and libffi would create a larger
 binding framework than Babet needs.
+
+## Incremental input and drawing roadmap
+
+The next application need is a native desktop weight log using Lua, SQLite and
+GTK, without a browser, HTTP service or JavaScript. It justifies generic GUI
+primitives, not weight-specific runtime functions. Land and validate separate
+lots in this order: Entry (current lot), SpinButton, Calendar, DrawingArea with
+a small Cairo drawing surface, then generic margins and expansion options.
+Keep the existing camelCase public method convention.
+
+The future example must preserve SQLite row identity during edits/deletions,
+allow several measurements per day (no UNIQUE constraint on the date), and
+allow past dates. Its graph must sort chronologically, position points using
+actual date intervals and derive the vertical range from the data. These are
+application requirements, not new Entry behavior. Entry alone does not deliver
+this application or the remaining widgets.
 
 ## Validation status before widening the API
 

@@ -17,11 +17,19 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.24.2**. Voir le
+Version actuelle : **2.25.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.25.0 ajoute [`babet.gui.entry`](docs/fr/modules/gui.md), un champ de
+saisie sur une ligne avec callbacks de modification/validation, indication
+de saisie et mode lecture seule. Elle corrige aussi la durée de vie des cycles
+widget/callback qui capturent leur propre widget. Un exemple complet figure
+dans [`examples/gui_entry`](examples/gui_entry/main.lua). GTK 4 reste optionnel
+et chargé depuis le système cible uniquement à la demande. La saisie
+numérique, le calendrier et les widgets de dessin feront l'objet d'autres lots.
 
 Babet 2.24.2 aligne la version compilée et la documentation de publication
 après l'incohérence de la publication 2.24.1. Elle conserve les correctifs
@@ -506,8 +514,8 @@ sont pas sandboxées. Le guide pratique développeur est [`EMBEDDING.fr.md`](EMB
 
 Le compagnon FLTK séparé livré comme expérience en 2.23.0 a rempli son rôle :
 il a exercé `libbabet` et l'API de callbacks Lua vers hôte, mais il n'est plus
-la direction GUI active. Le développement post-2.23 définit plutôt une API Lua
-optionnelle `babet.gui` dont le premier backend Linux sera GTK 4 chargé
+la direction GUI active. Babet propose désormais une API Lua
+optionnelle `babet.gui` dont le premier backend Linux est GTK 4 chargé
 paresseusement depuis le système. GTK ne devient pas une dépendance de lien du
 Babet normal ; l'usage GUI est l'exception explicite où une application générée
 mono-fichier peut exiger un runtime système cible. Voir

@@ -9,6 +9,36 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+## [2.25.0] - 2026-10-06
+
+### GUI Entry (premier lot de widgets de saisie)
+
+- ajoute `babet.gui.entry({text=?, placeholder=?, editable=?})`, `getText`,
+  `setText`, `setPlaceholder`, `setEditable`, `onChanged` et `onActivate` ;
+- conserve GTK 4 optionnel, son chargement à la demande et les opérations sur
+  le thread principal, sans paquet de développement GTK ni liaison directe ;
+- protège les callbacks synchrones de changement de texte lorsqu'ils ferment
+  une fenêtre ou rappellent un setter ; ils peuvent être remplacés ou retirés
+  avec `nil` explicite ;
+- permet la collecte des cycles widget/callback qui capturent leur propre
+  widget, y compris pour les boutons existants, tout en conservant les enfants
+  d'un parent vivant ;
+- ajoute les régressions Entry à `run_tests.sh`, la documentation FR/EN et
+  `examples/gui_entry`. SpinButton, Calendar et le dessin restent à venir.
+
+### Documentation, déploiement et validation
+
+- inclut le chapitre GUI dans les deux manuels PDF et aligne CMake, les README
+  et les index des manuels sur `2.25.0` ;
+- les applications GUI produites par `--create-exe` restent mono-fichier et
+  exigent GTK 4 sur la cible. Le déploiement sans GUI est inchangé.
+  Reconstruire les applications générées pour intégrer la nouvelle API et les
+  correctifs de durée de vie ;
+- l'implémentation Entry a passé la campagne complète `--release` du
+  mainteneur : ASan/UBSan, build normal, régressions runtime/packaging et tests
+  réseau. Le mainteneur indique également que l'exemple graphique semble
+  fonctionner.
+
 ## [2.24.2] - 2026-10-05
 
 ### Cohérence de la version publiée
