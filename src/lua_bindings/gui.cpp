@@ -80,8 +80,27 @@ std::atomic_bool g_quit_requested{false};
 bool g_initialized = false;
 unsigned int g_draw_depth = 0;
 WidgetState *g_deferred_widgets = nullptr;
+void *g_css_provider = nullptr;
+void *g_css_display = nullptr;
+lua_State *g_css_owner = nullptr;
+constexpr unsigned int CSS_PRIORITY_APPLICATION = 600U;
 
 void drain_deferred_widgets() noexcept;
+
+void clear_css_provider(lua_State *owner = nullptr) noexcept
+{
+    if (!g_css_provider)
+        return;
+    if (owner && g_css_owner != owner)
+        return;
+    if (g_css_display)
+        detail::gtk4_style_context_remove_provider_for_display(
+            g_css_display, g_css_provider);
+    detail::gtk4_object_unref(g_css_provider);
+    g_css_provider = nullptr;
+    g_css_display = nullptr;
+    g_css_owner = nullptr;
+}
 
 void require_not_drawing(lua_State *L, const char *api)
 {
@@ -142,7 +161,8 @@ void require_gui_initialized(lua_State *L, const char *api)
         luaL_error(L, "%s: unavailable while a curses session is active", api);
 
     lua_State *owner = main_lua_state(L);
-    if (g_gui_owner && g_gui_owner != owner)
+    if ((g_gui_owner && g_gui_owner != owner) ||
+        (g_css_owner && g_css_owner != owner))
         luaL_error(L, "%s: another Lua state currently owns the GUI", api);
 }
 
@@ -1679,6 +1699,64 @@ int widget_set_sensitive(lua_State *L)
     return push_ok_protected(L);
 }
 
+int widget_add_class(lua_State *L)
+{
+    if (!lua_arity_is(L, 2))
+        return luaL_error(L, "gui widget:addClass expects one CSS class name");
+    WidgetState *state = check_widget(L, 1, "gui widget:addClass");
+    const char *name = nullptr;
+    strict_c_string(L, 2, "gui widget:addClass", name);
+    if (!name[0])
+        return luaL_error(L, "gui widget:addClass: CSS class name cannot be empty");
+    detail::gtk4_widget_add_css_class(state->native, name);
+    return push_ok_protected(L);
+}
+
+int widget_remove_class(lua_State *L)
+{
+    if (!lua_arity_is(L, 2))
+        return luaL_error(L, "gui widget:removeClass expects one CSS class name");
+    WidgetState *state = check_widget(L, 1, "gui widget:removeClass");
+    const char *name = nullptr;
+    strict_c_string(L, 2, "gui widget:removeClass", name);
+    if (!name[0])
+        return luaL_error(L, "gui widget:removeClass: CSS class name cannot be empty");
+    detail::gtk4_widget_remove_css_class(state->native, name);
+    return push_ok_protected(L);
+}
+
+int l_set_css(lua_State *L)
+{
+    if (!lua_arity_is(L, 1) || (!lua_isnil(L, 1) && !lua_is_strict_string(L, 1)))
+        return luaL_error(L, "gui.setCss expects one CSS string or nil");
+    require_gui_initialized(L, "gui.setCss");
+    lua_State *owner = main_lua_state(L);
+
+    if (lua_isnil(L, 1))
+    {
+        clear_css_provider(owner);
+        return push_ok_protected(L);
+    }
+
+    const char *css = nullptr;
+    strict_c_string(L, 1, "gui.setCss", css);
+    void *display = detail::gdk4_display_get_default();
+    if (!display)
+        return push_fail_protected(L, "babet.gui: no default GTK display for CSS");
+    void *provider = detail::gtk4_css_provider_new();
+    if (!provider)
+        return push_fail_protected(L, "babet.gui: cannot create GTK CSS provider");
+
+    detail::gtk4_css_provider_load_from_data(provider, css);
+    clear_css_provider(owner);
+    detail::gtk4_style_context_add_provider_for_display(
+        display, provider, CSS_PRIORITY_APPLICATION);
+    g_css_provider = provider;
+    g_css_display = display;
+    g_css_owner = owner;
+    return push_ok_protected(L);
+}
+
 int window_show(lua_State *L)
 {
     if (!lua_arity_is(L, 1))
@@ -1839,7 +1917,8 @@ int gui_lua_boundary(lua_State *L)
 bool session_active() noexcept
 {
     return g_run_active.load(std::memory_order_acquire) ||
-           g_live_widgets.load(std::memory_order_acquire) > 0;
+           g_live_widgets.load(std::memory_order_acquire) > 0 ||
+           g_css_provider != nullptr;
 }
 
 void cleanup_on_main_thread(lua_State *L) noexcept
@@ -1849,6 +1928,7 @@ void cleanup_on_main_thread(lua_State *L) noexcept
 
     drain_deferred_widgets();
     lua_State *closing_owner = main_lua_state(L);
+    clear_css_provider(closing_owner);
     if (g_gui_owner == closing_owner)
     {
         g_quit_requested.store(true, std::memory_order_release);
@@ -1953,6 +2033,10 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "setVisible");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_sensitive>);
         lua_setfield(L, -2, "setSensitive");
+        lua_pushcfunction(L, gui_lua_boundary<widget_add_class>);
+        lua_setfield(L, -2, "addClass");
+        lua_pushcfunction(L, gui_lua_boundary<widget_remove_class>);
+        lua_setfield(L, -2, "removeClass");
         lua_pushcfunction(L, gui_lua_boundary<window_show>);
         lua_setfield(L, -2, "show");
         lua_pushcfunction(L, gui_lua_boundary<window_close>);
@@ -1965,6 +2049,8 @@ void register_gui(lua_State *L)
     lua_setfield(L, -2, "available");
     lua_pushcfunction(L, gui_lua_boundary<l_init>);
     lua_setfield(L, -2, "init");
+    lua_pushcfunction(L, gui_lua_boundary<l_set_css>);
+    lua_setfield(L, -2, "setCss");
     lua_pushcfunction(L, gui_lua_boundary<l_window>);
     lua_setfield(L, -2, "window");
     lua_pushcfunction(L, gui_lua_boundary<l_box>);

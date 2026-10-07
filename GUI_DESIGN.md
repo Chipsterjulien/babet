@@ -228,3 +228,8 @@ embedded-via-PATH, and 9/9 top-level modes. The stripped CLI measures
 15,559,496 bytes, only 36,864 bytes (+0.24%) above the published 2.23.0 CLI
 measurement. Only a concrete application need can now justify a wider widget
 surface or a second GUI backend.
+
+## Styling surface
+
+The optional GTK backend may expose one application CSS provider plus per-widget CSS classes. This remains a narrow styling layer (`gui.setCss`, `widget:addClass`, `widget:removeClass`), not generic GObject introspection or a complete GTK property binding.
+

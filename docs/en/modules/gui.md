@@ -91,6 +91,7 @@ The initial surface is intentionally small:
 
 - `babet.gui.available()`
 - `babet.gui.init()`
+- `babet.gui.setCss(css_or_nil)`
 - `babet.gui.window([options])`
 - `babet.gui.box([options])`
 - `babet.gui.label(text)`
@@ -108,7 +109,7 @@ The initial surface is intentionally small:
 - `drawingArea:onClick(function_or_nil)`
 - `spinButton:getValue()` / `spinButton:setValue(number)` / `spinButton:onChanged(function_or_nil)`
 - `calendar:getDate()` / `calendar:setDate(year, month, day)` / `calendar:onChanged(function_or_nil)`
-- common properties: `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`
+- common properties: `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`, `addClass`, `removeClass`
 - `window:show()` / `window:close()`
 - `babet.gui.run()` / `babet.gui.quit()`
 
@@ -343,6 +344,26 @@ The binding uses the Calendar API available since early GTK 4 instead of
 requiring much newer setters, preserving compatibility with GTK 4 runtimes older
 than 4.20.
 
+## CSS styling
+
+Babet can install one application-level GTK CSS provider and attach CSS classes to individual widgets:
+
+```lua
+assert(gui.setCss([[
+.card { background: #ffffff; border-radius: 12px; padding: 12px; }
+.primary { background: #2563eb; color: white; }
+]]))
+
+local panel = assert(gui.box())
+assert(panel:addClass("card"))
+local button = assert(gui.button("Save"))
+assert(button:addClass("primary"))
+assert(button:removeClass("primary"))
+assert(gui.setCss(nil))
+```
+
+`gui.setCss(css_or_nil)` replaces the application stylesheet for the current Lua GUI owner. `nil` removes it. `widget:addClass(name)` and `widget:removeClass(name)` work on every live widget; pass class names without a leading dot. CSS parsing diagnostics are reported by GTK.
+
 ## Common widget properties (unreleased GUI lot 6)
 
 Every live widget exposes these methods:
@@ -355,6 +376,8 @@ Every live widget exposes these methods:
 | `widget:setVExpand(boolean)` | Enable/disable vertical expansion. |
 | `widget:setVisible(boolean)` | Show or hide the widget. |
 | `widget:setSensitive(boolean)` | Enable or disable user interaction with the widget. |
+| `widget:addClass(name)` | Add a GTK CSS class to the widget. |
+| `widget:removeClass(name)` | Remove a GTK CSS class from the widget. |
 
 Margins must be integers from 0 through `INT_MAX`; the other methods require
 actual Lua booleans. They return `true, nil`. As with other GTK mutations, these

@@ -73,6 +73,14 @@ void gtk4_widget_set_hexpand(void *w, bool expand) noexcept;
 void gtk4_widget_set_vexpand(void *w, bool expand) noexcept;
 void gtk4_widget_set_visible(void *w, bool visible) noexcept;
 void gtk4_widget_set_sensitive(void *w, bool sensitive) noexcept;
+void *gtk4_css_provider_new() noexcept;
+void gtk4_css_provider_load_from_data(void *provider, const char *css) noexcept;
+void *gdk4_display_get_default() noexcept;
+void gtk4_style_context_add_provider_for_display(void *display, void *provider,
+                                                 unsigned int priority) noexcept;
+void gtk4_style_context_remove_provider_for_display(void *display, void *provider) noexcept;
+void gtk4_widget_add_css_class(void *w, const char *css_class) noexcept;
+void gtk4_widget_remove_css_class(void *w, const char *css_class) noexcept;
 int cairo_status(void *cr) noexcept;
 const char * cairo_status_to_string(int status) noexcept;
 void cairo_save(void *cr) noexcept;

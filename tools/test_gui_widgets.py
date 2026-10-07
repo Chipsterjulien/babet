@@ -45,9 +45,12 @@ def main():
             "spin-after-change", "calendar-after-change",
             "margin-top", "margin-end", "margin-bottom", "margin-start",
             "hexpand:true", "vexpand:true", "visible:false", "sensitive:false",
+            "css-load:", "css-provider:add", "css-provider:remove",
+            "css-class:add:app-card", "css-class:add:primary",
+            "css-class:remove:primary",
         ]:
             assert marker in log, marker
-        print("[PASS] containers, ScrolledWindow, SpinButton, Calendar and common properties")
+        print("[PASS] containers, widgets, CSS styling and common properties")
 
         # A signal connection failure must release the construction reference.
         cases = [

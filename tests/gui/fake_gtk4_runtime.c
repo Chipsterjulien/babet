@@ -350,6 +350,39 @@ void gtk_widget_set_visible(void *p, int value)
 { ((FakeWidget *)p)->visible = value; log_line("visible:", value ? "true" : "false"); }
 void gtk_widget_set_sensitive(void *p, int value)
 { ((FakeWidget *)p)->sensitive = value; log_line("sensitive:", value ? "true" : "false"); }
+void *gtk_css_provider_new(void)
+{ return make_widget(11, NULL); }
+void gtk_css_provider_load_from_data(void *p, const char *css, long length)
+{
+    FakeWidget *provider = (FakeWidget *)p;
+    if (!provider || !provider->alive || provider->kind != 11) abort();
+    (void)length;
+    log_line("css-load:", css ? css : "");
+}
+void *gdk_display_get_default(void)
+{ static int display; return &display; }
+void gtk_style_context_add_provider_for_display(void *display, void *provider, unsigned int priority)
+{
+    if (!display || !provider || priority != 600U) abort();
+    log_line("css-provider:add", NULL);
+}
+void gtk_style_context_remove_provider_for_display(void *display, void *provider)
+{
+    if (!display || !provider) abort();
+    log_line("css-provider:remove", NULL);
+}
+void gtk_widget_add_css_class(void *p, const char *name)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive || !name) abort();
+    log_line("css-class:add:", name);
+}
+void gtk_widget_remove_css_class(void *p, const char *name)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive || !name) abort();
+    log_line("css-class:remove:", name);
+}
 void gtk_drawing_area_set_draw_func(void *p, DrawCallback cb, void *data, DrawNotify notify)
 {
     FakeWidget *w = (FakeWidget *)p;

@@ -94,6 +94,7 @@ La première surface reste volontairement petite :
 
 - `babet.gui.available()`
 - `babet.gui.init()`
+- `babet.gui.setCss(css_ou_nil)`
 - `babet.gui.window([options])`
 - `babet.gui.box([options])`
 - `babet.gui.label(texte)`
@@ -111,7 +112,7 @@ La première surface reste volontairement petite :
 - `drawingArea:onClick(fonction_ou_nil)`
 - `spinButton:getValue()` / `spinButton:setValue(nombre)` / `spinButton:onChanged(fonction_ou_nil)`
 - `calendar:getDate()` / `calendar:setDate(année, mois, jour)` / `calendar:onChanged(fonction_ou_nil)`
-- propriétés communes : `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`
+- propriétés communes : `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`, `addClass`, `removeClass`
 - `window:show()` / `window:close()`
 - `babet.gui.run()` / `babet.gui.quit()`
 
@@ -385,6 +386,26 @@ L'implémentation utilise l'API Calendar disponible depuis les premières versio
 de GTK 4 plutôt que d'exiger les setters apparus beaucoup plus tard ; le runtime
 reste donc compatible avec les distributions GTK 4 antérieures à 4.20.
 
+## Style CSS
+
+Babet peut installer une feuille CSS GTK au niveau de l'application et associer des classes CSS aux widgets :
+
+```lua
+assert(gui.setCss([[
+.card { background: #ffffff; border-radius: 12px; padding: 12px; }
+.primary { background: #2563eb; color: white; }
+]]))
+
+local panneau = assert(gui.box())
+assert(panneau:addClass("card"))
+local bouton = assert(gui.button("Enregistrer"))
+assert(bouton:addClass("primary"))
+assert(bouton:removeClass("primary"))
+assert(gui.setCss(nil))
+```
+
+`gui.setCss(css_ou_nil)` remplace la feuille de style de l'application pour l'état Lua propriétaire de la GUI. `nil` la retire. `widget:addClass(nom)` et `widget:removeClass(nom)` fonctionnent sur tous les widgets vivants ; le nom est fourni sans point initial. Les diagnostics de parsing CSS restent ceux de GTK.
+
 ## Propriétés communes des widgets (non publié, lot GUI 6)
 
 Tous les widgets vivants exposent les méthodes suivantes :
@@ -397,6 +418,8 @@ Tous les widgets vivants exposent les méthodes suivantes :
 | `widget:setVExpand(booléen)` | Autorise/désactive l'expansion verticale. |
 | `widget:setVisible(booléen)` | Affiche ou masque le widget. |
 | `widget:setSensitive(booléen)` | Active ou désactive les interactions utilisateur avec le widget. |
+| `widget:addClass(nom)` | Ajoute une classe CSS GTK au widget. |
+| `widget:removeClass(nom)` | Retire une classe CSS GTK du widget. |
 
 Les marges sont des entiers compris entre 0 et `INT_MAX` et les quatre autres
 méthodes exigent de vrais booléens Lua. Elles renvoient `true, nil`. Comme les

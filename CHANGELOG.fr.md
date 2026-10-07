@@ -7,6 +7,18 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.28.0] - 2026-10-07
+
+### GUI — personnalisation native GTK4
+
+- Ajout de `babet.gui.setCss(css_or_nil)` pour installer, remplacer ou retirer une feuille de style GTK au niveau de l'application.
+- Ajout de `widget:addClass(name)` et `widget:removeClass(name)` pour appliquer des classes CSS aux widgets.
+- Le style est disponible sur tous les widgets GUI vivants sans exposer une introspection GObject générique.
+- Le support repose sur `GtkCssProvider` et la priorité CSS application de GTK4.
+- GTK reste optionnel, chargé dynamiquement et absent des dépendances directes de Babet à l'édition de liens.
+- La durée de vie du provider CSS et son nettoyage avec le propriétaire GUI sont gérés par Babet.
+- Ajout de tests structurels, d'exécution et de faux runtime GTK couvrant le chargement CSS et les classes des widgets.
+
 ## [2.27.0] - 2026-10-07
 
 ### GUI — DrawingArea cliquable

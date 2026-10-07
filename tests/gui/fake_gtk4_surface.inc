@@ -79,6 +79,16 @@ void gtk_widget_set_hexpand(void *w, int v) { (void)w; (void)v; }
 void gtk_widget_set_vexpand(void *w, int v) { (void)w; (void)v; }
 void gtk_widget_set_visible(void *w, int v) { (void)w; (void)v; }
 void gtk_widget_set_sensitive(void *w, int v) { (void)w; (void)v; }
+void *gtk_css_provider_new(void) { return (void *)0xb; }
+void gtk_css_provider_load_from_data(void *p, const char *css, long n)
+{ (void)p; (void)css; (void)n; }
+void *gdk_display_get_default(void) { return (void *)0xc; }
+void gtk_style_context_add_provider_for_display(void *d, void *p, unsigned int priority)
+{ (void)d; (void)p; (void)priority; }
+void gtk_style_context_remove_provider_for_display(void *d, void *p)
+{ (void)d; (void)p; }
+void gtk_widget_add_css_class(void *w, const char *name) { (void)w; (void)name; }
+void gtk_widget_remove_css_class(void *w, const char *name) { (void)w; (void)name; }
 void *gtk_widget_get_parent(void *w) { (void)w; return NULL; }
 void *g_object_ref_sink(void *o) { return o; }
 void g_object_unref(void *o) { (void)o; }

@@ -17,7 +17,7 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de **Babet 2.27.0**.
+Documentation de **Babet 2.28.0**.
 
 Babet 2.22.2 ajoute un client RFC 6455 natif via `babet.websocket`, avec
 `ws://` et `wss://` vérifié, négociation stricte, framing borné, Ping/Pong

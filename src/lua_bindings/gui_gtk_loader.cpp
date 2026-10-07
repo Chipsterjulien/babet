@@ -52,6 +52,12 @@ using GtkGestureSingleGetCurrentButton = unsigned int (*)(void *);
 using GtkWidgetAddController = void (*)(void *, void *);
 using GtkWidgetSetMargin = void (*)(void *, int);
 using GtkWidgetSetBoolean = void (*)(void *, int);
+using GtkCssProviderNew = void *(*)();
+using GtkCssProviderLoadFromData = void (*)(void *, const char *, long);
+using GdkDisplayGetDefault = void *(*)();
+using GtkStyleContextAddProviderForDisplay = void (*)(void *, void *, unsigned int);
+using GtkStyleContextRemoveProviderForDisplay = void (*)(void *, void *);
+using GtkWidgetCssClass = void (*)(void *, const char *);
 using GtkWidgetGetParent = void *(*)(void *);
 using GObjectRefSink = void *(*)(void *);
 using GObjectUnref = void (*)(void *);
@@ -117,6 +123,13 @@ struct GtkApi
     GtkWidgetSetBoolean widget_set_vexpand = nullptr;
     GtkWidgetSetBoolean widget_set_visible = nullptr;
     GtkWidgetSetBoolean widget_set_sensitive = nullptr;
+    GtkCssProviderNew css_provider_new = nullptr;
+    GtkCssProviderLoadFromData css_provider_load_from_data = nullptr;
+    GdkDisplayGetDefault display_get_default = nullptr;
+    GtkStyleContextAddProviderForDisplay style_context_add_provider_for_display = nullptr;
+    GtkStyleContextRemoveProviderForDisplay style_context_remove_provider_for_display = nullptr;
+    GtkWidgetCssClass widget_add_css_class = nullptr;
+    GtkWidgetCssClass widget_remove_css_class = nullptr;
     int (*cairo_status)(void *cr) = nullptr;
     const char * (*cairo_status_to_string)(int status) = nullptr;
     void (*cairo_save)(void *cr) = nullptr;
@@ -294,6 +307,13 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(widget_set_vexpand, "gtk_widget_set_vexpand");
     BABET_GTK_RESOLVE(widget_set_visible, "gtk_widget_set_visible");
     BABET_GTK_RESOLVE(widget_set_sensitive, "gtk_widget_set_sensitive");
+    BABET_GTK_RESOLVE(css_provider_new, "gtk_css_provider_new");
+    BABET_GTK_RESOLVE(css_provider_load_from_data, "gtk_css_provider_load_from_data");
+    BABET_GTK_RESOLVE(display_get_default, "gdk_display_get_default");
+    BABET_GTK_RESOLVE(style_context_add_provider_for_display, "gtk_style_context_add_provider_for_display");
+    BABET_GTK_RESOLVE(style_context_remove_provider_for_display, "gtk_style_context_remove_provider_for_display");
+    BABET_GTK_RESOLVE(widget_add_css_class, "gtk_widget_add_css_class");
+    BABET_GTK_RESOLVE(widget_remove_css_class, "gtk_widget_remove_css_class");
     BABET_GTK_RESOLVE(cairo_status, "cairo_status");
     BABET_GTK_RESOLVE(cairo_status_to_string, "cairo_status_to_string");
     BABET_GTK_RESOLVE(cairo_save, "cairo_save");
@@ -401,6 +421,18 @@ void gtk4_widget_set_hexpand(void *w, bool v) noexcept { g_gtk.widget_set_hexpan
 void gtk4_widget_set_vexpand(void *w, bool v) noexcept { g_gtk.widget_set_vexpand(w, v ? 1 : 0); }
 void gtk4_widget_set_visible(void *w, bool v) noexcept { g_gtk.widget_set_visible(w, v ? 1 : 0); }
 void gtk4_widget_set_sensitive(void *w, bool v) noexcept { g_gtk.widget_set_sensitive(w, v ? 1 : 0); }
+void *gtk4_css_provider_new() noexcept { return g_gtk.css_provider_new(); }
+void gtk4_css_provider_load_from_data(void *provider, const char *css) noexcept
+{ g_gtk.css_provider_load_from_data(provider, css, -1L); }
+void *gdk4_display_get_default() noexcept { return g_gtk.display_get_default(); }
+void gtk4_style_context_add_provider_for_display(void *display, void *provider, unsigned int priority) noexcept
+{ g_gtk.style_context_add_provider_for_display(display, provider, priority); }
+void gtk4_style_context_remove_provider_for_display(void *display, void *provider) noexcept
+{ g_gtk.style_context_remove_provider_for_display(display, provider); }
+void gtk4_widget_add_css_class(void *w, const char *css_class) noexcept
+{ g_gtk.widget_add_css_class(w, css_class); }
+void gtk4_widget_remove_css_class(void *w, const char *css_class) noexcept
+{ g_gtk.widget_remove_css_class(w, css_class); }
 int cairo_status(void *cr) noexcept { return g_gtk.cairo_status(cr); }
 const char * cairo_status_to_string(int status) noexcept { return g_gtk.cairo_status_to_string(status); }
 void cairo_save(void *cr) noexcept { g_gtk.cairo_save(cr); }

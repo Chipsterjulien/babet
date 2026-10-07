@@ -14,6 +14,15 @@ rejects(function() gui.spinButton() end, "init() first")
 rejects(function() gui.calendar() end, "init() first")
 assert(gui.init())
 
+-- Application CSS and per-widget classes.
+pair(gui.setCss([[
+.app-card { padding: 8px; }
+.primary { background: #2563eb; color: white; }
+]]))
+rejects(function() gui.setCss(42) end, "CSS string or nil")
+pair(gui.setCss(nil))
+pair(gui.setCss(".app-card { padding: 4px; }"))
+
 -- Box removal/clearing: removed children remain valid and can be reparented.
 local box = assert(gui.box())
 local other = assert(gui.box())
@@ -215,6 +224,9 @@ pair(common:setVisible(false))
 pair(common:setVisible(true))
 pair(common:setSensitive(false))
 pair(common:setSensitive(true))
+pair(common:addClass("app-card"))
+pair(common:addClass("primary"))
+pair(common:removeClass("primary"))
 rejects(function() common:setMargins() end, "one margin")
 rejects(function() common:setMargins(1, 2) end, "one margin")
 rejects(function() common:setMargins(-1) end, "out of range")
@@ -223,6 +235,9 @@ rejects(function() common:setHExpand(1) end, "boolean")
 rejects(function() common:setVExpand(nil) end, "boolean")
 rejects(function() common:setVisible("yes") end, "boolean")
 rejects(function() common:setSensitive(1) end, "boolean")
+rejects(function() common:addClass() end, "one CSS class name")
+rejects(function() common:addClass("") end, "cannot be empty")
+rejects(function() common:removeClass("") end, "cannot be empty")
 
 -- Callback cycles on the new signal-bearing widgets must remain collectable.
 for i = 1, 100 do
@@ -238,5 +253,7 @@ for i = 1, 100 do
     collectgarbage("collect")
     assert(weak[1] == nil and weak[2] == nil, "new widget callback cycle leaked")
 end
+
+pair(gui.setCss(nil))
 
 print("GUI_WIDGETS_CONTRACT_OK")
