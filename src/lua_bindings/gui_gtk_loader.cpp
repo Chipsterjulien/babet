@@ -23,6 +23,9 @@ using GtkWindowPresent = void (*)(void *);
 using GtkWindowDestroy = void (*)(void *);
 using GtkBoxNew = void *(*)(int, int);
 using GtkBoxAppend = void (*)(void *, void *);
+using GtkBoxRemove = void (*)(void *, void *);
+using GtkScrolledWindowNew = void *(*)();
+using GtkScrolledWindowSetChild = void (*)(void *, void *);
 using GtkLabelNew = void *(*)(const char *);
 using GtkLabelSetText = void (*)(void *, const char *);
 using GtkButtonNewWithLabel = void *(*)(const char *);
@@ -32,6 +35,19 @@ using GtkEntrySetPlaceholder = void (*)(void *, const char *);
 using GtkEditableSetText = void (*)(void *, const char *);
 using GtkEditableGetText = const char *(*)(void *);
 using GtkEditableSetEditable = void (*)(void *, int);
+using GtkSpinButtonNewWithRange = void *(*)(double, double, double);
+using GtkSpinButtonGetValue = double (*)(void *);
+using GtkSpinButtonSetValue = void (*)(void *, double);
+using GtkSpinButtonSetDigits = void (*)(void *, unsigned int);
+using GtkSpinButtonSetNumeric = void (*)(void *, int);
+using GtkCalendarNew = void *(*)();
+using GtkCalendarGetDate = void *(*)(void *);
+using GtkCalendarSelectDay = void (*)(void *, void *);
+using GDateTimeNewLocal = void *(*)(int, int, int, int, int, double);
+using GDateTimeGetInt = int (*)(void *);
+using GDateTimeUnref = void (*)(void *);
+using GtkWidgetSetMargin = void (*)(void *, int);
+using GtkWidgetSetBoolean = void (*)(void *, int);
 using GtkWidgetGetParent = void *(*)(void *);
 using GObjectRefSink = void *(*)(void *);
 using GObjectUnref = void (*)(void *);
@@ -55,6 +71,9 @@ struct GtkApi
     GtkWindowDestroy window_destroy = nullptr;
     GtkBoxNew box_new = nullptr;
     GtkBoxAppend box_append = nullptr;
+    GtkBoxRemove box_remove = nullptr;
+    GtkScrolledWindowNew scrolled_window_new = nullptr;
+    GtkScrolledWindowSetChild scrolled_window_set_child = nullptr;
     GtkLabelNew label_new = nullptr;
     GtkLabelSetText label_set_text = nullptr;
     GtkButtonNewWithLabel button_new_with_label = nullptr;
@@ -64,6 +83,49 @@ struct GtkApi
     GtkEditableSetText editable_set_text = nullptr;
     GtkEditableGetText editable_get_text = nullptr;
     GtkEditableSetEditable editable_set_editable = nullptr;
+    GtkSpinButtonNewWithRange spin_button_new_with_range = nullptr;
+    GtkSpinButtonGetValue spin_button_get_value = nullptr;
+    GtkSpinButtonSetValue spin_button_set_value = nullptr;
+    GtkSpinButtonSetDigits spin_button_set_digits = nullptr;
+    GtkSpinButtonSetNumeric spin_button_set_numeric = nullptr;
+    GtkCalendarNew calendar_new = nullptr;
+    GtkCalendarGetDate calendar_get_date = nullptr;
+    GtkCalendarSelectDay calendar_select_day = nullptr;
+    GDateTimeNewLocal date_time_new_local = nullptr;
+    GDateTimeGetInt date_time_get_year = nullptr;
+    GDateTimeGetInt date_time_get_month = nullptr;
+    GDateTimeGetInt date_time_get_day_of_month = nullptr;
+    GDateTimeUnref date_time_unref = nullptr;
+    void * (*gtk_drawing_area_new)() = nullptr;
+    void (*gtk_drawing_area_set_content_width)(void *w, int width) = nullptr;
+    void (*gtk_drawing_area_set_content_height)(void *w, int height) = nullptr;
+    void (*gtk_drawing_area_set_draw_func)(void *w, GtkDrawCallback cb, void *data, GtkDestroyNotify notify) = nullptr;
+    void (*gtk_widget_queue_draw)(void *w) = nullptr;
+    GtkWidgetSetMargin widget_set_margin_top = nullptr;
+    GtkWidgetSetMargin widget_set_margin_bottom = nullptr;
+    GtkWidgetSetMargin widget_set_margin_start = nullptr;
+    GtkWidgetSetMargin widget_set_margin_end = nullptr;
+    GtkWidgetSetBoolean widget_set_hexpand = nullptr;
+    GtkWidgetSetBoolean widget_set_vexpand = nullptr;
+    GtkWidgetSetBoolean widget_set_visible = nullptr;
+    GtkWidgetSetBoolean widget_set_sensitive = nullptr;
+    int (*cairo_status)(void *cr) = nullptr;
+    const char * (*cairo_status_to_string)(int status) = nullptr;
+    void (*cairo_save)(void *cr) = nullptr;
+    void (*cairo_restore)(void *cr) = nullptr;
+    void (*cairo_new_path)(void *cr) = nullptr;
+    void (*cairo_close_path)(void *cr) = nullptr;
+    void (*cairo_stroke)(void *cr) = nullptr;
+    void (*cairo_fill)(void *cr) = nullptr;
+    void (*cairo_move_to)(void *cr, double x, double y) = nullptr;
+    void (*cairo_line_to)(void *cr, double x, double y) = nullptr;
+    void (*cairo_rectangle)(void *cr, double x, double y, double width, double height) = nullptr;
+    void (*cairo_arc)(void *cr, double x, double y, double radius, double start, double end) = nullptr;
+    void (*cairo_set_line_width)(void *cr, double width) = nullptr;
+    void (*cairo_set_source_rgb)(void *cr, double r, double g, double b) = nullptr;
+    void (*cairo_set_source_rgba)(void *cr, double r, double g, double b, double a) = nullptr;
+    void (*cairo_set_font_size)(void *cr, double size) = nullptr;
+    void (*cairo_show_text)(void *cr, const char *text) = nullptr;
     GtkWidgetGetParent widget_get_parent = nullptr;
     GObjectRefSink object_ref_sink = nullptr;
     GObjectUnref object_unref = nullptr;
@@ -182,6 +244,9 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(window_destroy, "gtk_window_destroy");
     BABET_GTK_RESOLVE(box_new, "gtk_box_new");
     BABET_GTK_RESOLVE(box_append, "gtk_box_append");
+    BABET_GTK_RESOLVE(box_remove, "gtk_box_remove");
+    BABET_GTK_RESOLVE(scrolled_window_new, "gtk_scrolled_window_new");
+    BABET_GTK_RESOLVE(scrolled_window_set_child, "gtk_scrolled_window_set_child");
     BABET_GTK_RESOLVE(label_new, "gtk_label_new");
     BABET_GTK_RESOLVE(label_set_text, "gtk_label_set_text");
     BABET_GTK_RESOLVE(button_new_with_label, "gtk_button_new_with_label");
@@ -191,6 +256,49 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(editable_set_text, "gtk_editable_set_text");
     BABET_GTK_RESOLVE(editable_get_text, "gtk_editable_get_text");
     BABET_GTK_RESOLVE(editable_set_editable, "gtk_editable_set_editable");
+    BABET_GTK_RESOLVE(spin_button_new_with_range, "gtk_spin_button_new_with_range");
+    BABET_GTK_RESOLVE(spin_button_get_value, "gtk_spin_button_get_value");
+    BABET_GTK_RESOLVE(spin_button_set_value, "gtk_spin_button_set_value");
+    BABET_GTK_RESOLVE(spin_button_set_digits, "gtk_spin_button_set_digits");
+    BABET_GTK_RESOLVE(spin_button_set_numeric, "gtk_spin_button_set_numeric");
+    BABET_GTK_RESOLVE(calendar_new, "gtk_calendar_new");
+    BABET_GTK_RESOLVE(calendar_get_date, "gtk_calendar_get_date");
+    BABET_GTK_RESOLVE(calendar_select_day, "gtk_calendar_select_day");
+    BABET_GTK_RESOLVE(date_time_new_local, "g_date_time_new_local");
+    BABET_GTK_RESOLVE(date_time_get_year, "g_date_time_get_year");
+    BABET_GTK_RESOLVE(date_time_get_month, "g_date_time_get_month");
+    BABET_GTK_RESOLVE(date_time_get_day_of_month, "g_date_time_get_day_of_month");
+    BABET_GTK_RESOLVE(date_time_unref, "g_date_time_unref");
+    BABET_GTK_RESOLVE(gtk_drawing_area_new, "gtk_drawing_area_new");
+    BABET_GTK_RESOLVE(gtk_drawing_area_set_content_width, "gtk_drawing_area_set_content_width");
+    BABET_GTK_RESOLVE(gtk_drawing_area_set_content_height, "gtk_drawing_area_set_content_height");
+    BABET_GTK_RESOLVE(gtk_drawing_area_set_draw_func, "gtk_drawing_area_set_draw_func");
+    BABET_GTK_RESOLVE(gtk_widget_queue_draw, "gtk_widget_queue_draw");
+    BABET_GTK_RESOLVE(widget_set_margin_top, "gtk_widget_set_margin_top");
+    BABET_GTK_RESOLVE(widget_set_margin_bottom, "gtk_widget_set_margin_bottom");
+    BABET_GTK_RESOLVE(widget_set_margin_start, "gtk_widget_set_margin_start");
+    BABET_GTK_RESOLVE(widget_set_margin_end, "gtk_widget_set_margin_end");
+    BABET_GTK_RESOLVE(widget_set_hexpand, "gtk_widget_set_hexpand");
+    BABET_GTK_RESOLVE(widget_set_vexpand, "gtk_widget_set_vexpand");
+    BABET_GTK_RESOLVE(widget_set_visible, "gtk_widget_set_visible");
+    BABET_GTK_RESOLVE(widget_set_sensitive, "gtk_widget_set_sensitive");
+    BABET_GTK_RESOLVE(cairo_status, "cairo_status");
+    BABET_GTK_RESOLVE(cairo_status_to_string, "cairo_status_to_string");
+    BABET_GTK_RESOLVE(cairo_save, "cairo_save");
+    BABET_GTK_RESOLVE(cairo_restore, "cairo_restore");
+    BABET_GTK_RESOLVE(cairo_new_path, "cairo_new_path");
+    BABET_GTK_RESOLVE(cairo_close_path, "cairo_close_path");
+    BABET_GTK_RESOLVE(cairo_stroke, "cairo_stroke");
+    BABET_GTK_RESOLVE(cairo_fill, "cairo_fill");
+    BABET_GTK_RESOLVE(cairo_move_to, "cairo_move_to");
+    BABET_GTK_RESOLVE(cairo_line_to, "cairo_line_to");
+    BABET_GTK_RESOLVE(cairo_rectangle, "cairo_rectangle");
+    BABET_GTK_RESOLVE(cairo_arc, "cairo_arc");
+    BABET_GTK_RESOLVE(cairo_set_line_width, "cairo_set_line_width");
+    BABET_GTK_RESOLVE(cairo_set_source_rgb, "cairo_set_source_rgb");
+    BABET_GTK_RESOLVE(cairo_set_source_rgba, "cairo_set_source_rgba");
+    BABET_GTK_RESOLVE(cairo_set_font_size, "cairo_set_font_size");
+    BABET_GTK_RESOLVE(cairo_show_text, "cairo_show_text");
     BABET_GTK_RESOLVE(widget_get_parent, "gtk_widget_get_parent");
     BABET_GTK_RESOLVE(object_ref_sink, "g_object_ref_sink");
     BABET_GTK_RESOLVE(object_unref, "g_object_unref");
@@ -239,6 +347,9 @@ void gtk4_window_present(void *w) noexcept { g_gtk.window_present(w); }
 void gtk4_window_destroy(void *w) noexcept { g_gtk.window_destroy(w); }
 void *gtk4_box_new(int o, int s) noexcept { return g_gtk.box_new(o, s); }
 void gtk4_box_append(void *b, void *c) noexcept { g_gtk.box_append(b, c); }
+void gtk4_box_remove(void *b, void *c) noexcept { g_gtk.box_remove(b, c); }
+void *gtk4_scrolled_window_new() noexcept { return g_gtk.scrolled_window_new(); }
+void gtk4_scrolled_window_set_child(void *s, void *c) noexcept { g_gtk.scrolled_window_set_child(s, c); }
 void *gtk4_label_new(const char *t) noexcept { return g_gtk.label_new(t); }
 void gtk4_label_set_text(void *l, const char *t) noexcept { g_gtk.label_set_text(l, t); }
 void *gtk4_button_new_with_label(const char *t) noexcept { return g_gtk.button_new_with_label(t); }
@@ -248,6 +359,49 @@ void gtk4_entry_set_placeholder(void *e, const char *t) noexcept { g_gtk.entry_s
 void gtk4_editable_set_text(void *e, const char *t) noexcept { g_gtk.editable_set_text(e, t); }
 const char *gtk4_editable_get_text(void *e) noexcept { return g_gtk.editable_get_text(e); }
 void gtk4_editable_set_editable(void *e, bool v) noexcept { g_gtk.editable_set_editable(e, v ? 1 : 0); }
+void *gtk4_spin_button_new_with_range(double minimum, double maximum, double step) noexcept { return g_gtk.spin_button_new_with_range(minimum, maximum, step); }
+double gtk4_spin_button_get_value(void *s) noexcept { return g_gtk.spin_button_get_value(s); }
+void gtk4_spin_button_set_value(void *s, double v) noexcept { g_gtk.spin_button_set_value(s, v); }
+void gtk4_spin_button_set_digits(void *s, unsigned int d) noexcept { g_gtk.spin_button_set_digits(s, d); }
+void gtk4_spin_button_set_numeric(void *s, bool v) noexcept { g_gtk.spin_button_set_numeric(s, v ? 1 : 0); }
+void *gtk4_calendar_new() noexcept { return g_gtk.calendar_new(); }
+void *gtk4_calendar_get_date(void *c) noexcept { return g_gtk.calendar_get_date(c); }
+void gtk4_calendar_select_day(void *c, void *d) noexcept { g_gtk.calendar_select_day(c, d); }
+void *glib_date_time_new_local(int y, int m, int d, int h, int min, double sec) noexcept { return g_gtk.date_time_new_local(y, m, d, h, min, sec); }
+int glib_date_time_get_year(void *d) noexcept { return g_gtk.date_time_get_year(d); }
+int glib_date_time_get_month(void *d) noexcept { return g_gtk.date_time_get_month(d); }
+int glib_date_time_get_day_of_month(void *d) noexcept { return g_gtk.date_time_get_day_of_month(d); }
+void glib_date_time_unref(void *d) noexcept { g_gtk.date_time_unref(d); }
+void * gtk4_drawing_area_new() noexcept { return g_gtk.gtk_drawing_area_new(); }
+void gtk4_drawing_area_set_content_width(void *w, int width) noexcept { g_gtk.gtk_drawing_area_set_content_width(w, width); }
+void gtk4_drawing_area_set_content_height(void *w, int height) noexcept { g_gtk.gtk_drawing_area_set_content_height(w, height); }
+void gtk4_drawing_area_set_draw_func(void *w, GtkDrawCallback cb, void *data, GtkDestroyNotify notify) noexcept { g_gtk.gtk_drawing_area_set_draw_func(w, cb, data, notify); }
+void gtk4_widget_queue_draw(void *w) noexcept { g_gtk.gtk_widget_queue_draw(w); }
+void gtk4_widget_set_margin_top(void *w, int m) noexcept { g_gtk.widget_set_margin_top(w, m); }
+void gtk4_widget_set_margin_bottom(void *w, int m) noexcept { g_gtk.widget_set_margin_bottom(w, m); }
+void gtk4_widget_set_margin_start(void *w, int m) noexcept { g_gtk.widget_set_margin_start(w, m); }
+void gtk4_widget_set_margin_end(void *w, int m) noexcept { g_gtk.widget_set_margin_end(w, m); }
+void gtk4_widget_set_hexpand(void *w, bool v) noexcept { g_gtk.widget_set_hexpand(w, v ? 1 : 0); }
+void gtk4_widget_set_vexpand(void *w, bool v) noexcept { g_gtk.widget_set_vexpand(w, v ? 1 : 0); }
+void gtk4_widget_set_visible(void *w, bool v) noexcept { g_gtk.widget_set_visible(w, v ? 1 : 0); }
+void gtk4_widget_set_sensitive(void *w, bool v) noexcept { g_gtk.widget_set_sensitive(w, v ? 1 : 0); }
+int cairo_status(void *cr) noexcept { return g_gtk.cairo_status(cr); }
+const char * cairo_status_to_string(int status) noexcept { return g_gtk.cairo_status_to_string(status); }
+void cairo_save(void *cr) noexcept { g_gtk.cairo_save(cr); }
+void cairo_restore(void *cr) noexcept { g_gtk.cairo_restore(cr); }
+void cairo_new_path(void *cr) noexcept { g_gtk.cairo_new_path(cr); }
+void cairo_close_path(void *cr) noexcept { g_gtk.cairo_close_path(cr); }
+void cairo_stroke(void *cr) noexcept { g_gtk.cairo_stroke(cr); }
+void cairo_fill(void *cr) noexcept { g_gtk.cairo_fill(cr); }
+void cairo_move_to(void *cr, double x, double y) noexcept { g_gtk.cairo_move_to(cr, x, y); }
+void cairo_line_to(void *cr, double x, double y) noexcept { g_gtk.cairo_line_to(cr, x, y); }
+void cairo_rectangle(void *cr, double x, double y, double width, double height) noexcept { g_gtk.cairo_rectangle(cr, x, y, width, height); }
+void cairo_arc(void *cr, double x, double y, double radius, double start, double end) noexcept { g_gtk.cairo_arc(cr, x, y, radius, start, end); }
+void cairo_set_line_width(void *cr, double width) noexcept { g_gtk.cairo_set_line_width(cr, width); }
+void cairo_set_source_rgb(void *cr, double r, double g, double b) noexcept { g_gtk.cairo_set_source_rgb(cr, r, g, b); }
+void cairo_set_source_rgba(void *cr, double r, double g, double b, double a) noexcept { g_gtk.cairo_set_source_rgba(cr, r, g, b, a); }
+void cairo_set_font_size(void *cr, double size) noexcept { g_gtk.cairo_set_font_size(cr, size); }
+void cairo_show_text(void *cr, const char *text) noexcept { g_gtk.cairo_show_text(cr, text); }
 void *gtk4_widget_get_parent(void *w) noexcept { return g_gtk.widget_get_parent(w); }
 void *gtk4_object_ref_sink(void *o) noexcept { return g_gtk.object_ref_sink(o); }
 void gtk4_object_unref(void *o) noexcept { g_gtk.object_unref(o); }

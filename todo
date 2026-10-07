@@ -6,6 +6,27 @@ The ZIP supplied for each work session is the primary source of truth for
 files to modify. GitHub is a complementary reference and must not silently
 override a different local ZIP state.
 
+GUI native weight-log primitives — post-2.25.0 lots 2–6
+---------------------------------------------------------
+
+[x] Keep Entry from 2.25.0 and integrate the current DrawingArea/Cairo lot 2.
+[x] Add `Box:remove(child)` / `Box:clear()` with safe native-reference reacquire
+    before GTK unparenting, and add one-child `gui.scrolledWindow()`.
+[x] Add strict finite-number `gui.spinButton()` options plus get/set/onChanged,
+    including synchronous-callback lifetime pinning.
+[x] Add `gui.calendar()` with strict Gregorian dates, past-date editing,
+    getDate/setDate/onChanged, without requiring GTK 4.20-only setters.
+[x] Add common margins, horizontal/vertical expansion, visibility and sensitivity
+    setters to every live widget.
+[x] Extend the fake GTK surface/runtime and add focused regression coverage for
+    ownership, GC cycles, callback replacement/errors, validation and properties.
+[x] Wire the new GUI regression into `run_tests.sh` and synchronize current
+    README, GUI design, FR/EN module docs and changelogs.
+[~] Run the complete maintainer `./run_tests.sh --release` campaign on a machine
+    with the pinned dependency cache. This isolated workspace cannot download
+    the pinned miniz/Lua sources, so only dependency-independent checks are run
+    here before handoff.
+
 Release hardening — fixed-width public ABI tags
 ------------------------------------------------
 

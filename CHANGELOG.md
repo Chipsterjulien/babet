@@ -7,7 +7,43 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
-## [Unreleased]
+## [2.26.0] - 2026-10-07
+
+### GUI — remaining containers and inputs (lots 3 to 6, after 2.25.0)
+
+- add `Box:remove(child)` and `Box:clear()` while preserving removed child
+  handles, allowing a history/list to be rebuilt without recreating the window;
+- add `gui.scrolledWindow()`, a one-child scrolling container with the same
+  `remove` and `clear` operations;
+- add `gui.spinButton({min=?, max=?, step=?, value=?, digits=?})`, `getValue`,
+  `setValue` and `onChanged`, with strict finite-number validation and protected
+  synchronous callbacks;
+- add `gui.calendar({year=?, month=?, day=?})`, `getDate`, `setDate` and
+  `onChanged`, with Gregorian validation and support for past dates;
+- add `setMargins`, `setHExpand`, `setVExpand`, `setVisible` and `setSensitive`
+  to every live widget;
+- extend the lazy GTK loader without GTK headers or direct linkage, while using
+  a Calendar API compatible with GTK 4 runtimes older than 4.20;
+- add a dedicated regression for containers, synchronous callbacks, GC cycles,
+  signal-connection failures, strict validation and common properties, wired
+  into `run_tests.sh`, plus synchronized French/English documentation and regenerated PDF manuals.
+
+### GUI drawing (lot 2, after 2.25.0)
+
+- fix the real-Cairo test fixture's font-cache cleanup: destroy its context and
+  surface, reset Cairo's static data, then finalize Fontconfig; exercise repeated
+  text draws after reinitialization. Keep leak detection and production GUI
+  code unchanged, and preserve complete subprocess error diagnostics;
+- add `gui.drawingArea({width=?, height=?})`, `onDraw(fn_or_nil)` and
+  `queueDraw()`, with a minimal typed Cairo context for lines, shapes and text;
+- expire the borrowed context after every callback, including failures; protect
+  argument allocation as well as user code at the native GTK boundary;
+- reject widget mutations during drawing and defer widget GC until GTK returns;
+  retain optional lazy loading without GTK/Cairo headers or direct linkage;
+- add runtime, packaging, allocator-fault and optional real-Cairo pixel tests,
+  a native curve example, updated English/French API docs and regenerated PDFs;
+- establish the post-drawing roadmap; lots 3 through 6 above now complete Box
+  removal/clearing, ScrolledWindow, SpinButton, Calendar and common layout.
 
 ## [2.25.0] - 2026-10-06
 

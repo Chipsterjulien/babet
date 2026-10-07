@@ -90,13 +90,13 @@ A normal Lua callback error is captured and reported by Babet; the GUI loop
 remains structurally valid and can continue unless an explicit application
 policy requests termination.
 
-Entry text setters may emit callbacks synchronously. Dispatch them on the
-calling Lua thread, keep the native object and logical state alive until the
-setter returns, and contain errors/attempted yields. A callback may close the
-window, replace itself or reenter a setter. Event-loop callbacks run on the
-main Lua thread. Callback storage belongs to the widget userdata; the native
-bridge resolves it through weak Lua handles so self-capturing callback cycles
-remain collectable.
+Entry text setters, SpinButton value setters and Calendar date setters may emit
+callbacks synchronously. Dispatch them on the calling Lua thread, keep the native
+object and logical state alive until the setter returns, and contain
+errors/attempted yields. A callback may close the window, replace itself or
+reenter a setter. Event-loop callbacks run on the main Lua thread. Callback
+storage belongs to the widget userdata; the native bridge resolves it through
+weak Lua handles so self-capturing callback cycles remain collectable.
 
 Do not keep binding-owned C++ RAII objects alive across an unprotected Lua API
 operation that may raise. The existing Babet Lua/C++ exception and protected-
@@ -130,6 +130,7 @@ The first runtime implementation is intentionally small. The target surface is:
 - `babet.gui.label()`
 - `babet.gui.button()`
 - `babet.gui.entry()`
+- `babet.gui.drawingArea()` (unreleased lot 2)
 - `container:add()`
 - `widget:setText()`
 - `button:onClick()`
@@ -159,17 +160,49 @@ binding framework than Babet needs.
 
 The next application need is a native desktop weight log using Lua, SQLite and
 GTK, without a browser, HTTP service or JavaScript. It justifies generic GUI
-primitives, not weight-specific runtime functions. Land and validate separate
-lots in this order: Entry (current lot), SpinButton, Calendar, DrawingArea with
-a small Cairo drawing surface, then generic margins and expansion options.
-Keep the existing camelCase public method convention.
+primitives, not weight-specific runtime functions. The planned primitive lots are
+now implemented in order: Entry (released in 2.25.0), DrawingArea with a small
+Cairo drawing surface (unreleased lot 2), Box removal/clearing plus ScrolledWindow
+(lot 3), SpinButton (lot 4), Calendar (lot 5), and common margins, expansion,
+sensitivity and visibility (lot 6). Keep the existing camelCase public method
+convention.
 
-The future example must preserve SQLite row identity during edits/deletions,
-allow several measurements per day (no UNIQUE constraint on the date), and
-allow past dates. Its graph must sort chronologically, position points using
-actual date intervals and derive the vertical range from the data. These are
-application requirements, not new Entry behavior. Entry alone does not deliver
-this application or the remaining widgets.
+Box/ScrolledWindow removal must reacquire a native reference before GTK
+unparents a child, then remove the parent's Lua root. A surviving child handle
+therefore remains valid and can be reparented. ScrolledWindow owns at most one
+logical child. SpinButton exposes finite numeric range/value options, `getValue`,
+`setValue` and the shared `onChanged` callback contract. Calendar exposes strict
+Gregorian `year/month/day`, `getDate`, `setDate` and `onChanged`, while permitting
+past dates. Common widget setters are `setMargins`, `setHExpand`, `setVExpand`,
+`setVisible` and `setSensitive`.
+
+The weight-log application must preserve SQLite row identity during edits/deletions,
+allow several measurements per day (no UNIQUE constraint on the date), and allow
+past dates. Its graph must sort chronologically, position points using actual date
+intervals and derive the vertical range from the data. These remain application
+requirements rather than weight-specific runtime behavior.
+
+## Drawing callback contract (unreleased lot 2)
+
+`drawingArea({width=?, height=?})` requests a positive content size (default
+320 x 200). `onDraw(fn_or_nil)` replaces/removes the handler and requests repaint;
+`queueDraw()` requests an asynchronous repaint. The callback gets a borrowed
+typed context and the actual width/height. No native pointer is public.
+
+Protect context/argument allocation and the user callback separately with
+`lua_pcall`. Keep the context rooted until its native pointer is invalidated,
+including on callback error or OOM. Methods reject an expired context. Cairo's
+graphics state is saved/restored; the path is cleared before/after drawing.
+Numbers must be finite; colors are in [0, 1], line/font size positive, radius
+non-negative. Text is strict UTF-8 without NUL; the toy Cairo text API is only
+for simple labels, not a Pango or rich-text replacement.
+
+GTK widget mutation is prohibited throughout a draw callback. Read-only Entry
+text queries and `gui.quit()` remain allowed. Lua finalizers may run inside
+drawing; detach their handles immediately and defer native widget destruction
+through an allocation-free queue drained after GTK returns to Babet. A native
+draw destroy-notifier retains/releases WidgetState; callback functions still
+belong to the Lua widget handle and self-capturing cycles remain collectable.
 
 ## Validation status before widening the API
 

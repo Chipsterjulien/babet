@@ -24,7 +24,7 @@ local ok, err = gui.init()
 assert(ok, err)
 ```
 
-`available()` charge et valide l'étroite surface de symboles GTK/GLib sans
+`available()` charge et valide l'étroite surface de symboles GTK/GLib/Cairo sans
 initialiser l'affichage. Dès qu'un DSO GTK a été ouvert avec succès, il reste
 résident jusqu'à la fin du processus, y compris si la validation d'un symbole
 requis échoue. Le résultat du chargement est mémorisé : les appels suivants ne
@@ -99,9 +99,18 @@ La première surface reste volontairement petite :
 - `babet.gui.label(texte)`
 - `babet.gui.button(texte)`
 - `babet.gui.entry([options])`
-- `conteneur:add(enfant)` pour fenêtres et boxes
+- `babet.gui.drawingArea([options])` (non publié)
+- `babet.gui.scrolledWindow()` (non publié)
+- `babet.gui.spinButton([options])` (non publié)
+- `babet.gui.calendar([options])` (non publié)
+- `conteneur:add(enfant)` pour fenêtres, boxes et ScrolledWindow
+- `box:remove(enfant)` / `box:clear()`
+- `scrolledWindow:remove(enfant)` / `scrolledWindow:clear()`
 - `label:setText(texte)` / `button:setText(texte)` / `entry:setText(texte)`
 - `button:onClick(fonction)`
+- `spinButton:getValue()` / `spinButton:setValue(nombre)` / `spinButton:onChanged(fonction_ou_nil)`
+- `calendar:getDate()` / `calendar:setDate(année, mois, jour)` / `calendar:onChanged(fonction_ou_nil)`
+- propriétés communes : `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`
 - `window:show()` / `window:close()`
 - `babet.gui.run()` / `babet.gui.quit()`
 
@@ -173,6 +182,214 @@ babet --create-exe examples/gui_entry ./gui-entry-app
 ./gui-entry-app
 ```
 
+## DrawingArea : courbes natives (non publié, lot GUI 2)
+
+Cette API est ajoutée après la version publiée **2.25.0**. Il faut appliquer et
+compiler le lot DrawingArea pour l'utiliser ; le binaire 2.25.0 initial apporte
+seulement Entry parmi les nouveaux widgets prévus.
+
+```lua
+local zone = assert(gui.drawingArea {width = 640, height = 300})
+assert(colonne:add(zone))
+assert(zone:onDraw(function(ctx, largeur, hauteur)
+    assert(ctx:setSourceRGB(1, 1, 1))
+    assert(ctx:rectangle(0, 0, largeur, hauteur))
+    assert(ctx:fill())
+    assert(ctx:setSourceRGB(0.1, 0.4, 0.8))
+    assert(ctx:setLineWidth(2))
+    assert(ctx:moveTo(20, hauteur - 20))
+    assert(ctx:lineTo(largeur - 20, 20))
+    assert(ctx:stroke())
+    assert(ctx:setFontSize(14))
+    assert(ctx:text(20, 22, "Courbe native"))
+end))
+-- Depuis le callback d'un bouton/Entry, après modification des données :
+assert(zone:queueDraw())
+```
+
+`drawingArea()` et `drawingArea(nil)` utilisent 320 x 200 pixels logiques.
+Les options `width` et `height` sont des entiers strictement positifs au plus
+égaux à `INT_MAX`. Elles demandent une taille de contenu, sans fixer une taille
+maximale ni une allocation constante. Les options sont lues sans `__index`.
+GTK transmet la taille réellement allouée à `onDraw(ctx, largeur, hauteur)`.
+
+`zone:onDraw(fonction_ou_nil)` remplace le callback ; `nil` explicite le retire.
+L'inscription et le retrait demandent un redessin. `zone:queueDraw()` demande un
+redessin ultérieur, sans appeler immédiatement le callback. GTK peut regrouper
+plusieurs demandes. Ces méthodes sont réservées aux DrawingArea et renvoient
+`true, nil`.
+
+Le contexte est emprunté et valide **uniquement pendant cet appel à `onDraw`**.
+Un contexte conservé provoque une erreur Lua après le retour, une erreur ou une
+tentative de suspension du callback. Le dessin s'exécute sur le thread Lua
+principal. Une coroutine reprise synchroniquement sur le même thread OS peut
+utiliser le contexte tant que le callback est actif. Les workers ne le peuvent
+pas. La création des arguments et l'appel utilisateur sont protégés contre les
+erreurs Lua, y compris le manque de mémoire. Les erreurs sont signalées sur
+stderr ; la boucle reste utilisable.
+
+Dans `onDraw`, dessiner à partir de données déjà prêtes. Créer ou modifier un
+widget, inscrire un callback ou appeler `queueDraw()` est refusé, même sur un
+autre widget. Préparer les données et demander le redessin depuis un callback
+de saisie. `entry:getText()` et `gui.quit()` restent autorisés ; `quit()` demande
+seulement l'arrêt de la boucle après le retour de GTK. Les finalizers déclenchés
+pendant le dessin attendent le retour de GTK avant de détruire les widgets.
+Ces règles suivent les [restrictions de GTK pendant le dessin](https://docs.gtk.org/gtk4/method.DrawingArea.set_draw_func.html).
+
+Toutes les méthodes ci-dessous renvoient `true, nil`. Les mauvais arguments,
+les contextes expirés et les erreurs Cairo lèvent une erreur Lua. Les paramètres
+numériques doivent être de vrais nombres Lua finis ; les chaînes numériques,
+NaN et les infinis sont refusés.
+
+| Méthode du contexte | Effet |
+| --- | --- |
+| `ctx:newPath()` | Efface le chemin courant. |
+| `ctx:moveTo(x, y)` | Commence un sous-chemin au point indiqué. |
+| `ctx:lineTo(x, y)` | Ajoute un segment. |
+| `ctx:closePath()` | Referme le sous-chemin vers son début. |
+| `ctx:rectangle(x, y, width, height)` | Ajoute un rectangle ; dimensions signées acceptées. |
+| `ctx:arc(x, y, radius, start, finish)` | Ajoute un arc ; rayon positif ou nul, angles en radians, sens des angles croissants. |
+| `ctx:stroke()` | Trace puis efface le chemin avec la couleur et l'épaisseur courantes. |
+| `ctx:fill()` | Remplit puis efface le chemin avec la couleur courante. |
+| `ctx:setLineWidth(width)` | Épaisseur strictement positive. |
+| `ctx:setSourceRGB(r, g, b)` | Couleur opaque ; composantes entre 0 et 1 inclus. |
+| `ctx:setSourceRGBA(r, g, b, a)` | Couleur avec alpha ; toutes les composantes entre 0 et 1 inclus. |
+| `ctx:setFontSize(size)` | Taille de police strictement positive. |
+| `ctx:text(x, y, text)` | Texte positionné par sa ligne de base ; UTF-8 valide, sans NUL. |
+
+Les coordonnées sont des pixels logiques GTK, origine en haut à gauche et Y
+croissant vers le bas. Le contexte conserve le découpage et l'échelle de GTK.
+Babet sauvegarde et restaure l'état graphique Cairo autour du callback et
+efface le chemin de dessin. `arc` peut rejoindre le point courant ; appeler
+`newPath()` pour un arc indépendant. `text` utilise l'API texte minimale de
+Cairo et déplace le point courant : terminer un chemin avant de l'annoter.
+Cela convient aux légendes d'un graphique, pas au texte riche, à la mise en
+page multiligne ni aux écritures nécessitant une composition complexe.
+Aucun pointeur natif, surface persistante, exporteur d'image ou binding Cairo
+général n'est exposé.
+
+Voir [`examples/gui_drawing/main.lua`](../../../examples/gui_drawing/main.lua) :
+courbe illustrative de poids avec intervalles de dates inégaux, bornes Y
+automatiques et bouton de changement des données. Cette démonstration de
+dessin ne sauvegarde pas de mesures.
+
+```sh
+babet examples/gui_drawing
+babet --create-exe examples/gui_drawing ./gui-drawing-app
+./gui-drawing-app
+```
+
+## Conteneurs actualisables : Box et ScrolledWindow (non publié, lot GUI 3)
+
+Une `Box` peut maintenant retirer un enfant précis ou vider tous ses enfants :
+
+```lua
+assert(colonne:remove(ancien_widget))
+assert(colonne:clear())
+```
+
+`remove(enfant)` exige que l'enfant appartienne réellement au conteneur.
+`clear()` retire tous les enfants. Dans les deux cas, un enfant dont le handle
+Lua est encore conservé reste valide et peut être ajouté de nouveau à une autre
+`Box` ou à un `ScrolledWindow`. Le parent cesse de le garder vivant côté Lua.
+Cela permet de reconstruire une liste ou un historique sans remplacer toute la
+fenêtre. `Window` ne propose volontairement pas `remove()`/`clear()` dans cette
+surface.
+
+`gui.scrolledWindow()` crée une zone défilante GTK native. Elle accepte un seul
+enfant logique avec `add(enfant)` ; ajouter un second enfant avant d'avoir retiré
+ou vidé le premier est une erreur. Le widget enfant peut lui-même être une Box
+contenant autant de lignes que nécessaire :
+
+```lua
+local defilement = assert(gui.scrolledWindow())
+local historique = assert(gui.box {orientation = "vertical", spacing = 4})
+assert(defilement:add(historique))
+assert(colonne:add(defilement))
+
+-- Après une modification de la base :
+assert(historique:clear())
+for _, ligne in ipairs(nouvelles_lignes) do
+    assert(historique:add(gui.label(ligne)))
+end
+```
+
+## SpinButton : saisie numérique (non publié, lot GUI 4)
+
+```lua
+local poids = assert(gui.spinButton {
+    min = 30,
+    max = 250,
+    step = 0.1,
+    value = 91.4,
+    digits = 1,
+})
+
+assert(poids:onChanged(function()
+    print("Poids :", poids:getValue())
+end))
+assert(poids:setValue(90.8))
+```
+
+Sans options, les valeurs sont `min = 0`, `max = 100`, `step = 1`, `value = 0`
+et `digits = 0`. Si une plage personnalisée est fournie sans `value`, la valeur
+initiale est `min`, comme avec le constructeur GTK natif. `min`, `max`, `step`
+et `value` doivent être des nombres Lua finis ; `step` doit être strictement
+positif et une valeur initiale explicitement fournie doit être comprise entre
+les bornes. `digits` est un entier de 0 à 20. Les options sont lues directement,
+sans `__index`. Le SpinButton est configuré en saisie numérique.
+
+`getValue()` renvoie un nombre Lua. `setValue(nombre)` délègue la valeur à GTK,
+qui la contraint à la plage du SpinButton. `onChanged(fonction_ou_nil)` remplace
+ou retire le callback. Un changement programmatique peut déclencher le callback
+synchroniquement avant le retour de `setValue()`. Comme pour Entry, le widget
+et son état logique sont épinglés jusqu'au retour de GTK ; une fermeture de la
+fenêtre depuis le callback ne crée donc pas de pointeur pendant.
+
+## Calendar : choix et modification des dates (non publié, lot GUI 5)
+
+```lua
+local date = assert(gui.calendar {year = 2026, month = 10, day = 7})
+
+assert(date:onChanged(function()
+    local annee, mois, jour = date:getDate()
+    print(annee, mois, jour)
+end))
+
+assert(date:setDate(2025, 12, 31)) -- les dates passées sont autorisées
+```
+
+`calendar()` et `calendar(nil)` utilisent la date sélectionnée par défaut par
+GTK. Pour fixer une date à la construction, `year`, `month` et `day` doivent être
+fournis ensemble et être des entiers formant une date grégorienne valide, avec
+une année comprise entre 1 et 9999. `getDate()` renvoie exactement trois valeurs
+`année, mois, jour`. `setDate(année, mois, jour)` accepte aussi les dates passées.
+`onChanged(fonction_ou_nil)` suit le même contrat protégé et remplaçable que le
+SpinButton et Entry.
+
+L'implémentation utilise l'API Calendar disponible depuis les premières versions
+de GTK 4 plutôt que d'exiger les setters apparus beaucoup plus tard ; le runtime
+reste donc compatible avec les distributions GTK 4 antérieures à 4.20.
+
+## Propriétés communes des widgets (non publié, lot GUI 6)
+
+Tous les widgets vivants exposent les méthodes suivantes :
+
+| Méthode | Effet |
+| --- | --- |
+| `widget:setMargins(marge)` | Applique la même marge entière positive ou nulle sur les quatre côtés. |
+| `widget:setMargins(top, end_, bottom, start_)` | Définit séparément les quatre marges GTK, dans cet ordre. |
+| `widget:setHExpand(booléen)` | Autorise/désactive l'expansion horizontale. |
+| `widget:setVExpand(booléen)` | Autorise/désactive l'expansion verticale. |
+| `widget:setVisible(booléen)` | Affiche ou masque le widget. |
+| `widget:setSensitive(booléen)` | Active ou désactive les interactions utilisateur avec le widget. |
+
+Les marges sont des entiers compris entre 0 et `INT_MAX` et les quatre autres
+méthodes exigent de vrais booléens Lua. Elles renvoient `true, nil`. Comme les
+autres mutations GTK, ces appels sont refusés pendant `onDraw`. Les lectures
+`entry:getText()`, `spinButton:getValue()` et `calendar:getDate()` restent des
+opérations non mutantes.
+
 ## Boucle événementielle et callbacks
 
 Les opérations GTK sont réservées au thread principal. Une session GUI vivante
@@ -187,15 +404,19 @@ servir ses callbacks de signaux Unix différés pendant que GTK possède la bouc
 Les workers peuvent poursuivre des calculs non graphiques, mais ne doivent
 jamais appeler directement les méthodes GUI.
 
-Les callbacks Lua des boutons et des champs Entry sont exécutés sous `lua_pcall`. Une erreur est
-signalée sur stderr avec le préfixe `babet.gui callback error:` et ne traverse
+Les callbacks Lua des boutons, Entry, SpinButton et Calendar sont exécutés sous
+`lua_pcall`. Une erreur est signalée sur stderr avec le préfixe
+`babet.gui callback error:` et ne traverse
 jamais la pile C de GTK ; la boucle événementielle reste utilisable.
 
 ## Durée de vie
 
 Chaque méthode valide le handle Lua. Les parents Lua gardent leurs enfants Lua
-vivants, tandis que GTK devient propriétaire du widget natif après `add()`. Le
-signal GTK `destroy` invalide le handle Babet correspondant. Toute utilisation
+vivants, tandis que GTK devient propriétaire du widget natif après `add()`.
+`remove()` et `clear()` reprennent une référence native avant le détachement GTK,
+puis retirent la racine Lua du parent : un handle enfant encore détenu par le
+script reste valide et réutilisable. Le signal GTK `destroy` invalide le handle
+Babet correspondant. Toute utilisation
 ultérieure produit une erreur Lua contrôlée plutôt qu'un déréférencement de
 pointeur natif périmé.
 

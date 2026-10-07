@@ -110,6 +110,8 @@ The deployment smoke application runs under the build tree, so a noexec
 in the installation directory, then atomically rename it onto the final path.
 Never overwrite the installed inode in place: running processes must retain
 their original image and a failed copy must preserve the previous installation.
+If `/usr/local/bin/babet` is a symbolic link, installation replaces the link
+itself with the new executable and leaves the link's target unchanged.
 This is atomic visibility, not an fsync-based power-loss durability guarantee.
 
 ### 1.5 A generated application contains the complete Babet runtime
@@ -286,6 +288,13 @@ inside a protected Lua-call boundary, and Lua widget handles must be invalidated
 when their native widget dies. GTK initialization must use
 `gtk_disable_setlocale()` followed by `gtk_init_check()`, never uncontrolled
 `gtk_init()`.
+
+DrawingArea's Cairo context is borrowed only during its `onDraw` call. Protect
+argument allocation and callback execution against Lua errors, then invalidate
+the context before returning to GTK. Reject widget changes during drawing and
+defer native widget finalization until GTK returns. Cairo is resolved through
+the GTK runtime's dependencies; no Cairo development headers or direct runtime
+link dependency are introduced. See the unreleased lot 2 contract in GUI_DESIGN.
 
 The 2.23.0 FLTK companion prototype is retired from the active source after
 having served its embedding/API experiment. `libbabet`, the host-function API

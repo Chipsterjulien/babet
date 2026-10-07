@@ -509,6 +509,18 @@ if ! python3 "${SCRIPT_DIR}/tools/test_gui_entry.py" "${BINARY}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — GUI DrawingArea, contexte Cairo et durée de vie"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_drawing.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression GUI DrawingArea a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — GUI conteneurs, SpinButton, Calendar et propriétés communes"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_widgets.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression des widgets GUI complémentaires a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — état processus après chargement GTK"
 if ! python3 "${SCRIPT_DIR}/tools/test_gui_process_state.py" "${BINARY}"; then
     echo "ÉCHEC : la protection de l'état processus après chargement GTK a échoué."
@@ -559,6 +571,12 @@ case "${SANITIZER_MODE}" in
 esac
 if ! bash "${SCRIPT_DIR}/tools/test_lua_longjmp_oom.sh" "${OOM_ARGS[@]}"; then
     echo "ÉCHEC : le test OOM Lua / RAII C++ a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — DrawingArea, allocations Lua et frontière GTK"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_drawing_oom.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : la régression mémoire GUI DrawingArea a échoué."
     exit 1
 fi
 

@@ -7,7 +7,47 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
-## [Non publié]
+## [2.26.0] - 2026-10-07
+
+### GUI — conteneurs et saisies restantes (lots 3 à 6, après la 2.25.0)
+
+- ajoute `Box:remove(enfant)` et `Box:clear()` en préservant la validité des
+  handles retirés, afin de pouvoir reconstruire un historique sans recréer la
+  fenêtre ;
+- ajoute `gui.scrolledWindow()`, conteneur défilant à un enfant, avec les mêmes
+  opérations `remove` et `clear` ;
+- ajoute `gui.spinButton({min=?, max=?, step=?, value=?, digits=?})`, `getValue`,
+  `setValue` et `onChanged`, avec validation stricte des nombres finis et
+  protection des callbacks synchrones ;
+- ajoute `gui.calendar({year=?, month=?, day=?})`, `getDate`, `setDate` et
+  `onChanged`, avec validation grégorienne et prise en charge des dates passées ;
+- ajoute à tous les widgets `setMargins`, `setHExpand`, `setVExpand`,
+  `setVisible` et `setSensitive` ;
+- étend le chargeur GTK dynamique sans ajouter d'en-têtes GTK ni de liaison
+  directe, et conserve une API Calendar compatible avec les GTK 4 antérieurs à
+  4.20 ;
+- ajoute une régression dédiée aux conteneurs, callbacks synchrones, cycles GC,
+  erreurs de connexion de signal, validation des arguments et propriétés
+  communes, intégrée à `run_tests.sh`, ainsi que la documentation FR/EN et les manuels PDF régénérés.
+
+### Dessin GUI (lot 2, après la 2.25.0)
+
+- corrige le nettoyage des caches de polices du test Cairo réel : destruction
+  du contexte et de la surface, remise à zéro des caches Cairo, puis finalisation
+  de Fontconfig ; teste les redessins de texte après réinitialisation. Conserve
+  la détection des fuites et le code GUI de production, et garde les diagnostics
+  d'erreur complets des sous-processus ;
+- ajoute `gui.drawingArea({width=?, height=?})`, `onDraw(fn_ou_nil)` et
+  `queueDraw()`, avec un contexte Cairo minimal pour lignes, formes et texte ;
+- invalide le contexte emprunté après chaque callback, même en cas d'erreur ;
+  protège aussi la création des arguments Lua à la frontière native GTK ;
+- refuse les mutations de widgets pendant le dessin et diffère leur collecte
+  jusqu'au retour de GTK ; conserve le chargement optionnel, sans en-têtes de
+  développement GTK/Cairo ni liaison directe ;
+- ajoute les tests runtime, packaging, erreurs d'allocation et pixels Cairo
+  réels si disponibles, un exemple de courbe et les guides/PDF français/anglais ;
+- prépare la suite du lot 2 ; les lots 3 à 6 ci-dessus complètent désormais
+  retrait/vidage, ScrolledWindow, SpinButton, Calendar et mise en page commune.
 
 ## [2.25.0] - 2026-10-06
 

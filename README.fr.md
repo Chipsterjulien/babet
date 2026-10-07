@@ -17,7 +17,7 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.25.0**. Voir le
+Version actuelle : **2.26.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
@@ -28,8 +28,14 @@ saisie sur une ligne avec callbacks de modification/validation, indication
 de saisie et mode lecture seule. Elle corrige aussi la durée de vie des cycles
 widget/callback qui capturent leur propre widget. Un exemple complet figure
 dans [`examples/gui_entry`](examples/gui_entry/main.lua). GTK 4 reste optionnel
-et chargé depuis le système cible uniquement à la demande. La saisie
-numérique, le calendrier et les widgets de dessin feront l'objet d'autres lots.
+et chargé depuis le système cible uniquement à la demande.
+
+Les lots GUI non publiés ajoutent aussi [`drawingArea`](docs/fr/modules/gui.md)
+avec un contexte Cairo minimal, le retrait/vidage des enfants de `Box`,
+`ScrolledWindow`, `SpinButton`, `Calendar` et les propriétés communes de mise en
+page/visibilité/activation. Ils exigent de recompiler le runtime et fournissent
+désormais les primitives GTK prévues pour construire le suivi du poids natif ;
+voir aussi [`examples/gui_drawing`](examples/gui_drawing/main.lua).
 
 Babet 2.24.2 aligne la version compilée et la documentation de publication
 après l'incohérence de la publication 2.24.1. Elle conserve les correctifs
