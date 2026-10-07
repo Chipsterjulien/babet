@@ -64,6 +64,12 @@ void gtk_drawing_area_set_content_width(void *w, int s) { (void)w; (void)s; }
 void gtk_drawing_area_set_content_height(void *w, int s) { (void)w; (void)s; }
 void gtk_drawing_area_set_draw_func(void *w, DrawCallback cb, void *d, DrawNotify n)
 { (void)w; (void)cb; (void)d; (void)n; }
+#ifndef BABET_FAKE_GTK_MISSING_GESTURE_CLICK
+void *gtk_gesture_click_new(void) { return (void *)0xa; }
+#endif
+void gtk_gesture_single_set_button(void *g, unsigned int b) { (void)g; (void)b; }
+unsigned int gtk_gesture_single_get_current_button(void *g) { (void)g; return 1U; }
+void gtk_widget_add_controller(void *w, void *c) { (void)w; (void)c; }
 void gtk_widget_queue_draw(void *w) { (void)w; }
 void gtk_widget_set_margin_top(void *w, int v) { (void)w; (void)v; }
 void gtk_widget_set_margin_bottom(void *w, int v) { (void)w; (void)v; }

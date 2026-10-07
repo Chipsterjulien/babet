@@ -31,6 +31,7 @@ constexpr unsigned int GUI_WAKE_INTERVAL_MS = 25;
 char widget_handles_key;
 constexpr lua_Integer PRIMARY_CALLBACK = -1;
 constexpr lua_Integer ACTIVATE_CALLBACK = -2;
+constexpr lua_Integer CLICK_CALLBACK = -3;
 
 enum class WidgetKind : unsigned char
 {
@@ -308,6 +309,51 @@ void spin_button_changed(void *, void *data) noexcept
 void calendar_day_selected(void *, void *data) noexcept
 {
     dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
+}
+
+void drawing_area_pressed(void *gesture, int, double x, double y,
+                          void *data) noexcept
+{
+    auto *state = static_cast<WidgetState *>(data);
+    if (!state || !state->native || !state->owner || !state->handle_key)
+        return;
+
+    lua_State *L = state->owner;
+    const int base = lua_gettop(L);
+    if (!lua_checkstack(L, 7))
+    {
+        static constexpr char message[] =
+            "babet.gui callback error: cannot grow click callback stack\n";
+        std::fwrite(message, 1, sizeof(message) - 1, stderr);
+        return;
+    }
+
+    // Resolve the callback through the weak userdata handle, exactly like the
+    // other widget callbacks. Keeping the userdata and function rooted on the
+    // stack also makes self-removal/window destruction safe until pcall returns.
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &widget_handles_key);
+    lua_rawgetp(L, -1, state->handle_key);
+    if (lua_type(L, -1) != LUA_TUSERDATA)
+    {
+        lua_settop(L, base);
+        return;
+    }
+    lua_getiuservalue(L, -1, 1);
+    lua_rawgeti(L, -1, CLICK_CALLBACK);
+    if (lua_type(L, -1) != LUA_TFUNCTION)
+    {
+        lua_settop(L, base);
+        return;
+    }
+
+    const unsigned int button =
+        detail::gtk4_gesture_single_get_current_button(gesture);
+    lua_pushnumber(L, x);
+    lua_pushnumber(L, y);
+    lua_pushinteger(L, static_cast<lua_Integer>(button));
+    if (lua_pcall(L, 3, 0, 0) != LUA_OK)
+        report_callback_error(L);
+    lua_settop(L, base);
 }
 
 // All allocating Lua work for the native draw callback is protected, including
@@ -1029,6 +1075,28 @@ int l_drawing_area(lua_State *L)
     retain_state(userdata->state);
     detail::gtk4_drawing_area_set_draw_func(area, &drawing_area_draw,
                                            userdata->state, &drawing_area_released);
+
+    // GTK4 input is controller-based. One GtkGestureClick lives with the
+    // DrawingArea for its whole native lifetime; onClick() only replaces the
+    // Lua callback stored in the userdata. Button 0 means "any mouse button".
+    void *gesture = detail::gtk4_gesture_click_new();
+    if (!gesture)
+    {
+        release_construction_reference(userdata->state);
+        return push_fail_protected(L, "babet.gui: GTK 4 failed to create click gesture");
+    }
+    detail::gtk4_gesture_single_set_button(gesture, 0U);
+    retain_state(userdata->state);
+    if (detail::gtk4_signal_connect(
+            gesture, "pressed", gtk_callback(&drawing_area_pressed),
+            userdata->state, &button_signal_released) == 0)
+    {
+        release_state(userdata->state);
+        detail::gtk4_object_unref(gesture);
+        release_construction_reference(userdata->state);
+        return push_fail_protected(L, "babet.gui: cannot attach DrawingArea click signal");
+    }
+    detail::gtk4_widget_add_controller(area, gesture);
     return 1;
 }
 
@@ -1370,13 +1438,30 @@ int widget_set_text(lua_State *L)
 
 int button_on_click(lua_State *L)
 {
-    if (!lua_arity_is(L, 2) || lua_type(L, 2) != LUA_TFUNCTION)
-        return luaL_error(L, "gui button:onClick expects one function");
-    (void)check_kind(L, 1, WidgetKind::button, "gui button:onClick");
+    if (!lua_arity_is(L, 2))
+        return luaL_error(L, "gui widget:onClick expects one function or nil");
+
+    WidgetState *state = check_widget(L, 1, "gui widget:onClick");
+    lua_Integer slot = PRIMARY_CALLBACK;
+
+    if (state->kind == WidgetKind::drawing_area)
+    {
+        if (!lua_isnil(L, 2) && lua_type(L, 2) != LUA_TFUNCTION)
+            return luaL_error(L,
+                "gui drawingArea:onClick expects one function or nil");
+        slot = CLICK_CALLBACK;
+    }
+    else
+    {
+        if (lua_type(L, 2) != LUA_TFUNCTION)
+            return luaL_error(L, "gui button:onClick expects one function");
+        if (state->kind != WidgetKind::button)
+            return luaL_error(L, "gui button:onClick: expected a button handle");
+    }
 
     lua_getiuservalue(L, 1, 1);
     lua_pushvalue(L, 2);
-    lua_rawseti(L, -2, PRIMARY_CALLBACK);
+    lua_rawseti(L, -2, slot);
     return push_ok_protected(L);
 }
 

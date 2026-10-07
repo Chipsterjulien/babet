@@ -7,6 +7,18 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.27.0] - 2026-10-07
+
+### GUI — clickable DrawingArea
+
+- Added `DrawingArea:onClick(function(x, y, button) ... end)`.
+- Click callbacks receive logical widget coordinates and the mouse button number.
+- `onClick(nil)` removes the callback; replacement and self-removal are supported.
+- Click callbacks may update widgets and request redraws with `queueDraw()`.
+- GTK4 pointer handling uses `GtkGestureClick` through Babet's lazy dynamic GTK loader.
+- Babet still has no direct GTK/GObject/GLib link-time dependency.
+- Added regression coverage for click coordinates, mouse button reporting, callback lifetime, self-removal, redraws and missing GTK symbols.
+
 ## [2.26.0] - 2026-10-07
 
 ### GUI — remaining containers and inputs (lots 3 to 6, after 2.25.0)

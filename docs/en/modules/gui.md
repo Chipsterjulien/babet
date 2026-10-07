@@ -96,15 +96,16 @@ The initial surface is intentionally small:
 - `babet.gui.label(text)`
 - `babet.gui.button(text)`
 - `babet.gui.entry([options])`
-- `babet.gui.drawingArea([options])` (unreleased)
-- `babet.gui.scrolledWindow()` (unreleased)
-- `babet.gui.spinButton([options])` (unreleased)
-- `babet.gui.calendar([options])` (unreleased)
+- `babet.gui.drawingArea([options])`
+- `babet.gui.scrolledWindow()`
+- `babet.gui.spinButton([options])`
+- `babet.gui.calendar([options])`
 - `container:add(child)` for windows, boxes and ScrolledWindow
 - `box:remove(child)` / `box:clear()`
 - `scrolledWindow:remove(child)` / `scrolledWindow:clear()`
 - `label:setText(text)` / `button:setText(text)` / `entry:setText(text)`
 - `button:onClick(function)`
+- `drawingArea:onClick(function_or_nil)`
 - `spinButton:getValue()` / `spinButton:setValue(number)` / `spinButton:onChanged(function_or_nil)`
 - `calendar:getDate()` / `calendar:setDate(year, month, day)` / `calendar:onChanged(function_or_nil)`
 - common properties: `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`
@@ -174,10 +175,10 @@ babet --create-exe examples/gui_entry ./gui-entry-app
 ./gui-entry-app
 ```
 
-## DrawingArea: native curves (unreleased, GUI lot 2)
+## DrawingArea: native curves and click selection
 
-This API is added after the published **2.25.0** release. Apply and compile the
-DrawingArea lot before using it; the original 2.25.0 binary only includes Entry.
+`DrawingArea` can draw through Cairo and receive user clicks without an external
+charting library.
 
 ```lua
 local area = assert(gui.drawingArea {width = 640, height = 300})
@@ -196,6 +197,12 @@ assert(area:onDraw(function(ctx, width, height)
 end))
 -- From a button/Entry callback, after changing the data:
 assert(area:queueDraw())
+
+assert(area:onClick(function(x, y, button)
+    print("click", x, y, button)
+end))
+-- nil removes only the click callback:
+assert(area:onClick(nil))
 ```
 
 `drawingArea()` and `drawingArea(nil)` use 320 x 200 logical pixels. Options
@@ -207,6 +214,13 @@ access. GTK passes the actual allocation to `onDraw(ctx, width, height)`.
 Registration/removal schedules a redraw. `area:queueDraw()` requests a later
 redraw; it does not call the handler synchronously. GTK may combine several
 requests. Both methods return `true, nil` and are only for DrawingArea handles.
+
+`area:onClick(function_or_nil)` replaces or removes the click callback. The callback
+receives exactly `x`, `y`, `button`: the first two are Lua numbers in widget
+allocation coordinates, and `button` is an integer (`1` for the primary button).
+Unlike `onDraw`, this is an ordinary event callback: it may mutate widgets and
+call `queueDraw()`. Errors are protected and reported to stderr like the other
+GUI callbacks.
 
 The context is borrowed and valid **only during that invocation of `onDraw`**.
 A saved context raises a Lua error after return, failure or attempted yield.

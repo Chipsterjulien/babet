@@ -96,6 +96,17 @@ def main():
         events([str(app)])
         success("generated application runs after source removal")
 
+        click = temp / "click.lua"
+        shutil.copyfile(ROOT / "tests/gui/drawing_click.lua", click)
+        click_log = temp / "click.log"
+        result = run([binary, str(click)], dict(env, BABET_FAKE_GTK_LOG=str(click_log)))
+        assert "DRAWING_CLICK_OK" in result.stdout
+        assert "babet.gui callback error" not in result.stderr, result.stderr
+        click_lines = click_log.read_text().splitlines()
+        assert "queue-draw" in click_lines
+        assert "closure-notify:pressed" in click_lines
+        success("click coordinates/button, self-removal, redraw and lifetime")
+
         failure = temp / "failure.lua"
         failure.write_text('''
 local gui = babet.gui
@@ -135,7 +146,9 @@ print("DRAWING_CREATION_FAILURE_OK")
         success("failed lifetime connection releases all 100 native widgets")
 
         probe = temp / "probe.lua"
-        for macro, symbol in [("DRAWING", "gtk_drawing_area_new"), ("CAIRO", "cairo_show_text")]:
+        for macro, symbol in [("DRAWING", "gtk_drawing_area_new"),
+                              ("GESTURE_CLICK", "gtk_gesture_click_new"),
+                              ("CAIRO", "cairo_show_text")]:
             missing = temp / f"missing-{macro}"
             compile_fake(missing, "fake_gtk4_good.c", [f"-DBABET_FAKE_GTK_MISSING_{macro}"])
             probe.write_text(f'''

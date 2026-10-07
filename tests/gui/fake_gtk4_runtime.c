@@ -11,6 +11,7 @@ typedef int (*FakeSourceCallback)(void *);
 typedef void (*WidgetSignal)(void *, void *);
 typedef void (*DrawCallback)(void *, void *, int, int, void *);
 typedef void (*DrawNotify)(void *);
+typedef void (*PressedSignal)(void *, int, double, double, void *);
 
 typedef struct FakeDateTime {
     int year, month, day;
@@ -47,6 +48,11 @@ typedef struct FakeWidget {
     int year, month, day;
     int margin_top, margin_bottom, margin_start, margin_end;
     int hexpand, vexpand, visible, sensitive;
+    unsigned int gesture_button, current_button;
+    FakeCallback pressed_cb;
+    void *pressed_data;
+    FakeClosureNotify pressed_destroy_notify;
+    int pressed;
 } FakeWidget;
 
 static FakeWidget *widgets[MAX_WIDGETS];
@@ -97,6 +103,13 @@ static WidgetSignal as_widget_signal(FakeCallback cb)
     return typed;
 }
 
+static PressedSignal as_pressed_signal(FakeCallback cb)
+{
+    PressedSignal typed = NULL;
+    memcpy(&typed, &cb, sizeof(typed));
+    return typed;
+}
+
 static void destroy_widget(FakeWidget *w)
 {
     if (in_draw) { fputs("native destruction during drawing\n", stderr); abort(); }
@@ -126,6 +139,10 @@ static void destroy_widget(FakeWidget *w)
     if (w->activate_destroy_notify) {
         log_line("closure-notify:activate", NULL);
         w->activate_destroy_notify(w->activate_data, NULL);
+    }
+    if (w->pressed_destroy_notify) {
+        log_line("closure-notify:pressed", NULL);
+        w->pressed_destroy_notify(w->pressed_data, NULL);
     }
     if (w->kind == 5) log_line("destroy:entry", NULL);
     if (w->kind == 7) log_line("destroy:scrolledWindow", NULL);
@@ -339,6 +356,33 @@ void gtk_drawing_area_set_draw_func(void *p, DrawCallback cb, void *data, DrawNo
     if (w->draw_notify) w->draw_notify(w->draw_data);
     w->draw_cb = cb; w->draw_data = data; w->draw_notify = notify; w->dirty = 1;
 }
+void *gtk_gesture_click_new(void)
+{
+    FakeWidget *gesture = make_widget(10, NULL);
+    if (gesture) gesture->gesture_button = 1U;
+    return gesture;
+}
+void gtk_gesture_single_set_button(void *p, unsigned int button)
+{
+    FakeWidget *gesture = (FakeWidget *)p;
+    if (!gesture || !gesture->alive || gesture->kind != 10) abort();
+    gesture->gesture_button = button;
+}
+unsigned int gtk_gesture_single_get_current_button(void *p)
+{
+    FakeWidget *gesture = (FakeWidget *)p;
+    if (!gesture || !gesture->alive || gesture->kind != 10) abort();
+    return gesture->current_button;
+}
+void gtk_widget_add_controller(void *widget_p, void *controller_p)
+{
+    FakeWidget *widget = (FakeWidget *)widget_p;
+    FakeWidget *controller = (FakeWidget *)controller_p;
+    if (!widget || !controller || !widget->alive || !controller->alive || controller->parent) abort();
+    controller->parent = widget;
+    if (controller->floating) controller->floating = 0;
+    else ++controller->refs;
+}
 
 static void draw_widget(FakeWidget *w)
 {
@@ -427,6 +471,10 @@ unsigned long g_signal_connect_data(void *instance, const char *signal,
         w->activate_cb = cb; w->activate_data = data;
         w->activate_destroy_notify = destroy_notify; return 4;
     }
+    if (strcmp(signal, "pressed") == 0 && w->kind == 10) {
+        w->pressed_cb = cb; w->pressed_data = data;
+        w->pressed_destroy_notify = destroy_notify; return 5;
+    }
     return 0;
 }
 
@@ -443,6 +491,14 @@ int g_main_context_iteration(void *context, int may_block)
     }
     for (size_t i = 0; i < widget_count; ++i) {
         FakeWidget *w = widgets[i];
+        if (w && w->alive && w->kind == 10 && w->parent && !w->pressed && w->pressed_cb) {
+            w->pressed = 1;
+            w->current_button = 1U;
+            PressedSignal cb = as_pressed_signal(w->pressed_cb);
+            cb(w, 1, 42.5, 73.25, w->pressed_data);
+            if (w->alive) w->current_button = 0U;
+            return 1;
+        }
         if (w && w->alive && w->kind == 5 && !w->activated && w->activate_cb) {
             w->activated = 1;
             WidgetSignal cb = as_widget_signal(w->activate_cb);

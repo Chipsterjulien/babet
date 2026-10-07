@@ -46,6 +46,10 @@ using GtkCalendarSelectDay = void (*)(void *, void *);
 using GDateTimeNewLocal = void *(*)(int, int, int, int, int, double);
 using GDateTimeGetInt = int (*)(void *);
 using GDateTimeUnref = void (*)(void *);
+using GtkGestureClickNew = void *(*)();
+using GtkGestureSingleSetButton = void (*)(void *, unsigned int);
+using GtkGestureSingleGetCurrentButton = unsigned int (*)(void *);
+using GtkWidgetAddController = void (*)(void *, void *);
 using GtkWidgetSetMargin = void (*)(void *, int);
 using GtkWidgetSetBoolean = void (*)(void *, int);
 using GtkWidgetGetParent = void *(*)(void *);
@@ -100,6 +104,10 @@ struct GtkApi
     void (*gtk_drawing_area_set_content_width)(void *w, int width) = nullptr;
     void (*gtk_drawing_area_set_content_height)(void *w, int height) = nullptr;
     void (*gtk_drawing_area_set_draw_func)(void *w, GtkDrawCallback cb, void *data, GtkDestroyNotify notify) = nullptr;
+    GtkGestureClickNew gesture_click_new = nullptr;
+    GtkGestureSingleSetButton gesture_single_set_button = nullptr;
+    GtkGestureSingleGetCurrentButton gesture_single_get_current_button = nullptr;
+    GtkWidgetAddController widget_add_controller = nullptr;
     void (*gtk_widget_queue_draw)(void *w) = nullptr;
     GtkWidgetSetMargin widget_set_margin_top = nullptr;
     GtkWidgetSetMargin widget_set_margin_bottom = nullptr;
@@ -273,6 +281,10 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(gtk_drawing_area_set_content_width, "gtk_drawing_area_set_content_width");
     BABET_GTK_RESOLVE(gtk_drawing_area_set_content_height, "gtk_drawing_area_set_content_height");
     BABET_GTK_RESOLVE(gtk_drawing_area_set_draw_func, "gtk_drawing_area_set_draw_func");
+    BABET_GTK_RESOLVE(gesture_click_new, "gtk_gesture_click_new");
+    BABET_GTK_RESOLVE(gesture_single_set_button, "gtk_gesture_single_set_button");
+    BABET_GTK_RESOLVE(gesture_single_get_current_button, "gtk_gesture_single_get_current_button");
+    BABET_GTK_RESOLVE(widget_add_controller, "gtk_widget_add_controller");
     BABET_GTK_RESOLVE(gtk_widget_queue_draw, "gtk_widget_queue_draw");
     BABET_GTK_RESOLVE(widget_set_margin_top, "gtk_widget_set_margin_top");
     BABET_GTK_RESOLVE(widget_set_margin_bottom, "gtk_widget_set_margin_bottom");
@@ -376,6 +388,10 @@ void * gtk4_drawing_area_new() noexcept { return g_gtk.gtk_drawing_area_new(); }
 void gtk4_drawing_area_set_content_width(void *w, int width) noexcept { g_gtk.gtk_drawing_area_set_content_width(w, width); }
 void gtk4_drawing_area_set_content_height(void *w, int height) noexcept { g_gtk.gtk_drawing_area_set_content_height(w, height); }
 void gtk4_drawing_area_set_draw_func(void *w, GtkDrawCallback cb, void *data, GtkDestroyNotify notify) noexcept { g_gtk.gtk_drawing_area_set_draw_func(w, cb, data, notify); }
+void *gtk4_gesture_click_new() noexcept { return g_gtk.gesture_click_new(); }
+void gtk4_gesture_single_set_button(void *gesture, unsigned int button) noexcept { g_gtk.gesture_single_set_button(gesture, button); }
+unsigned int gtk4_gesture_single_get_current_button(void *gesture) noexcept { return g_gtk.gesture_single_get_current_button(gesture); }
+void gtk4_widget_add_controller(void *widget, void *controller) noexcept { g_gtk.widget_add_controller(widget, controller); }
 void gtk4_widget_queue_draw(void *w) noexcept { g_gtk.gtk_widget_queue_draw(w); }
 void gtk4_widget_set_margin_top(void *w, int m) noexcept { g_gtk.widget_set_margin_top(w, m); }
 void gtk4_widget_set_margin_bottom(void *w, int m) noexcept { g_gtk.widget_set_margin_bottom(w, m); }

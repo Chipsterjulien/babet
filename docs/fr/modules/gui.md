@@ -99,15 +99,16 @@ La première surface reste volontairement petite :
 - `babet.gui.label(texte)`
 - `babet.gui.button(texte)`
 - `babet.gui.entry([options])`
-- `babet.gui.drawingArea([options])` (non publié)
-- `babet.gui.scrolledWindow()` (non publié)
-- `babet.gui.spinButton([options])` (non publié)
-- `babet.gui.calendar([options])` (non publié)
+- `babet.gui.drawingArea([options])`
+- `babet.gui.scrolledWindow()`
+- `babet.gui.spinButton([options])`
+- `babet.gui.calendar([options])`
 - `conteneur:add(enfant)` pour fenêtres, boxes et ScrolledWindow
 - `box:remove(enfant)` / `box:clear()`
 - `scrolledWindow:remove(enfant)` / `scrolledWindow:clear()`
 - `label:setText(texte)` / `button:setText(texte)` / `entry:setText(texte)`
 - `button:onClick(fonction)`
+- `drawingArea:onClick(fonction_ou_nil)`
 - `spinButton:getValue()` / `spinButton:setValue(nombre)` / `spinButton:onChanged(fonction_ou_nil)`
 - `calendar:getDate()` / `calendar:setDate(année, mois, jour)` / `calendar:onChanged(fonction_ou_nil)`
 - propriétés communes : `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`
@@ -182,11 +183,10 @@ babet --create-exe examples/gui_entry ./gui-entry-app
 ./gui-entry-app
 ```
 
-## DrawingArea : courbes natives (non publié, lot GUI 2)
+## DrawingArea : courbes natives et sélection au clic
 
-Cette API est ajoutée après la version publiée **2.25.0**. Il faut appliquer et
-compiler le lot DrawingArea pour l'utiliser ; le binaire 2.25.0 initial apporte
-seulement Entry parmi les nouveaux widgets prévus.
+`DrawingArea` permet de dessiner avec Cairo et de recevoir un clic utilisateur
+sans dépendre d'une bibliothèque de graphiques externe.
 
 ```lua
 local zone = assert(gui.drawingArea {width = 640, height = 300})
@@ -205,6 +205,12 @@ assert(zone:onDraw(function(ctx, largeur, hauteur)
 end))
 -- Depuis le callback d'un bouton/Entry, après modification des données :
 assert(zone:queueDraw())
+
+assert(zone:onClick(function(x, y, bouton)
+    print("clic", x, y, bouton)
+end))
+-- nil retire seulement le callback de clic :
+assert(zone:onClick(nil))
 ```
 
 `drawingArea()` et `drawingArea(nil)` utilisent 320 x 200 pixels logiques.
@@ -218,6 +224,14 @@ L'inscription et le retrait demandent un redessin. `zone:queueDraw()` demande un
 redessin ultérieur, sans appeler immédiatement le callback. GTK peut regrouper
 plusieurs demandes. Ces méthodes sont réservées aux DrawingArea et renvoient
 `true, nil`.
+
+`zone:onClick(fonction_ou_nil)` remplace ou retire le callback de clic. Le callback
+reçoit exactement `x`, `y`, `bouton` : les deux premières valeurs sont des nombres
+Lua exprimés dans les coordonnées d'allocation du widget, et `bouton` est un entier
+(`1` pour le bouton principal). Contrairement à `onDraw`, ce callback est un
+callback d'événement ordinaire : il peut modifier des widgets et appeler
+`queueDraw()`. Les erreurs sont protégées et signalées sur stderr comme pour les
+autres callbacks GUI.
 
 Le contexte est emprunté et valide **uniquement pendant cet appel à `onDraw`**.
 Un contexte conservé provoque une erreur Lua après le retour, une erreur ou une
