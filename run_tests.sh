@@ -521,6 +521,12 @@ if ! python3 "${SCRIPT_DIR}/tools/test_gui_widgets.py" "${BINARY}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — GTK4 système réel sous Xvfb (optionnelle)"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_real_gtk.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression optionnelle contre le vrai GTK4 a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — état processus après chargement GTK"
 if ! python3 "${SCRIPT_DIR}/tools/test_gui_process_state.py" "${BINARY}"; then
     echo "ÉCHEC : la protection de l'état processus après chargement GTK a échoué."

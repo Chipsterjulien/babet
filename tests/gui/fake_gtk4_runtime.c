@@ -245,12 +245,24 @@ void gtk_editable_set_text(void *p, const char *text)
 {
     FakeWidget *w = (FakeWidget *)p;
     if (!w || !w->alive) abort();
-    if (strcmp(w->text, text) == 0) return;
-    set_text(w, text);
-    if (w->changed_cb) as_widget_signal(w->changed_cb)(w, w->changed_data);
-    // A setter still uses the object after synchronous notification. The
-    // binding must pin it if a callback closes its parent or finalizes Lua.
-    if (!w->alive) abort();
+
+    /* Match the observable GtkEntry/GtkEditable behavior exercised against
+     * real GTK 4.14: replacing text is implemented as deletion followed by
+     * insertion, so "changed" may expose an intermediate empty value. Even a
+     * same-text replacement can therefore emit both notifications. Babet must
+     * coalesce this native burst in its public setText() contract. */
+    if (w->text[0] != '\0') {
+        set_text(w, "");
+        log_line("entry-native-changed:", w->text);
+        if (w->changed_cb) as_widget_signal(w->changed_cb)(w, w->changed_data);
+        if (!w->alive) abort();
+    }
+    if (text[0] != '\0') {
+        set_text(w, text);
+        log_line("entry-native-changed:", w->text);
+        if (w->changed_cb) as_widget_signal(w->changed_cb)(w, w->changed_data);
+        if (!w->alive) abort();
+    }
     log_line("entry-after-change:", w->text);
 }
 const char *gtk_editable_get_text(void *p)
@@ -352,13 +364,23 @@ void gtk_widget_set_sensitive(void *p, int value)
 { ((FakeWidget *)p)->sensitive = value; log_line("sensitive:", value ? "true" : "false"); }
 void *gtk_css_provider_new(void)
 { return make_widget(11, NULL); }
+#ifndef BABET_FAKE_GTK_MISSING_CSS_STRING
+void gtk_css_provider_load_from_string(void *p, const char *css)
+{
+    FakeWidget *provider = (FakeWidget *)p;
+    if (!provider || !provider->alive || provider->kind != 11) abort();
+    log_line("css-load-string:", css ? css : "");
+}
+#endif
+#ifndef BABET_FAKE_GTK_MISSING_CSS_DATA
 void gtk_css_provider_load_from_data(void *p, const char *css, long length)
 {
     FakeWidget *provider = (FakeWidget *)p;
     if (!provider || !provider->alive || provider->kind != 11) abort();
     (void)length;
-    log_line("css-load:", css ? css : "");
+    log_line("css-load-data:", css ? css : "");
 }
+#endif
 void *gdk_display_get_default(void)
 { static int display; return &display; }
 void gtk_style_context_add_provider_for_display(void *display, void *provider, unsigned int priority)
@@ -524,11 +546,11 @@ int g_main_context_iteration(void *context, int may_block)
     }
     for (size_t i = 0; i < widget_count; ++i) {
         FakeWidget *w = widgets[i];
-        if (w && w->alive && w->kind == 10 && w->parent && !w->pressed && w->pressed_cb) {
-            w->pressed = 1;
+        if (w && w->alive && w->kind == 10 && w->parent && w->pressed < 2 && w->pressed_cb) {
+            ++w->pressed;
             w->current_button = 1U;
             PressedSignal cb = as_pressed_signal(w->pressed_cb);
-            cb(w, 1, 42.5, 73.25, w->pressed_data);
+            cb(w, w->pressed, 42.5, 73.25, w->pressed_data);
             if (w->alive) w->current_button = 0U;
             return 1;
         }

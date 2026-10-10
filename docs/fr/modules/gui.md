@@ -147,7 +147,7 @@ Les options sont lues directement dans la table, sans appeler `__index`.
 | Méthode | Contrat |
 | --- | --- |
 | `entry:getText()` | Renvoie une seule chaîne Lua : une copie du texte courant. |
-| `entry:setText(texte)` | Remplace le texte ; peut appeler `onChanged` immédiatement. |
+| `entry:setText(texte)` | Remplace le texte. Si la valeur finale diffère, appelle `onChanged` exactement une fois et synchroniquement avec le texte final ; un texte identique ne déclenche aucun callback. |
 | `entry:setPlaceholder(texte)` | Définit l'indication du champ vide et sans focus ; `""` la supprime. |
 | `entry:setEditable(booléen)` | Autorise/interdit la saisie utilisateur ; `setText` reste utilisable par le programme. |
 | `entry:onChanged(fonction_ou_nil)` | Remplace le callback de changement de texte ; `nil` explicite le retire. |
@@ -163,16 +163,25 @@ valident pas les données métier.
 
 Les callbacks ne reçoivent aucun argument : capturer le champ et utiliser
 `getText()` pour lire sa valeur. Les deux callbacks sont indépendants et leur
-enregistrement ne les déclenche pas. Une notification de `setText()` s'exécute
-avant le retour du setter, sur son thread Lua appelant, y compris une coroutine
-reprise sur le thread OS principal. Les événements traités par `gui.run()`
-utilisent le thread Lua principal. Un callback ne peut pas faire de `yield`
-à travers GTK. Les erreurs, y compris une tentative de yield, sont signalées
-et contenues. Un callback peut se remplacer, se retirer ou fermer sa fenêtre ;
-les états natif et Lua restent valides jusqu'au retour d'un setter en cours.
-Modifier le texte depuis `onChanged` peut déclencher une nouvelle notification :
-éviter une mise à jour récursive inconditionnelle, ou retirer temporairement
-le callback.
+enregistrement ne les déclenche pas. Pour un `setText()` programmatique, Babet
+masque volontairement la rafale interne suppression/insertion de GTK puis émet
+au plus un `onChanged` après le retour du setter natif : exactement un si le
+texte final diffère de la copie initiale, aucun si le texte est identique. Le
+callback voit donc la valeur finale et jamais une chaîne vide intermédiaire due
+à l'implémentation de GTK. Cette notification synthétique s'exécute néanmoins
+avant le retour de `setText()`, sur son thread Lua appelant, y compris une
+coroutine reprise sur le thread OS principal. Les modifications effectuées par
+l'utilisateur continuent de suivre les événements `changed` ordinaires de GTK.
+Cela inclut leurs états intermédiaires : par exemple, remplacer une sélection en
+tapant peut produire brièvement un texte vide. Seul `entry:setText()` applique la
+coalescence décrite ci-dessus.
+Les événements traités par `gui.run()` utilisent le thread Lua principal. Un
+callback ne peut pas faire de `yield` à travers GTK. Les erreurs, y compris une
+tentative de yield, sont signalées et contenues. Un callback peut se remplacer,
+se retirer ou fermer sa fenêtre ; les états natif et Lua restent valides jusqu'au
+retour d'un setter en cours. Modifier le texte depuis `onChanged` peut déclencher
+une nouvelle notification : éviter une mise à jour récursive inconditionnelle,
+ou retirer temporairement le callback.
 
 Voir [`examples/gui_entry/main.lua`](../../../examples/gui_entry/main.lua) pour
 un exemple complet : texte en direct, validation par Entrée et bascule en
@@ -207,8 +216,8 @@ end))
 -- Depuis le callback d'un bouton/Entry, après modification des données :
 assert(zone:queueDraw())
 
-assert(zone:onClick(function(x, y, bouton)
-    print("clic", x, y, bouton)
+assert(zone:onClick(function(x, y, bouton, nb_pressions)
+    print("clic", x, y, bouton, nb_pressions)
 end))
 -- nil retire seulement le callback de clic :
 assert(zone:onClick(nil))
@@ -227,9 +236,12 @@ plusieurs demandes. Ces méthodes sont réservées aux DrawingArea et renvoient
 `true, nil`.
 
 `zone:onClick(fonction_ou_nil)` remplace ou retire le callback de clic. Le callback
-reçoit exactement `x`, `y`, `bouton` : les deux premières valeurs sont des nombres
-Lua exprimés dans les coordonnées d'allocation du widget, et `bouton` est un entier
-(`1` pour le bouton principal). Contrairement à `onDraw`, ce callback est un
+reçoit exactement `x`, `y`, `bouton`, `nb_pressions` : les deux premières valeurs
+sont des nombres Lua exprimés dans les coordonnées d'allocation du widget,
+`bouton` est un entier (`1` pour le bouton principal) et `nb_pressions` est le
+compteur de pressions consécutives de GTK (`1` pour un clic simple, `2` pour la
+seconde pression d'un double-clic, etc.). Une fonction Lua qui ne déclare que
+trois paramètres reste compatible, Lua ignorant les arguments supplémentaires. Contrairement à `onDraw`, ce callback est un
 callback d'événement ordinaire : il peut modifier des widgets et appeler
 `queueDraw()`. Les erreurs sont protégées et signalées sur stderr comme pour les
 autres callbacks GUI.
@@ -294,7 +306,7 @@ babet --create-exe examples/gui_drawing ./gui-drawing-app
 ./gui-drawing-app
 ```
 
-## Conteneurs actualisables : Box et ScrolledWindow (non publié, lot GUI 3)
+## Conteneurs actualisables : Box et ScrolledWindow
 
 Une `Box` peut maintenant retirer un enfant précis ou vider tous ses enfants :
 
@@ -329,7 +341,7 @@ for _, ligne in ipairs(nouvelles_lignes) do
 end
 ```
 
-## SpinButton : saisie numérique (non publié, lot GUI 4)
+## SpinButton : saisie numérique
 
 ```lua
 local poids = assert(gui.spinButton {
@@ -361,7 +373,7 @@ synchroniquement avant le retour de `setValue()`. Comme pour Entry, le widget
 et son état logique sont épinglés jusqu'au retour de GTK ; une fermeture de la
 fenêtre depuis le callback ne crée donc pas de pointeur pendant.
 
-## Calendar : choix et modification des dates (non publié, lot GUI 5)
+## Calendar : choix et modification des dates
 
 ```lua
 local date = assert(gui.calendar {year = 2026, month = 10, day = 7})
@@ -404,9 +416,9 @@ assert(bouton:removeClass("primary"))
 assert(gui.setCss(nil))
 ```
 
-`gui.setCss(css_ou_nil)` remplace la feuille de style de l'application pour l'état Lua propriétaire de la GUI. `nil` la retire. `widget:addClass(nom)` et `widget:removeClass(nom)` fonctionnent sur tous les widgets vivants ; le nom est fourni sans point initial. Les diagnostics de parsing CSS restent ceux de GTK.
+`gui.setCss(css_ou_nil)` remplace la feuille de style de l'application pour l'état Lua propriétaire de la GUI. `nil` la retire. `widget:addClass(nom)` et `widget:removeClass(nom)` fonctionnent sur tous les widgets vivants ; le nom est fourni sans point initial. Les diagnostics de parsing CSS restent ceux de GTK. À partir de GTK 4.12, Babet utilise `gtk_css_provider_load_from_string()` ; avec GTK 4.0 à 4.10, il se replie sur l'ancienne API `gtk_css_provider_load_from_data()`. Aucun de ces symboles n'est une dépendance directe à l'édition de liens.
 
-## Propriétés communes des widgets (non publié, lot GUI 6)
+## Propriétés communes des widgets
 
 Tous les widgets vivants exposent les méthodes suivantes :
 

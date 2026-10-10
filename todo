@@ -22,10 +22,31 @@ GUI native weight-log primitives — post-2.25.0 lots 2–6
     ownership, GC cycles, callback replacement/errors, validation and properties.
 [x] Wire the new GUI regression into `run_tests.sh` and synchronize current
     README, GUI design, FR/EN module docs and changelogs.
-[~] Run the complete maintainer `./run_tests.sh --release` campaign on a machine
-    with the pinned dependency cache. This isolated workspace cannot download
-    the pinned miniz/Lua sources, so only dependency-independent checks are run
-    here before handoff.
+[x] Complete the maintainer `./run_tests.sh --release` campaign for the
+    published GUI lots before moving on to the later 2.27/2.28 additions.
+
+GUI 2.28.1 — real-GTK audit hardening
+--------------------------------------
+
+[x] Make `Entry:setText()` deterministic at the Babet boundary: suppress GTK's
+    synchronous delete/insert burst and emit exactly one final `onChanged` only
+    when the resulting text differs.
+[x] Make the fake GTK runtime reproduce the GTK 4.14 delete/insert behavior so
+    the regression proves Babet's coalescing instead of relying on a fake-only
+    signal contract.
+[x] Expose GTK's consecutive press count as the fourth `DrawingArea:onClick`
+    callback argument while preserving ordinary three-parameter Lua callbacks.
+[x] Prefer `gtk_css_provider_load_from_string()` on GTK >= 4.12 and retain
+    `gtk_css_provider_load_from_data()` as an optional compatibility fallback.
+[x] Add an optional system-GTK regression under Xvfb with fatal GTK criticals,
+    real Cairo drawing and an XTest-injected double click; SKIP cleanly when the
+    host lacks GTK4/Xvfb/X11/XTest.
+[x] Remove stale unreleased labels, correct the onClick introduction to 2.27.0,
+    and archive old patch-delivery notes below `docs/releases/archive/`.
+[~] Run the complete `./run_tests.sh --release` campaign on the maintainer
+    machine with Babet's pinned dependency cache before tagging 2.28.1.
+[ ] Consider a bounded `gui.after(ms, fn)` timer API as a separate future lot;
+    define cancellation, Lua-state teardown and callback lifetime rules first.
 
 Release hardening — fixed-width public ABI tags
 ------------------------------------------------

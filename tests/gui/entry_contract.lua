@@ -68,6 +68,11 @@ assert(entry:onChanged(function()
 end))
 assert(entry:setText("first"))
 assert(changes == 1)
+-- Programmatic setText has a Babet-level deterministic contract: GTK may
+-- emit delete/insert bursts internally, but Lua sees only the final value,
+-- exactly once when it changed and not at all for an identical replacement.
+assert(entry:setText("first"))
+assert(changes == 1)
 assert(entry:onChanged(function()
     changes = changes + 10
     assert(entry:onChanged(nil))

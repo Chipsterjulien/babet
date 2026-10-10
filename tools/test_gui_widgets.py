@@ -25,12 +25,15 @@ def main():
     binary = str(Path(sys.argv[1]).resolve())
     with tempfile.TemporaryDirectory(prefix="babet-gui-widgets-") as directory:
         temp = Path(directory)
+        def compile_fake(directory, extra=()):
+            directory.mkdir()
+            run([*shlex.split(os.environ.get("CC", "cc")), "-std=c99", "-Wall", "-Wextra", "-Werror",
+                 "-fPIC", "-shared", "-Wl,-soname,libgtk-4.so.1", *extra,
+                 str(ROOT / "tests/gui/fake_gtk4_runtime.c"),
+                 "-o", str(directory / "libgtk-4.so.1")])
+
         lib = temp / "lib"
-        lib.mkdir()
-        run([*shlex.split(os.environ.get("CC", "cc")), "-std=c99", "-Wall", "-Wextra", "-Werror",
-             "-fPIC", "-shared", "-Wl,-soname,libgtk-4.so.1",
-             str(ROOT / "tests/gui/fake_gtk4_runtime.c"),
-             "-o", str(lib / "libgtk-4.so.1")])
+        compile_fake(lib)
         log_path = temp / "gtk.log"
         env = dict(os.environ, LD_LIBRARY_PATH=str(lib), BABET_FAKE_GTK_LOG=str(log_path))
         env.pop("BABET_FAKE_GTK_FAIL_SIGNAL", None)
@@ -45,12 +48,34 @@ def main():
             "spin-after-change", "calendar-after-change",
             "margin-top", "margin-end", "margin-bottom", "margin-start",
             "hexpand:true", "vexpand:true", "visible:false", "sensitive:false",
-            "css-load:", "css-provider:add", "css-provider:remove",
+            "css-load-string:", "css-provider:add", "css-provider:remove",
             "css-class:add:app-card", "css-class:add:primary",
             "css-class:remove:primary",
         ]:
             assert marker in log, marker
+        assert "css-load-data:" not in log, "modern CSS API should be preferred when available"
         print("[PASS] containers, widgets, CSS styling and common properties")
+
+        # GTK 4.0-4.10 do not provide gtk_css_provider_load_from_string().
+        # The loader must retain the data API as a compatibility fallback.
+        fallback_lib = temp / "fallback-lib"
+        compile_fake(fallback_lib, ["-DBABET_FAKE_GTK_MISSING_CSS_STRING"])
+        fallback_log = temp / "fallback-css.log"
+        fallback_script = temp / "fallback-css.lua"
+        fallback_script.write_text(
+            'assert(babet.gui.init())\n'
+            'assert(babet.gui.setCss(".fallback { padding: 1px; }"))\n'
+            'assert(babet.gui.setCss(nil))\n'
+            'print("GUI_CSS_FALLBACK_OK")\n'
+        )
+        fallback_env = dict(env, LD_LIBRARY_PATH=str(fallback_lib),
+                            BABET_FAKE_GTK_LOG=str(fallback_log))
+        result = run([binary, str(fallback_script)], fallback_env)
+        assert "GUI_CSS_FALLBACK_OK" in result.stdout
+        fallback_text = fallback_log.read_text()
+        assert "css-load-data:" in fallback_text
+        assert "css-load-string:" not in fallback_text
+        print("[PASS] CSS loader prefers GTK 4.12 string API and falls back on older GTK4")
 
         # A signal connection failure must release the construction reference.
         cases = [
@@ -68,7 +93,7 @@ def main():
             assert failure_log.read_text().splitlines().count(destroyed) == 100
             print(f"[PASS] {constructor} signal failure releases native resources")
 
-    print("GUI widgets regression: 3 PASS / 0 FAIL")
+    print("GUI widgets regression: 4 PASS / 0 FAIL")
 
 
 if __name__ == "__main__":

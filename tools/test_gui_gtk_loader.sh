@@ -37,6 +37,14 @@ mkdir -p "$TMP/missing-entry"
 cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
     -DBABET_FAKE_GTK_MISSING_ENTRY -Wl,-soname,libgtk-4.so.1 \
     "$ROOT/tests/gui/fake_gtk4_good.c" -o "$TMP/missing-entry/libgtk-4.so.1" || exit 1
+mkdir -p "$TMP/old-css" "$TMP/no-css"
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+    -DBABET_FAKE_GTK_MISSING_CSS_STRING -Wl,-soname,libgtk-4.so.1 \
+    "$ROOT/tests/gui/fake_gtk4_good.c" -o "$TMP/old-css/libgtk-4.so.1" || exit 1
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared \
+    -DBABET_FAKE_GTK_MISSING_CSS_STRING -DBABET_FAKE_GTK_MISSING_CSS_DATA \
+    -Wl,-soname,libgtk-4.so.1 "$ROOT/tests/gui/fake_gtk4_good.c" \
+    -o "$TMP/no-css/libgtk-4.so.1" || exit 1
 
 OUT="$(LD_LIBRARY_PATH="$TMP/missing-entry" "$TMP/probe" load 2>&1)"
 RC=$?
@@ -44,6 +52,22 @@ if [ "$RC" -eq 2 ] && grep -Fq "missing GTK 4 dependency symbol 'gtk_editable_ge
     pass "missing Entry symbol is diagnosed without initializing GTK"
 else
     fail "missing Entry symbol is diagnosed without initializing GTK"
+fi
+
+OUT="$(LD_LIBRARY_PATH="$TMP/old-css" "$TMP/probe" load 2>&1)"
+RC=$?
+if [ "$RC" -eq 0 ] && [ "$OUT" = "LOAD_OK" ]; then
+    pass "GTK 4.0-4.10 CSS data API remains a valid loader fallback"
+else
+    fail "GTK 4.0-4.10 CSS data API remains a valid loader fallback"
+fi
+
+OUT="$(LD_LIBRARY_PATH="$TMP/no-css" "$TMP/probe" load 2>&1)"
+RC=$?
+if [ "$RC" -eq 2 ] && grep -Fq "missing GTK 4 CSS loader symbols" <<<"$OUT"; then
+    pass "loader fails closed when both CSS loading APIs are absent"
+else
+    fail "loader fails closed when both CSS loading APIs are absent"
 fi
 
 if [ "$("$TMP/probe" concurrent-freeze)" = "CONCURRENT_FREEZE_OK" ]; then

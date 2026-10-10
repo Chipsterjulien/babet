@@ -294,7 +294,7 @@ argument allocation and callback execution against Lua errors, then invalidate
 the context before returning to GTK. Reject widget changes during drawing and
 defer native widget finalization until GTK returns. Cairo is resolved through
 the GTK runtime's dependencies; no Cairo development headers or direct runtime
-link dependency are introduced. See the unreleased lot 2 contract in GUI_DESIGN.
+link dependency are introduced. See the active DrawingArea contract in GUI_DESIGN.
 
 The 2.23.0 FLTK companion prototype is retired from the active source after
 having served its embedding/API experiment. `libbabet`, the host-function API

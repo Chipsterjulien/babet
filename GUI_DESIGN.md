@@ -93,10 +93,17 @@ policy requests termination.
 Entry text setters, SpinButton value setters and Calendar date setters may emit
 callbacks synchronously. Dispatch them on the calling Lua thread, keep the native
 object and logical state alive until the setter returns, and contain
-errors/attempted yields. A callback may close the window, replace itself or
-reenter a setter. Event-loop callbacks run on the main Lua thread. Callback
-storage belongs to the widget userdata; the native bridge resolves it through
-weak Lua handles so self-capturing callback cycles remain collectable.
+errors/attempted yields. `Entry:setText()` has the stronger Babet contract added
+in 2.28.1: suppress the native GtkEditable delete/insert signal burst while the
+setter is active, then invoke the Lua `onChanged` handler exactly once with the
+final value if it differs from the initial snapshot, and not at all if it is
+identical. User-driven GTK `changed` events remain uncoalesced, including
+intermediate states such as a temporary empty string when typing over a
+selection. A callback may close the window, replace itself or reenter a setter.
+Event-loop callbacks run
+on the main Lua thread. Callback storage belongs to the widget userdata; the
+native bridge resolves it through weak Lua handles so self-capturing callback
+cycles remain collectable.
 
 Do not keep binding-owned C++ RAII objects alive across an unprotected Lua API
 operation that may raise. The existing Babet Lua/C++ exception and protected-
@@ -130,10 +137,12 @@ The first runtime implementation is intentionally small. The target surface is:
 - `babet.gui.label()`
 - `babet.gui.button()`
 - `babet.gui.entry()`
-- `babet.gui.drawingArea()` (unreleased lot 2)
-- `container:add()`
-- `widget:setText()`
-- `button:onClick()`
+- `babet.gui.drawingArea()`
+- `babet.gui.scrolledWindow()` / `babet.gui.spinButton()` / `babet.gui.calendar()`
+- `babet.gui.setCss()`
+- `container:add()` / Box and ScrolledWindow `remove()` / `clear()`
+- `widget:setText()` and common layout/state/CSS-class setters
+- `button:onClick()` / `drawingArea:onClick()`
 - `entry:getText()` / `entry:setPlaceholder()` / `entry:setEditable()`
 - `entry:onChanged()` / `entry:onActivate()`
 - `window:show()`
@@ -148,8 +157,9 @@ Entry callback registration accepts a function or explicit `nil` to remove
 that handler; `getText()` returns one copied string. Mutating operations return Babet's usual
 `true, nil` success pair; controlled runtime failures return `nil, diagnostic`.
 GTK-facing strings reject embedded NUL bytes. Do not add checkboxes, menus, tree
-views, dialogs, clipboard, CSS, drag-and-drop, OpenGL, or a generic GObject
-surface before this slice is proven in folder mode and through `--create-exe`.
+views, dialogs, clipboard, drag-and-drop, OpenGL, or a generic GObject surface
+without a concrete application need and dedicated runtime tests. CSS remains the
+narrow `setCss` plus widget-class surface described below.
 
 Typed GTK constructors/functions are preferred over generic variadic creation
 such as `g_object_new()`. GObject Introspection is deliberately out of scope:
@@ -161,11 +171,11 @@ binding framework than Babet needs.
 The next application need is a native desktop weight log using Lua, SQLite and
 GTK, without a browser, HTTP service or JavaScript. It justifies generic GUI
 primitives, not weight-specific runtime functions. The planned primitive lots are
-now implemented in order: Entry (released in 2.25.0), DrawingArea with a small
-Cairo drawing surface (unreleased lot 2), Box removal/clearing plus ScrolledWindow
-(lot 3), SpinButton (lot 4), Calendar (lot 5), and common margins, expansion,
-sensitivity and visibility (lot 6). Keep the existing camelCase public method
-convention.
+implemented in order: Entry (2.25.0), DrawingArea plus Box/ScrolledWindow,
+SpinButton, Calendar and common widget properties (2.26.0), DrawingArea click
+selection (2.27.0), and application CSS/classes (2.28.0). Version 2.28.1
+hardens these contracts against real GTK behavior. Keep the existing camelCase
+public method convention.
 
 Box/ScrolledWindow removal must reacquire a native reference before GTK
 unparents a child, then remove the parent's Lua root. A surviving child handle
@@ -182,7 +192,7 @@ past dates. Its graph must sort chronologically, position points using actual da
 intervals and derive the vertical range from the data. These remain application
 requirements rather than weight-specific runtime behavior.
 
-## Drawing callback contract (unreleased lot 2)
+## Drawing callback contract
 
 `drawingArea({width=?, height=?})` requests a positive content size (default
 320 x 200). `onDraw(fn_or_nil)` replaces/removes the handler and requests repaint;
@@ -203,6 +213,12 @@ drawing; detach their handles immediately and defer native widget destruction
 through an allocation-free queue drained after GTK returns to Babet. A native
 draw destroy-notifier retains/releases WidgetState; callback functions still
 belong to the Lua widget handle and self-capturing cycles remain collectable.
+
+`DrawingArea:onClick(fn_or_nil)` is an ordinary event callback, independent of
+`onDraw`. It receives `(x, y, button, n_press)`, where `n_press` is the consecutive
+press count supplied by `GtkGestureClick`. It may mutate widgets and request a
+redraw. The gesture controller is owned for the full native DrawingArea lifetime;
+replacing/removing the Lua callback must not recreate or leak the controller.
 
 ## Validation status before widening the API
 
@@ -231,5 +247,7 @@ surface or a second GUI backend.
 
 ## Styling surface
 
-The optional GTK backend may expose one application CSS provider plus per-widget CSS classes. This remains a narrow styling layer (`gui.setCss`, `widget:addClass`, `widget:removeClass`), not generic GObject introspection or a complete GTK property binding.
+The optional GTK backend exposes one application CSS provider plus per-widget CSS classes. This remains a narrow styling layer (`gui.setCss`, `widget:addClass`, `widget:removeClass`), not generic GObject introspection or a complete GTK property binding. Prefer `gtk_css_provider_load_from_string()` when the runtime exports it (GTK 4.12+); otherwise fall back to `gtk_css_provider_load_from_data()` so GTK 4.0-4.10 remain supported. At least one loader symbol is required, but neither is a direct link-time dependency.
+
+The deterministic fake GTK remains the fault-injection harness, but release validation also includes an optional system-GTK probe under Xvfb with `G_DEBUG=fatal-criticals`. Missing GTK/Xvfb/X11/XTest is a documented SKIP; when present, failures are release-test failures. This second layer exists specifically to catch semantic drift between the fake runtime and real GTK.
 

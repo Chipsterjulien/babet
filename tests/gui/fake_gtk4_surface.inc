@@ -80,8 +80,14 @@ void gtk_widget_set_vexpand(void *w, int v) { (void)w; (void)v; }
 void gtk_widget_set_visible(void *w, int v) { (void)w; (void)v; }
 void gtk_widget_set_sensitive(void *w, int v) { (void)w; (void)v; }
 void *gtk_css_provider_new(void) { return (void *)0xb; }
+#ifndef BABET_FAKE_GTK_MISSING_CSS_STRING
+void gtk_css_provider_load_from_string(void *p, const char *css)
+{ (void)p; (void)css; }
+#endif
+#ifndef BABET_FAKE_GTK_MISSING_CSS_DATA
 void gtk_css_provider_load_from_data(void *p, const char *css, long n)
 { (void)p; (void)css; (void)n; }
+#endif
 void *gdk_display_get_default(void) { return (void *)0xc; }
 void gtk_style_context_add_provider_for_display(void *d, void *p, unsigned int priority)
 { (void)d; (void)p; (void)priority; }

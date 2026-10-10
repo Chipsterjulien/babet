@@ -7,6 +7,18 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [2.28.1] - 2026-10-10
+
+### GUI — alignement avec le vrai GTK4
+
+- `Entry:setText()` masque désormais les notifications GTK intermédiaires (suppression puis insertion) et garantit un contrat Babet déterministe : un seul `onChanged` avec la valeur finale si le texte change, aucun callback si la valeur finale est identique.
+- Le faux runtime GTK reproduit le comportement observé avec GTK 4.14 afin que les tests valident réellement cette coalescence au lieu de figer un comportement artificiel.
+- `DrawingArea:onClick()` transmet maintenant un quatrième argument, `n_press`, correspondant au nombre de pressions consécutives fourni par `GtkGestureClick`; les callbacks Lua à trois paramètres restent compatibles.
+- Le CSS préfère `gtk_css_provider_load_from_string()` lorsqu'il est disponible (GTK >= 4.12) et conserve `gtk_css_provider_load_from_data()` comme repli pour GTK 4.0 à 4.10.
+- Ajout d'une régression optionnelle contre le GTK4 système sous Xvfb, avec `G_DEBUG=fatal-criticals`, incluant un vrai dessin Cairo et un double-clic injecté par XTest pour vérifier `n_press` ; elle est ignorée proprement si GTK4/Xvfb/X11/XTest n'est pas disponible.
+- Le test GTK réel attend explicitement le premier `onDraw` avant d'injecter les clics, ce qui supprime la course entre apparition de la fenêtre X11 et disponibilité réelle de la boucle GTK ; en cas de timeout, stdout/stderr sont conservés dans le diagnostic.
+- Nettoyage de la documentation GUI : suppression des mentions « non publié », correction de la version d'introduction de `DrawingArea:onClick` (2.27.0) et archivage des anciennes notes de chantier hors de la racine du dépôt.
+
 ## [2.28.0] - 2026-10-07
 
 ### GUI — personnalisation native GTK4

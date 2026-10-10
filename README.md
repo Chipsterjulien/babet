@@ -16,7 +16,7 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.28.0**. See the
+Current release: **2.28.1**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
@@ -27,11 +27,14 @@ text input with change/activation callbacks, placeholder text and a read-only
 mode. It also fixes self-capturing widget/callback lifetime cycles. See
 [`examples/gui_entry`](examples/gui_entry/main.lua) for a complete example.
 GTK 4 remains optional and loaded from the target system only when requested.
-The unreleased GUI lots also add [`drawingArea`](docs/en/modules/gui.md) with a
-minimal Cairo context, Box child removal/clearing, `ScrolledWindow`, `SpinButton`,
-`Calendar`, and common layout/visibility/sensitivity properties. They require
-rebuilding the runtime and now provide the GTK primitives planned for the native
-weight log; see [`examples/gui_drawing`](examples/gui_drawing/main.lua).
+Babet 2.26.0 completed the next GTK4 widget lots with
+[`drawingArea`](docs/en/modules/gui.md), refreshable containers, `ScrolledWindow`,
+`SpinButton`, `Calendar` and common widget properties. Babet 2.27.0 added
+DrawingArea pointer clicks and 2.28.0 added application CSS/classes. Version
+2.28.1 hardens that surface against real GTK behavior: programmatic Entry text
+changes are coalesced to one final callback, click callbacks expose the GTK press
+count, CSS uses the modern GTK 4.12 API when present with an older-runtime
+fallback, and the release harness can exercise the system GTK4 under Xvfb.
 
 Babet 2.24.2 aligns the compiled version and release documentation after the
 2.24.1 publication mismatch. It retains the audit fixes described below.

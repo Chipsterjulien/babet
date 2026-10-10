@@ -1,3 +1,5 @@
+> **Archive historique.** Ce document décrit un lot de développement avant publication. Les consignes d’extraction, de patch et de validation ci-dessous ne doivent plus être suivies sur une version actuelle de Babet.
+
 # Lot GUI 2 - DrawingArea et dessin Cairo
 
 7 octobre 2026. Base : sources 2.25.0, avec le lot Entry déjà appliqué.

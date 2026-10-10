@@ -143,7 +143,7 @@ the table itself, without invoking `__index`.
 | Method | Contract |
 | --- | --- |
 | `entry:getText()` | Returns one Lua string: a snapshot of the current text. |
-| `entry:setText(text)` | Replaces the text; may synchronously invoke `onChanged`. |
+| `entry:setText(text)` | Replaces the text. If the final value differs, invokes `onChanged` exactly once synchronously with the final text; identical text invokes no callback. |
 | `entry:setPlaceholder(text)` | Sets the hint for an empty, unfocused entry; `""` clears it. |
 | `entry:setEditable(boolean)` | Enables/disables user editing; programmatic `setText` remains allowed. |
 | `entry:onChanged(function_or_nil)` | Replaces the text-change callback; explicit `nil` removes it. |
@@ -158,14 +158,22 @@ do not parse numbers or validate application data.
 
 Callbacks receive no arguments: capture the entry and call `getText()` when
 needed. The two callbacks are independent, and registering one does not invoke
-it. A `setText()` notification runs before the setter returns, on the calling
-Lua thread (including a coroutine resumed on the main OS thread). Events
-processed by `gui.run()` use the main Lua thread. Callbacks cannot yield across
-the GTK boundary. Errors, including an attempted yield, are reported and
-contained. A callback may replace/remove itself or close its window; native
-and Lua state remain valid until an active setter has returned. Changing text
-from `onChanged` can trigger another notification: avoid unconditional recursive
-updates, or temporarily remove the handler.
+it. For programmatic `setText()`, Babet deliberately hides GTK's internal
+delete/insert notification burst and emits at most one `onChanged` after GTK
+returns from the native setter: exactly one when the final text differs from the
+initial snapshot, none when it is identical. The callback therefore observes the
+final value, never an intermediate empty string caused by GTK's implementation.
+That synthetic notification still runs before `setText()` returns, on the calling
+Lua thread (including a coroutine resumed on the main OS thread). User edits
+continue to follow GTK's ordinary `changed` events, including intermediate
+states: for example, typing over a selection may briefly expose an empty
+string. Only `entry:setText()` applies the coalescing described above. Events
+processed by `gui.run()` use the main Lua thread. Callbacks cannot yield across the GTK
+boundary. Errors, including an attempted yield, are reported and contained. A
+callback may replace/remove itself or close its window; native and Lua state
+remain valid until an active setter has returned. Changing text from `onChanged`
+can trigger another notification: avoid unconditional recursive updates, or
+temporarily remove the handler.
 
 See [`examples/gui_entry/main.lua`](../../../examples/gui_entry/main.lua) for a
 complete example with live text, Enter submission and a read-only toggle:
@@ -199,8 +207,8 @@ end))
 -- From a button/Entry callback, after changing the data:
 assert(area:queueDraw())
 
-assert(area:onClick(function(x, y, button)
-    print("click", x, y, button)
+assert(area:onClick(function(x, y, button, n_press)
+    print("click", x, y, button, n_press)
 end))
 -- nil removes only the click callback:
 assert(area:onClick(nil))
@@ -217,8 +225,12 @@ redraw; it does not call the handler synchronously. GTK may combine several
 requests. Both methods return `true, nil` and are only for DrawingArea handles.
 
 `area:onClick(function_or_nil)` replaces or removes the click callback. The callback
-receives exactly `x`, `y`, `button`: the first two are Lua numbers in widget
-allocation coordinates, and `button` is an integer (`1` for the primary button).
+receives exactly `x`, `y`, `button`, `n_press`: the first two are Lua numbers in
+widget allocation coordinates, `button` is an integer (`1` for the primary
+button), and `n_press` is GTK's consecutive press count (`1` for a single click,
+`2` for the second press of a double-click, and so on). Existing Lua functions
+that declare only three parameters remain valid because Lua ignores extra
+arguments.
 Unlike `onDraw`, this is an ordinary event callback: it may mutate widgets and
 call `queueDraw()`. Errors are protected and reported to stderr like the other
 GUI callbacks.
@@ -276,7 +288,7 @@ babet --create-exe examples/gui_drawing ./gui-drawing-app
 ./gui-drawing-app
 ```
 
-## Refreshable containers: Box and ScrolledWindow (unreleased GUI lot 3)
+## Refreshable containers: Box and ScrolledWindow
 
 A `Box` can now remove one child or clear all children:
 
@@ -297,7 +309,7 @@ logical child through `add(child)`; adding a second child before removing or
 clearing the first is an error. Put a Box inside it for an arbitrary number of
 rows.
 
-## SpinButton: numeric input (unreleased GUI lot 4)
+## SpinButton: numeric input
 
 ```lua
 local weight = assert(gui.spinButton {
@@ -322,7 +334,7 @@ or removes the handler. A programmatic value change may call it synchronously
 before `setValue()` returns. Native and logical state are pinned across that call,
 including when the callback closes its window.
 
-## Calendar: selecting and editing dates (unreleased GUI lot 5)
+## Calendar: selecting and editing dates
 
 ```lua
 local date = assert(gui.calendar {year = 2026, month = 10, day = 7})
@@ -362,9 +374,9 @@ assert(button:removeClass("primary"))
 assert(gui.setCss(nil))
 ```
 
-`gui.setCss(css_or_nil)` replaces the application stylesheet for the current Lua GUI owner. `nil` removes it. `widget:addClass(name)` and `widget:removeClass(name)` work on every live widget; pass class names without a leading dot. CSS parsing diagnostics are reported by GTK.
+`gui.setCss(css_or_nil)` replaces the application stylesheet for the current Lua GUI owner. `nil` removes it. `widget:addClass(name)` and `widget:removeClass(name)` work on every live widget; pass class names without a leading dot. CSS parsing diagnostics are reported by GTK. On GTK 4.12 and newer Babet uses `gtk_css_provider_load_from_string()`; on GTK 4.0–4.10 it falls back to the older `gtk_css_provider_load_from_data()` API. Neither symbol is a direct link-time dependency.
 
-## Common widget properties (unreleased GUI lot 6)
+## Common widget properties
 
 Every live widget exposes these methods:
 

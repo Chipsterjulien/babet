@@ -1,3 +1,5 @@
+> **Archive historique.** Ce document décrit un lot de développement avant publication. Les consignes d’extraction, de patch et de validation ci-dessous ne doivent plus être suivies sur une version actuelle de Babet.
+
 # GUI — lot 1 : Entry
 
 Date : 2026-10-06. Base : sources 2.24.2 corrigées et auditées.

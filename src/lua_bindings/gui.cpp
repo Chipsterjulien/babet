@@ -53,6 +53,7 @@ struct WidgetState
     WidgetKind kind = WidgetKind::label;
     void *handle_key = nullptr; // weak Lua handle lookup; never dereferenced
     lua_State *callback_thread = nullptr; // synchronous setters use their caller
+    unsigned int entry_set_text_depth = 0; // coalesce GTK's internal changed bursts
     int references = 1; // Lua userdata; native signal handlers retain as needed
     bool owns_reference = false; // construction ref for non-toplevel widgets
     WidgetState *previous = nullptr;
@@ -313,7 +314,10 @@ void button_clicked(void *, void *data) noexcept
 
 void entry_changed(void *, void *data) noexcept
 {
-    dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
+    auto *state = static_cast<WidgetState *>(data);
+    if (state && state->entry_set_text_depth != 0)
+        return;
+    dispatch_widget_callback(state, PRIMARY_CALLBACK);
 }
 
 void entry_activated(void *, void *data) noexcept
@@ -331,7 +335,7 @@ void calendar_day_selected(void *, void *data) noexcept
     dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
 }
 
-void drawing_area_pressed(void *gesture, int, double x, double y,
+void drawing_area_pressed(void *gesture, int n_press, double x, double y,
                           void *data) noexcept
 {
     auto *state = static_cast<WidgetState *>(data);
@@ -340,7 +344,7 @@ void drawing_area_pressed(void *gesture, int, double x, double y,
 
     lua_State *L = state->owner;
     const int base = lua_gettop(L);
-    if (!lua_checkstack(L, 7))
+    if (!lua_checkstack(L, 8))
     {
         static constexpr char message[] =
             "babet.gui callback error: cannot grow click callback stack\n";
@@ -371,7 +375,8 @@ void drawing_area_pressed(void *gesture, int, double x, double y,
     lua_pushnumber(L, x);
     lua_pushnumber(L, y);
     lua_pushinteger(L, static_cast<lua_Integer>(button));
-    if (lua_pcall(L, 3, 0, 0) != LUA_OK)
+    lua_pushinteger(L, static_cast<lua_Integer>(n_press));
+    if (lua_pcall(L, 4, 0, 0) != LUA_OK)
         report_callback_error(L);
     lua_settop(L, base);
 }
@@ -1439,14 +1444,27 @@ int widget_set_text(lua_State *L)
         detail::gtk4_button_set_label(state->native, text);
     else if (state->kind == WidgetKind::entry)
     {
-        // GTK can emit changed synchronously. A Lua callback may close the
-        // containing window or even explicitly finalize this userdata. Keep
-        // native and logical state alive until the GTK setter has returned.
+        // GtkEditable may emit more than one synchronous "changed" signal for
+        // one gtk_editable_set_text() call (for example delete then insert).
+        // Those intermediate states are an implementation detail of GTK and
+        // must not leak into Babet's public callback contract. Suppress native
+        // notifications while the setter is active, then emit exactly one Lua
+        // notification if the final text differs from the initial snapshot.
+        //
+        // Keep both native and logical state pinned through the synthetic
+        // callback: that callback may close the parent window, finalize the
+        // userdata, replace itself or re-enter setText().
+        const std::string before(detail::gtk4_editable_get_text(state->native));
         retain_state(state);
         void *native = detail::gtk4_object_ref_sink(state->native);
         lua_State *previous = state->callback_thread;
         state->callback_thread = L;
+        ++state->entry_set_text_depth;
         detail::gtk4_editable_set_text(native, text);
+        --state->entry_set_text_depth;
+        const bool changed = before != detail::gtk4_editable_get_text(native);
+        if (changed && state->native)
+            dispatch_widget_callback(state, PRIMARY_CALLBACK);
         state->callback_thread = previous;
         detail::gtk4_object_unref(native);
         release_state(state);
@@ -1747,7 +1765,7 @@ int l_set_css(lua_State *L)
     if (!provider)
         return push_fail_protected(L, "babet.gui: cannot create GTK CSS provider");
 
-    detail::gtk4_css_provider_load_from_data(provider, css);
+    detail::gtk4_css_provider_load(provider, css);
     clear_css_provider(owner);
     detail::gtk4_style_context_add_provider_for_display(
         display, provider, CSS_PRIORITY_APPLICATION);

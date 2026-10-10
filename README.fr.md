@@ -17,7 +17,7 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.28.0**. Voir le
+Version actuelle : **2.28.1**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
@@ -30,12 +30,15 @@ widget/callback qui capturent leur propre widget. Un exemple complet figure
 dans [`examples/gui_entry`](examples/gui_entry/main.lua). GTK 4 reste optionnel
 et chargé depuis le système cible uniquement à la demande.
 
-Les lots GUI non publiés ajoutent aussi [`drawingArea`](docs/fr/modules/gui.md)
-avec un contexte Cairo minimal, le retrait/vidage des enfants de `Box`,
-`ScrolledWindow`, `SpinButton`, `Calendar` et les propriétés communes de mise en
-page/visibilité/activation. Ils exigent de recompiler le runtime et fournissent
-désormais les primitives GTK prévues pour construire le suivi du poids natif ;
-voir aussi [`examples/gui_drawing`](examples/gui_drawing/main.lua).
+Babet 2.26.0 a complété les lots GTK4 suivants avec
+[`drawingArea`](docs/fr/modules/gui.md), les conteneurs actualisables,
+`ScrolledWindow`, `SpinButton`, `Calendar` et les propriétés communes des widgets.
+Babet 2.27.0 a ajouté les clics pointeur de DrawingArea et 2.28.0 le CSS/classes.
+La 2.28.1 durcit cette surface face au comportement du vrai GTK : les changements
+programmatiques d'Entry sont regroupés en un seul callback final, les clics
+exposent le nombre de pressions GTK, le CSS préfère l'API GTK 4.12 moderne avec
+un repli compatible anciennes versions, et le harnais peut tester le GTK4
+système sous Xvfb.
 
 Babet 2.24.2 aligne la version compilée et la documentation de publication
 après l'incohérence de la publication 2.24.1. Elle conserve les correctifs

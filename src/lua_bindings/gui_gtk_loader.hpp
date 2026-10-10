@@ -74,7 +74,7 @@ void gtk4_widget_set_vexpand(void *w, bool expand) noexcept;
 void gtk4_widget_set_visible(void *w, bool visible) noexcept;
 void gtk4_widget_set_sensitive(void *w, bool sensitive) noexcept;
 void *gtk4_css_provider_new() noexcept;
-void gtk4_css_provider_load_from_data(void *provider, const char *css) noexcept;
+void gtk4_css_provider_load(void *provider, const char *css) noexcept;
 void *gdk4_display_get_default() noexcept;
 void gtk4_style_context_add_provider_for_display(void *display, void *provider,
                                                  unsigned int priority) noexcept;

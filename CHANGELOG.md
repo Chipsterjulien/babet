@@ -7,6 +7,18 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [2.28.1] - 2026-10-10
+
+### GUI — alignment with real GTK4 behavior
+
+- `Entry:setText()` now hides GTK's intermediate delete/insert notifications and guarantees a deterministic Babet contract: one `onChanged` with the final value when text changes, no callback when the final value is identical.
+- The fake GTK runtime now reproduces the behavior observed with GTK 4.14 so regressions validate Babet's coalescing rather than an artificial single-signal model.
+- `DrawingArea:onClick()` now passes a fourth `n_press` argument with the consecutive press count from `GtkGestureClick`; existing three-parameter Lua callbacks remain compatible.
+- CSS prefers `gtk_css_provider_load_from_string()` when available (GTK >= 4.12) while retaining `gtk_css_provider_load_from_data()` as a compatibility fallback for GTK 4.0 through 4.10.
+- Added an optional regression against the system GTK4 under Xvfb with `G_DEBUG=fatal-criticals`, including real Cairo drawing and an XTest-injected double click that checks `n_press`; it cleanly skips when GTK4/Xvfb/X11/XTest is unavailable.
+- The real-GTK test explicitly waits for the first `onDraw` before injecting clicks, removing the race between X11 window discovery and actual GTK event-loop readiness; timeout diagnostics retain stdout/stderr.
+- Cleaned up GUI documentation: removed stale "unreleased" labels, corrected the `DrawingArea:onClick` introduction version to 2.27.0, and archived development patch notes away from the repository root.
+
 ## [2.28.0] - 2026-10-07
 
 ### GUI — native GTK4 styling

@@ -43,7 +43,11 @@ def main():
         for marker in ["placeholder:Saisir…", "placeholder:Nouveau repère",
                        "editable:false", "editable:true"]:
             assert marker in log, marker
-        print("[PASS] Entry values, validation, callbacks, reentry, coroutines and GC cycles")
+        # The fake runtime intentionally models real GTK's delete/insert burst.
+        # Seeing an empty native intermediate proves the Lua-side single final
+        # callback is produced by Babet's coalescing, not by an oversimplified fake.
+        assert "entry-native-changed:\n" in log
+        print("[PASS] Entry values, deterministic setText coalescing, callbacks, reentry, coroutines and GC cycles")
 
         project = temp / "project"
         project.mkdir()

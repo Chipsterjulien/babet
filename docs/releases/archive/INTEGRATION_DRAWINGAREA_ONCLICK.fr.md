@@ -1,4 +1,6 @@
-# Babet 2.26.0 — DrawingArea:onClick
+> **Archive historique.** Ce document décrit un lot de développement avant publication. Les consignes d’extraction, de patch et de validation ci-dessous ne doivent plus être suivies sur une version actuelle de Babet.
+
+# Babet 2.27.0 — DrawingArea:onClick
 
 Ajout ciblé de l'interaction souris au `DrawingArea` GTK4.
 

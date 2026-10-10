@@ -54,6 +54,7 @@ using GtkWidgetSetMargin = void (*)(void *, int);
 using GtkWidgetSetBoolean = void (*)(void *, int);
 using GtkCssProviderNew = void *(*)();
 using GtkCssProviderLoadFromData = void (*)(void *, const char *, long);
+using GtkCssProviderLoadFromString = void (*)(void *, const char *);
 using GdkDisplayGetDefault = void *(*)();
 using GtkStyleContextAddProviderForDisplay = void (*)(void *, void *, unsigned int);
 using GtkStyleContextRemoveProviderForDisplay = void (*)(void *, void *);
@@ -124,6 +125,7 @@ struct GtkApi
     GtkWidgetSetBoolean widget_set_visible = nullptr;
     GtkWidgetSetBoolean widget_set_sensitive = nullptr;
     GtkCssProviderNew css_provider_new = nullptr;
+    GtkCssProviderLoadFromString css_provider_load_from_string = nullptr;
     GtkCssProviderLoadFromData css_provider_load_from_data = nullptr;
     GdkDisplayGetDefault display_get_default = nullptr;
     GtkStyleContextAddProviderForDisplay style_context_add_provider_for_display = nullptr;
@@ -208,6 +210,22 @@ bool resolve(void *handle, const char *name, Function &function,
     }
     std::memcpy(&function, &symbol, sizeof(symbol));
     return true;
+}
+
+template <typename Function>
+void resolve_optional(void *handle, const char *name, Function &function) noexcept
+{
+    static_assert(sizeof(Function) == sizeof(void *),
+                  "GTK loader requires POSIX-sized function pointers");
+    (void)::dlerror();
+    void *symbol = ::dlsym(handle, name);
+    const char *detail = ::dlerror();
+    if (detail != nullptr || symbol == nullptr)
+    {
+        function = nullptr;
+        return;
+    }
+    std::memcpy(&function, &symbol, sizeof(symbol));
 }
 
 #define BABET_GTK_RESOLVE(member, symbol)                                      \
@@ -308,7 +326,22 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(widget_set_visible, "gtk_widget_set_visible");
     BABET_GTK_RESOLVE(widget_set_sensitive, "gtk_widget_set_sensitive");
     BABET_GTK_RESOLVE(css_provider_new, "gtk_css_provider_new");
-    BABET_GTK_RESOLVE(css_provider_load_from_data, "gtk_css_provider_load_from_data");
+    // GTK 4.12 introduced load_from_string() and deprecated load_from_data().
+    // Keep both optional and require at least one so Babet remains compatible
+    // with GTK 4.0-4.10 while preferring the modern API on newer runtimes.
+    resolve_optional(handle, "gtk_css_provider_load_from_string",
+                     candidate.css_provider_load_from_string);
+    resolve_optional(handle, "gtk_css_provider_load_from_data",
+                     candidate.css_provider_load_from_data);
+    if (!candidate.css_provider_load_from_string &&
+        !candidate.css_provider_load_from_data)
+    {
+        symbol_error =
+            "missing GTK 4 CSS loader symbols "
+            "'gtk_css_provider_load_from_string' and "
+            "'gtk_css_provider_load_from_data'";
+        goto symbol_failure;
+    }
     BABET_GTK_RESOLVE(display_get_default, "gdk_display_get_default");
     BABET_GTK_RESOLVE(style_context_add_provider_for_display, "gtk_style_context_add_provider_for_display");
     BABET_GTK_RESOLVE(style_context_remove_provider_for_display, "gtk_style_context_remove_provider_for_display");
@@ -422,8 +455,13 @@ void gtk4_widget_set_vexpand(void *w, bool v) noexcept { g_gtk.widget_set_vexpan
 void gtk4_widget_set_visible(void *w, bool v) noexcept { g_gtk.widget_set_visible(w, v ? 1 : 0); }
 void gtk4_widget_set_sensitive(void *w, bool v) noexcept { g_gtk.widget_set_sensitive(w, v ? 1 : 0); }
 void *gtk4_css_provider_new() noexcept { return g_gtk.css_provider_new(); }
-void gtk4_css_provider_load_from_data(void *provider, const char *css) noexcept
-{ g_gtk.css_provider_load_from_data(provider, css, -1L); }
+void gtk4_css_provider_load(void *provider, const char *css) noexcept
+{
+    if (g_gtk.css_provider_load_from_string)
+        g_gtk.css_provider_load_from_string(provider, css);
+    else
+        g_gtk.css_provider_load_from_data(provider, css, -1L);
+}
 void *gdk4_display_get_default() noexcept { return g_gtk.display_get_default(); }
 void gtk4_style_context_add_provider_for_display(void *display, void *provider, unsigned int priority) noexcept
 { g_gtk.style_context_add_provider_for_display(display, provider, priority); }
