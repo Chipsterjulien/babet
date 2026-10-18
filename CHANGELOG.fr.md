@@ -7,6 +7,39 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [Non publié]
+
+### GUI — récupération après un échec d’allocation
+
+- Protège la préparation des arguments de `onDrag`, y compris l’allocation de
+  la chaîne de phase, dans l’appel Lua protégé afin qu’une erreur mémoire ne
+  puisse pas remonter à travers GTK.
+- Libère les copies de texte GLib de TextView en cas d’échec d’allocation C++
+  et restaure le thread de callback ainsi que les références natives/logiques
+  du setter dans tous les chemins de sortie.
+- Ajoute à `run_tests.sh` des régressions par injection d’erreurs mémoire Lua
+  et C++, avec récupération après un setter en coroutine, callbacks réentrants
+  et comptage des ressources libérées.
+
+## [2.29.0] - 2026-10-16
+
+### GUI — composants GTK4 libres et correction des gestes
+
+- `progressBar:onClick(fonction_ou_nil)` : clic principal natif `GtkGestureClick`, avec coordonnées et nombre de pressions ; barre toujours contrôlée par `setFraction()` (progression manuelle ou automatique).
+- `box:reorder(enfant, precedent_ou_nil)` : réordonnancement natif `gtk_box_reorder_child_after()`, sans détacher les widgets ni perdre leur état/callbacks ; arbre Lua synchronisé et contrôles de parenté stricts.
+- Tests supplémentaires avec faux GTK et Xvfb/XTest (quatre clics réels sur une barre), documentation d'utilisation avec texte barré via le CSS GTK.
+- Renforcement des tests de `box:reorder()` : le faux GTK conserve et vérifie désormais l'ordre exact des enfants après chaque réordonnancement natif ; diagnostics `onClick` clarifiés et documentation complétée sur le `nil` explicite et l'accessibilité clavier.
+- Ajout des composants génériques `fixed`, `textView`, `checkButton`, `progressBar` et `expander`, ainsi que `widget:setSizeRequest()` et `widget:onDrag()`. GTK4 reste optionnel, chargé à la demande et non lié directement.
+- `onDrag` mesure désormais les déplacements depuis le début dans le repère stable de la surface GTK, même si le titre ou la poignée se déplace. Les contrôles interactifs conservent leurs gestes natifs et refusent `onDrag`.
+- Refus des cycles parent/enfant dans `add()` et `fixed:put()` avant modification des propriétés GTK/Lua. Correction du diagnostic d'un deuxième enfant ajouté à un expander.
+- Un `expander` replié ne contourne plus ces contrôles : GTK laisse alors son enfant sans parent, donc Babet lui donne une boîte interne permanente et détecte les cycles sur son propre arbre logique. Les cycles et les doubles parents qui passent par un expander replié sont refusés au lieu de provoquer une boucle infinie ou un `Gtk-CRITICAL` au dépliage.
+- Démonstration de notes libres, tests déterministes avec faux GTK (repère local mouvant) et test optionnel Xvfb/XTest de glisser-déposer sur une véritable poignée mobile.
+
+### Processus — nettoyage des pipelines terminés
+
+- Les pipelines dont les étapes ont déjà été récupérées ferment immédiatement leurs descripteurs dans `close`, `__close` et `__gc`, sans pause systématique de 500 ms. Le délai de grâce et la récupération forcée restent en place pour les processus encore actifs.
+- Ajout d'une régression chronométrée sur les pipelines terminés.
+
 ## [2.28.1] - 2026-10-10
 
 ### GUI — alignement avec le vrai GTK4

@@ -251,3 +251,20 @@ The optional GTK backend exposes one application CSS provider plus per-widget CS
 
 The deterministic fake GTK remains the fault-injection harness, but release validation also includes an optional system-GTK probe under Xvfb with `G_DEBUG=fatal-criticals`. Missing GTK/Xvfb/X11/XTest is a documented SKIP; when present, failures are release-test failures. This second layer exists specifically to catch semantic drift between the fake runtime and real GTK.
 
+
+
+## GTK4 primitive interactions (2.29.0)
+
+- Native GtkProgressBar input is exposed as an optional, lazily-installed
+  GtkGestureClick controller with primary-button press notifications. Passive
+  progress bars keep their original behavior; fractions are always set by the
+  Lua application, so both automatic and step-based progression are possible.
+- GtkBox ordering uses gtk_box_reorder_child_after rather than remove/reappend.
+  Only existing children can be reordered, and the Lua-owned child table must
+  always preserve the same visual order without recreating widgets.
+- Task completion styling (for example GTK CSS `text-decoration-line:
+  line-through`), prioritization, step counts and persistence are *application*
+  responsibilities, never implicit properties of the binding.
+- A full mouse drag-and-drop list interaction requires explicit GTK4 drag/drop
+  controllers and visual drop indicators. Native GtkBox reordering alone is
+  not incorrectly presented as a complete DnD solution.

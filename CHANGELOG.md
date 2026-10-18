@@ -7,6 +7,36 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [Unreleased]
+
+### GUI — allocation-failure recovery
+
+- Protect `onDrag` argument preparation, including phase-string allocation,
+  inside the Lua protected call so memory errors cannot unwind through GTK.
+- Release TextView's GLib text copies on C++ allocation failure and restore
+  the setter's callback thread and native/logical references on every exit.
+- Add Lua/C++ allocator-fault regressions to `run_tests.sh`, including recovery
+  after a failed coroutine setter, callback re-entry and resource accounting.
+
+## [2.29.0] - 2026-10-16
+
+### GUI — free-position GTK4 components and native drag fixes
+
+- `progressBar:onClick(function_or_nil)`: native primary-button `GtkGestureClick` input, with press coordinates and count; `setFraction()` remains application-controlled for manual or calculated progress.
+- `box:reorder(child, previous_or_nil)`: native `gtk_box_reorder_child_after()` without removing or rebuilding widgets; Lua child order and GTK visual order stay synchronized, with strict membership validation.
+- Added fake GTK regression and optional real GTK Xvfb/XTest four-click progress probe, plus CSS strikethrough usage documentation.
+- Strengthened `box:reorder()` regression coverage so the fake GTK keeps and verifies the exact child order after every native reorder; clarified `onClick` diagnostics and documented explicit `nil`/keyboard-accessibility details.
+- Added the reusable `fixed`, `textView`, `checkButton`, `progressBar`, and `expander` GTK4 bindings, plus `widget:setSizeRequest()` and `widget:onDrag()`. GTK4 remains optional, lazily loaded, and never a direct link dependency.
+- Corrected `onDrag` to report start-relative *surface* deltas even while its label/handle is being moved by the callback. Drag gestures are restricted to non-interactive widgets; interactive controls retain their native pointer gestures.
+- Reject parenting cycles through `add()` and `fixed:put()` before mutating native or Lua ownership. Expander's second-child error now names the right widget.
+- A collapsed `expander` no longer bypasses these checks: GTK leaves its child unparented while collapsed, so Babet gives it a permanent internal box and detects cycles on its own logical tree. Cycles and double parenting through a collapsed expander are refused instead of looping forever or raising a `Gtk-CRITICAL` on expand.
+- Added a free-note demo, deterministic fake-GTK tests (including changing gesture-local coordinates), and an optional Xvfb/XTest regression that drags an actual moving handle.
+
+### Processes — completed pipeline cleanup
+
+- `spawnPipeline` objects whose children have already been reaped now close their file descriptors immediately in `close`, `__close` and `__gc`, without an unconditional 500 ms sleep. Live-child termination retains the existing grace period and forced-reap logic.
+- Added a wall-clock regression for closed completed pipelines.
+
 ## [2.28.1] - 2026-10-10
 
 ### GUI — alignment with real GTK4 behavior

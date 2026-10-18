@@ -6,15 +6,15 @@ FAIL=0
 pass(){ echo "[PASS] $1"; PASS=$((PASS+1)); }
 fail(){ echo "[FAIL] $1"; FAIL=$((FAIL+1)); }
 req_file(){ if [[ -f "$ROOT/$1" ]]; then pass "$2"; else fail "$2"; fi; }
-req_grep(){ if grep -Eq "$1" "$ROOT/$2"; then pass "$3"; else fail "$3"; fi; }
+req_grep(){ if grep -Eq -- "$1" "$ROOT/$2"; then pass "$3"; else fail "$3"; fi; }
 
 req_file "SIZE_PROFILES_STUDY.md" "size/profile study contract exists"
 req_file "SIZE_PROFILES_STUDY.fr.md" "French size/profile study exists"
 req_file "tools/analyze_link_map.sh" "shell/awk link-map analyser exists"
 req_grep 'Do not depend on GNU ld heading text' "tools/analyze_link_map.sh" "link-map analysis is independent from localized GNU ld headings"
 req_grep 'BABET_ENABLE_SIZE_AUDIT' "CMakeLists.txt" "CMake has an opt-in size-audit switch"
-req_grep '\-Wl,-Map=.*babet-link\.map' "CMakeLists.txt" "size audit emits a GNU linker map"
-req_grep '\-\-size-audit' "build_local.sh" "maintainer build exposes --size-audit"
+req_grep '-Wl,-Map=.*babet-link\.map' "CMakeLists.txt" "size audit emits a GNU linker map"
+req_grep '--size-audit' "build_local.sh" "maintainer build exposes --size-audit"
 req_grep 'strip .*SIZE_BINARY' "build_local.sh" "size audit measures a stripped copy"
 req_grep 'cannot be combined with sanitizers|incompatible.*sanit' "CMakeLists.txt" "size audit rejects sanitizer attribution"
 req_grep 'NOT removable-size deltas|NOT removable-size' "tools/analyze_link_map.sh" "report rejects additive/removal interpretation"

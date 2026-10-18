@@ -1491,6 +1491,26 @@ void cleanup_pipeline_process(PipelineProcess *pipeline) noexcept
 
     babet_process::close_fd(pipeline->stdin_fd);
 
+    // wait() already reaped every stage: closing a completed pipeline must
+    // not sleep for the SIGTERM grace period (including __gc / __close).
+    bool all_reaped = true;
+    for (size_t i = 0; i < pipeline->count; ++i)
+    {
+        if (pipeline->pids[i] > 0 && !pipeline->status_valid[i])
+        {
+            all_reaped = false;
+            break;
+        }
+    }
+    if (all_reaped)
+    {
+        babet_process::close_fd(pipeline->stdout_fd);
+        for (size_t i = 0; i < pipeline->count; ++i)
+            babet_process::close_fd(pipeline->stderr_fds[i]);
+        pipeline->closed = true;
+        return;
+    }
+
     // Signaler avant le premier waitpid() de ce nettoyage : tant que l'enfant
     // direct n'est pas récupéré, son identifiant de groupe ne peut pas être
     // confondu avec un PID réutilisé. Les étapes déjà récupérées sont ignorées.

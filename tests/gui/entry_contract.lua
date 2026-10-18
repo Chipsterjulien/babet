@@ -58,7 +58,7 @@ rejects(function() label:setPlaceholder("x") end, "expected an entry handle")
 rejects(function() label:setEditable(true) end, "expected an entry handle")
 rejects(function() label:onChanged(function() end) end, "expected an entry handle")
 rejects(function() label:onActivate(nil) end, "expected an entry handle")
-rejects(function() entry:onClick(function() end) end, "expected a button handle")
+rejects(function() entry:onClick(function() end) end, "expected a button, drawingArea or progressBar handle")
 
 -- Synchronous notification, replacement, disconnect, reentry and errors.
 local changes = 0

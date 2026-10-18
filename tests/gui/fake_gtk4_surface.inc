@@ -23,6 +23,38 @@ int g_date_time_get_month(void *p) { return ((FakeDateTime *)p)->month; }
 int g_date_time_get_day_of_month(void *p) { return ((FakeDateTime *)p)->day; }
 void g_date_time_unref(void *p) { free(p); }
 
+
+void *gtk_fixed_new(void) { return (void *)0x11; }
+void gtk_fixed_put(void *f, void *c, double x, double y) { (void)f; (void)c; (void)x; (void)y; }
+void gtk_fixed_move(void *f, void *c, double x, double y) { (void)f; (void)c; (void)x; (void)y; }
+void gtk_fixed_remove(void *f, void *c) { (void)f; (void)c; }
+void *gtk_text_view_new(void) { return (void *)0x12; }
+void *gtk_text_view_get_buffer(void *v) { (void)v; return (void *)0x13; }
+void gtk_text_buffer_set_text(void *b, const char *s, int n) { (void)b; (void)s; (void)n; }
+void g_object_get(void *b, const char *name, ...) { (void)b; (void)name; }
+void g_free(void *p) { (void)p; }
+void gtk_text_view_set_editable(void *v, int e) { (void)v; (void)e; }
+void *gtk_check_button_new_with_label(const char *l) { (void)l; return (void *)0x14; }
+void gtk_check_button_set_label(void *c, const char *l) { (void)c; (void)l; }
+void gtk_check_button_set_active(void *c, int active) { (void)c; (void)active; }
+int gtk_check_button_get_active(void *c) { (void)c; return 0; }
+void *gtk_progress_bar_new(void) { return (void *)0x15; }
+void gtk_progress_bar_set_fraction(void *p, double n) { (void)p; (void)n; }
+double gtk_progress_bar_get_fraction(void *p) { (void)p; return 0; }
+void gtk_progress_bar_set_text(void *p, const char *s) { (void)p; (void)s; }
+void gtk_progress_bar_set_show_text(void *p, int b) { (void)p; (void)b; }
+void *gtk_expander_new(const char *s) { (void)s; return (void *)0x16; }
+void gtk_expander_set_label(void *p, const char *s) { (void)p; (void)s; }
+void gtk_expander_set_child(void *p, void *c) { (void)p; (void)c; }
+void gtk_expander_set_expanded(void *p, int b) { (void)p; (void)b; }
+int gtk_expander_get_expanded(void *p) { (void)p; return 0; }
+void *gtk_gesture_drag_new(void) { return (void *)0x17; }
+void *gtk_gesture_single_get_current_sequence(void *g) { (void)g; return NULL; }
+void *gtk_gesture_get_last_event(void *g, void *seq) { (void)seq; return g; }
+int gdk_event_get_position(void *event, double *x, double *y)
+{ (void)event; *x = 0; *y = 0; return 1; }
+void gtk_widget_set_size_request(void *p, int w, int h) { (void)p; (void)w; (void)h; }
+
 void *gtk_window_new(void) { return (void *)0x1; }
 void gtk_window_set_title(void *w, const char *t) { (void)w; (void)t; }
 void gtk_window_set_default_size(void *w, int x, int y) { (void)w; (void)x; (void)y; }
@@ -32,6 +64,8 @@ void gtk_window_destroy(void *w) { (void)w; }
 void *gtk_box_new(int o, int s) { (void)o; (void)s; return (void *)0x2; }
 void gtk_box_append(void *b, void *c) { (void)b; (void)c; }
 void gtk_box_remove(void *b, void *c) { (void)b; (void)c; }
+void gtk_box_reorder_child_after(void *b, void *c, void *s)
+{ (void)b; (void)c; (void)s; }
 void *gtk_scrolled_window_new(void) { return (void *)0x7; }
 void gtk_scrolled_window_set_child(void *s, void *c) { (void)s; (void)c; }
 void *gtk_label_new(const char *t) { (void)t; return (void *)0x3; }

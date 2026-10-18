@@ -56,6 +56,37 @@ def main():
         assert "css-load-data:" not in log, "modern CSS API should be preferred when available"
         print("[PASS] containers, widgets, CSS styling and common properties")
 
+        for fixture, marker in (
+            ("free_layout_contract.lua", "GUI_FREE_LAYOUT_CONTRACT_OK"),
+            ("free_layout_drag.lua", "GUI_FREE_LAYOUT_DRAG_OK"),
+        ):
+            result = run([binary, str(ROOT / "tests/gui" / fixture)], env)
+            assert marker in result.stdout, (fixture, result.stdout)
+            print(f"[PASS] {fixture}: free layout, cycle guards and drag coordinates")
+
+        native_log = temp / "native-widgets.log"
+        native_env = dict(env, BABET_FAKE_GTK_LOG=str(native_log))
+        native_result = run([binary, str(ROOT / "tests/gui/native_list_contract.lua")], native_env)
+        assert "GUI_NATIVE_LIST_CONTRACT_OK" in native_result.stdout
+        native_text = native_log.read_text()
+        assert native_text.count("box-reorder:") == 4, native_text
+        removals = [line for line in native_text.splitlines() if line.startswith("box-remove:")]
+        assert removals == [
+            "box-remove:row-d",       # explicit remove() before re-adding row-d
+            "box-remove:row-d",       # clear(): logical Lua order must match GTK
+            "box-remove:row-c",
+            "box-remove:row-b",
+            "box-remove:row-a",
+        ], native_text
+        orders = [line for line in native_text.splitlines() if line.startswith("box-order:")]
+        assert orders == [
+            "box-order:row-a,row-d,row-b,row-c",
+            "box-order:row-d,row-b,row-c,row-a",
+            "box-order:row-c,row-d,row-b,row-a",
+            "box-order:row-d,row-c,row-b,row-a",
+        ], native_text
+        print("[PASS] native GtkBox reorder order and GtkProgressBar click progression")
+
         # GTK 4.0-4.10 do not provide gtk_css_provider_load_from_string().
         # The loader must retain the data API as a compatibility fallback.
         fallback_lib = temp / "fallback-lib"
@@ -93,7 +124,29 @@ def main():
             assert failure_log.read_text().splitlines().count(destroyed) == 100
             print(f"[PASS] {constructor} signal failure releases native resources")
 
-    print("GUI widgets regression: 4 PASS / 0 FAIL")
+        # A failure while adding a lazy click gesture leaves the existing
+        # progressBar handle alive and does not retain native controllers.
+        bad_gesture_script = temp / "fail-progress-click.lua"
+        bad_gesture_script.write_text("""
+assert(babet.gui.init())
+for i = 1, 100 do
+    local bar = assert(babet.gui.progressBar())
+    local result, err = bar:onClick(function() end)
+    assert(result == nil and type(err) == "string" and err:find("cannot attach", 1, true), tostring(err))
+    bar = nil
+    collectgarbage("collect")
+end
+print("GUI_PROGRESS_CLICK_FAILURE_OK")
+""")
+        failure_log = temp / "failure-progress-click.log"
+        failure_env = dict(env, BABET_FAKE_GTK_FAIL_SIGNAL="pressed",
+                           BABET_FAKE_GTK_LOG=str(failure_log))
+        failed = run([binary, str(bad_gesture_script)], failure_env)
+        assert "GUI_PROGRESS_CLICK_FAILURE_OK" in failed.stdout
+        assert failure_log.read_text().splitlines().count("destroy:progressBar") == 100
+        print("[PASS] progressBar lazy click gesture failure releases native resources")
+
+    print("GUI widgets regression: 8 PASS / 0 FAIL")
 
 
 if __name__ == "__main__":

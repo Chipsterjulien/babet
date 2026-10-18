@@ -521,9 +521,21 @@ if ! python3 "${SCRIPT_DIR}/tools/test_gui_widgets.py" "${BINARY}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — fermeture rapide des pipelines terminés"
+if ! python3 "${SCRIPT_DIR}/tools/test_pipeline_completed_cleanup.py" "${BINARY}"; then
+    echo "ÉCHEC : le nettoyage des pipelines terminés est trop lent."
+    exit 1
+fi
+
 print_preflight_stage "Régression — GTK4 système réel sous Xvfb (optionnelle)"
 if ! python3 "${SCRIPT_DIR}/tools/test_gui_real_gtk.py" "${BINARY}"; then
     echo "ÉCHEC : la régression optionnelle contre le vrai GTK4 a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — déplacement libre sous vrai GTK4 (optionnelle)"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_real_drag.py" "${BINARY}"; then
+    echo "ÉCHEC : le vrai glisser GTK4 ne suit pas le pointeur."
     exit 1
 fi
 
@@ -583,6 +595,12 @@ fi
 print_preflight_stage "Régression — DrawingArea, allocations Lua et frontière GTK"
 if ! bash "${SCRIPT_DIR}/tools/test_gui_drawing_oom.sh" "${OOM_ARGS[@]}"; then
     echo "ÉCHEC : la régression mémoire GUI DrawingArea a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — onDrag et TextView, erreurs mémoire et récupération"
+if ! bash "${SCRIPT_DIR}/tools/test_gui_callback_oom.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : la régression mémoire GUI onDrag/TextView a échoué."
     exit 1
 fi
 

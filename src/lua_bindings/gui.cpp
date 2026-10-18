@@ -17,6 +17,7 @@ extern "C"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 
@@ -32,6 +33,7 @@ char widget_handles_key;
 constexpr lua_Integer PRIMARY_CALLBACK = -1;
 constexpr lua_Integer ACTIVATE_CALLBACK = -2;
 constexpr lua_Integer CLICK_CALLBACK = -3;
+constexpr lua_Integer DRAG_CALLBACK = -4;
 
 enum class WidgetKind : unsigned char
 {
@@ -44,6 +46,11 @@ enum class WidgetKind : unsigned char
     spin_button,
     calendar,
     drawing_area,
+    fixed,
+    text_view,
+    check_button,
+    progress_bar,
+    expander,
 };
 
 struct WidgetState
@@ -53,6 +60,14 @@ struct WidgetState
     WidgetKind kind = WidgetKind::label;
     void *handle_key = nullptr; // weak Lua handle lookup; never dereferenced
     lua_State *callback_thread = nullptr; // synchronous setters use their caller
+    bool drag_controller_attached = false;
+    bool click_controller_attached = false;
+    void *content = nullptr; // expander: internal box, always parents user children
+    bool drag_origin_valid = false;
+    double drag_origin_x = 0.0;
+    double drag_origin_y = 0.0;
+    double drag_last_dx = 0.0;
+    double drag_last_dy = 0.0;
     unsigned int entry_set_text_depth = 0; // coalesce GTK's internal changed bursts
     int references = 1; // Lua userdata; native signal handlers retain as needed
     bool owns_reference = false; // construction ref for non-toplevel widgets
@@ -180,6 +195,11 @@ const char *kind_name(WidgetKind kind) noexcept
     case WidgetKind::spin_button: return "spinButton";
     case WidgetKind::calendar: return "calendar";
     case WidgetKind::drawing_area: return "drawingArea";
+    case WidgetKind::fixed: return "fixed";
+    case WidgetKind::text_view: return "textView";
+    case WidgetKind::check_button: return "checkButton";
+    case WidgetKind::progress_bar: return "progressBar";
+    case WidgetKind::expander: return "expander";
     }
     return "widget";
 }
@@ -335,7 +355,122 @@ void calendar_day_selected(void *, void *data) noexcept
     dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
 }
 
-void drawing_area_pressed(void *gesture, int n_press, double x, double y,
+void check_button_toggled(void *, void *data) noexcept
+{
+    dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
+}
+
+void text_buffer_changed(void *, void *data) noexcept
+{
+    auto *state = static_cast<WidgetState *>(data);
+    if (state && state->entry_set_text_depth == 0)
+        dispatch_widget_callback(state, PRIMARY_CALLBACK);
+}
+
+struct DragInvocation
+{
+    WidgetState *state;
+    const char *phase;
+    double x;
+    double y;
+};
+
+// Protect argument construction as well as the user callback. In particular,
+// interning the phase string can fail before the user function is entered.
+// No Lua error may jump out through GTK's native signal dispatch.
+int invoke_drag_callback(lua_State *L)
+{
+    const auto *call = static_cast<const DragInvocation *>(lua_touserdata(L, 1));
+    // Preparing pcall's frame may run GC before this thunk roots the handle.
+    // The bridge pins WidgetState; a finalizer may still destroy its widget.
+    if (!call->state->native || !call->state->owner || !call->state->handle_key)
+        return 0;
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &widget_handles_key);
+    lua_rawgetp(L, -1, call->state->handle_key);
+    if (lua_type(L, -1) == LUA_TUSERDATA)
+    {
+        lua_getiuservalue(L, -1, 1);
+        lua_rawgeti(L, -1, DRAG_CALLBACK);
+        if (lua_type(L, -1) == LUA_TFUNCTION)
+        {
+            lua_pushstring(L, call->phase);
+            lua_pushnumber(L, call->x);
+            lua_pushnumber(L, call->y);
+            lua_call(L, 3, 0);
+        }
+    }
+    return 0;
+}
+
+void dispatch_drag(WidgetState *state, const char *phase, double x, double y) noexcept
+{
+    if (!state || !state->native || !state->owner || !state->handle_key)
+        return;
+    lua_State *L = state->owner;
+    const int base = lua_gettop(L);
+    retain_state(state);
+    if (!lua_checkstack(L, 2))
+    {
+        std::fputs("babet.gui callback error: cannot grow drag stack\n", stderr);
+        release_state(state);
+        return;
+    }
+    DragInvocation call{state, phase, x, y};
+    lua_pushcfunction(L, invoke_drag_callback);
+    lua_pushlightuserdata(L, &call);
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+        report_callback_error(L);
+    lua_settop(L, base);
+    release_state(state);
+}
+
+void drag_begin(void *gesture, double x, double y, void *data) noexcept
+{
+    auto *state = static_cast<WidgetState *>(data);
+    if (!state || !state->native) return;
+    state->drag_origin_valid = detail::gtk4_gesture_surface_position(
+        gesture, state->drag_origin_x, state->drag_origin_y);
+    state->drag_last_dx = 0.0;
+    state->drag_last_dy = 0.0;
+    // Preserve the existing contract: begin returns widget-local coordinates.
+    dispatch_drag(state, "begin", x, y);
+}
+void drag_motion(void *gesture, double x, double y, void *data,
+                 const char *phase) noexcept
+{
+    auto *state = static_cast<WidgetState *>(data);
+    if (!state || !state->native) return;
+    double current_x = 0.0, current_y = 0.0;
+    if (state->drag_origin_valid)
+    {
+        if (detail::gtk4_gesture_surface_position(gesture, current_x, current_y))
+        {
+            x = current_x - state->drag_origin_x;
+            y = current_y - state->drag_origin_y;
+            state->drag_last_dx = x;
+            state->drag_last_dy = y;
+        }
+        else
+        {
+            // Some backends have no last event by drag-end. Preserve the
+            // most recent stable displacement, not a widget-local fallback.
+            x = state->drag_last_dx;
+            y = state->drag_last_dy;
+        }
+    }
+    if (phase[0] == 'e') state->drag_origin_valid = false;
+    dispatch_drag(state, phase, x, y);
+}
+void drag_update(void *gesture, double x, double y, void *data) noexcept
+{
+    drag_motion(gesture, x, y, data, "update");
+}
+void drag_end(void *gesture, double x, double y, void *data) noexcept
+{
+    drag_motion(gesture, x, y, data, "end");
+}
+
+void widget_pressed(void *gesture, int n_press, double x, double y,
                           void *data) noexcept
 {
     auto *state = static_cast<WidgetState *>(data);
@@ -880,6 +1015,142 @@ int l_box(lua_State *L)
 }
 
 
+// A GtkFixed acts as a canvas of real GTK widgets, not a Cairo bitmap.
+int l_fixed(lua_State *L)
+{
+    if (!lua_arity_is(L, 0))
+        return luaL_error(L, "gui.fixed expects no arguments");
+    require_gui_initialized(L, "gui.fixed");
+    push_empty_widget_userdata(L);
+    return push_native_widget(L, WidgetKind::fixed, detail::gtk4_fixed_new(), true);
+}
+
+int l_text_view(lua_State *L)
+{
+    if (!lua_arity_between(L, 0, 1) ||
+        (lua_gettop(L) == 1 && !lua_isnil(L, 1) && lua_type(L, 1) != LUA_TTABLE))
+        return luaL_error(L, "gui.textView expects an optional options table");
+    require_gui_initialized(L, "gui.textView");
+    const char *text = "";
+    bool editable = true;
+    if (lua_type(L, 1) == LUA_TTABLE)
+    {
+        lua_pushliteral(L, "text");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1)) strict_c_string(L, -1, "gui.textView text", text);
+        lua_pushliteral(L, "editable");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_boolean(L, -1))
+                return luaL_error(L, "gui.textView editable must be a boolean");
+            editable = lua_toboolean(L, -1) != 0;
+        }
+    }
+    push_empty_widget_userdata(L);
+    void *view = detail::gtk4_text_view_new();
+    const int result = push_native_widget(L, WidgetKind::text_view, view, true);
+    if (result != 1) return result;
+    detail::gtk4_text_view_set_editable(view, editable);
+    void *buffer = detail::gtk4_text_view_get_buffer(view);
+    detail::gtk4_text_buffer_set_text(buffer, text);
+    auto *state = static_cast<WidgetUserdata *>(lua_touserdata(L, -1))->state;
+    retain_state(state);
+    if (detail::gtk4_signal_connect(buffer, "changed", gtk_callback(&text_buffer_changed),
+                                    state, &button_signal_released) == 0)
+    {
+        release_state(state);
+        release_construction_reference(state);
+        return push_fail_protected(L, "babet.gui: cannot attach textView changed signal");
+    }
+    return 1;
+}
+
+int l_check_button(lua_State *L)
+{
+    if (!lua_arity_between(L, 0, 1) ||
+        (lua_gettop(L) == 1 && !lua_isnil(L, 1) && lua_type(L, 1) != LUA_TTABLE))
+        return luaL_error(L, "gui.checkButton expects an optional options table");
+    require_gui_initialized(L, "gui.checkButton");
+    const char *label = "";
+    bool active = false;
+    if (lua_type(L, 1) == LUA_TTABLE)
+    {
+        lua_pushliteral(L, "label");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1)) strict_c_string(L, -1, "gui.checkButton label", label);
+        lua_pushliteral(L, "active");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_boolean(L, -1))
+                return luaL_error(L, "gui.checkButton active must be a boolean");
+            active = lua_toboolean(L, -1) != 0;
+        }
+    }
+    push_empty_widget_userdata(L);
+    void *check = detail::gtk4_check_button_new_with_label(label);
+    const int result = push_native_widget(L, WidgetKind::check_button, check, true);
+    if (result != 1) return result;
+    detail::gtk4_check_button_set_active(check, active);
+    auto *state = static_cast<WidgetUserdata *>(lua_touserdata(L, -1))->state;
+    retain_state(state);
+    if (detail::gtk4_signal_connect(check, "toggled", gtk_callback(&check_button_toggled),
+                                    state, &button_signal_released) == 0)
+    {
+        release_state(state);
+        release_construction_reference(state);
+        return push_fail_protected(L, "babet.gui: cannot attach checkButton toggled signal");
+    }
+    return 1;
+}
+
+int l_progress_bar(lua_State *L)
+{
+    if (!lua_arity_is(L, 0))
+        return luaL_error(L, "gui.progressBar expects no arguments");
+    require_gui_initialized(L, "gui.progressBar");
+    push_empty_widget_userdata(L);
+    return push_native_widget(L, WidgetKind::progress_bar, detail::gtk4_progress_bar_new(), true);
+}
+
+int l_expander(lua_State *L)
+{
+    if (!lua_arity_between(L, 0, 1) ||
+        (lua_gettop(L) == 1 && !lua_isnil(L, 1) && lua_type(L, 1) != LUA_TTABLE))
+        return luaL_error(L, "gui.expander expects an optional options table");
+    require_gui_initialized(L, "gui.expander");
+    const char *label = "";
+    bool expanded = false;
+    if (lua_type(L, 1) == LUA_TTABLE)
+    {
+        lua_pushliteral(L, "label");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1)) strict_c_string(L, -1, "gui.expander label", label);
+        lua_pushliteral(L, "expanded");
+        lua_rawget(L, 1);
+        if (!lua_isnil(L, -1))
+        {
+            if (!lua_is_strict_boolean(L, -1))
+                return luaL_error(L, "gui.expander expanded must be a boolean");
+            expanded = lua_toboolean(L, -1) != 0;
+        }
+    }
+    push_empty_widget_userdata(L);
+    void *expander = detail::gtk4_expander_new(label);
+    const int result = push_native_widget(L, WidgetKind::expander, expander, true);
+    if (result != 1) return result;
+    detail::gtk4_expander_set_expanded(expander, expanded);
+    // GtkExpander leaves its child unparented while collapsed. Keep a private
+    // vertical box as that permanent child: user widgets always have a real GTK
+    // parent, so the "already has a GTK parent" check stays reliable. The
+    // expander owns the box; add/remove/clear only touch the box's children.
+    void *content = detail::gtk4_box_new(1, 0);
+    detail::gtk4_expander_set_child(expander, content);
+    static_cast<WidgetUserdata *>(lua_touserdata(L, -1))->state->content = content;
+    return 1;
+}
+
 int l_scrolled_window(lua_State *L)
 {
     if (!lua_arity_is(L, 0))
@@ -1113,7 +1384,7 @@ int l_drawing_area(lua_State *L)
     detail::gtk4_gesture_single_set_button(gesture, 0U);
     retain_state(userdata->state);
     if (detail::gtk4_signal_connect(
-            gesture, "pressed", gtk_callback(&drawing_area_pressed),
+            gesture, "pressed", gtk_callback(&widget_pressed),
             userdata->state, &button_signal_released) == 0)
     {
         release_state(userdata->state);
@@ -1330,6 +1601,282 @@ int draw_text(lua_State *L)
     return draw_result(L, cr);
 }
 
+// Co-ordinates are in GtkFixed canvas units (pixels at scale factor 1).
+void check_canvas_coord(lua_State *L, int index, const char *api)
+{
+    const double value = finite_number(L, index, api);
+    if (value < -10000000.0 || value > 10000000.0)
+        luaL_error(L, "%s: coordinate is out of range", api);
+}
+
+// Reject an ancestor as child before changing either native or Lua ownership.
+// GTK does not protect every container type against parent cycles. Walk
+// Babet's own child lists (uservalue 1) rather than GTK parents: those lists
+// are the complete logical tree, whereas a native parent chain can stop early
+// (GtkExpander historically keeps a collapsed child unparented).
+//
+// Iterative depth-first walk with a Lua table as work list: no C recursion and
+// no depth limit, whatever the shape of the tree. Babet refuses every cycle at
+// insertion time, so the logical tree is acyclic and the walk terminates. It
+// runs before any mutation; a Lua memory error therefore changes nothing.
+bool lua_tree_contains(lua_State *L, int root_index, WidgetState *target)
+{
+    luaL_checkstack(L, 6, "gui: cannot check widget parent cycle");
+    root_index = lua_absindex(L, root_index);
+    lua_createtable(L, 16, 0);
+    const int work = lua_gettop(L);
+    lua_Integer pending = 0;
+    lua_pushvalue(L, root_index);
+    lua_rawseti(L, work, ++pending);
+    bool found = false;
+    while (pending > 0 && !found)
+    {
+        lua_rawgeti(L, work, pending);          // node
+        lua_pushnil(L);
+        lua_rawseti(L, work, pending--);
+        lua_getiuservalue(L, -1, 1);            // node, children (or nil)
+        const lua_Integer count = static_cast<lua_Integer>(lua_rawlen(L, -1));
+        for (lua_Integer i = 1; i <= count && !found; ++i)
+        {
+            lua_rawgeti(L, -1, i);              // node, children, child
+            auto *ud = static_cast<WidgetUserdata *>(
+                luaL_testudata(L, -1, WIDGET_META));
+            if (ud && ud->state == target)
+            {
+                found = true;
+                lua_pop(L, 1);
+            }
+            else if (ud && ud->state)
+                lua_rawseti(L, work, ++pending); // pops child
+            else
+                lua_pop(L, 1);
+        }
+        lua_pop(L, 2);                          // children, node
+    }
+    lua_settop(L, work - 1);
+    return found;
+}
+
+// The child is at stack index 2: refuse if the parent is inside its subtree.
+bool creates_widget_cycle(lua_State *L, WidgetState *parent, WidgetState *child)
+{
+    return parent == child || lua_tree_contains(L, 2, parent);
+}
+
+int fixed_put(lua_State *L)
+{
+    if (!lua_arity_is(L, 4))
+        return luaL_error(L, "gui fixed:put expects child, x, y");
+    WidgetState *fixed = check_kind(L, 1, WidgetKind::fixed, "gui fixed:put");
+    WidgetState *child = check_widget(L, 2, "gui fixed:put");
+    if (child == fixed || child->kind == WidgetKind::window)
+        return luaL_error(L, "gui fixed:put: invalid child widget");
+    if (creates_widget_cycle(L, fixed, child))
+        return luaL_error(L, "gui fixed:put: parent cycle is forbidden");
+    check_canvas_coord(L, 3, "gui fixed:put x");
+    check_canvas_coord(L, 4, "gui fixed:put y");
+    if (detail::gtk4_widget_get_parent(child->native))
+        return luaL_error(L, "gui fixed:put: child already has a GTK parent");
+    lua_getiuservalue(L, 1, 1);
+    const lua_Unsigned count = lua_rawlen(L, -1);
+    if (count >= static_cast<lua_Unsigned>(LUA_MAXINTEGER))
+        return luaL_error(L, "gui fixed:put: too many child handles");
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, static_cast<lua_Integer>(count + 1));
+    lua_pop(L, 1);
+    detail::gtk4_fixed_put(fixed->native, child->native,
+                           lua_tonumber(L, 3), lua_tonumber(L, 4));
+    release_construction_reference(child);
+    return push_ok_protected(L);
+}
+
+int fixed_move(lua_State *L)
+{
+    if (!lua_arity_is(L, 4))
+        return luaL_error(L, "gui fixed:move expects child, x, y");
+    WidgetState *fixed = check_kind(L, 1, WidgetKind::fixed, "gui fixed:move");
+    WidgetState *child = check_widget(L, 2, "gui fixed:move");
+    check_canvas_coord(L, 3, "gui fixed:move x");
+    check_canvas_coord(L, 4, "gui fixed:move y");
+    if (find_child_handle(L, 1, 2) == 0 ||
+        detail::gtk4_widget_get_parent(child->native) != fixed->native)
+        return luaL_error(L, "gui fixed:move: child does not belong to this canvas");
+    detail::gtk4_fixed_move(fixed->native, child->native,
+                            lua_tonumber(L, 3), lua_tonumber(L, 4));
+    return push_ok_protected(L);
+}
+
+int widget_on_drag(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || (!lua_isnil(L, 2) && lua_type(L, 2) != LUA_TFUNCTION))
+        return luaL_error(L, "gui widget:onDrag expects a function or nil");
+    WidgetState *state = check_widget(L, 1, "gui widget:onDrag");
+    if (state->kind == WidgetKind::window)
+        return luaL_error(L, "gui widget:onDrag: windows cannot receive drag gestures");
+    // Interactive widgets own pointer gestures; their click/select/expand
+    // handling can win over our GtkGestureDrag, making callbacks unreliable.
+    if (state->kind != WidgetKind::label && state->kind != WidgetKind::box &&
+        state->kind != WidgetKind::drawing_area && state->kind != WidgetKind::fixed &&
+        state->kind != WidgetKind::progress_bar)
+        return luaL_error(L, "gui widget:onDrag: use a non-interactive widget (label, box, drawingArea, fixed, progressBar)");
+    if (!state->drag_controller_attached && lua_type(L, 2) == LUA_TFUNCTION)
+    {
+        void *gesture = detail::gtk4_gesture_drag_new();
+        if (!gesture) return push_fail_protected(L, "babet.gui: cannot create drag gesture");
+        // GTK takes ownership of the controller. The signal closures each retain
+        // a logical reference until GTK releases that controller.
+        state->drag_controller_attached = true;
+        const char *signals[] = {"drag-begin", "drag-update", "drag-end"};
+        const detail::GtkCallback callbacks[] = {
+            gtk_callback(&drag_begin), gtk_callback(&drag_update), gtk_callback(&drag_end)};
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            retain_state(state);
+            if (detail::gtk4_signal_connect(gesture, signals[i], callbacks[i],
+                                            state, &button_signal_released) == 0)
+            {
+                release_state(state);
+                state->drag_controller_attached = false;
+                detail::gtk4_object_unref(gesture);
+                return push_fail_protected(L, "babet.gui: cannot attach drag gesture");
+            }
+        }
+        detail::gtk4_widget_add_controller(state->native, gesture);
+    }
+    lua_getiuservalue(L, 1, 1);
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, DRAG_CALLBACK);
+    return push_ok_protected(L);
+}
+
+int widget_set_size_request(lua_State *L)
+{
+    if (!lua_arity_is(L, 3))
+        return luaL_error(L, "gui widget:setSizeRequest expects width, height");
+    WidgetState *state = check_widget(L, 1, "gui widget:setSizeRequest");
+    int sizes[2];
+    for (int i = 0; i < 2; ++i)
+    {
+        if (!lua_is_strict_integer(L, i + 2))
+            return luaL_error(L, "gui widget:setSizeRequest: sizes must be integers");
+        const lua_Integer value = lua_tointeger(L, i + 2);
+        if (value < -1 || value > INT_MAX)
+            return luaL_error(L, "gui widget:setSizeRequest: size out of range");
+        sizes[i] = static_cast<int>(value);
+    }
+    detail::gtk4_widget_set_size_request(state->native, sizes[0], sizes[1]);
+    return push_ok_protected(L);
+}
+
+int check_get_active(lua_State *L)
+{
+    if (!lua_arity_is(L, 1)) return luaL_error(L, "gui checkButton:getActive expects no arguments");
+    WidgetState *state = check_kind(L, 1, WidgetKind::check_button, "gui checkButton:getActive", false);
+    lua_pushboolean(L, detail::gtk4_check_button_get_active(state->native));
+    return 1;
+}
+
+int check_set_active(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || !lua_is_strict_boolean(L, 2))
+        return luaL_error(L, "gui checkButton:setActive expects one boolean");
+    WidgetState *state = check_kind(L, 1, WidgetKind::check_button, "gui checkButton:setActive");
+    retain_state(state);
+    void *native = detail::gtk4_object_ref_sink(state->native);
+    lua_State *previous = state->callback_thread;
+    state->callback_thread = L;
+    detail::gtk4_check_button_set_active(native, lua_toboolean(L, 2) != 0);
+    state->callback_thread = previous;
+    detail::gtk4_object_unref(native);
+    release_state(state);
+    return push_ok_protected(L);
+}
+
+int progress_get_fraction(lua_State *L)
+{
+    if (!lua_arity_is(L, 1)) return luaL_error(L, "gui progressBar:getFraction expects no arguments");
+    WidgetState *state = check_kind(L, 1, WidgetKind::progress_bar, "gui progressBar:getFraction", false);
+    lua_pushnumber(L, detail::gtk4_progress_bar_get_fraction(state->native));
+    return 1;
+}
+
+int progress_set_fraction(lua_State *L)
+{
+    if (!lua_arity_is(L, 2)) return luaL_error(L, "gui progressBar:setFraction expects a fraction");
+    WidgetState *state = check_kind(L, 1, WidgetKind::progress_bar, "gui progressBar:setFraction");
+    const double value = finite_number(L, 2, "gui progressBar:setFraction");
+    if (value < 0.0 || value > 1.0)
+        return luaL_error(L, "gui progressBar:setFraction expects a number from 0 to 1");
+    detail::gtk4_progress_bar_set_fraction(state->native, value);
+    return push_ok_protected(L);
+}
+
+int progress_show_text(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || !lua_is_strict_boolean(L, 2))
+        return luaL_error(L, "gui progressBar:setShowText expects one boolean");
+    WidgetState *state = check_kind(L, 1, WidgetKind::progress_bar, "gui progressBar:setShowText");
+    detail::gtk4_progress_bar_set_show_text(state->native, lua_toboolean(L, 2) != 0);
+    return push_ok_protected(L);
+}
+
+int expander_get_expanded(lua_State *L)
+{
+    if (!lua_arity_is(L, 1)) return luaL_error(L, "gui expander:getExpanded expects no arguments");
+    WidgetState *state = check_kind(L, 1, WidgetKind::expander, "gui expander:getExpanded", false);
+    lua_pushboolean(L, detail::gtk4_expander_get_expanded(state->native));
+    return 1;
+}
+
+int expander_set_expanded(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || !lua_is_strict_boolean(L, 2))
+        return luaL_error(L, "gui expander:setExpanded expects one boolean");
+    WidgetState *state = check_kind(L, 1, WidgetKind::expander, "gui expander:setExpanded");
+    detail::gtk4_expander_set_expanded(state->native, lua_toboolean(L, 2) != 0);
+    return push_ok_protected(L);
+}
+
+// g_object_get transfers an allocated copy to us. Release it even if the
+// following C++ string allocation throws, before reporting the error to Lua.
+std::string text_view_snapshot(void *view)
+{
+    const std::unique_ptr<char, decltype(&detail::gtk4_free)> raw(
+        detail::gtk4_text_buffer_dup_text(detail::gtk4_text_view_get_buffer(view)),
+        &detail::gtk4_free);
+    if (!raw) return {};
+    return std::string(raw.get());
+}
+
+// Only use across native operations and protected Lua callbacks: a raw Lua
+// longjmp would bypass C++ destructors. TextView's post-write snapshot can
+// throw, so its native/logical pins and callback thread need scoped cleanup.
+class ScopedWidgetCallback
+{
+public:
+    ScopedWidgetCallback(WidgetState *state, lua_State *caller) noexcept
+        : state_(state), native_(detail::gtk4_object_ref_sink(state->native)),
+          previous_(state->callback_thread)
+    {
+        retain_state(state_);
+        state_->callback_thread = caller;
+    }
+    ~ScopedWidgetCallback()
+    {
+        state_->callback_thread = previous_;
+        detail::gtk4_object_unref(native_);
+        release_state(state_);
+    }
+    ScopedWidgetCallback(const ScopedWidgetCallback &) = delete;
+    ScopedWidgetCallback &operator=(const ScopedWidgetCallback &) = delete;
+    void *native() const noexcept { return native_; }
+
+private:
+    WidgetState *state_;
+    void *native_;
+    lua_State *previous_;
+};
+
 int widget_add(lua_State *L)
 {
     if (!lua_arity_is(L, 2))
@@ -1339,21 +1886,23 @@ int widget_add(lua_State *L)
     if (parent == child)
         return luaL_error(L, "gui widget:add: a widget cannot contain itself");
     if (parent->kind != WidgetKind::window && parent->kind != WidgetKind::box &&
-        parent->kind != WidgetKind::scrolled_window)
-        return luaL_error(L, "gui widget:add: parent must be a window, box or scrolledWindow");
+        parent->kind != WidgetKind::scrolled_window && parent->kind != WidgetKind::expander)
+        return luaL_error(L, "gui widget:add: parent must be a window, box, scrolledWindow or expander");
     if (child->kind == WidgetKind::window)
         return luaL_error(L, "gui widget:add: a window cannot be a child widget");
     if (detail::gtk4_widget_get_parent(child->native) != nullptr)
         return luaL_error(L, "gui widget:add: child already has a GTK parent");
+    if (creates_widget_cycle(L, parent, child))
+        return luaL_error(L, "gui widget:add: parent cycle is forbidden");
 
     // Root the Lua child BEFORE GTK takes ownership. A Lua OOM therefore leaves
     // the native hierarchy unchanged.
     lua_getiuservalue(L, 1, 1);
     const lua_Unsigned count = lua_rawlen(L, -1);
-    if (parent->kind == WidgetKind::scrolled_window && count != 0)
+    if ((parent->kind == WidgetKind::scrolled_window || parent->kind == WidgetKind::expander) && count != 0)
     {
         lua_pop(L, 1);
-        return luaL_error(L, "gui widget:add: scrolledWindow already has a child");
+        return luaL_error(L, "gui widget:add: %s already has a child", kind_name(parent->kind));
     }
     if (count >= static_cast<lua_Unsigned>(LUA_MAXINTEGER))
     {
@@ -1368,9 +1917,66 @@ int widget_add(lua_State *L)
         detail::gtk4_window_set_child(parent->native, child->native);
     else if (parent->kind == WidgetKind::box)
         detail::gtk4_box_append(parent->native, child->native);
-    else
+    else if (parent->kind == WidgetKind::scrolled_window)
         detail::gtk4_scrolled_window_set_child(parent->native, child->native);
+    else
+        detail::gtk4_box_append(parent->content, child->native);
     release_construction_reference(child);
+    return push_ok_protected(L);
+}
+
+// Reorder an existing box child in place. No GtkWidget is detached,
+// destroyed, recreated, or given a new Lua owner. The Lua child list follows
+// the native visual ordering, including after later remove()/clear() calls.
+int box_reorder(lua_State *L)
+{
+    if (!lua_arity_is(L, 3))
+        return luaL_error(L, "gui box:reorder expects child, previousChild or nil");
+    WidgetState *box = check_kind(L, 1, WidgetKind::box, "gui box:reorder");
+    WidgetState *child = check_widget(L, 2, "gui box:reorder child");
+    if (child->kind == WidgetKind::window)
+        return luaL_error(L, "gui box:reorder: windows cannot be box children");
+    WidgetState *previous = nullptr;
+    if (!lua_isnil(L, 3))
+    {
+        previous = check_widget(L, 3, "gui box:reorder previousChild");
+    }
+    const lua_Integer from = find_child_handle(L, 1, 2);
+    if (from == 0 || detail::gtk4_widget_get_parent(child->native) != box->native)
+        return luaL_error(L, "gui box:reorder: child does not belong to this box");
+    const lua_Integer after = previous ? find_child_handle(L, 1, 3) : 0;
+    if (previous && (after == 0 || detail::gtk4_widget_get_parent(previous->native) != box->native))
+        return luaL_error(L, "gui box:reorder: previousChild does not belong to this box");
+    if (previous == child)
+        return push_ok_protected(L); // valid member, no-op
+    const lua_Integer to = after == 0 ? 1 : (after < from ? after + 1 : after);
+    if (from == to)
+        return push_ok_protected(L);
+
+    // Existing integer keys are overwritten in place; no extra ownership and
+    // no Lua allocation between the table update and the native GTK call.
+    lua_getiuservalue(L, 1, 1);
+    if (to < from)
+    {
+        for (lua_Integer i = from; i > to; --i)
+        {
+            lua_rawgeti(L, -1, i - 1);
+            lua_rawseti(L, -2, i);
+        }
+    }
+    else
+    {
+        for (lua_Integer i = from; i < to; ++i)
+        {
+            lua_rawgeti(L, -1, i + 1);
+            lua_rawseti(L, -2, i);
+        }
+    }
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, to);
+    lua_pop(L, 1);
+    detail::gtk4_box_reorder_child_after(box->native, child->native,
+                                         previous ? previous->native : nullptr);
     return push_ok_protected(L);
 }
 
@@ -1380,8 +1986,9 @@ int widget_remove(lua_State *L)
         return luaL_error(L, "gui container:remove expects one child widget");
     WidgetState *parent = check_widget(L, 1, "gui container:remove");
     WidgetState *child = check_widget(L, 2, "gui container:remove");
-    if (parent->kind != WidgetKind::box && parent->kind != WidgetKind::scrolled_window)
-        return luaL_error(L, "gui container:remove: parent must be a box or scrolledWindow");
+    if (parent->kind != WidgetKind::box && parent->kind != WidgetKind::scrolled_window &&
+        parent->kind != WidgetKind::fixed && parent->kind != WidgetKind::expander)
+        return luaL_error(L, "gui container:remove: parent must be a box or scrolledWindow, fixed or expander");
     const lua_Integer index = find_child_handle(L, 1, 2);
     if (index == 0)
         return luaL_error(L, "gui container:remove: child does not belong to this container");
@@ -1392,8 +1999,12 @@ int widget_remove(lua_State *L)
     acquire_construction_reference(child);
     if (parent->kind == WidgetKind::box)
         detail::gtk4_box_remove(parent->native, child->native);
-    else
+    else if (parent->kind == WidgetKind::scrolled_window)
         detail::gtk4_scrolled_window_set_child(parent->native, nullptr);
+    else if (parent->kind == WidgetKind::fixed)
+        detail::gtk4_fixed_remove(parent->native, child->native);
+    else
+        detail::gtk4_box_remove(parent->content, child->native);
     erase_child_handle(L, 1, index);
     return push_ok_protected(L);
 }
@@ -1403,8 +2014,9 @@ int widget_clear(lua_State *L)
     if (!lua_arity_is(L, 1))
         return luaL_error(L, "gui container:clear expects no arguments");
     WidgetState *parent = check_widget(L, 1, "gui container:clear");
-    if (parent->kind != WidgetKind::box && parent->kind != WidgetKind::scrolled_window)
-        return luaL_error(L, "gui container:clear: parent must be a box or scrolledWindow");
+    if (parent->kind != WidgetKind::box && parent->kind != WidgetKind::scrolled_window &&
+        parent->kind != WidgetKind::fixed && parent->kind != WidgetKind::expander)
+        return luaL_error(L, "gui container:clear: parent must be a box or scrolledWindow, fixed or expander");
 
     lua_getiuservalue(L, 1, 1);
     const lua_Integer count = static_cast<lua_Integer>(lua_rawlen(L, -1));
@@ -1419,8 +2031,12 @@ int widget_clear(lua_State *L)
         acquire_construction_reference(child);
         if (parent->kind == WidgetKind::box)
             detail::gtk4_box_remove(parent->native, child->native);
-        else
+        else if (parent->kind == WidgetKind::scrolled_window)
             detail::gtk4_scrolled_window_set_child(parent->native, nullptr);
+        else if (parent->kind == WidgetKind::fixed)
+            detail::gtk4_fixed_remove(parent->native, child->native);
+        else
+            detail::gtk4_box_remove(parent->content, child->native);
     }
     for (lua_Integer i = count; i >= 1; --i)
     {
@@ -1469,8 +2085,26 @@ int widget_set_text(lua_State *L)
         detail::gtk4_object_unref(native);
         release_state(state);
     }
+    else if (state->kind == WidgetKind::text_view)
+    {
+        const std::string before = text_view_snapshot(state->native);
+        const ScopedWidgetCallback callback(state, L);
+        void *native = callback.native();
+        ++state->entry_set_text_depth;
+        detail::gtk4_text_buffer_set_text(detail::gtk4_text_view_get_buffer(native), text);
+        --state->entry_set_text_depth;
+        const bool changed = before != text_view_snapshot(native);
+        if (changed && state->native)
+            dispatch_widget_callback(state, PRIMARY_CALLBACK);
+    }
+    else if (state->kind == WidgetKind::check_button)
+        detail::gtk4_check_button_set_label(state->native, text);
+    else if (state->kind == WidgetKind::expander)
+        detail::gtk4_expander_set_label(state->native, text);
+    else if (state->kind == WidgetKind::progress_bar)
+        detail::gtk4_progress_bar_set_text(state->native, text);
     else
-        return luaL_error(L, "gui widget:setText: only label, button and entry support text");
+        return luaL_error(L, "gui widget:setText: only label, button, entry, textView, checkButton, progressBar and expander support text");
     return push_ok_protected(L);
 }
 
@@ -1480,23 +2114,49 @@ int button_on_click(lua_State *L)
         return luaL_error(L, "gui widget:onClick expects one function or nil");
 
     WidgetState *state = check_widget(L, 1, "gui widget:onClick");
-    lua_Integer slot = PRIMARY_CALLBACK;
+    if (state->kind != WidgetKind::button &&
+        state->kind != WidgetKind::drawing_area &&
+        state->kind != WidgetKind::progress_bar)
+        return luaL_error(L,
+            "gui widget:onClick: expected a button, drawingArea or progressBar handle");
 
-    if (state->kind == WidgetKind::drawing_area)
+    lua_Integer slot = PRIMARY_CALLBACK;
+    if (state->kind == WidgetKind::drawing_area ||
+        state->kind == WidgetKind::progress_bar)
     {
         if (!lua_isnil(L, 2) && lua_type(L, 2) != LUA_TFUNCTION)
             return luaL_error(L,
-                "gui drawingArea:onClick expects one function or nil");
+                "gui drawingArea/progressBar:onClick expects one function or nil");
         slot = CLICK_CALLBACK;
     }
-    else
+    else if (lua_type(L, 2) != LUA_TFUNCTION)
     {
-        if (lua_type(L, 2) != LUA_TFUNCTION)
-            return luaL_error(L, "gui button:onClick expects one function");
-        if (state->kind != WidgetKind::button)
-            return luaL_error(L, "gui button:onClick: expected a button handle");
+        return luaL_error(L, "gui button:onClick expects one function");
     }
 
+    // Do not change GtkProgressBar behavior for existing passive/progress
+    // displays: install the native controller only when onClick(fn) is asked
+    // for. Mirrors the onDrag gesture's lazy initialization.
+    if (state->kind == WidgetKind::progress_bar &&
+        lua_type(L, 2) == LUA_TFUNCTION && !state->click_controller_attached)
+    {
+        void *gesture = detail::gtk4_gesture_click_new();
+        if (!gesture)
+            return push_fail_protected(L, "babet.gui: cannot create progressBar click gesture");
+        // Primary mouse button only; no fake activation on right-click.
+        detail::gtk4_gesture_single_set_button(gesture, 1U);
+        retain_state(state);
+        if (detail::gtk4_signal_connect(
+                gesture, "pressed", gtk_callback(&widget_pressed),
+                state, &button_signal_released) == 0)
+        {
+            release_state(state);
+            detail::gtk4_object_unref(gesture);
+            return push_fail_protected(L, "babet.gui: cannot attach progressBar click signal");
+        }
+        detail::gtk4_widget_add_controller(state->native, gesture);
+        state->click_controller_attached = true;
+    }
     lua_getiuservalue(L, 1, 1);
     lua_pushvalue(L, 2);
     lua_rawseti(L, -2, slot);
@@ -1507,7 +2167,11 @@ int entry_get_text(lua_State *L)
 {
     if (!lua_arity_is(L, 1))
         return luaL_error(L, "gui entry:getText expects no arguments");
-    WidgetState *state = check_kind(L, 1, WidgetKind::entry, "gui entry:getText", false);
+    WidgetState *state = check_widget(L, 1, "gui widget:getText", false);
+    if (state->kind == WidgetKind::text_view)
+        return push_string_protected(L, text_view_snapshot(state->native));
+    if (state->kind != WidgetKind::entry)
+        (void)check_kind(L, 1, WidgetKind::entry, "gui entry:getText", false);
     // Own a snapshot before any Lua allocation/GC can change the GTK buffer.
     const std::string text(detail::gtk4_editable_get_text(state->native));
     return push_string_protected(L, text);
@@ -1528,8 +2192,13 @@ int entry_set_editable(lua_State *L)
 {
     if (!lua_arity_is(L, 2) || !lua_is_strict_boolean(L, 2))
         return luaL_error(L, "gui entry:setEditable expects one boolean");
-    WidgetState *state = check_kind(L, 1, WidgetKind::entry, "gui entry:setEditable");
-    detail::gtk4_editable_set_editable(state->native, lua_toboolean(L, 2) != 0);
+    WidgetState *state = check_widget(L, 1, "gui widget:setEditable");
+    if (state->kind == WidgetKind::entry)
+        detail::gtk4_editable_set_editable(state->native, lua_toboolean(L, 2) != 0);
+    else if (state->kind == WidgetKind::text_view)
+        detail::gtk4_text_view_set_editable(state->native, lua_toboolean(L, 2) != 0);
+    else
+        (void)check_kind(L, 1, WidgetKind::entry, "gui entry:setEditable");
     return push_ok_protected(L);
 }
 
@@ -1550,10 +2219,11 @@ int widget_on_changed(lua_State *L)
         return luaL_error(L, "gui widget:onChanged expects one function or nil");
     WidgetState *state = check_widget(L, 1, "gui widget:onChanged");
     if (state->kind != WidgetKind::entry && state->kind != WidgetKind::spin_button &&
-        state->kind != WidgetKind::calendar)
+        state->kind != WidgetKind::calendar && state->kind != WidgetKind::text_view &&
+        state->kind != WidgetKind::check_button)
         return luaL_error(
             L,
-            "gui widget:onChanged: expected an entry handle, spinButton handle or calendar handle");
+            "gui widget:onChanged: expected an entry handle, textView, checkButton, spinButton or calendar");
     lua_getiuservalue(L, 1, 1);
     lua_pushvalue(L, 2);
     lua_rawseti(L, -2, PRIMARY_CALLBACK);
@@ -2011,14 +2681,38 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "__gc");
         lua_pushcfunction(L, gui_lua_boundary<widget_add>);
         lua_setfield(L, -2, "add");
+        lua_pushcfunction(L, gui_lua_boundary<fixed_put>);
+        lua_setfield(L, -2, "put");
+        lua_pushcfunction(L, gui_lua_boundary<fixed_move>);
+        lua_setfield(L, -2, "move");
+        lua_pushcfunction(L, gui_lua_boundary<widget_on_drag>);
+        lua_setfield(L, -2, "onDrag");
+        lua_pushcfunction(L, gui_lua_boundary<widget_set_size_request>);
+        lua_setfield(L, -2, "setSizeRequest");
         lua_pushcfunction(L, gui_lua_boundary<widget_remove>);
         lua_setfield(L, -2, "remove");
+        lua_pushcfunction(L, gui_lua_boundary<box_reorder>);
+        lua_setfield(L, -2, "reorder");
         lua_pushcfunction(L, gui_lua_boundary<widget_clear>);
         lua_setfield(L, -2, "clear");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_text>);
         lua_setfield(L, -2, "setText");
         lua_pushcfunction(L, gui_lua_boundary<entry_get_text>);
         lua_setfield(L, -2, "getText");
+        lua_pushcfunction(L, gui_lua_boundary<check_get_active>);
+        lua_setfield(L, -2, "getActive");
+        lua_pushcfunction(L, gui_lua_boundary<check_set_active>);
+        lua_setfield(L, -2, "setActive");
+        lua_pushcfunction(L, gui_lua_boundary<progress_get_fraction>);
+        lua_setfield(L, -2, "getFraction");
+        lua_pushcfunction(L, gui_lua_boundary<progress_set_fraction>);
+        lua_setfield(L, -2, "setFraction");
+        lua_pushcfunction(L, gui_lua_boundary<progress_show_text>);
+        lua_setfield(L, -2, "setShowText");
+        lua_pushcfunction(L, gui_lua_boundary<expander_get_expanded>);
+        lua_setfield(L, -2, "getExpanded");
+        lua_pushcfunction(L, gui_lua_boundary<expander_set_expanded>);
+        lua_setfield(L, -2, "setExpanded");
         lua_pushcfunction(L, gui_lua_boundary<entry_set_placeholder>);
         lua_setfield(L, -2, "setPlaceholder");
         lua_pushcfunction(L, gui_lua_boundary<entry_set_editable>);
@@ -2073,6 +2767,16 @@ void register_gui(lua_State *L)
     lua_setfield(L, -2, "window");
     lua_pushcfunction(L, gui_lua_boundary<l_box>);
     lua_setfield(L, -2, "box");
+    lua_pushcfunction(L, gui_lua_boundary<l_fixed>);
+    lua_setfield(L, -2, "fixed");
+    lua_pushcfunction(L, gui_lua_boundary<l_text_view>);
+    lua_setfield(L, -2, "textView");
+    lua_pushcfunction(L, gui_lua_boundary<l_check_button>);
+    lua_setfield(L, -2, "checkButton");
+    lua_pushcfunction(L, gui_lua_boundary<l_progress_bar>);
+    lua_setfield(L, -2, "progressBar");
+    lua_pushcfunction(L, gui_lua_boundary<l_expander>);
+    lua_setfield(L, -2, "expander");
     lua_pushcfunction(L, gui_lua_boundary<l_scrolled_window>);
     lua_setfield(L, -2, "scrolledWindow");
     lua_pushcfunction(L, gui_lua_boundary<l_label>);

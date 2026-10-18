@@ -70,8 +70,8 @@ def finish_with_timeout(child, timeout, stdout_prefix=b"", stderr_prefix=b""):
     return stdout_prefix + stdout, stderr_prefix + stderr
 
 
-def wait_for_ready(child, timeout):
-    """Wait for the Lua probe's first completed DrawingArea onDraw callback."""
+def wait_for_ready(child, timeout, marker=READY_MARKER):
+    """Wait for the probe readiness marker (default: legacy GTK probe)."""
     deadline = time.monotonic() + timeout
     stdout = bytearray()
     stderr = bytearray()
@@ -80,7 +80,7 @@ def wait_for_ready(child, timeout):
     selector.register(child.stderr, selectors.EVENT_READ, stderr)
     try:
         while time.monotonic() < deadline:
-            if READY_MARKER in stdout:
+            if marker in stdout:
                 return bytes(stdout), bytes(stderr)
             remaining = max(0.0, deadline - time.monotonic())
             events = selector.select(min(0.2, remaining))
@@ -93,7 +93,7 @@ def wait_for_ready(child, timeout):
                         selector.unregister(key.fileobj)
                     except KeyError:
                         pass
-            if READY_MARKER in stdout:
+            if marker in stdout:
                 return bytes(stdout), bytes(stderr)
             if child.poll() is not None and not selector.get_map():
                 break
@@ -205,7 +205,7 @@ def find_window(x11, display, target):
     return visit(root)
 
 
-def click_center_twice(x11, xtst, display, window):
+def click_center(x11, xtst, display, window, count=2):
     root_return = ctypes.c_ulong()
     x = ctypes.c_int()
     y = ctypes.c_int()
@@ -232,7 +232,7 @@ def click_center_twice(x11, xtst, display, window):
     py = root_y.value + max(1, height.value // 2)
     if not xtst.XTestFakeMotionEvent(display, -1, px, py, 0):
         raise AssertionError("XTestFakeMotionEvent failed")
-    for _ in range(2):
+    for _ in range(count):
         if not xtst.XTestFakeButtonEvent(display, 1, 1, 0):
             raise AssertionError("XTestFakeButtonEvent press failed")
         if not xtst.XTestFakeButtonEvent(display, 1, 0, 0):
@@ -365,20 +365,53 @@ def main():
                 + format_output(stdout, stderr)
             )
 
-        click_center_twice(x11, xtst, display, window)
+        click_center(x11, xtst, display, window)
         stdout, stderr = finish_with_timeout(
             child, 20, stdout_prefix, stderr_prefix
         )
         stdout_text = decode(stdout)
-        if child.returncode == 0 and "REAL_GTK_CONTRACT_OK" in stdout_text:
-            print("[PASS] real GTK4: containers, Entry coalescing, SpinButton, Calendar and CSS")
-            print("[PASS] real GTK4: DrawingArea Cairo draw and real double-click n_press")
-            print("real GTK4 regression: 2 PASS / 0 FAIL")
-            return 0
-        raise AssertionError(
-            f"real GTK4 probe failed with exit {child.returncode}\n"
-            + format_output(stdout, stderr)
+        if child.returncode != 0 or "REAL_GTK_CONTRACT_OK" not in stdout_text:
+            raise AssertionError(
+                f"real GTK4 probe failed with exit {child.returncode}\n"
+                + format_output(stdout, stderr)
+            )
+        print("[PASS] real GTK4: containers, Entry coalescing, SpinButton, Calendar and CSS")
+        print("[PASS] real GTK4: DrawingArea Cairo draw and real double-click n_press")
+
+        # Independent native GtkProgressBar gesture. The main GTK probe has
+        # already exited; reuse the same private Xvfb server and input helper.
+        child = subprocess.Popen(
+            [binary, str(ROOT / "tests/gui/real_gtk_progress.lua")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
         )
+        progress_out, progress_err = wait_for_ready(
+            child, 20, marker=b"REAL_GTK_PROGRESS_READY\n"
+        )
+        progress_window = None
+        for _ in range(150):
+            if child.poll() is not None:
+                break
+            progress_window = find_window(x11, display, "Babet real GTK progress probe")
+            if progress_window is not None:
+                break
+            time.sleep(0.04)
+        if progress_window is None:
+            stdout, stderr = kill_and_collect(child, progress_out, progress_err)
+            raise AssertionError("native progress window not found\n" + format_output(stdout, stderr))
+        # The window may be mapped before its first layout; let GTK draw the
+        # progress widget before injecting the four primary-button clicks.
+        time.sleep(0.25)
+        click_center(x11, xtst, display, progress_window, count=4)
+        stdout, stderr = finish_with_timeout(child, 8, progress_out, progress_err)
+        if child.returncode != 0 or "REAL_GTK_PROGRESS_OK" not in decode(stdout):
+            raise AssertionError(
+                f"real GTK4 progress failed with exit {child.returncode}\n"
+                + format_output(stdout, stderr)
+            )
+        print("[PASS] real GTK4: progressBar receives four real primary clicks")
+        print("real GTK4 regression: 3 PASS / 0 FAIL")
+        return 0
     finally:
         if display:
             x11.XCloseDisplay(display)

@@ -447,3 +447,80 @@ linker is required at application launch or `--create-exe` time.
 
 This GUI-only exception does not change the autonomy of scripts and generated
 applications that do not use `babet.gui`.
+
+
+## GTK4 additions — freely positioned notes (2.29.0)
+
+These are **general-purpose** GUI components, with no built-in task database.
+The application is responsible for storing note contents and positions.
+
+* `gui.fixed()` is a free-position canvas: `canvas:put(child, x, y)`,
+  `canvas:move(child, x, y)`, `canvas:remove(child)`, `canvas:clear()`.
+* `gui.textView {text="...", editable=true}` supports `getText()`, `setText()`,
+  `setEditable(boolean)`, `onChanged(callback or nil)`.
+* `gui.checkButton {label="...", active=false}` supports `getActive()`,
+  `setActive(boolean)`, `setText(label)`, `onChanged(callback or nil)`.
+* `gui.progressBar()` supports `setFraction(0..1)`, `getFraction()`,
+  `setShowText(boolean)`, `setText(label)`, `onClick(callback or nil)`.
+* `gui.expander {label="...", expanded=false}` supports `add(child)` (one child),
+  `remove(child)`, `clear()`, `setExpanded(boolean)`, `getExpanded()`, `setText(label)`.
+* On a non-interactive label, box, drawingArea, fixed or progressBar, `onDrag(function(phase, x, y) ... end or nil)`
+  installs a drag gesture. `"begin"` sends widget-local start coordinates;
+  `"update"` and `"end"` send offsets from the drag start in stable GTK surface coordinates, even when the handle moves. The application
+  moves the desired widget using `canvas:move(...)`. Install on a title/drag
+  handle instead of on interactive controls (button, entry, checkButton, textView, expander, etc.).
+* All widgets support `setSizeRequest(width, height)`; `-1` means automatic
+  sizing. Canvas coordinates must be finite and between ±10,000,000.
+
+A child removed from the fixed canvas remains usable. For a scrolling area,
+put `gui.fixed()` inside `gui.scrolledWindow()` and request sufficient canvas
+size. GTK4 does not automatically arrange children inside `GtkFixed`.
+
+Working example: [`examples/gui_free_notes/main.lua`](../../../examples/gui_free_notes/main.lua).
+
+
+## Native clickable progress bars and in-place list reordering
+
+Babet exposes the real GTK4 `GtkProgressBar` and
+`gtk_box_reorder_child_after()`; no custom drawing or remove/recreate
+workarounds are needed.
+
+- `progressBar:onClick(function_or_nil)` installs or clears a protected
+  callback receiving `(x, y, button, n_press)` on **primary-button press**.
+  Coordinates are widget-local. `n_press` is GTK's consecutive-click counter,
+  **not** the total number of application steps. The application maintains its
+  own step count and calls `setFraction(0..1)`. Automatic calculated progress
+  remains fully supported. The label to the right is a separate `gui.label()`.
+  A progress bar is not a keyboard-activatable button: when progression is an
+  action rather than display-only feedback, provide an equivalent real button
+  or another keyboard-accessible control as well.
+- `box:reorder(child, previousChild_or_nil)` moves an **existing** child of
+  the same `gui.box` natively and in place. The second argument is required:
+  pass `nil` explicitly for first position;
+  otherwise the widget goes immediately after `previousChild`. Ownership and
+  callbacks are unchanged, and Babet's Lua child order stays in sync. Invalid
+  children are rejected without mutation. A no-op succeeds.
+
+```lua
+local bar, text = assert(gui.progressBar()), assert(gui.label("The graphics"))
+local row = assert(gui.box {orientation = "horizontal", spacing = 8})
+assert(row:add(bar)); assert(row:add(text))
+assert(bar:setHExpand(true))
+local count = 0
+assert(bar:onClick(function(x, y, button, n_press)
+    count = math.min(4, count + 1)
+    assert(bar:setFraction(count / 4))
+    if count == 4 then assert(text:addClass("completed")) end
+end))
+-- Move the last checklist row immediately after the first one:
+assert(list:reorder(last, first))
+```
+
+For native text strikethrough styling apply GTK CSS such as:
+`label.completed, checkbutton.completed label { text-decoration-line: line-through; }`.
+A check button's `onChanged()` handler can add/remove its `completed` class.
+
+`box:reorder` is a low-level **native** ordering primitive, not a complete
+GtkDragSource/GtkDropTarget drag-and-drop system. A future rich reordering UI
+can add explicit native drop controllers and insertion indicators without
+changing this API or faking the widget hierarchy.

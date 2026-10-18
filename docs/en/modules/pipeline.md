@@ -344,7 +344,12 @@ local pipeline <close> = assert(babet.spawnPipeline({
 ```
 
 GC is a safety net, not a synchronization mechanism. Use `wait()`,
-`terminate()`, or `close()` explicitly when cleanup timing matters.
+`terminate()`, or `close()` explicitly when cleanup timing matters. When the
+pipeline is already known to be finished, call `wait()` (or observe
+`is_running() == false`) before `close()` if immediate closure matters: this
+lets Babet use the completed-pipeline fast path. Calling `close()` without
+having reaped a merely-finished pipeline may still spend the normal 0.5 s grace
+period protecting process-group cleanup.
 
 ## Launch errors and reuse
 

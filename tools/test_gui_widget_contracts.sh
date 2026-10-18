@@ -62,6 +62,11 @@ check "widget CSS classes are exposed" contains "$IMPL" '"addClass"'
 check "widget CSS class removal is exposed" contains "$IMPL" '"removeClass"'
 check "loader resolves GtkBox append" contains "$LOADER" 'gtk_box_append'
 check "loader resolves GtkBox remove" contains "$LOADER" 'gtk_box_remove'
+check "loader resolves native GtkBox in-place reorder" contains "$LOADER" 'gtk_box_reorder_child_after'
+check "Lua exposes native GtkBox reorder" contains "$IMPL" 'box_reorder'
+check "GtkProgressBar click uses GTK click gestures" contains "$IMPL" 'cannot attach progressBar click signal'
+check "native list and progress test is reached" contains "${ROOT}/tools/test_gui_widgets.py" 'native_list_contract.lua'
+check "native progress integration uses XTest" contains "${ROOT}/tools/test_gui_real_gtk.py" 'real_gtk_progress.lua'
 check "loader resolves GtkScrolledWindow child setter" contains "$LOADER" 'gtk_scrolled_window_set_child'
 check "loader resolves GtkSpinButton range constructor" contains "$LOADER" 'gtk_spin_button_new_with_range'
 check "loader resolves GtkCalendar selection" contains "$LOADER" 'gtk_calendar_select_day'
@@ -77,6 +82,10 @@ check "loader resolves GLib main-context iteration" contains "$LOADER" 'g_main_c
 check "runtime harness includes widget contract preflight" contains "$RUN" 'tools/test_gui_widget_contracts.sh'
 check "runtime harness includes expanded GUI widget regression" contains "$RUN" 'tools/test_gui_widgets.py'
 check "runtime harness includes optional real GTK regression" contains "$RUN" 'tools/test_gui_real_gtk.py'
+check "free-layout runtime suites are exercised" contains "${ROOT}/tools/test_gui_widgets.py" 'free_layout_drag.lua'
+check "real GTK moving-handle regression is exercised" contains "$RUN" 'tools/test_gui_real_drag.py'
+check "real GTK drag converts move errors into immediate test failures" contains "${ROOT}/tests/gui/real_gtk_drag.lua" 'pcall(canvas.move, canvas, block, x, y)'
+check "completed pipeline cleanup regression is exercised" contains "$RUN" 'tools/test_pipeline_completed_cleanup.py'
 check "real GTK regression exercises DrawingArea draw" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'area:onDraw'
 check "real GTK regression checks double-click press count" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'n_press == 2'
 check "real GTK regression injects real X11 clicks" contains "${ROOT}/tools/test_gui_real_gtk.py" 'XTestFakeButtonEvent'
@@ -87,6 +96,7 @@ check "real GTK sanitizer probe disables only third-party leak detection" contai
 check "obsolete Entry lot note is absent from repository root" absent "${ROOT}/GUI_ENTRY_LOT1.fr.md"
 check "obsolete DrawingArea lot note is absent from repository root" absent "${ROOT}/GUI_DRAWING_LOT2.fr.md"
 check "obsolete onClick integration note is absent from repository root" absent "${ROOT}/INTEGRATION_DRAWINGAREA_ONCLICK.fr.md"
+check "obsolete GTK4 application note is absent from repository root" absent "${ROOT}/LIRE_AVANT_APPLICATION.txt"
 check "modified-only deletion manifest is absent from repository root" absent "${ROOT}/REMOVED_FILES.txt"
 check "modified-only applicator is absent from repository root" absent "${ROOT}/APPLY_TO_PROJECT.sh"
 check "modified-only payload is absent from repository root" absent "${ROOT}/payload"

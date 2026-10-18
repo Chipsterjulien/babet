@@ -43,9 +43,9 @@ assert(first_x == 42.5 and first_y == 73.25 and first_button == 1 and first_n_pr
 assert(second_n_press == 2)
 assert(w:close())
 
--- Wrong widget keeps the historical button diagnostic.
+-- Wrong widget reports the complete set of widgets supporting onClick.
 local entry = assert(gui.entry())
 local ok, err = pcall(function() entry:onClick(function() end) end)
-assert(not ok and tostring(err):find("expected a button handle", 1, true), tostring(err))
+assert(not ok and tostring(err):find("expected a button, drawingArea or progressBar handle", 1, true), tostring(err))
 
 print("DRAWING_CLICK_OK")

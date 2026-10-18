@@ -493,3 +493,143 @@ linker n'est nécessaire au lancement ni au moment du `--create-exe`.
 
 Cette exception limitée à la GUI ne modifie pas l'autonomie des scripts et
 applications générées qui n'utilisent pas `babet.gui`.
+
+
+## Compléments GTK4 — canevas de notes libres (2.29.0)
+
+Ces composants restent **génériques** et ne définissent ni projet, ni objectif,
+ni base de données. Les positions et contenus sont sauvegardés par l'application.
+
+| Construction | Méthodes supplémentaires | Usage |
+|---|---|---|
+| `gui.fixed()` | `canvas:put(child, x, y)`, `canvas:move(child, x, y)`, `canvas:remove(child)`, `canvas:clear()` | Widgets placés librement (coordonnées GTK en pixels logiques). |
+| `gui.textView {text = "...", editable = true}` | `getText()`, `setText()`, `setEditable(bool)`, `onChanged(fn ou nil)` | Éditeur multiligne GTK. |
+| `gui.checkButton {label = "...", active = false}` | `getActive()`, `setActive(bool)`, `setText(label)`, `onChanged(fn ou nil)` | Cases à cocher. |
+| `gui.progressBar()` | `setFraction(0..1)`, `getFraction()`, `setShowText(bool)`, `setText(label)`, `onClick(fn ou nil)` | Progression calculée ou manuelle, contrôlée par l'application. |
+| `gui.box()` | `reorder(child, previousChild ou nil)` | Changement d’ordre natif, sans démonter les enfants. |
+| `gui.expander {label = "...", expanded = false}` | `add(child)`, `remove(child)`, `clear()`, `setExpanded(bool)`, `getExpanded()`, `setText(label)` | Bloc repliable, **un seul enfant** GTK (utiliser `gui.box()` pour plusieurs éléments). |
+| Widget non interactif : label, box, drawingArea, fixed, progressBar | `onDrag(function(phase, x, y) ... end ou nil)` | Geste de déplacement, déclenché sur un **élément-poignée**. |
+| Tous les widgets | `setSizeRequest(width, height)` | Taille minimale demandée (dimension `-1` : automatique). |
+
+`onDrag` déclenche les phases `"begin"` (coordonnées locales du début), puis
+`"update"` et `"end"` (**déplacements relatifs au début, mesurés dans le
+repère stable de la surface GTK même si la poignée bouge**). Le déplacement
+n'est **pas automatique** : appeler `canvas:move(bloc, x, y)` depuis le
+callback. Il faut accrocher `onDrag` à un élément non interactif dédié (par
+exemple un label-titre) : boutons, éditeurs de texte, cases à cocher et expanders
+possèdent leurs propres gestes GTK et ne sont pas acceptés. Les callbacks sont exécutés de façon protégée ;
+ils ne doivent pas lever ou céder la main à GTK.
+
+Les coordonnées de `put` et `move` doivent être finies, entre -10 000 000 et
+10 000 000. Le canevas `gui.fixed()` doit être dimensionné ou avoir assez de
+contenu pour produire une zone défilable ; `GtkFixed` n'effectue pas de
+placement automatique. Un enfant retiré reste réutilisable.
+
+Exemple exécutable : [`examples/gui_free_notes/main.lua`](../../../examples/gui_free_notes/main.lua).
+
+```lua
+local gui = babet.gui
+assert(gui.init())
+local window = gui.window {title="Notes", width=700, height=500}
+local canvas = gui.fixed()
+local content = gui.box {orientation="vertical"}
+local handle = gui.label("Déplacer ⠿")
+local editor = gui.textView {text="Mon idée"}
+content:add(handle)
+content:add(editor)
+window:add(canvas)
+canvas:put(content, 50, 40)
+local ox, oy = 50, 40
+handle:onDrag(function(phase, x, y)
+    if phase == "begin" then ox, oy = 50, 40 end
+    if phase == "update" then canvas:move(content, ox + x, oy + y) end
+end)
+window:show()
+gui.run()
+```
+
+Le mini-exemple ci-dessus est illustratif (il faudrait mémoriser les dernières
+coordonnées si plusieurs déplacements sont réalisés). La démonstration complète
+le fait correctement.
+
+
+## Interaction native sur les progressions et réorganisation d'une liste
+
+Babet expose **le véritable `GtkProgressBar`** et le réordonnancement natif
+**`gtk_box_reorder_child_after()`** ; une application n'a pas à redessiner une
+progression ni à détruire/recréer ses lignes.
+
+### `progressBar:onClick(fonction_ou_nil)`
+
+- Fonction facultative, ou `nil` pour désactiver le callback ; renvoie `true, nil`.
+- Appel sur un **appui du bouton principal**, avec quatre arguments :
+  `(x, y, button, n_press)` ; les coordonnées sont locales au widget.
+- `n_press` est le compteur de clics successifs propre à GTK, **pas** le
+  nombre total de validations de l'application. Conserver son propre compteur.
+- La progression n'augmente **jamais automatiquement** : `setFraction(0..1)`
+  reste sous le contrôle du programme, pour les modes manuel et automatique.
+- Le callback, protégé par Babet, peut être remplacé ou supprimer la fenêtre.
+- `progressBar:setText()` concerne le texte **dans la barre** ; un intitulé à
+  droite est un `gui.label()` distinct, dans une `gui.box{orientation="horizontal"}`.
+- Une barre de progression n'est pas un bouton activable au clavier. Si elle
+  sert d'action d'avancement et pas seulement d'indicateur, prévoir aussi un
+  vrai bouton (ou un contrôle équivalent accessible au clavier).
+
+```lua
+local bar = assert(gui.progressBar())
+local title = assert(gui.label("The graphics"))
+local row = assert(gui.box {orientation = "horizontal", spacing = 8})
+assert(row:add(bar))
+assert(row:add(title))
+assert(bar:setHExpand(true))
+assert(bar:setShowText(true))
+local steps, total = 0, 4
+assert(bar:onClick(function(x, y, button, n_press)
+    steps = math.min(total, steps + 1)
+    assert(bar:setFraction(steps / total))
+    assert(bar:setText(tostring(steps * 25) .. " %"))
+    if steps == total then assert(title:addClass("completed")) end
+end))
+```
+
+Pour barrer les libellés avec le rendu typographique GTK, utiliser le CSS :
+
+```css
+label.completed, checkbutton.completed label {
+    text-decoration-line: line-through;
+    opacity: 0.6;
+}
+```
+
+Dans une checklist : `check:onChanged(function() ... check:getActive()`
+permet d'ajouter ou retirer `check:addClass("completed")` /
+`check:removeClass("completed")`. À la fin d'une progression manuelle,
+appliquer la même classe sur le libellé voisin. Aucune API spécialisée de
+« checklist » n'est inscrite dans le moteur Babet.
+
+### `box:reorder(child, previousChild_or_nil)`
+
+`box` doit être un `gui.box`, `child` doit déjà lui appartenir et
+`previousChild` doit appartenir à **la même boîte**. Le deuxième argument est
+obligatoire : pour placer `child` au début, il faut passer `nil` explicitement.
+`nil` place `child` au
+début ; une autre ligne le place juste après elle. La modification est native
+**sans `remove()`, `add()` ni reparentage** : les callbacks et l'état des
+widgets restent intacts, et la table des enfants Lua conserve le même ordre.
+Une demande invalide est rejetée sans modifier la liste ; une demande qui ne
+change rien est acceptée. Par exemple :
+
+```lua
+-- [first, middle, last] : déplacer la dernière ligne au deuxième rang.
+assert(list:reorder(last, first))
+-- Placer une ligne tout en haut.
+assert(list:reorder(last, nil))
+```
+
+`onDrag()` permet déjà de reconnaître un mouvement sur une poignée dédiée.
+Le choix graphique de la position de dépôt, le repère d'insertion et la
+persistance de l'ordre appartiennent à l'application. Pour un véritable
+*drag-and-drop* GTK4 entre listes, une future interface de
+`GtkDragSource`/`GtkDropTarget` devra être ajoutée explicitement :
+`box:reorder` fournit **la primitive native de réordonnancement**, mais ne
+prétend pas à lui seul implémenter tout le parcours de dépôt.

@@ -21,9 +21,38 @@ using GtkWindowSetDefaultSize = void (*)(void *, int, int);
 using GtkWindowSetChild = void (*)(void *, void *);
 using GtkWindowPresent = void (*)(void *);
 using GtkWindowDestroy = void (*)(void *);
+using GtkFixedNew = void *(*)();
+using GtkFixedPut = void (*)(void *, void *, double, double);
+using GtkFixedRemove = void (*)(void *, void *);
+using GtkTextViewNew = void *(*)();
+using GtkTextViewGetBuffer = void *(*)(void *);
+using GtkTextBufferSetText = void (*)(void *, const char *, int);
+using GObjectGet = void (*)(void *, const char *, ...);
+using GFree = void (*)(void *);
+using GtkCheckButtonNewWithLabel = void *(*)(const char *);
+using GtkCheckButtonSetLabel = void (*)(void *, const char *);
+using GtkCheckButtonSetActive = void (*)(void *, int);
+using GtkCheckButtonGetActive = int (*)(void *);
+using GtkProgressBarNew = void *(*)();
+using GtkProgressBarSetFraction = void (*)(void *, double);
+using GtkProgressBarGetFraction = double (*)(void *);
+using GtkProgressBarSetText = void (*)(void *, const char *);
+using GtkProgressBarSetShowText = void (*)(void *, int);
+using GtkExpanderNew = void *(*)(const char *);
+using GtkExpanderSetLabel = void (*)(void *, const char *);
+using GtkExpanderSetChild = void (*)(void *, void *);
+using GtkExpanderSetExpanded = void (*)(void *, int);
+using GtkExpanderGetExpanded = int (*)(void *);
+using GtkGestureDragNew = void *(*)();
+using GtkGestureSingleGetCurrentSequence = void *(*)(void *);
+using GtkGestureGetLastEvent = void *(*)(void *, void *);
+using GdkEventGetPosition = int (*)(void *, double *, double *);
+using GtkWidgetSetSizeRequest = void (*)(void *, int, int);
+
 using GtkBoxNew = void *(*)(int, int);
 using GtkBoxAppend = void (*)(void *, void *);
 using GtkBoxRemove = void (*)(void *, void *);
+using GtkBoxReorderChildAfter = void (*)(void *, void *, void *);
 using GtkScrolledWindowNew = void *(*)();
 using GtkScrolledWindowSetChild = void (*)(void *, void *);
 using GtkLabelNew = void *(*)(const char *);
@@ -80,9 +109,39 @@ struct GtkApi
     GtkWindowSetChild window_set_child = nullptr;
     GtkWindowPresent window_present = nullptr;
     GtkWindowDestroy window_destroy = nullptr;
+    GtkFixedNew fixed_new = nullptr;
+    GtkFixedPut fixed_put = nullptr;
+    GtkFixedPut fixed_move = nullptr;
+    GtkFixedRemove fixed_remove = nullptr;
+    GtkTextViewNew text_view_new = nullptr;
+    GtkTextViewGetBuffer text_view_get_buffer = nullptr;
+    GtkTextBufferSetText text_buffer_set_text = nullptr;
+    GObjectGet object_get = nullptr;
+    GFree glib_free = nullptr;
+    GtkWidgetSetBoolean text_view_set_editable = nullptr;
+    GtkCheckButtonNewWithLabel check_button_new_with_label = nullptr;
+    GtkCheckButtonSetLabel check_button_set_label = nullptr;
+    GtkCheckButtonSetActive check_button_set_active = nullptr;
+    GtkCheckButtonGetActive check_button_get_active = nullptr;
+    GtkProgressBarNew progress_bar_new = nullptr;
+    GtkProgressBarSetFraction progress_bar_set_fraction = nullptr;
+    GtkProgressBarGetFraction progress_bar_get_fraction = nullptr;
+    GtkProgressBarSetText progress_bar_set_text = nullptr;
+    GtkProgressBarSetShowText progress_bar_set_show_text = nullptr;
+    GtkExpanderNew expander_new = nullptr;
+    GtkExpanderSetLabel expander_set_label = nullptr;
+    GtkExpanderSetChild expander_set_child = nullptr;
+    GtkExpanderSetExpanded expander_set_expanded = nullptr;
+    GtkExpanderGetExpanded expander_get_expanded = nullptr;
+    GtkGestureDragNew gesture_drag_new = nullptr;
+    GtkGestureSingleGetCurrentSequence gesture_single_get_current_sequence = nullptr;
+    GtkGestureGetLastEvent gesture_get_last_event = nullptr;
+    GdkEventGetPosition gdk_event_get_position = nullptr;
+    GtkWidgetSetSizeRequest widget_set_size_request = nullptr;
     GtkBoxNew box_new = nullptr;
     GtkBoxAppend box_append = nullptr;
     GtkBoxRemove box_remove = nullptr;
+    GtkBoxReorderChildAfter box_reorder_child_after = nullptr;
     GtkScrolledWindowNew scrolled_window_new = nullptr;
     GtkScrolledWindowSetChild scrolled_window_set_child = nullptr;
     GtkLabelNew label_new = nullptr;
@@ -281,9 +340,39 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(window_set_child, "gtk_window_set_child");
     BABET_GTK_RESOLVE(window_present, "gtk_window_present");
     BABET_GTK_RESOLVE(window_destroy, "gtk_window_destroy");
+    BABET_GTK_RESOLVE(fixed_new, "gtk_fixed_new");
+    BABET_GTK_RESOLVE(fixed_put, "gtk_fixed_put");
+    BABET_GTK_RESOLVE(fixed_move, "gtk_fixed_move");
+    BABET_GTK_RESOLVE(fixed_remove, "gtk_fixed_remove");
+    BABET_GTK_RESOLVE(text_view_new, "gtk_text_view_new");
+    BABET_GTK_RESOLVE(text_view_get_buffer, "gtk_text_view_get_buffer");
+    BABET_GTK_RESOLVE(text_buffer_set_text, "gtk_text_buffer_set_text");
+    BABET_GTK_RESOLVE(object_get, "g_object_get");
+    BABET_GTK_RESOLVE(glib_free, "g_free");
+    BABET_GTK_RESOLVE(text_view_set_editable, "gtk_text_view_set_editable");
+    BABET_GTK_RESOLVE(check_button_new_with_label, "gtk_check_button_new_with_label");
+    BABET_GTK_RESOLVE(check_button_set_label, "gtk_check_button_set_label");
+    BABET_GTK_RESOLVE(check_button_set_active, "gtk_check_button_set_active");
+    BABET_GTK_RESOLVE(check_button_get_active, "gtk_check_button_get_active");
+    BABET_GTK_RESOLVE(progress_bar_new, "gtk_progress_bar_new");
+    BABET_GTK_RESOLVE(progress_bar_set_fraction, "gtk_progress_bar_set_fraction");
+    BABET_GTK_RESOLVE(progress_bar_get_fraction, "gtk_progress_bar_get_fraction");
+    BABET_GTK_RESOLVE(progress_bar_set_text, "gtk_progress_bar_set_text");
+    BABET_GTK_RESOLVE(progress_bar_set_show_text, "gtk_progress_bar_set_show_text");
+    BABET_GTK_RESOLVE(expander_new, "gtk_expander_new");
+    BABET_GTK_RESOLVE(expander_set_label, "gtk_expander_set_label");
+    BABET_GTK_RESOLVE(expander_set_child, "gtk_expander_set_child");
+    BABET_GTK_RESOLVE(expander_set_expanded, "gtk_expander_set_expanded");
+    BABET_GTK_RESOLVE(expander_get_expanded, "gtk_expander_get_expanded");
+    BABET_GTK_RESOLVE(gesture_drag_new, "gtk_gesture_drag_new");
+    BABET_GTK_RESOLVE(gesture_single_get_current_sequence, "gtk_gesture_single_get_current_sequence");
+    BABET_GTK_RESOLVE(gesture_get_last_event, "gtk_gesture_get_last_event");
+    BABET_GTK_RESOLVE(gdk_event_get_position, "gdk_event_get_position");
+    BABET_GTK_RESOLVE(widget_set_size_request, "gtk_widget_set_size_request");
     BABET_GTK_RESOLVE(box_new, "gtk_box_new");
     BABET_GTK_RESOLVE(box_append, "gtk_box_append");
     BABET_GTK_RESOLVE(box_remove, "gtk_box_remove");
+    BABET_GTK_RESOLVE(box_reorder_child_after, "gtk_box_reorder_child_after");
     BABET_GTK_RESOLVE(scrolled_window_new, "gtk_scrolled_window_new");
     BABET_GTK_RESOLVE(scrolled_window_set_child, "gtk_scrolled_window_set_child");
     BABET_GTK_RESOLVE(label_new, "gtk_label_new");
@@ -410,9 +499,49 @@ void gtk4_window_set_default_size(void *w, int x, int y) noexcept { g_gtk.window
 void gtk4_window_set_child(void *w, void *c) noexcept { g_gtk.window_set_child(w, c); }
 void gtk4_window_present(void *w) noexcept { g_gtk.window_present(w); }
 void gtk4_window_destroy(void *w) noexcept { g_gtk.window_destroy(w); }
+void *gtk4_fixed_new() noexcept { return g_gtk.fixed_new(); }
+void gtk4_fixed_put(void *p, void *c, double x, double y) noexcept { g_gtk.fixed_put(p, c, x, y); }
+void gtk4_fixed_move(void *p, void *c, double x, double y) noexcept { g_gtk.fixed_move(p, c, x, y); }
+void gtk4_fixed_remove(void *p, void *c) noexcept { g_gtk.fixed_remove(p, c); }
+void *gtk4_text_view_new() noexcept { return g_gtk.text_view_new(); }
+void *gtk4_text_view_get_buffer(void *v) noexcept { return g_gtk.text_view_get_buffer(v); }
+void gtk4_text_buffer_set_text(void *b, const char *t) noexcept { g_gtk.text_buffer_set_text(b, t, -1); }
+char *gtk4_text_buffer_dup_text(void *b) noexcept
+{
+    char *value = nullptr;
+    g_gtk.object_get(b, "text", &value, nullptr);
+    return value;
+}
+void gtk4_free(void *p) noexcept { g_gtk.glib_free(p); }
+void gtk4_text_view_set_editable(void *v, bool b) noexcept { g_gtk.text_view_set_editable(v, b ? 1 : 0); }
+void *gtk4_check_button_new_with_label(const char *s) noexcept { return g_gtk.check_button_new_with_label(s); }
+void gtk4_check_button_set_label(void *c, const char *s) noexcept { g_gtk.check_button_set_label(c, s); }
+void gtk4_check_button_set_active(void *c, bool b) noexcept { g_gtk.check_button_set_active(c, b ? 1 : 0); }
+bool gtk4_check_button_get_active(void *c) noexcept { return g_gtk.check_button_get_active(c) != 0; }
+void *gtk4_progress_bar_new() noexcept { return g_gtk.progress_bar_new(); }
+void gtk4_progress_bar_set_fraction(void *p, double f) noexcept { g_gtk.progress_bar_set_fraction(p, f); }
+double gtk4_progress_bar_get_fraction(void *p) noexcept { return g_gtk.progress_bar_get_fraction(p); }
+void gtk4_progress_bar_set_text(void *p, const char *s) noexcept { g_gtk.progress_bar_set_text(p, s); }
+void gtk4_progress_bar_set_show_text(void *p, bool b) noexcept { g_gtk.progress_bar_set_show_text(p, b ? 1 : 0); }
+void *gtk4_expander_new(const char *s) noexcept { return g_gtk.expander_new(s); }
+void gtk4_expander_set_label(void *e, const char *s) noexcept { g_gtk.expander_set_label(e, s); }
+void gtk4_expander_set_child(void *e, void *c) noexcept { g_gtk.expander_set_child(e, c); }
+void gtk4_expander_set_expanded(void *e, bool b) noexcept { g_gtk.expander_set_expanded(e, b ? 1 : 0); }
+bool gtk4_expander_get_expanded(void *e) noexcept { return g_gtk.expander_get_expanded(e) != 0; }
+void *gtk4_gesture_drag_new() noexcept { return g_gtk.gesture_drag_new(); }
+bool gtk4_gesture_surface_position(void *gesture, double &x, double &y) noexcept
+{
+    void *sequence = g_gtk.gesture_single_get_current_sequence(gesture);
+    void *event = g_gtk.gesture_get_last_event(gesture, sequence);
+    return event && g_gtk.gdk_event_get_position(event, &x, &y) != 0;
+}
+void gtk4_widget_set_size_request(void *w, int width, int height) noexcept { g_gtk.widget_set_size_request(w, width, height); }
+
 void *gtk4_box_new(int o, int s) noexcept { return g_gtk.box_new(o, s); }
 void gtk4_box_append(void *b, void *c) noexcept { g_gtk.box_append(b, c); }
 void gtk4_box_remove(void *b, void *c) noexcept { g_gtk.box_remove(b, c); }
+void gtk4_box_reorder_child_after(void *b, void *c, void *s) noexcept
+{ g_gtk.box_reorder_child_after(b, c, s); }
 void *gtk4_scrolled_window_new() noexcept { return g_gtk.scrolled_window_new(); }
 void gtk4_scrolled_window_set_child(void *s, void *c) noexcept { g_gtk.scrolled_window_set_child(s, c); }
 void *gtk4_label_new(const char *t) noexcept { return g_gtk.label_new(t); }

@@ -29,9 +29,43 @@ void gtk4_window_set_child(void *window, void *child) noexcept;
 void gtk4_window_present(void *window) noexcept;
 void gtk4_window_destroy(void *window) noexcept;
 
+// Additional GTK4 building blocks for freely positioned note boards.
+void *gtk4_fixed_new() noexcept;
+void gtk4_fixed_put(void *fixed, void *child, double x, double y) noexcept;
+void gtk4_fixed_move(void *fixed, void *child, double x, double y) noexcept;
+void gtk4_fixed_remove(void *fixed, void *child) noexcept;
+void *gtk4_text_view_new() noexcept;
+void *gtk4_text_view_get_buffer(void *view) noexcept;
+void gtk4_text_buffer_set_text(void *buffer, const char *text) noexcept;
+// Allocates a GLib-owned UTF-8 snapshot; free with gtk4_free().
+char *gtk4_text_buffer_dup_text(void *buffer) noexcept;
+void gtk4_free(void *pointer) noexcept;
+void gtk4_text_view_set_editable(void *view, bool editable) noexcept;
+void *gtk4_check_button_new_with_label(const char *label) noexcept;
+void gtk4_check_button_set_label(void *check, const char *label) noexcept;
+void gtk4_check_button_set_active(void *check, bool active) noexcept;
+bool gtk4_check_button_get_active(void *check) noexcept;
+void *gtk4_progress_bar_new() noexcept;
+void gtk4_progress_bar_set_fraction(void *bar, double fraction) noexcept;
+double gtk4_progress_bar_get_fraction(void *bar) noexcept;
+void gtk4_progress_bar_set_text(void *bar, const char *text) noexcept;
+void gtk4_progress_bar_set_show_text(void *bar, bool enabled) noexcept;
+void *gtk4_expander_new(const char *label) noexcept;
+void gtk4_expander_set_label(void *expander, const char *label) noexcept;
+void gtk4_expander_set_child(void *expander, void *child) noexcept;
+void gtk4_expander_set_expanded(void *expander, bool expanded) noexcept;
+bool gtk4_expander_get_expanded(void *expander) noexcept;
+void *gtk4_gesture_drag_new() noexcept;
+// GdkEvent positions are surface-relative, unlike GtkGestureDrag offsets.
+// The stable event surface makes moving a gesture's own widget safe.
+bool gtk4_gesture_surface_position(void *gesture, double &x, double &y) noexcept;
+void gtk4_widget_set_size_request(void *widget, int width, int height) noexcept;
+
 void *gtk4_box_new(int orientation, int spacing) noexcept;
 void gtk4_box_append(void *box, void *child) noexcept;
 void gtk4_box_remove(void *box, void *child) noexcept;
+// Native in-place GtkBox reordering (no unparenting or refcount churn).
+void gtk4_box_reorder_child_after(void *box, void *child, void *sibling) noexcept;
 void *gtk4_scrolled_window_new() noexcept;
 void gtk4_scrolled_window_set_child(void *scrolled, void *child) noexcept;
 void *gtk4_label_new(const char *text) noexcept;

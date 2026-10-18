@@ -16,6 +16,15 @@ assert(root:remove(label))
 assert(scrolled:add(label))
 assert(scrolled:clear())
 assert(root:add(label))
+-- Native in-place reorder: no GTK child detach, no destroyed handle.
+local ordered_a, ordered_b = assert(gui.label("ordered-a")), assert(gui.label("ordered-b"))
+assert(root:add(ordered_a))
+assert(root:add(ordered_b))
+assert(root:reorder(ordered_b, label))
+assert(root:reorder(ordered_a, ordered_b))
+assert(root:reorder(ordered_a, nil))
+assert(root:remove(ordered_a))
+assert(root:add(ordered_a))
 
 -- Babet's public Entry:setText contract deliberately coalesces GTK's native
 -- delete/insert notification burst into one final notification.
@@ -47,6 +56,47 @@ assert(calendar:setDate(2025, 12, 31))
 local year, month, day = calendar:getDate()
 assert(year == 2025 and month == 12 and day == 31)
 assert(calendar_changes >= 1)
+
+-- A real collapsed GtkExpander keeps its child unparented. Babet must still
+-- refuse cycles and double parenting through it; otherwise the next add loops
+-- forever, or expanding raises a Gtk-CRITICAL (fatal under fatal-criticals).
+local function refused(fn, fragment)
+    local ok, err = pcall(fn)
+    assert(not ok and tostring(err):find(fragment, 1, true), tostring(err))
+end
+local folded = assert(gui.expander {label = "replié"})
+local folded_inner = assert(gui.box {orientation = "vertical"})
+assert(folded:add(folded_inner))
+refused(function() folded_inner:add(folded) end, "parent cycle")
+assert(root:add(folded))
+local single = assert(gui.expander {label = "simple"})
+assert(root:add(single))
+local only_child = assert(gui.label("un seul parent"))
+assert(single:add(only_child))
+local elsewhere = assert(gui.box())
+assert(root:add(elsewhere))
+refused(function() elsewhere:add(only_child) end, "already has a GTK parent")
+assert(folded:setExpanded(true))
+assert(single:setExpanded(true))
+assert(folded_inner:add(assert(gui.label("ajout après dépliage"))))
+assert(single:remove(only_child))
+assert(elsewhere:add(only_child))
+assert(single:setExpanded(false))
+-- Reuse: back into the collapsed expander, then out while it is open.
+assert(elsewhere:remove(only_child))
+assert(single:add(only_child))
+assert(single:setExpanded(true))
+assert(single:remove(only_child))
+assert(elsewhere:add(only_child))
+-- Deep logical trees: no recursion limit and no false "parent cycle".
+local deep = {assert(gui.box())}
+for i = 2, 600 do
+    deep[i] = assert(gui.box())
+    assert(deep[i - 1]:add(deep[i]))
+end
+refused(function() deep[600]:add(deep[1]) end, "parent cycle")
+local deep_holder = assert(gui.box())
+assert(deep_holder:add(deep[1]))
 
 -- GTK parsing diagnostics are intentionally left to GTK. Both valid and
 -- invalid CSS must remain contained; the invalid sheet may write warnings.
