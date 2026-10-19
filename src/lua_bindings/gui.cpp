@@ -34,6 +34,7 @@ constexpr lua_Integer PRIMARY_CALLBACK = -1;
 constexpr lua_Integer ACTIVATE_CALLBACK = -2;
 constexpr lua_Integer CLICK_CALLBACK = -3;
 constexpr lua_Integer DRAG_CALLBACK = -4;
+constexpr lua_Integer CALENDAR_VIEW_CALLBACK = -5;
 
 enum class WidgetKind : unsigned char
 {
@@ -353,6 +354,11 @@ void spin_button_changed(void *, void *data) noexcept
 void calendar_day_selected(void *, void *data) noexcept
 {
     dispatch_widget_callback(static_cast<WidgetState *>(data), PRIMARY_CALLBACK);
+}
+
+void calendar_view_changed(void *, void *data) noexcept
+{
+    dispatch_widget_callback(static_cast<WidgetState *>(data), CALENDAR_VIEW_CALLBACK);
 }
 
 void check_button_toggled(void *, void *data) noexcept
@@ -1330,6 +1336,20 @@ int l_calendar(lua_State *L)
         release_state(userdata->state);
         release_construction_reference(userdata->state);
         return push_fail_protected(L, "babet.gui: cannot attach Calendar signal");
+    }
+
+    const char *view_signals[] = {"next-month", "prev-month", "next-year", "prev-year"};
+    for (const char *signal : view_signals)
+    {
+        retain_state(userdata->state);
+        if (detail::gtk4_signal_connect(
+                calendar, signal, gtk_callback(&calendar_view_changed),
+                userdata->state, &button_signal_released) == 0)
+        {
+            release_state(userdata->state);
+            release_construction_reference(userdata->state);
+            return push_fail_protected(L, "babet.gui: cannot attach Calendar view signal");
+        }
     }
     return 1;
 }
@@ -2324,6 +2344,55 @@ int calendar_set_date(lua_State *L)
     return push_ok_protected(L);
 }
 
+int calendar_day_argument(lua_State *L, const char *api)
+{
+    if (!lua_arity_is(L, 2) || !lua_is_strict_integer(L, 2))
+        return luaL_error(L, "%s expects one integer day", api);
+    const lua_Integer value = lua_tointeger(L, 2);
+    if (value < 1 || value > 31)
+        return luaL_error(L, "%s day must be between 1 and 31", api);
+    return static_cast<int>(value);
+}
+
+int calendar_mark_day(lua_State *L)
+{
+    const int day = calendar_day_argument(L, "gui calendar:markDay");
+    WidgetState *state = check_kind(
+        L, 1, WidgetKind::calendar, "gui calendar:markDay");
+    detail::gtk4_calendar_mark_day(state->native, static_cast<unsigned int>(day));
+    return push_ok_protected(L);
+}
+
+int calendar_unmark_day(lua_State *L)
+{
+    const int day = calendar_day_argument(L, "gui calendar:unmarkDay");
+    WidgetState *state = check_kind(
+        L, 1, WidgetKind::calendar, "gui calendar:unmarkDay");
+    detail::gtk4_calendar_unmark_day(state->native, static_cast<unsigned int>(day));
+    return push_ok_protected(L);
+}
+
+int calendar_clear_marks(lua_State *L)
+{
+    if (!lua_arity_is(L, 1))
+        return luaL_error(L, "gui calendar:clearMarks expects no arguments");
+    WidgetState *state = check_kind(
+        L, 1, WidgetKind::calendar, "gui calendar:clearMarks");
+    detail::gtk4_calendar_clear_marks(state->native);
+    return push_ok_protected(L);
+}
+
+int calendar_on_view_changed(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || (!lua_isnil(L, 2) && lua_type(L, 2) != LUA_TFUNCTION))
+        return luaL_error(L, "gui calendar:onViewChanged expects one function or nil");
+    (void)check_kind(L, 1, WidgetKind::calendar, "gui calendar:onViewChanged");
+    lua_getiuservalue(L, 1, 1);
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, CALENDAR_VIEW_CALLBACK);
+    return push_ok_protected(L);
+}
+
 int widget_set_margins(lua_State *L)
 {
     if (!lua_arity_is(L, 2) && !lua_arity_is(L, 5))
@@ -2729,6 +2798,14 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "getDate");
         lua_pushcfunction(L, gui_lua_boundary<calendar_set_date>);
         lua_setfield(L, -2, "setDate");
+        lua_pushcfunction(L, gui_lua_boundary<calendar_mark_day>);
+        lua_setfield(L, -2, "markDay");
+        lua_pushcfunction(L, gui_lua_boundary<calendar_unmark_day>);
+        lua_setfield(L, -2, "unmarkDay");
+        lua_pushcfunction(L, gui_lua_boundary<calendar_clear_marks>);
+        lua_setfield(L, -2, "clearMarks");
+        lua_pushcfunction(L, gui_lua_boundary<calendar_on_view_changed>);
+        lua_setfield(L, -2, "onViewChanged");
         lua_pushcfunction(L, gui_lua_boundary<drawing_area_on_draw>);
         lua_setfield(L, -2, "onDraw");
         lua_pushcfunction(L, gui_lua_boundary<drawing_area_queue_draw>);

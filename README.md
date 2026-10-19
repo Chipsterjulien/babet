@@ -16,11 +16,16 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.29.0**. See the
+Current release: **2.30.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.30.0 adds native [Calendar day markers and navigation callbacks](docs/en/modules/gui.md#calendar-selecting-and-editing-dates):
+`markDay`, `unmarkDay`, `clearMarks` and `onViewChanged`. Rebuild markers for
+each displayed month, including explicitly after a programmatic `setDate()`.
+The release includes expanded fake-GTK and real-GTK regression coverage.
 
 Babet 2.25.0 adds [`babet.gui.entry`](docs/en/modules/gui.md), a single-line
 text input with change/activation callbacks, placeholder text and a read-only

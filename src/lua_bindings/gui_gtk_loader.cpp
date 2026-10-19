@@ -72,6 +72,9 @@ using GtkSpinButtonSetNumeric = void (*)(void *, int);
 using GtkCalendarNew = void *(*)();
 using GtkCalendarGetDate = void *(*)(void *);
 using GtkCalendarSelectDay = void (*)(void *, void *);
+using GtkCalendarMarkDay = void (*)(void *, unsigned int);
+using GtkCalendarUnmarkDay = void (*)(void *, unsigned int);
+using GtkCalendarClearMarks = void (*)(void *);
 using GDateTimeNewLocal = void *(*)(int, int, int, int, int, double);
 using GDateTimeGetInt = int (*)(void *);
 using GDateTimeUnref = void (*)(void *);
@@ -161,6 +164,9 @@ struct GtkApi
     GtkCalendarNew calendar_new = nullptr;
     GtkCalendarGetDate calendar_get_date = nullptr;
     GtkCalendarSelectDay calendar_select_day = nullptr;
+    GtkCalendarMarkDay calendar_mark_day = nullptr;
+    GtkCalendarUnmarkDay calendar_unmark_day = nullptr;
+    GtkCalendarClearMarks calendar_clear_marks = nullptr;
     GDateTimeNewLocal date_time_new_local = nullptr;
     GDateTimeGetInt date_time_get_year = nullptr;
     GDateTimeGetInt date_time_get_month = nullptr;
@@ -392,6 +398,9 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(calendar_new, "gtk_calendar_new");
     BABET_GTK_RESOLVE(calendar_get_date, "gtk_calendar_get_date");
     BABET_GTK_RESOLVE(calendar_select_day, "gtk_calendar_select_day");
+    BABET_GTK_RESOLVE(calendar_mark_day, "gtk_calendar_mark_day");
+    BABET_GTK_RESOLVE(calendar_unmark_day, "gtk_calendar_unmark_day");
+    BABET_GTK_RESOLVE(calendar_clear_marks, "gtk_calendar_clear_marks");
     BABET_GTK_RESOLVE(date_time_new_local, "g_date_time_new_local");
     BABET_GTK_RESOLVE(date_time_get_year, "g_date_time_get_year");
     BABET_GTK_RESOLVE(date_time_get_month, "g_date_time_get_month");
@@ -561,6 +570,9 @@ void gtk4_spin_button_set_numeric(void *s, bool v) noexcept { g_gtk.spin_button_
 void *gtk4_calendar_new() noexcept { return g_gtk.calendar_new(); }
 void *gtk4_calendar_get_date(void *c) noexcept { return g_gtk.calendar_get_date(c); }
 void gtk4_calendar_select_day(void *c, void *d) noexcept { g_gtk.calendar_select_day(c, d); }
+void gtk4_calendar_mark_day(void *c, unsigned int day) noexcept { g_gtk.calendar_mark_day(c, day); }
+void gtk4_calendar_unmark_day(void *c, unsigned int day) noexcept { g_gtk.calendar_unmark_day(c, day); }
+void gtk4_calendar_clear_marks(void *c) noexcept { g_gtk.calendar_clear_marks(c); }
 void *glib_date_time_new_local(int y, int m, int d, int h, int min, double sec) noexcept { return g_gtk.date_time_new_local(y, m, d, h, min, sec); }
 int glib_date_time_get_year(void *d) noexcept { return g_gtk.date_time_get_year(d); }
 int glib_date_time_get_month(void *d) noexcept { return g_gtk.date_time_get_month(d); }

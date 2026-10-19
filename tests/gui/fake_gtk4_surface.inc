@@ -89,6 +89,9 @@ void *gtk_calendar_new(void) { return (void *)0x9; }
 void *gtk_calendar_get_date(void *c)
 { (void)c; return g_date_time_new_local(2026, 10, 7, 12, 0, 0.0); }
 void gtk_calendar_select_day(void *c, void *date) { (void)c; (void)date; }
+void gtk_calendar_mark_day(void *c, unsigned int day) { (void)c; (void)day; }
+void gtk_calendar_unmark_day(void *c, unsigned int day) { (void)c; (void)day; }
+void gtk_calendar_clear_marks(void *c) { (void)c; }
 typedef void (*DrawCallback)(void *, void *, int, int, void *);
 typedef void (*DrawNotify)(void *);
 #ifndef BABET_FAKE_GTK_MISSING_DRAWING

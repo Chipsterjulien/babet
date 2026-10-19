@@ -23,6 +23,12 @@ def main():
     if len(sys.argv) != 2:
         raise AssertionError("usage: python3 tools/test_gui_widgets.py /path/to/babet")
     binary = str(Path(sys.argv[1]).resolve())
+    passed = []
+
+    def success(message):
+        passed.append(message)
+        print(f"[PASS] {message}")
+
     with tempfile.TemporaryDirectory(prefix="babet-gui-widgets-") as directory:
         temp = Path(directory)
         def compile_fake(directory, extra=()):
@@ -37,6 +43,8 @@ def main():
         log_path = temp / "gtk.log"
         env = dict(os.environ, LD_LIBRARY_PATH=str(lib), BABET_FAKE_GTK_LOG=str(log_path))
         env.pop("BABET_FAKE_GTK_FAIL_SIGNAL", None)
+        env.pop("BABET_FAKE_GTK_CALENDAR_EVENTS", None)
+        env.pop("BABET_CALENDAR_CASE", None)
         result = run([binary, str(ROOT / "tests/gui/widgets_contract.lua")], env)
         assert "GUI_WIDGETS_CONTRACT_OK" in result.stdout
         assert "SPIN_CHANGED_ERROR_SENTINEL" in result.stderr
@@ -46,6 +54,8 @@ def main():
         for marker in [
             "box-remove", "scrolled-child:set", "scrolled-child:clear",
             "spin-after-change", "calendar-after-change",
+            "calendar-clear-marks", "calendar-mark:7", "calendar-mark:29",
+            "calendar-unmark:7",
             "margin-top", "margin-end", "margin-bottom", "margin-start",
             "hexpand:true", "vexpand:true", "visible:false", "sensitive:false",
             "css-load-string:", "css-provider:add", "css-provider:remove",
@@ -54,7 +64,7 @@ def main():
         ]:
             assert marker in log, marker
         assert "css-load-data:" not in log, "modern CSS API should be preferred when available"
-        print("[PASS] containers, widgets, CSS styling and common properties")
+        success("containers, widgets, CSS styling and common properties")
 
         for fixture, marker in (
             ("free_layout_contract.lua", "GUI_FREE_LAYOUT_CONTRACT_OK"),
@@ -62,7 +72,7 @@ def main():
         ):
             result = run([binary, str(ROOT / "tests/gui" / fixture)], env)
             assert marker in result.stdout, (fixture, result.stdout)
-            print(f"[PASS] {fixture}: free layout, cycle guards and drag coordinates")
+            success(f"{fixture}: free layout, cycle guards and drag coordinates")
 
         native_log = temp / "native-widgets.log"
         native_env = dict(env, BABET_FAKE_GTK_LOG=str(native_log))
@@ -85,7 +95,7 @@ def main():
             "box-order:row-c,row-d,row-b,row-a",
             "box-order:row-d,row-c,row-b,row-a",
         ], native_text
-        print("[PASS] native GtkBox reorder order and GtkProgressBar click progression")
+        success("native GtkBox reorder order and GtkProgressBar click progression")
 
         # GTK 4.0-4.10 do not provide gtk_css_provider_load_from_string().
         # The loader must retain the data API as a compatibility fallback.
@@ -106,12 +116,54 @@ def main():
         fallback_text = fallback_log.read_text()
         assert "css-load-data:" in fallback_text
         assert "css-load-string:" not in fallback_text
-        print("[PASS] CSS loader prefers GTK 4.12 string API and falls back on older GTK4")
+        success("CSS loader prefers GTK 4.12 string API and falls back on older GTK4")
+
+        # Exercise native signals, not setters that bypass onViewChanged.
+        navigation = "next-month,prev-month,next-year,prev-year,prev-month,next-month"
+        for case, events in (
+            ("navigation", navigation),
+            ("replacement", "next-month,next-month,next-month"),
+            ("error", "next-month,next-month"),
+            ("yield", "next-month,next-month"),
+            ("reentrant", "next-month,next-month"),
+            ("close", "next-month"),
+        ):
+            calendar_log = temp / f"calendar-{case}.log"
+            calendar_env = dict(env, BABET_FAKE_GTK_LOG=str(calendar_log),
+                                BABET_CALENDAR_CASE=case,
+                                BABET_FAKE_GTK_CALENDAR_EVENTS=events)
+            result = run([binary, str(ROOT / "tests/gui/calendar_view_contract.lua")], calendar_env)
+            assert f"GUI_CALENDAR_VIEW_OK:{case}" in result.stdout, result.stdout
+            lines = calendar_log.read_text().splitlines()
+            actual_events = [line for line in lines if line.startswith("calendar-view-event:")]
+            assert len(actual_events) == len(events.split(",")), actual_events
+            assert [line.split(":")[1] for line in actual_events] == events.split(","), actual_events
+            if case == "navigation":
+                marks = [line.split(":")[1] for line in lines
+                         if line.startswith("calendar-marks-after-view:")]
+                assert marks == ["00000002", "00000001", "00000001",
+                                 "00000001", "00000800", "00000001"], marks
+                assert lines.count("destroy:calendar") == 51, "Calendar cycle/native leak"
+                assert lines.count("closure-notify:calendar-view") == 51 * 4
+            else:
+                assert lines.count("destroy:calendar") == 1, "Calendar native leak"
+                assert lines.count("closure-notify:calendar-view") == 4
+            if case == "error":
+                assert result.stderr.count("CALENDAR_VIEW_ERROR_SENTINEL") == 1, result.stderr
+            elif case == "yield":
+                assert "yield" in result.stderr, result.stderr
+            else:
+                assert not result.stderr.strip(), result.stderr
+            success(f"Calendar native navigation: {case}")
 
         # A signal connection failure must release the construction reference.
         cases = [
             ("value-changed", "spinButton", "destroy:spinButton"),
             ("day-selected", "calendar", "destroy:calendar"),
+            ("next-month", "calendar", "destroy:calendar"),
+            ("prev-month", "calendar", "destroy:calendar"),
+            ("next-year", "calendar", "destroy:calendar"),
+            ("prev-year", "calendar", "destroy:calendar"),
         ]
         for signal, constructor, destroyed in cases:
             script = temp / f"fail-{constructor}.lua"
@@ -122,7 +174,7 @@ def main():
             result = run([binary, str(script)], failure_env)
             assert "GUI_SIGNAL_FAILURE_OK" in result.stdout
             assert failure_log.read_text().splitlines().count(destroyed) == 100
-            print(f"[PASS] {constructor} signal failure releases native resources")
+            success(f"{constructor} {signal} connection failure releases native resources")
 
         # A failure while adding a lazy click gesture leaves the existing
         # progressBar handle alive and does not retain native controllers.
@@ -144,9 +196,9 @@ print("GUI_PROGRESS_CLICK_FAILURE_OK")
         failed = run([binary, str(bad_gesture_script)], failure_env)
         assert "GUI_PROGRESS_CLICK_FAILURE_OK" in failed.stdout
         assert failure_log.read_text().splitlines().count("destroy:progressBar") == 100
-        print("[PASS] progressBar lazy click gesture failure releases native resources")
+        success("progressBar lazy click gesture failure releases native resources")
 
-    print("GUI widgets regression: 8 PASS / 0 FAIL")
+    print(f"GUI widgets regression: {len(passed)} PASS / 0 FAIL")
 
 
 if __name__ == "__main__":

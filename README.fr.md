@@ -17,11 +17,16 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.29.0**. Voir le
+Version actuelle : **2.30.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.30.0 ajoute les [marqueurs de jours et callbacks de navigation Calendar](docs/fr/modules/gui.md#calendar--choix-et-modification-des-dates) :
+`markDay`, `unmarkDay`, `clearMarks` et `onViewChanged`. Les marqueurs sont à
+reconstruire pour chaque mois affiché, y compris explicitement après un
+`setDate()` programmatique. Les tests avec faux GTK et vrai GTK sont renforcés.
 
 Babet 2.25.0 ajoute [`babet.gui.entry`](docs/fr/modules/gui.md), un champ de
 saisie sur une ligne avec callbacks de modification/validation, indication

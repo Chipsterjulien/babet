@@ -9,6 +9,27 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+## [2.30.0] - 2026-10-18
+
+### GUI — marqueurs de jours du Calendar
+
+- Ajout de `calendar:markDay(jour)`, `calendar:unmarkDay(jour)` et `calendar:clearMarks()` via les marqueurs natifs du calendrier GTK4.
+- Ajout de `calendar:onViewChanged(fonction_ou_nil)` lors de la navigation mois/année précédent(e)/suivant(e), afin de reconstruire des marqueurs pilotés par les données sans modifier la sémantique de `onChanged()`.
+- GTK4 reste chargé dynamiquement ; les symboles ajoutés appartiennent à l'API Calendar historique de GTK4.
+- Teste les quatre signaux natifs de navigation Calendar avec vérification des
+  dates et marqueurs, remplacement/retrait du callback, récupération après
+  erreur/yield, setters réentrants et fermeture de fenêtre. Couvre chaque échec
+  de connexion de signal et la libération des cycles de callbacks.
+- Ajoute un scénario optionnel de navigation Ctrl+flèches avec le vrai GTK4 à la
+  suite de release existante ; calcule les bilans GUI à partir des cas réussis.
+- Documente la persistance des marqueurs par numéro de jour, leur rafraîchissement
+  après `setDate()`, les ajustements de jour sans `onChanged` et les dates
+  intermédiaires dans le callback de navigation.
+- Archive la note Calendar et étend le contrôle de propreté à tous les fichiers
+  `README_PATCH_*` et `LIRE_*` de la racine, liens symboliques cassés inclus.
+
+## [2.29.0] - 2026-10-16
+
 ### GUI — récupération après un échec d’allocation
 
 - Protège la préparation des arguments de `onDrag`, y compris l’allocation de
@@ -20,8 +41,6 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 - Ajoute à `run_tests.sh` des régressions par injection d’erreurs mémoire Lua
   et C++, avec récupération après un setter en coroutine, callbacks réentrants
   et comptage des ressources libérées.
-
-## [2.29.0] - 2026-10-16
 
 ### GUI — composants GTK4 libres et correction des gestes
 

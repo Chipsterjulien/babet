@@ -9,6 +9,18 @@ ko(){ echo "[FAIL] $1"; FAIL=$((FAIL+1)); }
 check(){ local label="$1"; shift; if "$@"; then ok "$label"; else ko "$label"; fi; }
 contains(){ grep -Fq -- "$2" "$1"; }
 absent(){ [ ! -e "$1" ]; }
+delivery_notes_absent(){
+    local path
+    local status=0
+    for path in "${ROOT}"/README_PATCH_* "${ROOT}"/LIRE_*; do
+        # Also reject dangling symlinks: they are still root-level artefacts.
+        if [ -e "$path" ] || [ -L "$path" ]; then
+            printf 'Delivery note at repository root: %s\n' "${path##*/}" >&2
+            status=1
+        fi
+    done
+    return "$status"
+}
 
 IMPL="src/lua_bindings/gui.cpp"
 HEADER="src/lua_bindings/gui_gtk_loader.hpp"
@@ -47,6 +59,9 @@ check "container clear is exposed" contains "$IMPL" 'widget_clear'
 check "removal reacquires native ownership before unparent" contains "$IMPL" 'acquire_construction_reference(child)'
 check "SpinButton value access is exposed" contains "$IMPL" 'gtk4_spin_button_get_value'
 check "Calendar date access is exposed" contains "$IMPL" 'gtk4_calendar_get_date'
+check "Calendar day markers are exposed" contains "$IMPL" '"markDay"'
+check "Calendar marker clearing is exposed" contains "$IMPL" '"clearMarks"'
+check "Calendar view navigation callback is exposed" contains "$IMPL" '"onViewChanged"'
 check "common widget margins are exposed" contains "$IMPL" '"setMargins"'
 check "common horizontal expansion is exposed" contains "$IMPL" '"setHExpand"'
 check "common vertical expansion is exposed" contains "$IMPL" '"setVExpand"'
@@ -70,6 +85,8 @@ check "native progress integration uses XTest" contains "${ROOT}/tools/test_gui_
 check "loader resolves GtkScrolledWindow child setter" contains "$LOADER" 'gtk_scrolled_window_set_child'
 check "loader resolves GtkSpinButton range constructor" contains "$LOADER" 'gtk_spin_button_new_with_range'
 check "loader resolves GtkCalendar selection" contains "$LOADER" 'gtk_calendar_select_day'
+check "loader resolves GtkCalendar mark day" contains "$LOADER" 'gtk_calendar_mark_day'
+check "loader resolves GtkCalendar clear marks" contains "$LOADER" 'gtk_calendar_clear_marks'
 check "loader resolves common widget sensitivity" contains "$LOADER" 'gtk_widget_set_sensitive'
 check "loader resolves CSS provider creation" contains "$LOADER" 'gtk_css_provider_new'
 check "loader resolves display CSS provider install" contains "$LOADER" 'gtk_style_context_add_provider_for_display'
@@ -87,6 +104,7 @@ check "real GTK moving-handle regression is exercised" contains "$RUN" 'tools/te
 check "real GTK drag converts move errors into immediate test failures" contains "${ROOT}/tests/gui/real_gtk_drag.lua" 'pcall(canvas.move, canvas, block, x, y)'
 check "completed pipeline cleanup regression is exercised" contains "$RUN" 'tools/test_pipeline_completed_cleanup.py'
 check "real GTK regression exercises DrawingArea draw" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'area:onDraw'
+check "real GTK regression exercises Calendar day markers" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'calendar:markDay'
 check "real GTK regression checks double-click press count" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'n_press == 2'
 check "real GTK regression injects real X11 clicks" contains "${ROOT}/tools/test_gui_real_gtk.py" 'XTestFakeButtonEvent'
 check "real GTK regression waits for first draw readiness" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'REAL_GTK_READY'
@@ -96,7 +114,7 @@ check "real GTK sanitizer probe disables only third-party leak detection" contai
 check "obsolete Entry lot note is absent from repository root" absent "${ROOT}/GUI_ENTRY_LOT1.fr.md"
 check "obsolete DrawingArea lot note is absent from repository root" absent "${ROOT}/GUI_DRAWING_LOT2.fr.md"
 check "obsolete onClick integration note is absent from repository root" absent "${ROOT}/INTEGRATION_DRAWINGAREA_ONCLICK.fr.md"
-check "obsolete GTK4 application note is absent from repository root" absent "${ROOT}/LIRE_AVANT_APPLICATION.txt"
+check "delivery notes (README_PATCH_*, LIRE_*) are absent from repository root" delivery_notes_absent
 check "modified-only deletion manifest is absent from repository root" absent "${ROOT}/REMOVED_FILES.txt"
 check "modified-only applicator is absent from repository root" absent "${ROOT}/APPLY_TO_PROJECT.sh"
 check "modified-only payload is absent from repository root" absent "${ROOT}/payload"

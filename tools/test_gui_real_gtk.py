@@ -155,6 +155,12 @@ def load_x11():
         ctypes.POINTER(window_t),
     ]
     x11.XTranslateCoordinates.restype = ctypes.c_int
+    x11.XKeysymToKeycode.argtypes = [display_p, ctypes.c_ulong]
+    x11.XKeysymToKeycode.restype = ctypes.c_ubyte
+    x11.XSetInputFocus.argtypes = [display_p, window_t, ctypes.c_int, ctypes.c_ulong]
+    x11.XSetInputFocus.restype = ctypes.c_int
+    xtst.XTestFakeKeyEvent.argtypes = [display_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+    xtst.XTestFakeKeyEvent.restype = ctypes.c_int
     x11.XFlush.argtypes = [display_p]
     x11.XFlush.restype = ctypes.c_int
 
@@ -242,6 +248,25 @@ def click_center(x11, xtst, display, window, count=2):
     x11.XFlush(display)
 
 
+def calendar_key(x11, xtst, display, keysym):
+    """Inject Ctrl+arrow; release both keys even if event injection fails."""
+    control = x11.XKeysymToKeycode(display, 0xffe3)  # Control_L
+    arrow = x11.XKeysymToKeycode(display, keysym)
+    if not control or not arrow:
+        raise AssertionError("X11 keymap lacks Calendar navigation keys")
+    try:
+        if not xtst.XTestFakeKeyEvent(display, control, 1, 0):
+            raise AssertionError("XTest Control press failed")
+        if not xtst.XTestFakeKeyEvent(display, arrow, 1, 0):
+            raise AssertionError("XTest Calendar arrow press failed")
+    finally:
+        arrow_released = xtst.XTestFakeKeyEvent(display, arrow, 0, 0)
+        control_released = xtst.XTestFakeKeyEvent(display, control, 0, 0)
+        x11.XFlush(display)
+    if not arrow_released or not control_released:
+        raise AssertionError("XTest Calendar key release failed")
+
+
 def start_xvfb(xvfb):
     # Use a private display without relying on xvfb-run so the parent process can
     # inject XTest events into the same server.
@@ -278,6 +303,12 @@ def main():
     if len(sys.argv) != 2:
         raise AssertionError("usage: python3 tools/test_gui_real_gtk.py /path/to/babet")
     binary = str(Path(sys.argv[1]).resolve())
+    passed = []
+
+    def success(message):
+        passed.append(message)
+        print(f"[PASS] real GTK4: {message}")
+
     xvfb = shutil.which("Xvfb")
     if not xvfb:
         return skip("Xvfb is unavailable")
@@ -375,8 +406,8 @@ def main():
                 f"real GTK4 probe failed with exit {child.returncode}\n"
                 + format_output(stdout, stderr)
             )
-        print("[PASS] real GTK4: containers, Entry coalescing, SpinButton, Calendar and CSS")
-        print("[PASS] real GTK4: DrawingArea Cairo draw and real double-click n_press")
+        success("containers, Entry coalescing, SpinButton, Calendar and CSS")
+        success("DrawingArea Cairo draw and real double-click n_press")
 
         # Independent native GtkProgressBar gesture. The main GTK probe has
         # already exited; reuse the same private Xvfb server and input helper.
@@ -409,8 +440,44 @@ def main():
                 f"real GTK4 progress failed with exit {child.returncode}\n"
                 + format_output(stdout, stderr)
             )
-        print("[PASS] real GTK4: progressBar receives four real primary clicks")
-        print("real GTK4 regression: 3 PASS / 0 FAIL")
+        success("progressBar receives four real primary clicks")
+        # A separate Calendar window verifies real navigation. The four native
+        # signals are reached through GTK's Ctrl+arrow key bindings, not setters
+        # or direct signal emission. Wait for an acknowledgement after each key.
+        child = subprocess.Popen(
+            [binary, str(ROOT / "tests/gui/real_gtk_calendar.lua")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+        calendar_out, calendar_err = wait_for_ready(
+            child, 20, marker=b"REAL_GTK_CALENDAR_READY\n"
+        )
+        calendar_window = find_window(x11, display, "Babet real GTK calendar probe")
+        if calendar_window is None:
+            stdout, stderr = kill_and_collect(child, calendar_out, calendar_err)
+            raise AssertionError("native Calendar window not found\n" + format_output(stdout, stderr))
+        x11.XSetInputFocus(display, calendar_window, 2, 0)  # RevertToParent, CurrentTime
+        click_center(x11, xtst, display, calendar_window, count=1)
+        chunk_out, chunk_err = wait_for_ready(child, 8, marker=b"REAL_GTK_CALENDAR_FOCUSED\n")
+        calendar_out += chunk_out
+        calendar_err += chunk_err
+        # Right, Left, Down, Up, Left, Right: all four signals, leap-day clamp
+        # and December/January rollover. The final callback closes its window.
+        for step, keysym in enumerate((0xff53, 0xff51, 0xff54, 0xff52, 0xff51, 0xff53), 1):
+            calendar_key(x11, xtst, display, keysym)
+            chunk_out, chunk_err = wait_for_ready(
+                child, 8, marker=f"REAL_GTK_CALENDAR_STEP_{step}\n".encode()
+            )
+            calendar_out += chunk_out
+            calendar_err += chunk_err
+        stdout, stderr = finish_with_timeout(child, 8, calendar_out, calendar_err)
+        if child.returncode != 0 or "REAL_GTK_CALENDAR_OK" not in decode(stdout):
+            raise AssertionError(
+                f"real GTK4 Calendar failed with exit {child.returncode}\n"
+                + format_output(stdout, stderr)
+            )
+        success("Calendar month/year navigation, markers and callback close")
+        print(f"real GTK4 regression: {len(passed)} PASS / 0 FAIL")
         return 0
     finally:
         if display:

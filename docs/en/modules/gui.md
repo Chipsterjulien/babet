@@ -109,6 +109,7 @@ The initial surface is intentionally small:
 - `drawingArea:onClick(function_or_nil)`
 - `spinButton:getValue()` / `spinButton:setValue(number)` / `spinButton:onChanged(function_or_nil)`
 - `calendar:getDate()` / `calendar:setDate(year, month, day)` / `calendar:onChanged(function_or_nil)`
+- `calendar:markDay(day)` / `calendar:unmarkDay(day)` / `calendar:clearMarks()` / `calendar:onViewChanged(function_or_nil)`
 - common properties: `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`, `addClass`, `removeClass`
 - `window:show()` / `window:close()`
 - `babet.gui.run()` / `babet.gui.quit()`
@@ -342,7 +343,19 @@ assert(date:onChanged(function()
     local year, month, day = date:getDate()
     print(year, month, day)
 end))
+local daysByMonth = { ["2026-10"] = {7, 18}, ["2025-12"] = {31} }
+local function refreshMarks()
+    local year, month = date:getDate() -- only the displayed year/month
+    assert(date:clearMarks())
+    local key = string.format("%04d-%02d", year, month)
+    for _, day in ipairs(daysByMonth[key] or {}) do
+        assert(date:markDay(day))
+    end
+end
+assert(date:onViewChanged(refreshMarks))
+refreshMarks() -- initial display
 assert(date:setDate(2025, 12, 31)) -- past dates are allowed
+refreshMarks() -- setDate() does not invoke onViewChanged()
 ```
 
 `calendar()` and `calendar(nil)` keep GTK's default selected date. To set a date
@@ -351,6 +364,37 @@ and must form a valid Gregorian date with year 1..9999. `getDate()` returns
 exactly three values: `year, month, day`. `setDate(year, month, day)` also accepts
 past dates. `onChanged(function_or_nil)` has the same protected, replaceable
 callback contract as SpinButton and Entry.
+
+Since Babet **2.30.0**, Calendar also exposes `markDay`, `unmarkDay`,
+`clearMarks` and `onViewChanged`.
+
+`markDay(day)` places GTK's native visual marker on a day number;
+`unmarkDay(day)` removes it and `clearMarks()` removes all markers. `day` must
+be an integer from 1 through 31. Markers remain attached to **day numbers** when
+the displayed month changes: marking day 5 also marks day 5 in subsequent months.
+For dated data, clear and rebuild the markers for each displayed month.
+
+`onViewChanged(function_or_nil)` runs on native user navigation to the
+previous/next month or year (header arrows, scrolling, keyboard or selection of
+a greyed-out day in an adjacent month). **`setDate()` does not invoke it**, even
+when changing the month or year. After a successful `setDate()`, call the same
+marker-refresh function explicitly, as above; otherwise the previous markers
+remain on the new month.
+
+GTK navigation can also adjust the selected day **without `onChanged()`**.
+For example, with GTK 4.14, moving forward from 31 January 2024 selects
+29 February and emits only `onViewChanged`. Selecting a greyed-out day can
+produce two stages: `onViewChanged` first sees the new month with an intermediate
+day (29 February in this example), then `onChanged` sees the selected day
+(e.g. 1 February).
+
+Use only the **year and month** from `getDate()` when rebuilding markers in
+`onViewChanged`; its day is not necessarily the final user selection. If the
+application tracks the complete selected date, read `getDate()` in both
+callbacks and again when confirming an operation. Do not assume that
+`onChanged` alone reports every date change, or that every navigation is followed
+by `onChanged`. Babet forwards these native GTK signals without synthesizing an
+extra selection notification.
 
 The binding uses the Calendar API available since early GTK 4 instead of
 requiring much newer setters, preserving compatibility with GTK 4 runtimes older

@@ -112,6 +112,7 @@ La première surface reste volontairement petite :
 - `drawingArea:onClick(fonction_ou_nil)`
 - `spinButton:getValue()` / `spinButton:setValue(nombre)` / `spinButton:onChanged(fonction_ou_nil)`
 - `calendar:getDate()` / `calendar:setDate(année, mois, jour)` / `calendar:onChanged(fonction_ou_nil)`
+- `calendar:markDay(jour)` / `calendar:unmarkDay(jour)` / `calendar:clearMarks()` / `calendar:onViewChanged(fonction_ou_nil)`
 - propriétés communes : `setMargins`, `setHExpand`, `setVExpand`, `setVisible`, `setSensitive`, `addClass`, `removeClass`
 - `window:show()` / `window:close()`
 - `babet.gui.run()` / `babet.gui.quit()`
@@ -383,7 +384,19 @@ assert(date:onChanged(function()
     print(annee, mois, jour)
 end))
 
+local joursParMois = { ["2026-10"] = {7, 18}, ["2025-12"] = {31} }
+local function actualiserMarqueurs()
+    local annee, mois = date:getDate() -- seulement l'année et le mois affichés
+    assert(date:clearMarks())
+    local cle = string.format("%04d-%02d", annee, mois)
+    for _, jour in ipairs(joursParMois[cle] or {}) do
+        assert(date:markDay(jour))
+    end
+end
+assert(date:onViewChanged(actualiserMarqueurs))
+actualiserMarqueurs() -- affichage initial
 assert(date:setDate(2025, 12, 31)) -- les dates passées sont autorisées
+actualiserMarqueurs() -- setDate() n'appelle pas onViewChanged()
 ```
 
 `calendar()` et `calendar(nil)` utilisent la date sélectionnée par défaut par
@@ -393,6 +406,38 @@ une année comprise entre 1 et 9999. `getDate()` renvoie exactement trois valeur
 `année, mois, jour`. `setDate(année, mois, jour)` accepte aussi les dates passées.
 `onChanged(fonction_ou_nil)` suit le même contrat protégé et remplaçable que le
 SpinButton et Entry.
+
+Depuis Babet **2.30.0**, Calendar expose aussi `markDay`, `unmarkDay`,
+`clearMarks` et `onViewChanged`.
+
+`markDay(jour)` place le marqueur visuel GTK natif sur un numéro de jour ;
+`unmarkDay(jour)` le retire et `clearMarks()` efface tous les marqueurs. `jour`
+doit être un entier de 1 à 31. Les marqueurs restent attachés aux **numéros de
+jour** quand le mois affiché change : marquer le 5 marque aussi le 5 des mois
+suivants. Pour des données datées, effacer et reconstruire les marqueurs pour
+chaque mois affiché.
+
+`onViewChanged(fonction_ou_nil)` est appelé lors d'une navigation native de
+l'utilisateur vers le mois ou l'année précédent(e)/suivant(e) : flèches de
+l'en-tête, molette, clavier ou sélection d'un jour grisé d'un mois voisin.
+**`setDate()` ne le déclenche pas**, même s'il change de mois ou d'année. Après
+un `setDate()` réussi, appeler explicitement la même fonction de rafraîchissement,
+comme ci-dessus ; sinon les anciens marqueurs restent sur le nouveau mois.
+
+La navigation GTK peut aussi ajuster le jour sélectionné **sans `onChanged()`**.
+Par exemple, avec GTK 4.14, passer au mois suivant depuis le 31 janvier 2024
+sélectionne le 29 février et déclenche seulement `onViewChanged`. Sélectionner
+un jour grisé peut produire deux étapes : `onViewChanged` voit d'abord le nouveau
+mois avec un jour intermédiaire (29 février dans cet exemple), puis `onChanged`
+voit le jour sélectionné (par exemple le 1er février).
+
+Pour reconstruire les marqueurs dans `onViewChanged`, n'utiliser que **l'année
+et le mois** de `getDate()` : son jour n'est pas nécessairement la sélection
+finale de l'utilisateur. Si l'application suit la date complète, relire
+`getDate()` dans les deux callbacks et au moment de valider une opération.
+Ne pas supposer que `onChanged` signale à lui seul tous les changements de date,
+ni qu'il suit chaque navigation. Babet transmet ces signaux natifs GTK sans
+ajouter de notification de sélection.
 
 L'implémentation utilise l'API Calendar disponible depuis les premières versions
 de GTK 4 plutôt que d'exiger les setters apparus beaucoup plus tard ; le runtime
@@ -533,7 +578,7 @@ assert(gui.init())
 local window = gui.window {title="Notes", width=700, height=500}
 local canvas = gui.fixed()
 local content = gui.box {orientation="vertical"}
-local handle = gui.label("Déplacer ⠿")
+local handle = gui.label("Déplacer")
 local editor = gui.textView {text="Mon idée"}
 content:add(handle)
 content:add(editor)

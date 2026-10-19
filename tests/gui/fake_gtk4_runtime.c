@@ -39,6 +39,9 @@ typedef struct FakeWidget {
     FakeCallback activate_cb;
     void *activate_data;
     FakeClosureNotify activate_destroy_notify;
+    FakeCallback calendar_view_cb[4];
+    void *calendar_view_data[4];
+    FakeClosureNotify calendar_view_destroy[4];
     int activated;
     int editable;
     char *text;
@@ -55,6 +58,8 @@ typedef struct FakeWidget {
     void *drag_data[3];
     FakeClosureNotify drag_destroy[3];
     int year, month, day;
+    unsigned char calendar_marks[32];
+    unsigned int calendar_event_index;
     int margin_top, margin_bottom, margin_start, margin_end;
     int hexpand, vexpand, visible, sensitive;
     unsigned int gesture_button, current_button;
@@ -176,6 +181,10 @@ static void destroy_widget(FakeWidget *w)
     if (w->activate_destroy_notify) {
         log_line("closure-notify:activate", NULL);
         w->activate_destroy_notify(w->activate_data, NULL);
+    }
+    for (int i = 0; i < 4; ++i) if (w->calendar_view_destroy[i]) {
+        log_line("closure-notify:calendar-view", NULL);
+        w->calendar_view_destroy[i](w->calendar_view_data[i], NULL);
     }
     if (w->pressed_destroy_notify) {
         log_line("closure-notify:pressed", NULL);
@@ -591,6 +600,31 @@ void gtk_calendar_select_day(void *p, void *date_p)
     if (!w->alive) abort();
     log_line("calendar-after-change", NULL);
 }
+void gtk_calendar_mark_day(void *p, unsigned int day)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive || day < 1 || day > 31) abort();
+    w->calendar_marks[day] = 1;
+    char value[16];
+    snprintf(value, sizeof(value), ":%u", day);
+    log_line("calendar-mark", value);
+}
+void gtk_calendar_unmark_day(void *p, unsigned int day)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive || day < 1 || day > 31) abort();
+    w->calendar_marks[day] = 0;
+    char value[16];
+    snprintf(value, sizeof(value), ":%u", day);
+    log_line("calendar-unmark", value);
+}
+void gtk_calendar_clear_marks(void *p)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive) abort();
+    memset(w->calendar_marks, 0, sizeof(w->calendar_marks));
+    log_line("calendar-clear-marks", NULL);
+}
 void *gtk_drawing_area_new(void) { return make_widget(6, NULL); }
 void gtk_drawing_area_set_content_width(void *p, int width)
 { ((FakeWidget *)p)->width = width; }
@@ -782,6 +816,17 @@ unsigned long g_signal_connect_data(void *instance, const char *signal,
         w->activate_cb = cb; w->activate_data = data;
         w->activate_destroy_notify = destroy_notify; return 4;
     }
+    if (w->kind == 9) {
+        const char *calendar_view_names[] = {
+            "next-month", "prev-month", "next-year", "prev-year"
+        };
+        for (int i = 0; i < 4; ++i) if (strcmp(signal, calendar_view_names[i]) == 0) {
+            w->calendar_view_cb[i] = cb;
+            w->calendar_view_data[i] = data;
+            w->calendar_view_destroy[i] = destroy_notify;
+            return (unsigned long)(30 + i);
+        }
+    }
     if (w->kind == 21) {
         const char *names[] = {"drag-begin", "drag-update", "drag-end"};
         for (int i = 0; i < 3; ++i) if (strcmp(signal, names[i]) == 0) {
@@ -797,10 +842,69 @@ unsigned long g_signal_connect_data(void *instance, const char *signal,
     return 0;
 }
 
+/* Opt-in native navigation for the Calendar fixture. Update the date before
+   emitting the signal, as GTK does; select_day() never emits these signals.
+   Month/year navigation clamps the day (e.g. Jan 31 -> Feb 29 in 2024).
+   Model GTK 4.14's navigation without synthesizing day-selected. */
+static int calendar_next_event(FakeWidget *w)
+{
+    const char *events = getenv("BABET_FAKE_GTK_CALENDAR_EVENTS");
+    if (!events || !*events) return 0;
+    const char *event = events;
+    for (unsigned int i = 0; i < w->calendar_event_index; ++i) {
+        event = strchr(event, ',');
+        if (!event) return 0;
+        ++event;
+    }
+    const char *end = strchr(event, ',');
+    const size_t length = end ? (size_t)(end - event) : strlen(event);
+    const char *names[] = {"next-month", "prev-month", "next-year", "prev-year"};
+    int signal = -1;
+    for (int i = 0; i < 4; ++i)
+        if (strlen(names[i]) == length && strncmp(event, names[i], length) == 0)
+            signal = i;
+    if (signal < 0) {
+        fputs("invalid fake Calendar navigation event\n", stderr);
+        abort();
+    }
+    ++w->calendar_event_index;
+    if (signal == 0 && ++w->month == 13) { w->month = 1; ++w->year; }
+    if (signal == 1 && --w->month == 0) { w->month = 12; --w->year; }
+    if (signal == 2) ++w->year;
+    if (signal == 3) --w->year;
+    const int days[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    int last = days[w->month - 1];
+    if (w->month == 2 && w->year % 4 == 0 &&
+        (w->year % 100 != 0 || w->year % 400 == 0)) ++last;
+    if (w->day > last) w->day = last;
+    char value[96];
+    snprintf(value, sizeof(value), "%s:%04d-%02d-%02d", names[signal],
+             w->year, w->month, w->day);
+    log_line("calendar-view-event:", value);
+    /* GObject pins the instance during signal emission. In particular, the
+       callback may close its window and release every other native owner. */
+    g_object_ref_sink(w);
+    if (w->calendar_view_cb[signal])
+        as_widget_signal(w->calendar_view_cb[signal])(w, w->calendar_view_data[signal]);
+    unsigned long marks = 0;
+    for (unsigned int day = 1; day <= 31; ++day)
+        if (w->calendar_marks[day]) marks |= 1UL << (day - 1);
+    snprintf(value, sizeof(value), "%08lx", marks);
+    log_line("calendar-marks-after-view:", value);
+    g_object_unref(w);
+    return 1;
+}
+
 int g_main_context_iteration(void *context, int may_block)
 {
     (void)context; (void)may_block;
-    /* Render dirty areas before simulating a button event. */
+    /* Calendar events precede the fixture's final button, even when the Lua
+       view callback has been removed. The button can then assert exact counts. */
+    for (size_t i = 0; i < widget_count; ++i) {
+        FakeWidget *w = widgets[i];
+        if (w && w->alive && w->kind == 9 && w->parent && calendar_next_event(w))
+            return 1;
+    }
     for (size_t i = 0; i < widget_count; ++i) {
         FakeWidget *w = widgets[i];
         if (w && w->alive && w->kind == 6 && w->parent && w->dirty && w->draw_cb) {

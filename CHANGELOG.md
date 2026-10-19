@@ -9,6 +9,25 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+## [2.30.0] - 2026-10-18
+
+### GUI — Calendar day markers
+
+- Added `calendar:markDay(day)`, `calendar:unmarkDay(day)` and `calendar:clearMarks()` using GTK4 native calendar markers.
+- Added `calendar:onViewChanged(function_or_nil)` for previous/next month and year navigation, so data-driven markers can be rebuilt for the displayed month without changing `onChanged()` semantics.
+- GTK4 remains dynamically loaded; the added symbols are part of the early GTK4 Calendar API.
+- Exercise all four native Calendar navigation signals with exact date/marker checks,
+  callback replacement/removal, error/yield recovery, reentrant setters and window
+  closure. Cover each signal-connection failure and callback-cycle cleanup.
+- Add an optional real GTK4 Ctrl+arrow navigation probe to the existing release
+  test suite, and derive GUI test totals from the cases that actually passed.
+- Document persistent day-number markers, explicit refresh after `setDate()`,
+  silent day adjustment during navigation and intermediate dates in view callbacks.
+- Archive the Calendar delivery note and reject root-level `README_PATCH_*` and
+  `LIRE_*` files, including dangling symlinks, in the existing cleanliness check.
+
+## [2.29.0] - 2026-10-16
+
 ### GUI — allocation-failure recovery
 
 - Protect `onDrag` argument preparation, including phase-string allocation,
@@ -17,8 +36,6 @@ may affect existing scripts.
   the setter's callback thread and native/logical references on every exit.
 - Add Lua/C++ allocator-fault regressions to `run_tests.sh`, including recovery
   after a failed coroutine setter, callback re-entry and resource accounting.
-
-## [2.29.0] - 2026-10-16
 
 ### GUI — free-position GTK4 components and native drag fixes
 
