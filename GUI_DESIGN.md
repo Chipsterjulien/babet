@@ -260,6 +260,7 @@ The deterministic fake GTK remains the fault-injection harness, but release vali
   progress bars keep their original behavior; fractions are always set by the
   Lua application, so both automatic and step-based progression are possible.
 - GtkBox ordering uses gtk_box_reorder_child_after rather than remove/reappend.
+- Rich row reordering uses native GtkDragSource/GtkDropTarget controllers with UTF-8 string IDs and GDK_ACTION_MOVE; `onDrag` remains reserved for free-position handles.
   Only existing children can be reordered, and the Lua-owned child table must
   always preserve the same visual order without recreating widgets.
 - Task completion styling (for example GTK CSS `text-decoration-line:
@@ -268,3 +269,30 @@ The deterministic fake GTK remains the fault-injection harness, but release vali
 - A full mouse drag-and-drop list interaction requires explicit GTK4 drag/drop
   controllers and visual drop indicators. Native GtkBox reordering alone is
   not incorrectly presented as a complete DnD solution.
+
+## Native DND target lifetime
+
+`onDrop(nil)` keeps the controller attached but disables its MOVE action and
+preload, and rejects any ongoing hover. This is a native disable, not merely an
+empty Lua callback: a disabled descendant must not consume its parent's drop.
+Re-enabling restores the same controller. A callback that disables then enables
+its target cannot accept the old gesture; the next gesture uses the new callback.
+
+Do not call `gtk_drop_target_reject()` from inside that target's `drop` emission:
+GTK still accesses its current GdkDrop after the callback returns. The protected
+bridge tracks that emission and lets GTK finish it with a rejected result.
+
+A zero action during enter/motion is only hover feedback, not permanent rejection.
+Applications must validate the final `drop` independently. The test double must
+allow subsequent motion/leave/drop rather than terminate the gesture on the first
+hover refusal. Parent targets also receive hover events and can allow a drop that
+is then consumed by a child. A delivered drop does not imply a subsequent leave;
+applications must clear all participating indicators in the drop handler. Its transfer owns a copy of the payload and pins widget/controller
+lifetimes while callbacks can close windows or replace source data. Sanitizer
+validation instruments both Babet and this test double.
+
+The source icon is a GtkWidgetPaintable of the handle, installed at source
+creation with hotspot (10, 10). The source owns the paintable; the paintable
+observes the widget without retaining it. The payload ID is never used to build
+the icon. Failure to create the icon releases the unattached source. The two
+additional symbols are part of the original GTK4 API and remain lazily resolved.

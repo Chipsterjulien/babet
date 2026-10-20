@@ -7,7 +7,31 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
-## [Non publié]
+## [2.31.0] - 2026-10-20
+
+### GUI — drag-and-drop GTK4 natif
+
+- Ajout de `widget:setDragData(chaine_ou_nil)` avec `GtkDragSource` et de
+  `widget:onDrop(fonction_ou_nil)` avec `GtkDropTarget`, en MOVE, avec identifiants
+  UTF-8 strictement validés et sans octet NUL interne.
+- L’icône de glisser montre le widget-poignée au lieu de l’identifiant interne.
+- Expose les callbacks protégés `enter`, `motion`, `drop` et `leave`. Prend en
+  charge la désactivation/réactivation native et le nettoyage lorsque les
+  callbacks ferment une fenêtre, modifient la source ou rencontrent une erreur mémoire.
+- Documente la propagation entre cibles imbriquées, la revalidation du dépôt et
+  le nettoyage commun des indicateurs : `leave` n’est pas garanti après un dépôt,
+  et `false` ne rend pas un enfant transparent pour son parent. Éviter de combiner
+  `onDrag` et le DND natif sur une poignée ; `onDrag` reste le geste des blocs libres.
+- Couvre les icônes, la durée de vie des callbacks/cibles, les échecs mémoire et
+  de connexion de signaux, l’imbrication et le retrait de source par des tests
+  d’exécution et des tests optionnels sur le vrai GTK/XTest.
+
+### Tests — synchronisation du premier plan du pseudo-terminal
+
+- Attendre que le processus enfant possède le terminal au premier plan avant
+  de lancer Babet dans le test de contrôle des tâches. En cas d'échec, arrêter
+  proprement le lancement pour ne pas confondre un arrêt initial par `SIGTTIN`
+  avec le traitement de Ctrl-Z.
 
 ## [2.30.0] - 2026-10-18
 

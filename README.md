@@ -16,11 +16,16 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.30.0**. See the
+Current release: **2.31.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.31.0 adds [native GTK4 drag-and-drop](docs/en/modules/gui.md#native-gtk4-drag-and-drop-for-list-rows)
+through `setDragData` and `onDrop`, with a handle-widget drag icon and protected
+callbacks. The GUI guide explains nested targets, drop validation and hover
+indicator cleanup. GTK 4 remains optional and loaded only when requested.
 
 Babet 2.30.0 adds native [Calendar day markers and navigation callbacks](docs/en/modules/gui.md#calendar-selecting-and-editing-dates):
 `markDay`, `unmarkDay`, `clearMarks` and `onViewChanged`. Rebuild markers for

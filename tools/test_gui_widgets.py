@@ -24,6 +24,12 @@ def main():
         raise AssertionError("usage: python3 tools/test_gui_widgets.py /path/to/babet")
     binary = str(Path(sys.argv[1]).resolve())
     passed = []
+    sanitizer_mode = os.environ.get("BABET_TEST_GUI_SANITIZERS", "OFF")
+    sanitizer_flags = {
+        "OFF": [],
+        "UBSAN": ["-fsanitize=undefined", "-fno-omit-frame-pointer"],
+        "ASAN_UBSAN": ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"],
+    }[sanitizer_mode]
 
     def success(message):
         passed.append(message)
@@ -34,7 +40,7 @@ def main():
         def compile_fake(directory, extra=()):
             directory.mkdir()
             run([*shlex.split(os.environ.get("CC", "cc")), "-std=c99", "-Wall", "-Wextra", "-Werror",
-                 "-fPIC", "-shared", "-Wl,-soname,libgtk-4.so.1", *extra,
+                 "-fPIC", "-shared", "-Wl,-soname,libgtk-4.so.1", *sanitizer_flags, *extra,
                  str(ROOT / "tests/gui/fake_gtk4_runtime.c"),
                  "-o", str(directory / "libgtk-4.so.1")])
 
@@ -45,6 +51,9 @@ def main():
         env.pop("BABET_FAKE_GTK_FAIL_SIGNAL", None)
         env.pop("BABET_FAKE_GTK_CALENDAR_EVENTS", None)
         env.pop("BABET_CALENDAR_CASE", None)
+        for key in list(env):
+            if key.startswith("BABET_FAKE_GTK_DND_"):
+                env.pop(key)
         result = run([binary, str(ROOT / "tests/gui/widgets_contract.lua")], env)
         assert "GUI_WIDGETS_CONTRACT_OK" in result.stdout
         assert "SPIN_CHANGED_ERROR_SENTINEL" in result.stderr
@@ -96,6 +105,89 @@ def main():
             "box-order:row-d,row-c,row-b,row-a",
         ], native_text
         success("native GtkBox reorder order and GtkProgressBar click progression")
+
+        dnd_log = temp / "native-dnd.log"
+        dnd_env = dict(env, BABET_FAKE_GTK_LOG=str(dnd_log))
+        dnd_result = run([binary, str(ROOT / "tests/gui/native_dnd_contract.lua")], dnd_env)
+        assert "GUI_NATIVE_DND_CONTRACT_OK" in dnd_result.stdout
+        dnd_lines = dnd_log.read_text().splitlines()
+        assert "dnd-complete:row-42" in dnd_lines
+        assert "dnd-icon-widget:visible-handle" in dnd_lines
+        assert dnd_lines.count("widget-paintable:drag-handle") == 1
+        assert dnd_lines.count("destroy:widgetPaintable") == 1
+        success("native GtkDragSource/GtkDropTarget string DND lifecycle")
+
+        # Explicit false and callback errors are both rejection paths, never
+        # process-aborting native failures. The error is reported and contained.
+        for mode, rejected_marker, stderr_marker in (
+            ("drop-false", "dnd-rejected:drop", None),
+            ("enter-error", "dnd-rejected:drop", "DND_ERROR_SENTINEL"),
+        ):
+            reject_log = temp / f"native-dnd-reject-{mode}.log"
+            reject_env = dict(env, BABET_FAKE_GTK_LOG=str(reject_log))
+            rejected = run([binary, str(ROOT / "tests/gui/native_dnd_reject.lua"), mode], reject_env)
+            assert f"GUI_NATIVE_DND_REJECT_OK:{mode}" in rejected.stdout
+            reject_text = reject_log.read_text()
+            assert rejected_marker in reject_text, reject_text
+            assert "dnd-complete:" not in reject_text, reject_text
+            if stderr_marker:
+                assert stderr_marker in rejected.stderr, rejected.stderr
+            else:
+                assert not rejected.stderr.strip(), rejected.stderr
+            success(f"native DND rejection is contained: {mode}")
+
+        for mode in (
+            "disabled", "reenabled", "self-disable-enter", "self-disable-drop",
+            "toggle-enter", "clear-source", "replace-source", "replace-callback",
+            "close-enter", "close-drop", "close-leave", "hover-recover",
+            "hover-false", "hover-false-alone", "hover-yield", "delayed", "cancel",
+        ):
+            lifecycle_log = temp / f"dnd-lifecycle-{mode}.log"
+            lifecycle_env = dict(env, BABET_FAKE_GTK_LOG=str(lifecycle_log),
+                                 BABET_FAKE_GTK_DND_HIT="dnd-hit")
+            if mode == "toggle-enter":
+                lifecycle_env["BABET_FAKE_GTK_DND_GESTURES"] = "2"
+            if mode == "delayed":
+                lifecycle_env["BABET_FAKE_GTK_DND_DELAYED"] = "1"
+            if mode in ("cancel", "close-leave"):
+                lifecycle_env["BABET_FAKE_GTK_DND_CANCEL"] = "1"
+            result = run([binary, str(ROOT / "tests/gui/native_dnd_lifecycle.lua"), mode], lifecycle_env)
+            assert f"GUI_NATIVE_DND_LIFECYCLE_OK:{mode}" in result.stdout, result.stdout
+            lines = lifecycle_log.read_text().splitlines()
+            assert lines.count("destroy:dropTarget") == 102, "DND native controller leak"
+            assert lines.count("destroy:widgetPaintable") == 101, "DND icon reference leak"
+            if mode in ("self-disable-drop", "hover-false"):
+                assert any(x.startswith("dnd-rejected:drop:") for x in lines), lines
+                assert not any(x.startswith("dnd-complete:") for x in lines), lines
+            elif mode in ("cancel", "close-enter", "close-leave", "hover-false-alone"):
+                assert any(x.startswith("dnd-cancelled:") for x in lines), lines
+            else:
+                assert any(x.startswith("dnd-complete:") for x in lines), lines
+            if mode == "hover-yield":
+                assert "yield" in result.stderr, result.stderr
+            else:
+                assert not result.stderr.strip(), result.stderr
+            success(f"native DND lifetime and propagation: {mode}")
+
+        icon_failure = temp / "icon-failure.lua"
+        icon_failure.write_text("""
+assert(babet.gui.init())
+for i = 1, 100 do
+    local handle = assert(babet.gui.label("handle"))
+    local ok, err = handle:setDragData("internal-id")
+    assert(ok == nil and err:find("cannot create GTK drag icon", 1, true))
+    assert(handle:setDragData(nil))
+    handle = nil
+    collectgarbage("collect")
+end
+print("ICON_FAILURE_OK")
+""")
+        icon_log = temp / "icon-failure.log"
+        result = run([binary, str(icon_failure)], dict(
+            env, BABET_FAKE_GTK_DND_FAIL_ICON="1", BABET_FAKE_GTK_LOG=str(icon_log)))
+        assert "ICON_FAILURE_OK" in result.stdout and not result.stderr.strip()
+        assert icon_log.read_text().splitlines().count("destroy:dragSource") == 100
+        success("drag icon allocation failure releases unattached source")
 
         # GTK 4.0-4.10 do not provide gtk_css_provider_load_from_string().
         # The loader must retain the data API as a compatibility fallback.
@@ -198,12 +290,35 @@ print("GUI_PROGRESS_CLICK_FAILURE_OK")
         assert failure_log.read_text().splitlines().count("destroy:progressBar") == 100
         success("progressBar lazy click gesture failure releases native resources")
 
+        # A lazy GtkDropTarget that fails while wiring any signal must
+        # release the controller and every closure already connected to it.
+        bad_drop_script = temp / "fail-drop-target.lua"
+        bad_drop_script.write_text("""
+assert(babet.gui.init())
+for i = 1, 100 do
+    local target = assert(babet.gui.label("target"))
+    local result, err = target:onDrop(function() end)
+    assert(result == nil and type(err) == "string" and err:find("cannot attach", 1, true), tostring(err))
+    target = nil
+    collectgarbage("collect")
+end
+print("GUI_DROP_TARGET_FAILURE_OK")
+""")
+        for signal in ("enter", "motion", "leave", "drop"):
+            drop_failure_log = temp / f"failure-drop-target-{signal}.log"
+            drop_failure_env = dict(env, BABET_FAKE_GTK_FAIL_SIGNAL=signal,
+                                    BABET_FAKE_GTK_LOG=str(drop_failure_log))
+            failed = run([binary, str(bad_drop_script)], drop_failure_env)
+            assert "GUI_DROP_TARGET_FAILURE_OK" in failed.stdout
+            assert drop_failure_log.read_text().splitlines().count("destroy:dropTarget") == 100
+            success(f"dropTarget {signal} signal failure releases native resources")
+
     print(f"GUI widgets regression: {len(passed)} PASS / 0 FAIL")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (AssertionError, OSError, subprocess.SubprocessError) as error:
+    except (AssertionError, KeyError, OSError, subprocess.SubprocessError) as error:
         print(f"[FAIL] GUI widgets: {error}", file=sys.stderr)
         sys.exit(1)

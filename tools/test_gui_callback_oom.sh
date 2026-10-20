@@ -31,3 +31,5 @@ if [ "$(getconf LONG_BIT 2>/dev/null || printf '64')" = "32" ]; then SYSTEM_LIBS
     "${LUA_ROOT}/liblua.a" "${SYSTEM_LIBS[@]}" -o "${TMP_ROOT}/probe"
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drag
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" text
+LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drop
+BABET_FAKE_GTK_DND_HIT=target LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drop-setter

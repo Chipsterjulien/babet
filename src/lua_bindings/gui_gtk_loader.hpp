@@ -1,6 +1,7 @@
 #ifndef BABET_GUI_GTK_LOADER_HPP
 #define BABET_GUI_GTK_LOADER_HPP
 
+#include <cstddef>
 #include <string>
 
 namespace babet_gui::detail
@@ -56,6 +57,21 @@ void gtk4_expander_set_child(void *expander, void *child) noexcept;
 void gtk4_expander_set_expanded(void *expander, bool expanded) noexcept;
 bool gtk4_expander_get_expanded(void *expander) noexcept;
 void *gtk4_gesture_drag_new() noexcept;
+// Native GTK4 drag-and-drop controllers. Babet intentionally exchanges only
+// UTF-8 string payloads here; applications can use stable IDs and keep their
+// model/data outside GTK.
+void *gtk4_drag_source_new() noexcept;
+void gtk4_drag_source_set_move_action(void *source) noexcept;
+bool gtk4_drag_source_set_widget_icon(void *source, void *widget) noexcept;
+bool gtk4_drag_source_set_text(void *source, const char *text) noexcept;
+void *gtk4_drop_target_new_text_move() noexcept;
+void gtk4_drop_target_set_preload(void *target, bool preload) noexcept;
+void gtk4_drop_target_set_enabled(void *target, bool enabled) noexcept;
+void gtk4_drop_target_reject(void *target) noexcept;
+const char *gtk4_drop_target_text(void *target) noexcept;
+const char *gtk4_value_text(const void *value) noexcept;
+unsigned int gtk4_drag_action_move() noexcept;
+bool gtk4_utf8_valid(const char *text, std::size_t length) noexcept;
 // GdkEvent positions are surface-relative, unlike GtkGestureDrag offsets.
 // The stable event surface makes moving a gesture's own widget safe.
 bool gtk4_gesture_surface_position(void *gesture, double &x, double &y) noexcept;

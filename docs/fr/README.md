@@ -17,7 +17,11 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de **Babet 2.30.0**.
+Documentation de **Babet 2.31.0**.
+
+Babet 2.31.0 ajoute le [glisser-déposer GTK4 natif](modules/gui.md#drag-and-drop-gtk4-natif-pour-les-listes)
+avec `setDragData` et `onDrop`, une icône représentant la poignée et des callbacks
+protégés. Le chapitre GUI décrit les cibles imbriquées et le nettoyage après dépôt.
 
 Babet 2.22.2 ajoute un client RFC 6455 natif via `babet.websocket`, avec
 `ws://` et `wss://` vérifié, négociation stricte, framing borné, Ping/Pong
@@ -42,7 +46,7 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 | publier atomiquement une configuration ou un fichier binaire | [`writeFileAtomic — écriture atomique`](modules/write-file-atomic.md) | refus d’écrasement par défaut, permissions, durabilité, confinement des chemins, concurrence et workers |
 | lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |
 | construire une interface terminal | [`CURSES — interfaces utilisateur en terminal`](modules/curses.md) | affichage UTF-8, clavier symbolique, resize/suspension, handoff des enfants interactifs, workers et fallbacks terminfo autonomes |
-| construire une GUI de bureau optionnelle | [`GUI — interface graphique GTK 4 optionnelle`](modules/gui.md) | chargement paresseux de GTK 4 système, fenêtre/box/label/bouton/entry, DrawingArea, conteneurs actualisables, saisies numérique/date, CSS/classes, callbacks, durée de vie, boucle événementielle et exception de déploiement `--create-exe` |
+| construire une GUI de bureau optionnelle | [`GUI — interface graphique GTK 4 optionnelle`](modules/gui.md) | chargement paresseux de GTK 4 système, fenêtre/box/label/bouton/entry, DrawingArea, conteneurs actualisables, saisies numérique/date, CSS/classes, glisser-déposer natif, callbacks, durée de vie, boucle événementielle et exception de déploiement `--create-exe` |
 | lancer un programme externe | [`Exec — processus`](modules/exec.md) | arguments sans shell, capture avec `exec`, streaming avec `spawn`, environnement, cwd et contrôle du processus |
 | enchaîner plusieurs commandes | [`Pipelines de processus`](modules/pipeline.md) | capture complète ou streaming, stderr séparés, statuts individuels et nettoyage des groupes |
 | créer ou inspecter/extraire des archives ZIP ou TAR | [`Archive — archives multi-formats sécurisées`](modules/archive.md) | création déterministe de ZIP et de TAR brut/gzip/xz/bzip2/zstd, listing, test intégral, extraction sélective, simulation `dry_run`, limites anti-bombe et publication atomique des fichiers |

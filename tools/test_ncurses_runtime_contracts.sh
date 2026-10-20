@@ -156,6 +156,10 @@ else
 fi
 require "PTY Ctrl-Z uses a shell-like same-session supervisor" tools/test_curses_pty.sh \
     'def exec_job_control_child\(argv, env\):'
+require "PTY Ctrl-Z startup creates a foreground handoff barrier" tools/test_curses_pty.sh \
+    'start_r, start_w = os\.pipe\(\)'
+require "PTY Ctrl-Z child waits for foreground handoff before exec" tools/test_curses_pty.sh \
+    'token = os\.read\(start_r, 1\)'
 require "PTY Ctrl-Z foregrounds a distinct Babet process group" tools/test_curses_pty.sh \
     'os\.tcsetpgrp\(0, child\)'
 require "PTY Ctrl-Z stop observation comes from child WIFSTOPPED" tools/test_curses_pty.sh \

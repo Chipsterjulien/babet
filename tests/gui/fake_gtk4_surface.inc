@@ -49,6 +49,20 @@ void gtk_expander_set_child(void *p, void *c) { (void)p; (void)c; }
 void gtk_expander_set_expanded(void *p, int b) { (void)p; (void)b; }
 int gtk_expander_get_expanded(void *p) { (void)p; return 0; }
 void *gtk_gesture_drag_new(void) { return (void *)0x17; }
+size_t g_type_from_name(const char *name) { (void)name; return (size_t)64; }
+int g_utf8_validate(const char *s, long n, const char **end) { (void)s; (void)n; (void)end; return 1; }
+const char *g_value_get_string(const void *value) { (void)value; return "fake-dnd"; }
+void *gdk_content_provider_new_typed(size_t type, ...) { (void)type; return (void *)0x18; }
+void *gtk_widget_paintable_new(void *w) { (void)w; return (void *)0x1b; }
+void gtk_drag_source_set_icon(void *s, void *p, int x, int y) { (void)s; (void)p; (void)x; (void)y; }
+void *gtk_drag_source_new(void) { return (void *)0x19; }
+void gtk_drag_source_set_actions(void *s, unsigned int a) { (void)s; (void)a; }
+void gtk_drag_source_set_content(void *s, void *c) { (void)s; (void)c; }
+void *gtk_drop_target_new(size_t type, unsigned int a) { (void)type; (void)a; return (void *)0x1a; }
+void gtk_drop_target_set_preload(void *t, int p) { (void)t; (void)p; }
+void gtk_drop_target_set_actions(void *t, unsigned int a) { (void)t; (void)a; }
+void gtk_drop_target_reject(void *t) { (void)t; }
+const void *gtk_drop_target_get_value(void *t) { (void)t; return NULL; }
 void *gtk_gesture_single_get_current_sequence(void *g) { (void)g; return NULL; }
 void *gtk_gesture_get_last_event(void *g, void *seq) { (void)seq; return g; }
 int gdk_event_get_position(void *event, double *x, double *y)

@@ -516,7 +516,7 @@ if ! python3 "${SCRIPT_DIR}/tools/test_gui_drawing.py" "${BINARY}"; then
 fi
 
 print_preflight_stage "Régression — GUI conteneurs, SpinButton, Calendar et propriétés communes"
-if ! python3 "${SCRIPT_DIR}/tools/test_gui_widgets.py" "${BINARY}"; then
+if ! BABET_TEST_GUI_SANITIZERS="${SANITIZER_MODE}" python3 "${SCRIPT_DIR}/tools/test_gui_widgets.py" "${BINARY}"; then
     echo "ÉCHEC : la régression des widgets GUI complémentaires a échoué."
     exit 1
 fi

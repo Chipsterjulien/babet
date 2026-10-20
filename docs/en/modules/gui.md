@@ -564,7 +564,80 @@ For native text strikethrough styling apply GTK CSS such as:
 `label.completed, checkbutton.completed label { text-decoration-line: line-through; }`.
 A check button's `onChanged()` handler can add/remove its `completed` class.
 
-`box:reorder` is a low-level **native** ordering primitive, not a complete
-GtkDragSource/GtkDropTarget drag-and-drop system. A future rich reordering UI
-can add explicit native drop controllers and insertion indicators without
-changing this API or faking the widget hierarchy.
+### Native GTK4 drag-and-drop for list rows
+
+Since Babet **2.31.0**, native DND is available alongside `onDrag()`:
+
+- `handle:setDragData(string_or_nil)` installs a real **`GtkDragSource`** on a
+  non-interactive widget (`label`, `box`, `drawingArea`, `fixed` or
+  `progressBar`). The UTF-8 string is the move payload; `nil` disables the
+  source without rebuilding the widget. The string must be valid UTF-8 and
+  embedded NUL bytes are rejected. The drag icon shows the handle widget,
+  not the transported ID, with a fixed hotspot at (10, 10).
+- `target:onDrop(function_or_nil)` installs a real **`GtkDropTarget`** on any
+  non-window widget. The protected callback receives
+  `(phase, payload, x, y)` for `"enter"`, `"motion"`, `"drop"` and
+  `"leave"`. `leave` receives nil payload/coordinates. During hover, a backend
+  may not have preloaded the string yet, so `payload` can be nil on
+  `enter`/`motion`; it is present on `drop`.
+- Callbacks accept by default (`nil` or truthy). `false` or an error refuses the
+  current notification. Refusing `enter`/`motion` **does not cancel the gesture**:
+  further motion, `leave` and possibly `drop` can follow. Revalidate the ID and
+  position in `drop`; return `false` if the operation is forbidden.
+- `onDrop(nil)` disables the **native target** as well as its Lua callback and
+  cancels an ongoing hover/preload. A disabled child no longer intercepts drops
+  for a parent target or the widget's built-in text handling. Calling
+  `onDrop(function)` enables the same controller again.
+- Disabling inside a callback rejects the current transfer for that target.
+  Re-enabling affects the next gesture, even when immediate. Existing model
+  changes are not undone.
+- The transfer owns its payload: changing or clearing `setDragData()` during a
+  gesture affects subsequent gestures, not the ID already being transferred.
+- The advertised GTK action is **MOVE**. Babet transports only the stable ID;
+  the application owns its model and calls `box:reorder()` when the drop is
+  accepted.
+
+Use a dedicated non-interactive handle. Avoid combining `onDrag()` and
+`setDragData()` on the same widget: `onDrag` can start first, then lose the
+sequence when native DND takes over at its drag threshold.
+
+With nested targets, the parent also receives `enter`/`motion` while hovering
+its child. If the parent accepts the hover, the child can still receive `drop`
+even after returning `false` during hover. **Revalidate every final drop.**
+Returning `false` from the child's `drop` does not forward it to the parent;
+only disabling the child with `onDrop(nil)` makes it transparent.
+
+**Do not wait for `leave` after a drop.** GTK may finish an accepted or refused
+drop without emitting `leave`, including on the parent. In every `drop` handler,
+clear the indicators on all participating targets before validating or updating
+the model. Keep `leave` cleanup for a pointer exit/cancelled gesture:
+
+```lua
+local rows = { ["task-42"] = rowA }
+local function clearDropIndicators()
+    for _, widget in ipairs({list, rowA, rowB}) do
+        assert(widget:removeClass("drop-target"))
+    end
+end
+assert(handleA:setDragData("task-42"))
+assert(rowB:onDrop(function(phase, payload, x, y)
+    if phase == "enter" or phase == "motion" then
+        assert(rowB:addClass("drop-target"))
+    elseif phase == "leave" then
+        assert(rowB:removeClass("drop-target"))
+    elseif phase == "drop" then
+        clearDropIndicators() -- shared by every drop handler, including list's
+        local moved = rows[payload]
+        if not moved or moved == rowB then return false end
+        assert(list:reorder(moved, rowB)) -- move immediately after rowB
+    end
+end))
+```
+
+If the parent `list` also has an `onDrop` handler, call the same cleanup function
+in its `drop` branch, including when rejecting the drop.
+
+To insert before a target, pass the target's previous row from the application
+model to `reorder()` (or explicit `nil` for first position). The insertion
+indicator and persistence remain application concerns, but the gesture/drop path
+itself is native `GtkDragSource`/`GtkDropTarget`, not an `onDrag()` simulation.

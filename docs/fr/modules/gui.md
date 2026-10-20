@@ -671,10 +671,87 @@ assert(list:reorder(last, first))
 assert(list:reorder(last, nil))
 ```
 
-`onDrag()` permet déjà de reconnaître un mouvement sur une poignée dédiée.
-Le choix graphique de la position de dépôt, le repère d'insertion et la
-persistance de l'ordre appartiennent à l'application. Pour un véritable
-*drag-and-drop* GTK4 entre listes, une future interface de
-`GtkDragSource`/`GtkDropTarget` devra être ajoutée explicitement :
-`box:reorder` fournit **la primitive native de réordonnancement**, mais ne
-prétend pas à lui seul implémenter tout le parcours de dépôt.
+### Drag-and-drop GTK4 natif pour les listes
+
+Depuis Babet **2.31.0**, le DND natif est disponible en complément de `onDrag()` :
+
+- `poignee:setDragData(identifiant_ou_nil)` installe un **`GtkDragSource`** sur
+  un widget non interactif (`label`, `box`, `drawingArea`, `fixed` ou
+  `progressBar`). La chaîne UTF-8 sert de donnée de déplacement ; `nil`
+  désactive la source sans reconstruire le widget. La chaîne doit être un UTF-8
+  valide et les octets NUL internes sont refusés afin de garder une sémantique
+  texte exacte. L’icône de glisser montre le widget-poignée, pas l’identifiant
+  transporté, avec un point d’accroche fixe en (10, 10).
+- `cible:onDrop(fonction_ou_nil)` installe un **`GtkDropTarget`** natif sur tout
+  widget non-fenêtre. Le callback reçoit `(phase, payload, x, y)` avec les
+  phases `"enter"`, `"motion"`, `"drop"` et `"leave"`. Pour `leave`,
+  `payload`, `x` et `y` valent `nil`. Pendant `enter`/`motion`, certains
+  backends peuvent ne pas avoir encore préchargé la chaîne ; `payload` peut
+  donc être `nil`. Lors de `drop`, la chaîne est disponible.
+- Le callback accepte le dépôt par défaut (`nil` ou toute valeur vraie). Un
+  retour explicite `false`, ou une erreur du callback, refuse cette notification.
+  Un refus pendant `enter` ou `motion` **n’annule pas définitivement le geste** :
+  d’autres mouvements, `leave`, et éventuellement `drop` peuvent suivre.
+  Vérifier de nouveau l’identifiant et la position finale dans `drop`, puis
+  renvoyer `false` si l’opération est interdite. Les callbacks restent protégés.
+- `onDrop(nil)` désactive **la cible native** et son callback Lua, et annule le
+  survol/préchargement en cours. Un enfant désactivé n’intercepte plus les dépôts
+  destinés à une cible parente ou au traitement de texte natif du widget.
+  `onDrop(fonction)` réactive ensuite le même contrôleur.
+- Une désactivation depuis un callback de dépôt annule aussi le transfert en
+  cours ; même une réactivation immédiate ne prend effet qu’au geste suivant.
+  GTK peut terminer le callback en cours sans accéder à des données libérées.
+  Cela n’annule pas les modifications du modèle déjà effectuées par le callback :
+  désactiver avant d’appliquer une modification si l’objectif est de l’annuler.
+- Le transfert possède sa propre donnée : modifier ou effacer `setDragData()`
+  pendant un geste concerne les gestes suivants, pas l’identifiant déjà transféré.
+- L'action GTK annoncée est **MOVE**. Babet transporte seulement l'identifiant ;
+  l'application garde son modèle, choisit la position et appelle ensuite
+  `box:reorder()`.
+
+Utiliser une poignée non interactive dédiée. Éviter de combiner `onDrag()` et
+`setDragData()` sur le même widget : `onDrag` peut démarrer puis perdre la
+séquence lorsque le glisser-déposer natif prend la main au seuil de déplacement.
+
+Avec des cibles imbriquées, le parent reçoit aussi `enter`/`motion` pendant le
+survol de l’enfant. Si le parent accepte le survol, l’enfant peut recevoir `drop`
+même après avoir renvoyé `false` pendant le survol. **Toujours revalider le dépôt
+final.** Un `false` dans le `drop` de l’enfant ne transmet pas le dépôt au parent ;
+seule la désactivation de l’enfant par `onDrop(nil)` le rend transparent.
+
+**Ne pas attendre `leave` après un dépôt.** GTK peut terminer un dépôt accepté
+ou refusé sans émettre `leave`, y compris sur le parent. Dans chaque callback
+`drop`, nettoyer les indicateurs de toutes les cibles concernées avant de valider
+ou de modifier le modèle. Garder le nettoyage dans `leave` pour la sortie du
+pointeur ou un geste annulé :
+
+```lua
+local rows = { ["task-42"] = rowA }
+local function clearDropIndicators()
+    for _, widget in ipairs({list, rowA, rowB}) do
+        assert(widget:removeClass("drop-target"))
+    end
+end
+assert(handleA:setDragData("task-42"))
+assert(rowB:onDrop(function(phase, payload, x, y)
+    if phase == "enter" or phase == "motion" then
+        assert(rowB:addClass("drop-target"))
+    elseif phase == "leave" then
+        assert(rowB:removeClass("drop-target"))
+    elseif phase == "drop" then
+        clearDropIndicators() -- nettoyage commun à tous les callbacks drop
+        local moved = rows[payload]
+        if not moved or moved == rowB then return false end
+        assert(list:reorder(moved, rowB)) -- place moved juste après rowB
+    end
+end))
+```
+
+Si le parent `list` possède aussi un callback `onDrop`, appeler cette même
+fonction dans sa branche `drop`, y compris lorsque le dépôt est refusé.
+
+Pour placer avant une cible, l'application passe à `reorder()` la ligne qui
+précède cette cible dans son propre modèle (ou `nil` pour la première place).
+Le repère d'insertion et la persistance restent donc des décisions de l'UI,
+mais le geste et le dépôt eux-mêmes utilisent bien `GtkDragSource` et
+`GtkDropTarget`, sans simulation avec `onDrag()`.

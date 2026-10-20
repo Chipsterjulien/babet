@@ -35,6 +35,7 @@ constexpr lua_Integer ACTIVATE_CALLBACK = -2;
 constexpr lua_Integer CLICK_CALLBACK = -3;
 constexpr lua_Integer DRAG_CALLBACK = -4;
 constexpr lua_Integer CALENDAR_VIEW_CALLBACK = -5;
+constexpr lua_Integer DROP_CALLBACK = -6;
 
 enum class WidgetKind : unsigned char
 {
@@ -63,6 +64,12 @@ struct WidgetState
     lua_State *callback_thread = nullptr; // synchronous setters use their caller
     bool drag_controller_attached = false;
     bool click_controller_attached = false;
+    bool drag_source_controller_attached = false;
+    bool drop_target_controller_attached = false;
+    void *drag_source_controller = nullptr; // borrowed; owned by GTK widget
+    void *drop_target_controller = nullptr; // borrowed; owned by GTK widget
+    unsigned long long drop_revision = 0; // invalidates an in-flight hover callback
+    unsigned int drop_received_depth = 0;
     void *content = nullptr; // expander: internal box, always parents user children
     bool drag_origin_valid = false;
     double drag_origin_x = 0.0;
@@ -267,6 +274,8 @@ void widget_destroyed(void *, void *data) noexcept
         return;
 
     state->native = nullptr;
+    state->drag_source_controller = nullptr;
+    state->drop_target_controller = nullptr;
     state->owns_reference = false;
     g_live_widgets.fetch_sub(1, std::memory_order_acq_rel);
     if (state->kind == WidgetKind::window)
@@ -474,6 +483,120 @@ void drag_update(void *gesture, double x, double y, void *data) noexcept
 void drag_end(void *gesture, double x, double y, void *data) noexcept
 {
     drag_motion(gesture, x, y, data, "end");
+}
+
+struct DropInvocation
+{
+    WidgetState *state;
+    const char *phase;
+    const char *payload;
+    double x;
+    double y;
+    bool has_coords;
+    bool invoked;
+    bool accepted;
+};
+
+int invoke_drop_callback(lua_State *L)
+{
+    auto *call = static_cast<DropInvocation *>(lua_touserdata(L, 1));
+    if (!call->state->native || !call->state->owner || !call->state->handle_key)
+        return 0;
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &widget_handles_key);
+    lua_rawgetp(L, -1, call->state->handle_key);
+    if (lua_type(L, -1) != LUA_TUSERDATA)
+        return 0;
+    lua_getiuservalue(L, -1, 1);
+    lua_rawgeti(L, -1, DROP_CALLBACK);
+    if (lua_type(L, -1) != LUA_TFUNCTION)
+        return 0;
+
+    call->invoked = true;
+    lua_pushstring(L, call->phase);
+    if (call->payload)
+        lua_pushstring(L, call->payload);
+    else
+        lua_pushnil(L);
+    if (call->has_coords)
+    {
+        lua_pushnumber(L, call->x);
+        lua_pushnumber(L, call->y);
+    }
+    else
+    {
+        lua_pushnil(L);
+        lua_pushnil(L);
+    }
+    lua_call(L, 4, 1);
+    call->accepted = lua_isnil(L, -1) || lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+    return 0;
+}
+
+bool dispatch_drop(WidgetState *state, const char *phase, const char *payload,
+                   double x, double y, bool has_coords) noexcept
+{
+    if (!state || !state->native || !state->owner || !state->handle_key)
+        return false;
+    lua_State *L = state->owner;
+    const int base = lua_gettop(L);
+    retain_state(state);
+    if (!lua_checkstack(L, 2))
+    {
+        std::fputs("babet.gui callback error: cannot grow drop stack\n", stderr);
+        release_state(state);
+        return false;
+    }
+    DropInvocation call{state, phase, payload, x, y, has_coords, false, true};
+    const auto revision = state->drop_revision;
+    const bool receiving = phase[0] == 'd';
+    if (receiving)
+        ++state->drop_received_depth;
+    lua_pushcfunction(L, invoke_drop_callback);
+    lua_pushlightuserdata(L, &call);
+    const bool ok = lua_pcall(L, 1, 0, 0) == LUA_OK;
+    if (!ok)
+        report_callback_error(L);
+    lua_settop(L, base);
+    if (receiving)
+        --state->drop_received_depth;
+    // Disabling then re-enabling in the callback must not advertise MOVE for
+    // a hover operation that onDrop(nil) has already rejected in GTK.
+    const bool accepted = ok && call.invoked && call.accepted &&
+                          revision == state->drop_revision;
+    release_state(state);
+    return accepted;
+}
+
+unsigned int drop_enter(void *target, double x, double y, void *data) noexcept
+{
+    auto *state = static_cast<WidgetState *>(data);
+    const char *payload = detail::gtk4_drop_target_text(target);
+    return dispatch_drop(state, "enter", payload, x, y, true)
+               ? detail::gtk4_drag_action_move() : 0U;
+}
+
+unsigned int drop_motion(void *target, double x, double y, void *data) noexcept
+{
+    auto *state = static_cast<WidgetState *>(data);
+    const char *payload = detail::gtk4_drop_target_text(target);
+    return dispatch_drop(state, "motion", payload, x, y, true)
+               ? detail::gtk4_drag_action_move() : 0U;
+}
+
+void drop_leave(void *, void *data) noexcept
+{
+    (void)dispatch_drop(static_cast<WidgetState *>(data), "leave", nullptr,
+                        0.0, 0.0, false);
+}
+
+int drop_received(void *, const void *value, double x, double y, void *data) noexcept
+{
+    const char *payload = detail::gtk4_value_text(value);
+    if (!payload)
+        return 0;
+    return dispatch_drop(static_cast<WidgetState *>(data), "drop", payload,
+                         x, y, true) ? 1 : 0;
 }
 
 void widget_pressed(void *gesture, int n_press, double x, double y,
@@ -1769,6 +1892,117 @@ int widget_on_drag(lua_State *L)
     return push_ok_protected(L);
 }
 
+int widget_set_drag_data(lua_State *L)
+{
+    if (!lua_arity_is(L, 2))
+        return luaL_error(L, "gui widget:setDragData expects one string or nil");
+    WidgetState *state = check_widget(L, 1, "gui widget:setDragData");
+    if (state->kind == WidgetKind::window)
+        return luaL_error(L, "gui widget:setDragData: windows cannot be drag sources");
+    if (state->kind != WidgetKind::label && state->kind != WidgetKind::box &&
+        state->kind != WidgetKind::drawing_area && state->kind != WidgetKind::fixed &&
+        state->kind != WidgetKind::progress_bar)
+        return luaL_error(L, "gui widget:setDragData: use a non-interactive drag handle (label, box, drawingArea, fixed, progressBar)");
+
+    if (lua_isnil(L, 2))
+    {
+        if (state->drag_source_controller_attached && state->drag_source_controller)
+            (void)detail::gtk4_drag_source_set_text(state->drag_source_controller, nullptr);
+        return push_ok_protected(L);
+    }
+    if (lua_type(L, 2) != LUA_TSTRING)
+        return luaL_error(L, "gui widget:setDragData expects one string or nil");
+    size_t length = 0;
+    const char *payload = lua_tolstring(L, 2, &length);
+    if (std::memchr(payload, '\0', length) != nullptr)
+        return luaL_error(L, "gui widget:setDragData: payload cannot contain NUL bytes");
+    if (!detail::gtk4_utf8_valid(payload, length))
+        return luaL_error(L, "gui widget:setDragData: payload must be valid UTF-8");
+
+    if (!state->drag_source_controller_attached)
+    {
+        void *source = detail::gtk4_drag_source_new();
+        if (!source)
+            return push_fail_protected(L, "babet.gui: cannot create GTK drag source");
+        detail::gtk4_drag_source_set_move_action(source);
+        detail::gtk4_gesture_single_set_button(source, 1U);
+        // GTK otherwise builds a text icon from the internal payload ID.
+        if (!detail::gtk4_drag_source_set_widget_icon(source, state->native))
+        {
+            detail::gtk4_object_unref(source);
+            return push_fail_protected(L, "babet.gui: cannot create GTK drag icon");
+        }
+        if (!detail::gtk4_drag_source_set_text(source, payload))
+        {
+            detail::gtk4_object_unref(source);
+            return push_fail_protected(L, "babet.gui: cannot create GTK drag payload");
+        }
+        detail::gtk4_widget_add_controller(state->native, source);
+        state->drag_source_controller = source;
+        state->drag_source_controller_attached = true;
+    }
+    else if (!detail::gtk4_drag_source_set_text(state->drag_source_controller, payload))
+        return push_fail_protected(L, "babet.gui: cannot create GTK drag payload");
+    return push_ok_protected(L);
+}
+
+int widget_on_drop(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || (!lua_isnil(L, 2) && lua_type(L, 2) != LUA_TFUNCTION))
+        return luaL_error(L, "gui widget:onDrop expects a function or nil");
+    WidgetState *state = check_widget(L, 1, "gui widget:onDrop");
+    if (state->kind == WidgetKind::window)
+        return luaL_error(L, "gui widget:onDrop: windows cannot be drop targets");
+
+    if (!state->drop_target_controller_attached && lua_type(L, 2) == LUA_TFUNCTION)
+    {
+        void *target = detail::gtk4_drop_target_new_text_move();
+        if (!target)
+            return push_fail_protected(L, "babet.gui: cannot create GTK drop target");
+        // Stay inert until the allocating Lua callback-table update succeeds.
+        // A caught allocation failure must not leave a target swallowing drops.
+        detail::gtk4_drop_target_set_enabled(target, false);
+        const char *signals[] = {"enter", "motion", "leave", "drop"};
+        const detail::GtkCallback callbacks[] = {
+            gtk_callback(&drop_enter), gtk_callback(&drop_motion),
+            gtk_callback(&drop_leave), gtk_callback(&drop_received)};
+        for (unsigned int i = 0; i < 4; ++i)
+        {
+            retain_state(state);
+            if (detail::gtk4_signal_connect(target, signals[i], callbacks[i], state,
+                                            &button_signal_released) == 0)
+            {
+                release_state(state);
+                detail::gtk4_object_unref(target);
+                return push_fail_protected(L, "babet.gui: cannot attach GTK drop target signal");
+            }
+        }
+        detail::gtk4_widget_add_controller(state->native, target);
+        state->drop_target_controller = target;
+        state->drop_target_controller_attached = true;
+    }
+    lua_getiuservalue(L, 1, 1);
+    lua_pushvalue(L, 2);
+    lua_rawseti(L, -2, DROP_CALLBACK);
+    // The Lua table update can allocate and run finalizers. Recheck the native
+    // handle before using the controller borrowed from the GTK widget.
+    if (state->native && state->drop_target_controller)
+    {
+        const bool enabled = !lua_isnil(L, 2);
+        detail::gtk4_drop_target_set_enabled(state->drop_target_controller, enabled);
+        if (!enabled)
+        {
+            ++state->drop_revision;
+            // GTK still accesses its GdkDrop after emitting ::drop. Let it
+            // finish that emission normally; actions=0 and the revision above
+            // reject the result. Outside ::drop, cancel any hover/preload now.
+            if (state->drop_received_depth == 0)
+                detail::gtk4_drop_target_reject(state->drop_target_controller);
+        }
+    }
+    return push_ok_protected(L);
+}
+
 int widget_set_size_request(lua_State *L)
 {
     if (!lua_arity_is(L, 3))
@@ -2756,6 +2990,10 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "move");
         lua_pushcfunction(L, gui_lua_boundary<widget_on_drag>);
         lua_setfield(L, -2, "onDrag");
+        lua_pushcfunction(L, gui_lua_boundary<widget_set_drag_data>);
+        lua_setfield(L, -2, "setDragData");
+        lua_pushcfunction(L, gui_lua_boundary<widget_on_drop>);
+        lua_setfield(L, -2, "onDrop");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_size_request>);
         lua_setfield(L, -2, "setSizeRequest");
         lua_pushcfunction(L, gui_lua_boundary<widget_remove>);

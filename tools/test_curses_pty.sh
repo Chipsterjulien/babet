@@ -295,12 +295,27 @@ def exec_job_control_child(argv, env):
     # pty.fork() makes this helper the session leader and controlling-terminal
     # owner. Keep it alive as a tiny shell-like parent so the Babet process
     # group is not orphaned: SIGTSTP then has real shell job-control semantics.
+    #
+    # Do not let the child exec Babet before its process group owns the PTY.
+    # Without this barrier, a very fast child can print PRE_CURSES_READY and
+    # attempt io.read() while still in the background. The kernel then stops
+    # it with SIGTTIN, which is indistinguishable here from the intentional
+    # Ctrl-Z stop later in the scenario and makes the test flaky.
     shell_pgid = os.getpgrp()
+    start_r, start_w = os.pipe()
     child = os.fork()
     if child == 0:
+        os.close(start_w)
         os.setpgid(0, 0)
+        try:
+            token = os.read(start_r, 1)
+        finally:
+            os.close(start_r)
+        if token != b"1":
+            os._exit(126)
         os.execve(argv[0], argv, env)
 
+    os.close(start_r)
     try:
         os.setpgid(child, child)
     except OSError:
@@ -310,7 +325,11 @@ def exec_job_control_child(argv, env):
     # background process group. Ignoring SIGTTOU is the normal job-control
     # technique for tcsetpgrp(). The launched Babet child did not inherit it.
     signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-    os.tcsetpgrp(0, child)
+    try:
+        os.tcsetpgrp(0, child)
+        os.write(start_w, b"1")
+    finally:
+        os.close(start_w)
 
     while True:
         waited, status = os.waitpid(child, os.WUNTRACED)

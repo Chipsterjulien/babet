@@ -248,6 +248,49 @@ def click_center(x11, xtst, display, window, count=2):
     x11.XFlush(display)
 
 
+def drag_across_window(x11, xtst, display, window):
+    """Drag from the left half to the right half of one GTK probe window."""
+    root_return = ctypes.c_ulong()
+    x = ctypes.c_int()
+    y = ctypes.c_int()
+    width = ctypes.c_uint()
+    height = ctypes.c_uint()
+    border = ctypes.c_uint()
+    depth = ctypes.c_uint()
+    if not x11.XGetGeometry(display, window, ctypes.byref(root_return),
+                            ctypes.byref(x), ctypes.byref(y), ctypes.byref(width),
+                            ctypes.byref(height), ctypes.byref(border),
+                            ctypes.byref(depth)):
+        raise AssertionError("XGetGeometry failed for GTK DND window")
+    root = x11.XDefaultRootWindow(display)
+    root_x = ctypes.c_int()
+    root_y = ctypes.c_int()
+    child = ctypes.c_ulong()
+    if not x11.XTranslateCoordinates(display, window, root, 0, 0,
+                                     ctypes.byref(root_x), ctypes.byref(root_y),
+                                     ctypes.byref(child)):
+        raise AssertionError("XTranslateCoordinates failed for GTK DND window")
+
+    start_x = root_x.value + max(10, width.value // 5)
+    end_x = root_x.value + max(20, (width.value * 4) // 5)
+    py = root_y.value + max(10, height.value // 2)
+    if not xtst.XTestFakeMotionEvent(display, -1, start_x, py, 0):
+        raise AssertionError("XTest DND initial motion failed")
+    if not xtst.XTestFakeButtonEvent(display, 1, 1, 0):
+        raise AssertionError("XTest DND press failed")
+    x11.XFlush(display)
+    time.sleep(0.08)
+    for step in range(1, 11):
+        px = start_x + ((end_x - start_x) * step) // 10
+        if not xtst.XTestFakeMotionEvent(display, -1, px, py, 0):
+            raise AssertionError("XTest DND motion failed")
+        x11.XFlush(display)
+        time.sleep(0.04)
+    if not xtst.XTestFakeButtonEvent(display, 1, 0, 0):
+        raise AssertionError("XTest DND release failed")
+    x11.XFlush(display)
+
+
 def calendar_key(x11, xtst, display, keysym):
     """Inject Ctrl+arrow; release both keys even if event injection fails."""
     control = x11.XKeysymToKeycode(display, 0xffe3)  # Control_L
@@ -441,6 +484,39 @@ def main():
                 + format_output(stdout, stderr)
             )
         success("progressBar receives four real primary clicks")
+        # Native GTK4 DND: real GtkDragSource/GtkDropTarget with an XTest drag.
+        for mode in ("normal", "disabled-child", "reenabled-child", "self-disable-enter",
+                     "self-disable-drop", "clear-source", "close-drop",
+                     "nested-hover-false", "nested-drop-false", "remove-source"):
+            child = subprocess.Popen(
+                [binary, str(ROOT / "tests/gui/real_gtk_dnd.lua"), mode],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+            )
+            dnd_out, dnd_err = wait_for_ready(
+                child, 20, marker=b"REAL_GTK_DND_READY\n"
+            )
+            dnd_window = None
+            for _ in range(150):
+                if child.poll() is not None:
+                    break
+                dnd_window = find_window(x11, display, "Babet real GTK DND probe")
+                if dnd_window is not None:
+                    break
+                time.sleep(0.04)
+            if dnd_window is None:
+                stdout, stderr = kill_and_collect(child, dnd_out, dnd_err)
+                raise AssertionError("native DND window not found\n" + format_output(stdout, stderr))
+            time.sleep(0.25)
+            drag_across_window(x11, xtst, display, dnd_window)
+            stdout, stderr = finish_with_timeout(child, 8, dnd_out, dnd_err)
+            if child.returncode != 0 or f"REAL_GTK_DND_OK:{mode}" not in decode(stdout):
+                raise AssertionError(
+                    f"real GTK4 DND failed with exit {child.returncode}\n"
+                    + format_output(stdout, stderr)
+                )
+            success(f"native DND lifetime and propagation: {mode}")
+
         # A separate Calendar window verifies real navigation. The four native
         # signals are reached through GTK's Ctrl+arrow key bindings, not setters
         # or direct signal emission. Wait for an acknowledgement after each key.

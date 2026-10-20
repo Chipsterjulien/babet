@@ -7,7 +7,29 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
-## [Unreleased]
+## [2.31.0] - 2026-10-20
+
+### GUI — native GTK4 drag-and-drop
+
+- Add `widget:setDragData(string_or_nil)` with `GtkDragSource` and
+  `widget:onDrop(function_or_nil)` with `GtkDropTarget`, using MOVE and strictly
+  validated UTF-8 IDs without embedded NUL bytes.
+- Show the handle widget as the drag icon instead of exposing the internal ID.
+- Expose protected `enter`, `motion`, `drop` and `leave` callbacks. Support native
+  target disabling/re-enabling and safe cleanup when callbacks close windows,
+  change source data or encounter allocation failures.
+- Document nested target propagation, final-drop validation and shared indicator
+  cleanup: `leave` is not guaranteed after a drop, and `false` does not make a
+  child transparent to its parent. Avoid combining `onDrag` and native DND on one
+  handle; `onDrag` remains the gesture for free-position blocks.
+- Cover drag icons, callback/target lifetime, allocation and signal failures,
+  nested targets and source removal with runtime and optional real GTK/XTest tests.
+
+### Tests — pseudo-terminal foreground synchronization
+
+- Wait until the child process owns the foreground terminal before starting
+  Babet in the job-control regression. Abort cleanly if foreground setup fails,
+  preventing startup `SIGTTIN` stops from being mistaken for Ctrl-Z handling.
 
 ## [2.30.0] - 2026-10-18
 

@@ -234,11 +234,108 @@ static void text_faults()
                 failed, successful);
 }
 
+static void drop_faults()
+{
+    int failed = 0, successful = 0;
+    for (int budget = 0; budget < 32; ++budget) {
+        Allocator a;
+        lua_State *L = create_state(a);
+        load_counters();
+        execute(L, R"lua(
+            window = assert(gui.window())
+            root = assert(gui.box())
+            source = assert(gui.label('source'))
+            target = assert(gui.label('target'))
+            assert(root:add(source)); assert(root:add(target)); assert(window:add(root))
+            assert(source:setDragData(string.rep('data-', 40)))
+            seen = 0
+            assert(target:onDrop(function() seen = seen + 1 end))
+            assert(window:show())
+            collectgarbage('collect')
+        )lua");
+        check(lua_checkstack(L, 128) != 0, "reserve drop stack");
+        const int top = lua_gettop(L);
+        a.budget = budget;
+        (void)babet_gui::detail::gtk4_main_context_iteration(false);
+        a.budget = -1;
+        check(lua_gettop(L) == top, "drop changed Lua stack");
+        if (a.failures) ++failed;
+        else { ++successful; execute(L, "assert(seen == 3)"); }
+        execute(L, R"lua(
+            recovery_source = assert(gui.label('recovery'))
+            assert(root:add(recovery_source))
+            assert(recovery_source:setDragData('recovery-id'))
+            recovered = false
+            assert(target:onDrop(function(phase, payload)
+                if phase == 'drop' then
+                    assert(payload == 'recovery-id')
+                    recovered = true
+                    assert(target:onDrop(nil))
+                end
+            end))
+        )lua");
+        (void)babet_gui::detail::gtk4_main_context_iteration(false);
+        execute(L, "assert(recovered); assert(window:close())");
+        close_state(L);
+    }
+    check(failed > 0 && successful > 0, "drop sweep controls");
+    std::printf("[PASS] onDrop allocator: %d fault cases / %d controls\n", failed, successful);
+}
+
+static void drop_setter_faults()
+{
+    int failed = 0, successful = 0;
+    for (int budget = 0; budget < 8; ++budget) {
+        Allocator a;
+        lua_State *L = create_state(a);
+        load_counters();
+        execute(L, R"lua(
+            window = assert(gui.window())
+            root = assert(gui.box())
+            source = assert(gui.label('source'))
+            outer = assert(gui.box())
+            target = assert(gui.label('target'))
+            assert(root:add(source)); assert(root:add(outer))
+            assert(outer:add(target)); assert(window:add(root))
+            assert(source:setDragData('setter-id'))
+            child_drops, parent_drops = 0, 0
+            handler = function(phase)
+                if phase == 'drop' then child_drops = child_drops + 1 end
+            end
+            install = function() assert(target:onDrop(handler)) end
+            assert(outer:onDrop(function(phase)
+                if phase == 'drop' then parent_drops = parent_drops + 1 end
+            end))
+            assert(window:show()); collectgarbage('collect')
+        )lua");
+        check(lua_checkstack(L, 128) != 0, "reserve drop setter stack");
+        lua_getglobal(L, "install");
+        a.budget = budget;
+        const int status = lua_pcall(L, 0, 0, 0);
+        a.budget = -1;
+        const bool fault = a.failures != 0;
+        check(status == (fault ? LUA_ERRMEM : LUA_OK), "drop setter fault status");
+        lua_settop(L, 0);
+        if (fault) ++failed; else ++successful;
+        (void)babet_gui::detail::gtk4_main_context_iteration(false);
+        execute(L, fault ? "assert(parent_drops == 1 and child_drops == 0)"
+                         : "assert(child_drops == 1 and parent_drops == 0)");
+        execute(L, "install(); assert(window:close())");
+        close_state(L);
+    }
+    check(failed > 0 && successful > 0, "drop setter sweep controls");
+    std::printf("[PASS] onDrop installation allocator: %d fault cases / %d controls; parent fallback and cleanup\n",
+                failed, successful);
+}
+
+
 int main(int argc, char **argv)
 {
     babet_runtime::register_main_thread();
-    check(argc == 2, "expected drag or text");
+    check(argc == 2, "expected drag, text, drop or drop-setter");
     if (std::strcmp(argv[1], "drag") == 0) drag_faults();
     else if (std::strcmp(argv[1], "text") == 0) text_faults();
+    else if (std::strcmp(argv[1], "drop") == 0) drop_faults();
+    else if (std::strcmp(argv[1], "drop-setter") == 0) drop_setter_faults();
     else check(false, "unknown test mode");
 }

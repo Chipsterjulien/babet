@@ -2,6 +2,7 @@
 #include "process_state.hpp"
 
 #include <cstring>
+#include <cstddef>
 #include <dlfcn.h>
 #include <string>
 #include <string_view>
@@ -44,6 +45,21 @@ using GtkExpanderSetChild = void (*)(void *, void *);
 using GtkExpanderSetExpanded = void (*)(void *, int);
 using GtkExpanderGetExpanded = int (*)(void *);
 using GtkGestureDragNew = void *(*)();
+using GType = std::size_t;
+using GtkDragSourceNew = void *(*)();
+using GtkDragSourceSetActions = void (*)(void *, unsigned int);
+using GtkDragSourceSetContent = void (*)(void *, void *);
+using GtkDragSourceSetIcon = void (*)(void *, void *, int, int);
+using GtkWidgetPaintableNew = void *(*)(void *);
+using GdkContentProviderNewTyped = void *(*)(GType, ...);
+using GTypeFromName = GType (*)(const char *);
+using GtkDropTargetNew = void *(*)(GType, unsigned int);
+using GtkDropTargetSetPreload = void (*)(void *, int);
+using GtkDropTargetSetActions = void (*)(void *, unsigned int);
+using GtkDropTargetReject = void (*)(void *);
+using GtkDropTargetGetValue = const void *(*)(void *);
+using GValueGetString = const char *(*)(const void *);
+using GUtf8Validate = int (*)(const char *, std::ptrdiff_t, const char **);
 using GtkGestureSingleGetCurrentSequence = void *(*)(void *);
 using GtkGestureGetLastEvent = void *(*)(void *, void *);
 using GdkEventGetPosition = int (*)(void *, double *, double *);
@@ -137,6 +153,20 @@ struct GtkApi
     GtkExpanderSetExpanded expander_set_expanded = nullptr;
     GtkExpanderGetExpanded expander_get_expanded = nullptr;
     GtkGestureDragNew gesture_drag_new = nullptr;
+    GtkDragSourceNew drag_source_new = nullptr;
+    GtkDragSourceSetActions drag_source_set_actions = nullptr;
+    GtkDragSourceSetContent drag_source_set_content = nullptr;
+    GtkDragSourceSetIcon drag_source_set_icon = nullptr;
+    GtkWidgetPaintableNew widget_paintable_new = nullptr;
+    GdkContentProviderNewTyped content_provider_new_typed = nullptr;
+    GTypeFromName type_from_name = nullptr;
+    GtkDropTargetNew drop_target_new = nullptr;
+    GtkDropTargetSetPreload drop_target_set_preload = nullptr;
+    GtkDropTargetSetActions drop_target_set_actions = nullptr;
+    GtkDropTargetReject drop_target_reject = nullptr;
+    GtkDropTargetGetValue drop_target_get_value = nullptr;
+    GValueGetString value_get_string = nullptr;
+    GUtf8Validate utf8_validate = nullptr;
     GtkGestureSingleGetCurrentSequence gesture_single_get_current_sequence = nullptr;
     GtkGestureGetLastEvent gesture_get_last_event = nullptr;
     GdkEventGetPosition gdk_event_get_position = nullptr;
@@ -371,6 +401,20 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(expander_set_expanded, "gtk_expander_set_expanded");
     BABET_GTK_RESOLVE(expander_get_expanded, "gtk_expander_get_expanded");
     BABET_GTK_RESOLVE(gesture_drag_new, "gtk_gesture_drag_new");
+    BABET_GTK_RESOLVE(drag_source_new, "gtk_drag_source_new");
+    BABET_GTK_RESOLVE(drag_source_set_actions, "gtk_drag_source_set_actions");
+    BABET_GTK_RESOLVE(drag_source_set_content, "gtk_drag_source_set_content");
+    BABET_GTK_RESOLVE(drag_source_set_icon, "gtk_drag_source_set_icon");
+    BABET_GTK_RESOLVE(widget_paintable_new, "gtk_widget_paintable_new");
+    BABET_GTK_RESOLVE(content_provider_new_typed, "gdk_content_provider_new_typed");
+    BABET_GTK_RESOLVE(type_from_name, "g_type_from_name");
+    BABET_GTK_RESOLVE(drop_target_new, "gtk_drop_target_new");
+    BABET_GTK_RESOLVE(drop_target_set_preload, "gtk_drop_target_set_preload");
+    BABET_GTK_RESOLVE(drop_target_set_actions, "gtk_drop_target_set_actions");
+    BABET_GTK_RESOLVE(drop_target_reject, "gtk_drop_target_reject");
+    BABET_GTK_RESOLVE(drop_target_get_value, "gtk_drop_target_get_value");
+    BABET_GTK_RESOLVE(value_get_string, "g_value_get_string");
+    BABET_GTK_RESOLVE(utf8_validate, "g_utf8_validate");
     BABET_GTK_RESOLVE(gesture_single_get_current_sequence, "gtk_gesture_single_get_current_sequence");
     BABET_GTK_RESOLVE(gesture_get_last_event, "gtk_gesture_get_last_event");
     BABET_GTK_RESOLVE(gdk_event_get_position, "gdk_event_get_position");
@@ -538,6 +582,77 @@ void gtk4_expander_set_child(void *e, void *c) noexcept { g_gtk.expander_set_chi
 void gtk4_expander_set_expanded(void *e, bool b) noexcept { g_gtk.expander_set_expanded(e, b ? 1 : 0); }
 bool gtk4_expander_get_expanded(void *e) noexcept { return g_gtk.expander_get_expanded(e) != 0; }
 void *gtk4_gesture_drag_new() noexcept { return g_gtk.gesture_drag_new(); }
+namespace
+{
+constexpr unsigned int GDK_ACTION_MOVE_VALUE = 1U << 1;
+GType gtk4_string_type() noexcept
+{
+    return g_gtk.type_from_name ? g_gtk.type_from_name("gchararray") : 0;
+}
+}
+void *gtk4_drag_source_new() noexcept { return g_gtk.drag_source_new(); }
+void gtk4_drag_source_set_move_action(void *source) noexcept
+{ g_gtk.drag_source_set_actions(source, GDK_ACTION_MOVE_VALUE); }
+bool gtk4_drag_source_set_widget_icon(void *source, void *widget) noexcept
+{
+    void *paintable = g_gtk.widget_paintable_new(widget);
+    if (!paintable)
+        return false;
+    // GtkDragSource retains the paintable. GtkWidgetPaintable observes the
+    // handle without owning it, so this does not create a widget/controller cycle.
+    g_gtk.drag_source_set_icon(source, paintable, 10, 10);
+    g_gtk.object_unref(paintable);
+    return true;
+}
+bool gtk4_drag_source_set_text(void *source, const char *text) noexcept
+{
+    if (!text)
+    {
+        g_gtk.drag_source_set_content(source, nullptr);
+        return true;
+    }
+    const GType string_type = gtk4_string_type();
+    if (!string_type)
+    {
+        g_gtk.drag_source_set_content(source, nullptr);
+        return false;
+    }
+    void *provider = g_gtk.content_provider_new_typed(string_type, text);
+    if (!provider)
+    {
+        g_gtk.drag_source_set_content(source, nullptr);
+        return false;
+    }
+    g_gtk.drag_source_set_content(source, provider);
+    g_gtk.object_unref(provider);
+    return true;
+}
+void *gtk4_drop_target_new_text_move() noexcept
+{
+    const GType string_type = gtk4_string_type();
+    return string_type ? g_gtk.drop_target_new(string_type, GDK_ACTION_MOVE_VALUE) : nullptr;
+}
+void gtk4_drop_target_set_preload(void *target, bool preload) noexcept
+{ g_gtk.drop_target_set_preload(target, preload ? 1 : 0); }
+void gtk4_drop_target_set_enabled(void *target, bool enabled) noexcept
+{
+    g_gtk.drop_target_set_actions(target, enabled ? GDK_ACTION_MOVE_VALUE : 0U);
+    g_gtk.drop_target_set_preload(target, enabled ? 1 : 0);
+}
+void gtk4_drop_target_reject(void *target) noexcept
+{ g_gtk.drop_target_reject(target); }
+const char *gtk4_drop_target_text(void *target) noexcept
+{
+    const void *value = g_gtk.drop_target_get_value(target);
+    return value ? g_gtk.value_get_string(value) : nullptr;
+}
+const char *gtk4_value_text(const void *value) noexcept
+{ return value ? g_gtk.value_get_string(value) : nullptr; }
+unsigned int gtk4_drag_action_move() noexcept { return GDK_ACTION_MOVE_VALUE; }
+bool gtk4_utf8_valid(const char *text, std::size_t length) noexcept
+{
+    return text && g_gtk.utf8_validate(text, static_cast<std::ptrdiff_t>(length), nullptr) != 0;
+}
 bool gtk4_gesture_surface_position(void *gesture, double &x, double &y) noexcept
 {
     void *sequence = g_gtk.gesture_single_get_current_sequence(gesture);

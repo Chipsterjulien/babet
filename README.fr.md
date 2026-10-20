@@ -17,11 +17,16 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.30.0**. Voir le
+Version actuelle : **2.31.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.31.0 ajoute le [glisser-déposer GTK4 natif](docs/fr/modules/gui.md#drag-and-drop-gtk4-natif-pour-les-listes)
+avec `setDragData` et `onDrop`, une icône représentant la poignée et des callbacks
+protégés. Le guide GUI décrit les cibles imbriquées, la validation du dépôt et
+le nettoyage des indicateurs de survol. GTK 4 reste optionnel et chargé à la demande.
 
 Babet 2.30.0 ajoute les [marqueurs de jours et callbacks de navigation Calendar](docs/fr/modules/gui.md#calendar--choix-et-modification-des-dates) :
 `markDay`, `unmarkDay`, `clearMarks` et `onViewChanged`. Les marqueurs sont à
