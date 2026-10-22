@@ -12,12 +12,23 @@ assert(source:setHExpand(true)); assert(outer:setHExpand(true))
 assert(target:setHExpand(true)); assert(target:setVExpand(true))
 assert(outer:add(target)); assert(root:add(source)); assert(root:add(outer))
 assert(window:add(root))
+if mode == "copy-action" then
+    assert(source:setDragActions({"copy", "move"}))
+    assert(target:setDropActions({"copy", "move"}))
+    assert(outer:setDropActions({"copy", "move"}))
+end
 assert(source:setDragData("real-row-7"))
+local drag_end_action, drag_end_delete
+if mode == "copy-action" then
+    assert(source:onDragState(function(phase, detail, action)
+        if phase == "end" then drag_end_action, drag_end_delete = action, detail end
+    end))
+end
 local saw_enter, saw_motion, saw_drop, closed = false, false, false, false
 local inner_calls, inner_drops, outer_drops = 0, 0, 0
 local parent_enters, parent_motions = 0, 0
 local expect_outer = mode == "disabled-child" or mode == "self-disable-enter"
-local function receive(is_inner, phase, payload, x, y)
+local function receive(is_inner, phase, payload, x, y, action)
     if is_inner then inner_calls = inner_calls + 1 end
     if phase == "enter" or phase == "motion" then
         if not is_inner then
@@ -30,6 +41,10 @@ local function receive(is_inner, phase, payload, x, y)
         if is_inner and phase == "enter" then
             if mode == "self-disable-enter" then assert(target:onDrop(nil)) end
             if mode == "clear-source" then assert(source:setDragData(nil)) end
+        end
+        if mode == "copy-action" then
+            assert(action == "move" or action == "copy")
+            return "copy"
         end
         if is_inner and mode == "nested-hover-false" then return false end
     elseif phase == "drop" then
@@ -68,6 +83,10 @@ if mode == "disabled-child" then assert(inner_calls == 0) end
 if mode == "nested-hover-false" or mode == "nested-drop-false" then
     assert(parent_enters > 0 and parent_motions > 0)
     assert(inner_drops == 1 and outer_drops == 0)
+end
+if mode == "copy-action" then
+    assert(drag_end_action == "copy", tostring(drag_end_action))
+    assert(drag_end_delete == false)
 end
 if not closed then assert(window:close()) end
 print("REAL_GTK_DND_OK:" .. mode)

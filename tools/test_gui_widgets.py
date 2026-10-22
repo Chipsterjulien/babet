@@ -83,6 +83,37 @@ def main():
             assert marker in result.stdout, (fixture, result.stdout)
             success(f"{fixture}: free layout, cycle guards and drag coordinates")
 
+        for mode in ("cycles", "lifetime"):
+            result = run([binary, str(ROOT / "tests/gui/popover_ownership.lua"), mode], env)
+            assert f"GUI_POPOVER_OWNERSHIP_OK:{mode}" in result.stdout
+            assert not result.stderr.strip(), result.stderr
+            success(f"popover ownership: {mode}")
+
+        for mode in ("copy-at-drop", "move-at-drop", "copy", "move", "link", "copy-only", "link-only", "drop-false", "drop-error", "reject-then-move"):
+            result = run([binary, str(ROOT / "tests/gui/native_dnd_actions.lua"), mode],
+                         dict(env, BABET_FAKE_GTK_DND_HIT="target", BABET_FAKE_GTK_DND_FINISHED_ON_REJECT="1",
+                              BABET_FAKE_GTK_DND_GESTURES="2" if mode == "reject-then-move" else "1"))
+            assert f"REAL_GTK_DND_OK:{mode}" in result.stdout
+            if mode in ("copy-at-drop", "move-at-drop"):
+                assert "cannot change the negotiated action during drop" in result.stderr, result.stderr
+            elif mode == "drop-error":
+                assert "DND_FINAL_ERROR_SENTINEL" in result.stderr, result.stderr
+            else:
+                assert not result.stderr.strip(), result.stderr
+            success(f"DND action and source deletion: {mode}")
+
+        for mode in ("unparented", "mapped", "hidden", "detached", "destroyed", "reset"):
+            icon_log = temp / f"drag-icon-{mode}.log"
+            result = run([binary, str(ROOT / "tests/gui/native_dnd_icon.lua"), mode],
+                         dict(env, BABET_FAKE_GTK_DND_HIT="target", BABET_FAKE_GTK_LOG=str(icon_log)))
+            assert f"GUI_DND_ICON_OK:{mode}" in result.stdout, result.stdout
+            assert not result.stderr.strip(), result.stderr
+            lines = icon_log.read_text().splitlines()
+            expected_icon = "custom-preview" if mode == "mapped" else "visible-source"
+            assert f"dnd-icon-widget:{expected_icon}" in lines, lines
+            assert sum(line.startswith("widget-paintable:") for line in lines) == lines.count("destroy:widgetPaintable"), lines
+            success(f"drag icon mapping and native cleanup: {mode}")
+
         native_log = temp / "native-widgets.log"
         native_env = dict(env, BABET_FAKE_GTK_LOG=str(native_log))
         native_result = run([binary, str(ROOT / "tests/gui/native_list_contract.lua")], native_env)
@@ -135,6 +166,31 @@ def main():
             else:
                 assert not rejected.stderr.strip(), rejected.stderr
             success(f"native DND rejection is contained: {mode}")
+
+        desktop_log = temp / "desktop-ui.log"
+        desktop_env = dict(
+            env, BABET_FAKE_GTK_LOG=str(desktop_log),
+            BABET_FAKE_GTK_DESKTOP_EVENTS="1",
+            BABET_FAKE_GTK_DND_MODIFIERS="4",
+        )
+        desktop = run([binary, str(ROOT / "tests/gui/desktop_ui_contract.lua")], desktop_env)
+        assert "GUI_DESKTOP_UI_CONTRACT_OK" in desktop.stdout, desktop.stdout
+        assert not desktop.stderr.strip(), desktop.stderr
+        desktop_lines = desktop_log.read_text().splitlines()
+        for marker in (
+            "cursor:grab", "tooltip:Move note", "text-wrap",
+            "paned-start:set:slot-a", "paned-end:set:slot-b",
+            "paned-start:clear", "paned-end:clear",
+            "paned-start:set:slot-b", "paned-end:set:slot-c",
+            "window-transient:set", "window-modal:1",
+            "menu-popup", "menu-popdown", "widget-parent:set:", "widget-parent:clear:", "popover-present",
+            "popover-popup", "popover-popdown", "popover-point",
+            "key-consumed:1", "controller-phase:1", "close-request-blocked:1",
+            "dnd-icon-widget:drag-preview", "dnd-hover:enter:copy",
+            "dnd-hover:motion:copy", "dnd-complete:desktop-row",
+        ):
+            assert marker in desktop_lines, (marker, desktop_lines[-100:])
+        success("desktop UI primitives, context popovers and rich DND")
 
         for mode in (
             "disabled", "reenabled", "self-disable-enter", "self-disable-drop",
@@ -312,6 +368,70 @@ print("GUI_DROP_TARGET_FAILURE_OK")
             assert "GUI_DROP_TARGET_FAILURE_OK" in failed.stdout
             assert drop_failure_log.read_text().splitlines().count("destroy:dropTarget") == 100
             success(f"dropTarget {signal} signal failure releases native resources")
+
+        # New desktop controllers/signals are lazy. Any partial connection
+        # failure must destroy the unattached controller and leave the widget
+        # itself collectable; no callback/state reference may leak.
+        desktop_failures = (
+            ("pressed", "pointer-press", "label", "onPointer",
+             ("destroy:label", "destroy:gestureClick", "destroy:pointerMotion")),
+            ("released", "pointer-release", "label", "onPointer",
+             ("destroy:label", "destroy:gestureClick", "destroy:pointerMotion")),
+            ("enter", "pointer-enter", "label", "onPointer",
+             ("destroy:label", "destroy:gestureClick", "destroy:pointerMotion")),
+            ("motion", "pointer-motion", "label", "onPointer",
+             ("destroy:label", "destroy:gestureClick", "destroy:pointerMotion")),
+            ("leave", "pointer-leave", "label", "onPointer",
+             ("destroy:label", "destroy:gestureClick", "destroy:pointerMotion")),
+            ("key-pressed", "key-press", "label", "onKey",
+             ("destroy:label", "destroy:keyController")),
+            ("key-released", "key-release", "label", "onKey",
+             ("destroy:label", "destroy:keyController")),
+            ("notify::position", "paned", "paned", "onPositionChanged",
+             ("destroy:paned",)),
+            ("close-request", "close", "window", "onCloseRequest",
+             ("destroy:window",)),
+            ("drag-begin", "drag-begin", "label", "drag-source",
+             ("destroy:label", "destroy:dragSource", "destroy:widgetPaintable")),
+            ("drag-end", "drag-end", "label", "drag-source",
+             ("destroy:label", "destroy:dragSource", "destroy:widgetPaintable")),
+            ("drag-cancel", "drag-cancel", "label", "drag-source",
+             ("destroy:label", "destroy:dragSource", "destroy:widgetPaintable")),
+        )
+        for signal, label, constructor, method, destroyed_markers in desktop_failures:
+            script = temp / f"fail-desktop-{label}.lua"
+            if constructor == "paned":
+                create = "assert(babet.gui.paned())"
+            elif constructor == "window":
+                create = "assert(babet.gui.window())"
+            else:
+                create = "assert(babet.gui.label('desktop'))"
+            if method == "drag-source":
+                operation = "widget:setDragData('row')"
+            else:
+                operation = f"widget:{method}(function() end)"
+            lua_source = (
+                "assert(babet.gui.init())\n"
+                "for i = 1, 100 do\n"
+                f"    local widget = {create}\n"
+                f"    local ok, err = {operation}\n"
+                "    assert(ok == nil and type(err) == 'string' and err:find('cannot attach', 1, true), tostring(err))\n"
+                "    if widget.close then pcall(function() widget:close() end) end\n"
+                "    widget = nil\n"
+                "    collectgarbage('collect')\n"
+                "end\n"
+                "print('GUI_DESKTOP_SIGNAL_FAILURE_OK')\n"
+            )
+            script.write_text(lua_source)
+            failure_log = temp / f"failure-desktop-{label}.log"
+            failure_env = dict(env, BABET_FAKE_GTK_FAIL_SIGNAL=signal,
+                               BABET_FAKE_GTK_LOG=str(failure_log))
+            failed = run([binary, str(script)], failure_env)
+            assert "GUI_DESKTOP_SIGNAL_FAILURE_OK" in failed.stdout
+            lines = failure_log.read_text().splitlines()
+            for destroyed in destroyed_markers:
+                assert lines.count(destroyed) == 100, (signal, destroyed, lines[-50:])
+            success(f"desktop {label} signal failure releases native resources")
 
     print(f"GUI widgets regression: {len(passed)} PASS / 0 FAIL")
 

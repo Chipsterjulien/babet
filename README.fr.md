@@ -17,11 +17,17 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.31.0**. Voir le
+Version actuelle : **2.32.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.32.0 enrichit l’[API de bureau GTK4](docs/fr/modules/gui.md#primitives-pour-applications-de-bureau) avec volets séparés,
+menus et popovers contextuels, icônes du thème, événements pointeur/clavier,
+géométrie et gestion des fenêtres de dialogue. Le glisser-déposer natif gagne
+COPY/MOVE/LINK, les aperçus personnalisés et les callbacks de cycle de vie.
+GTK 4 reste optionnel et chargé à la demande.
 
 Babet 2.31.0 ajoute le [glisser-déposer GTK4 natif](docs/fr/modules/gui.md#drag-and-drop-gtk4-natif-pour-les-listes)
 avec `setDragData` et `onDrop`, une icône représentant la poignée et des callbacks

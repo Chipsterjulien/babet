@@ -7,6 +7,41 @@ The project follows semantic versioning for public releases. Migration and
 usage notes are kept with each release when a new contract or operational rule
 may affect existing scripts.
 
+## [Unreleased]
+
+## [2.32.0] - 2026-10-22
+
+### GUI — GTK4 desktop application primitives
+
+- Add split panes (`gui.paned`), separators, themed images, menu buttons and
+  popovers, including pointer-positioned context menus attached to widgets.
+- Add pointer and keyboard callbacks, modifier masks, cursor and tooltip helpers,
+  focus control, alignment, allocated size, coordinate translation and hit-testing.
+  Window key handlers run in capture phase for application shortcuts.
+- Add TextView wrap modes and window title/icon updates, transient parenting,
+  modality and protected close-request callbacks.
+- Extend native drag-and-drop with COPY/MOVE/LINK actions, custom drag previews
+  and begin/end/cancel callbacks. MOVE remains the default.
+- Reject parenting cycles through menus and context popovers; detach context
+  popovers when their parent is destroyed so retained handles remain reusable.
+- Keep the negotiated action fixed during `drop` and prevent a refused local
+  Babet drop from requesting source deletion when GTK/X11 reports a completed MOVE.
+- Release native resources on Lua allocation failure during `setDragData`.
+- Refresh custom previews at drag start and fall back to the source widget when
+  a custom preview is not mapped, avoiding an invisible drag icon.
+
+### Tests and documentation
+
+- Expand widget, lifetime, allocation-failure and real GTK/XTest regressions,
+  including checks of the pixels rendered by custom drag previews.
+- Separate the desktop keyboard test from popover presentation. A dedicated
+  test waits for the popover to draw before closing it in a later event, avoiding
+  GTK's lost-key behavior after immediate `popup()` / `popdown()` calls.
+- Ignore `babet-tests*.txt` logs and check those rules in an isolated Git
+  environment, independent of personal Git configuration and templates.
+- Document Paned defaults, text-widget key consumption, layout-dependent
+  geometry, close-request errors and popover event sequencing in both manuals.
+
 ## [2.31.0] - 2026-10-20
 
 ### GUI — native GTK4 drag-and-drop

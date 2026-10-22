@@ -329,13 +329,50 @@ static void drop_setter_faults()
 }
 
 
+static void drag_source_setter_faults()
+{
+    int failed = 0, successful = 0;
+    for (int budget = 0; budget < 16; ++budget) {
+        Allocator a;
+        lua_State *L = create_state(a);
+        load_counters();
+        execute(L, R"lua(
+            window = assert(gui.window())
+            handle = assert(gui.label('handle'))
+            assert(window:add(handle))
+            install = function() assert(handle:setDragData('source-id')) end
+            collectgarbage('collect')
+        )lua");
+        check(lua_checkstack(L, 128) != 0, "reserve source setter stack");
+        lua_getglobal(L, "install");
+        a.budget = budget;
+        const int status = lua_pcall(L, 0, 0, 0);
+        a.budget = -1;
+        if (a.failures) {
+            ++failed;
+            check(status == LUA_ERRMEM, "source setter must propagate Lua OOM");
+        } else {
+            ++successful;
+            check(status == LUA_OK, "source setter successful control");
+        }
+        lua_settop(L, 0);
+        execute(L, "install(); assert(handle:setDragData(nil)); assert(window:close())");
+        close_state(L); // Includes unattached controllers, not just widgets.
+    }
+    check(failed > 0 && successful > 0, "source setter sweep controls");
+    std::printf("[PASS] setDragData allocator: %d fault cases / %d controls; retry and native cleanup\n",
+                failed, successful);
+}
+
+
 int main(int argc, char **argv)
 {
     babet_runtime::register_main_thread();
-    check(argc == 2, "expected drag, text, drop or drop-setter");
+    check(argc == 2, "expected drag, text, drop, drop-setter or source-setter");
     if (std::strcmp(argv[1], "drag") == 0) drag_faults();
     else if (std::strcmp(argv[1], "text") == 0) text_faults();
     else if (std::strcmp(argv[1], "drop") == 0) drop_faults();
     else if (std::strcmp(argv[1], "drop-setter") == 0) drop_setter_faults();
+    else if (std::strcmp(argv[1], "source-setter") == 0) drag_source_setter_faults();
     else check(false, "unknown test mode");
 }

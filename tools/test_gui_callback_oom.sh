@@ -33,3 +33,4 @@ LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drag
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" text
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drop
 BABET_FAKE_GTK_DND_HIT=target LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drop-setter
+LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" source-setter

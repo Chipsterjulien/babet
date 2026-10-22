@@ -260,7 +260,7 @@ The deterministic fake GTK remains the fault-injection harness, but release vali
   progress bars keep their original behavior; fractions are always set by the
   Lua application, so both automatic and step-based progression are possible.
 - GtkBox ordering uses gtk_box_reorder_child_after rather than remove/reappend.
-- Rich row reordering uses native GtkDragSource/GtkDropTarget controllers with UTF-8 string IDs and GDK_ACTION_MOVE; `onDrag` remains reserved for free-position handles.
+- Rich row reordering uses native GtkDragSource/GtkDropTarget controllers with UTF-8 string IDs. MOVE is the compatibility default; the application can explicitly enable COPY/MOVE/LINK and choose a custom drag preview. `onDrag` remains reserved for free-position handles.
   Only existing children can be reordered, and the Lua-owned child table must
   always preserve the same visual order without recreating widgets.
 - Task completion styling (for example GTK CSS `text-decoration-line:
@@ -296,3 +296,48 @@ creation with hotspot (10, 10). The source owns the paintable; the paintable
 observes the widget without retaining it. The payload ID is never used to build
 the icon. Failure to create the icon releases the unattached source. The two
 additional symbols are part of the original GTK4 API and remain lazily resolved.
+
+
+## Desktop application primitive layer
+
+A concrete rich-desktop use case may widen the binding with generic GTK4
+mechanics without moving application semantics into Babet. The approved surface
+includes GtkPaned split panes, GtkSeparator, GtkImage/icon names, GtkMenuButton
+and GtkPopover, pointer/key event controllers, focus/cursor/tooltip helpers,
+allocated geometry/coordinate translation, alignment, TextView wrapping and
+transient/modal window policy. Context popovers may use explicit GTK parenting
+through a popover-only `attachTo()` operation; arbitrary widgets never gain a
+generic `setParent` escape hatch.
+
+Native DND may advertise COPY, MOVE and LINK, select a custom widget preview and
+report source begin/end/cancel state. The payload remains an application-owned
+UTF-8 identifier and Babet never infers model operations, grouping, note types or
+persistence. Pointer hit-testing, insertion indicators, tree semantics, menus'
+application commands and shortcuts are likewise application responsibilities.
+
+All added GTK symbols remain lazy/dynamic. They do not introduce a direct GTK
+link dependency or GTK development-header requirement. The deterministic fake
+GTK must cover failure/lifetime paths and the optional system-GTK/Xvfb suite must
+exercise the observable desktop semantics that a fake toolkit could model
+incorrectly.
+
+Desktop ownership and DND acceptance invariants:
+
+- Cycle checks include dense child arrays, MenuButton popovers and directly
+  attached context popovers. Drag-icon and transient-window roots are not child
+  edges. All checks run before changing native ownership.
+- Destroying a context parent explicitly unparents its popovers, including
+  parents such as GtkLabel that do not dispose arbitrary widget children.
+- `onDrop` action strings select a preference during enter/motion. During drop,
+  a different action is an error and rejects the transfer. GTK's boolean drop
+  result cannot renegotiate COPY/MOVE/LINK; application changes are not rolled
+  back, so applications must validate the supplied action before model writes.
+  Track the result of each local Babet drop at its source: a refusal must veto
+  delete_data even when GTK/X11 emits drag-end with an outdated MOVE flag.
+  Clear this result for each gesture; do not synthesize a GTK cancel signal.
+- `setDragData` completes allocating Lua icon lookup before acquiring a GTK
+  source, then rechecks the handle after any GC and pins the custom icon.
+- Custom drag previews are resolved again during drag-begin, inside the protected
+  Lua invocation, independently of an application's onDragState callback. Only
+  a mapped custom widget supplies the image; otherwise use the source handle.
+  Preview roots never imply reparenting or off-screen widget rendering.

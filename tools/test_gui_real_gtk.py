@@ -163,6 +163,13 @@ def load_x11():
     xtst.XTestFakeKeyEvent.restype = ctypes.c_int
     x11.XFlush.argtypes = [display_p]
     x11.XFlush.restype = ctypes.c_int
+    x11.XGetImage.argtypes = [display_p, window_t, ctypes.c_int, ctypes.c_int,
+                              ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_int]
+    x11.XGetImage.restype = ctypes.c_void_p
+    x11.XGetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    x11.XGetPixel.restype = ctypes.c_ulong
+    x11.XDestroyImage.argtypes = [ctypes.c_void_p]
+    x11.XDestroyImage.restype = ctypes.c_int
 
     xtst.XTestFakeMotionEvent.argtypes = [display_p, ctypes.c_int, ctypes.c_int,
                                           ctypes.c_int, ctypes.c_ulong]
@@ -248,7 +255,34 @@ def click_center(x11, xtst, display, window, count=2):
     x11.XFlush(display)
 
 
-def drag_across_window(x11, xtst, display, window):
+def check_drag_icon(x11, display, x, y, mode):
+    """Inspect the actual 24-bit Xvfb pixels under the held drag, not setters.
+
+    The fixture uses a red source, green preview and blue target. The sample
+    is beside the pointer over the target, away from the original widgets.
+    A blank paintable cannot pass this check merely by completing the drop.
+    """
+    expected = 0x00ff00 if mode == "mapped" else 0xff0000
+    root = x11.XDefaultRootWindow(display)
+    deadline = time.monotonic() + 2
+    matches = 0
+    while time.monotonic() < deadline:
+        snapshot = x11.XGetImage(display, root, x + 15, y + 5,
+                                 80, 25, ctypes.c_ulong(-1).value, 2)  # ZPixmap
+        if not snapshot:
+            raise AssertionError("cannot capture native drag icon")
+        try:
+            matches = sum((x11.XGetPixel(snapshot, px, py) & 0xffffff) == expected
+                          for px in range(0, 80, 4) for py in range(0, 25, 4))
+        finally:
+            x11.XDestroyImage(snapshot)
+        if matches >= 50:
+            return
+        time.sleep(0.04)  # wait for the icon's next GTK frame
+    raise AssertionError(f"native drag icon {mode}: expected colour {expected:#08x}, only {matches} pixels")
+
+
+def drag_across_window(x11, xtst, display, window, icon_mode=None):
     """Drag from the left half to the right half of one GTK probe window."""
     root_return = ctypes.c_ulong()
     x = ctypes.c_int()
@@ -280,15 +314,20 @@ def drag_across_window(x11, xtst, display, window):
         raise AssertionError("XTest DND press failed")
     x11.XFlush(display)
     time.sleep(0.08)
-    for step in range(1, 11):
-        px = start_x + ((end_x - start_x) * step) // 10
-        if not xtst.XTestFakeMotionEvent(display, -1, px, py, 0):
-            raise AssertionError("XTest DND motion failed")
+    try:
+        for step in range(1, 11):
+            px = start_x + ((end_x - start_x) * step) // 10
+            if not xtst.XTestFakeMotionEvent(display, -1, px, py, 0):
+                raise AssertionError("XTest DND motion failed")
+            x11.XFlush(display)
+            time.sleep(0.04)
+        if icon_mode is not None:
+            check_drag_icon(x11, display, end_x, py, icon_mode)
+    finally:
+        released = xtst.XTestFakeButtonEvent(display, 1, 0, 0)
         x11.XFlush(display)
-        time.sleep(0.04)
-    if not xtst.XTestFakeButtonEvent(display, 1, 0, 0):
+    if not released:
         raise AssertionError("XTest DND release failed")
-    x11.XFlush(display)
 
 
 def calendar_key(x11, xtst, display, keysym):
@@ -308,6 +347,18 @@ def calendar_key(x11, xtst, display, keysym):
         x11.XFlush(display)
     if not arrow_released or not control_released:
         raise AssertionError("XTest Calendar key release failed")
+
+
+def inject_keysym(x11, xtst, display, keysym):
+    """Inject one key press/release pair through XTest."""
+    keycode = x11.XKeysymToKeycode(display, keysym)
+    if not keycode:
+        raise AssertionError(f"X11 keymap lacks keysym 0x{keysym:x}")
+    pressed = xtst.XTestFakeKeyEvent(display, keycode, 1, 0)
+    released = xtst.XTestFakeKeyEvent(display, keycode, 0, 0)
+    x11.XFlush(display)
+    if not pressed or not released:
+        raise AssertionError("XTest key injection failed")
 
 
 def start_xvfb(xvfb):
@@ -484,12 +535,32 @@ def main():
                 + format_output(stdout, stderr)
             )
         success("progressBar receives four real primary clicks")
-        # Native GTK4 DND: real GtkDragSource/GtkDropTarget with an XTest drag.
-        for mode in ("normal", "disabled-child", "reenabled-child", "self-disable-enter",
-                     "self-disable-drop", "clear-source", "close-drop",
-                     "nested-hover-false", "nested-drop-false", "remove-source"):
+        # The same ownership probes run on both the simulator and real GTK.
+        for mode in ("cycles", "lifetime"):
             child = subprocess.Popen(
-                [binary, str(ROOT / "tests/gui/real_gtk_dnd.lua"), mode],
+                [binary, str(ROOT / "tests/gui/popover_ownership.lua"), mode],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+            )
+            stdout, stderr = finish_with_timeout(child, 8)
+            if child.returncode != 0 or f"GUI_POPOVER_OWNERSHIP_OK:{mode}" not in decode(stdout):
+                raise AssertionError(f"real GTK popover {mode} failed\n" + format_output(stdout, stderr))
+            if b"still has children left" in stderr:
+                raise AssertionError(format_output(stdout, stderr))
+            success(f"popover ownership: {mode}")
+
+        # Native GTK4 DND: real GtkDragSource/GtkDropTarget with an XTest drag.
+        dnd_cases = [("real_gtk_dnd.lua", mode) for mode in (
+            "normal", "disabled-child", "reenabled-child", "self-disable-enter",
+            "self-disable-drop", "clear-source", "close-drop", "nested-hover-false",
+            "nested-drop-false", "remove-source", "copy-action")]
+        dnd_cases += [("native_dnd_actions.lua", mode) for mode in (
+            "copy-at-drop", "move-at-drop", "copy", "move", "link", "copy-only", "link-only", "drop-false", "drop-error", "reject-then-move")]
+        dnd_cases += [("native_dnd_icon.lua", mode) for mode in (
+            "unparented", "mapped", "hidden", "detached", "destroyed", "reset")]
+        for fixture, mode in dnd_cases:
+            child = subprocess.Popen(
+                [binary, str(ROOT / "tests/gui" / fixture), mode],
                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
             )
@@ -508,14 +579,99 @@ def main():
                 stdout, stderr = kill_and_collect(child, dnd_out, dnd_err)
                 raise AssertionError("native DND window not found\n" + format_output(stdout, stderr))
             time.sleep(0.25)
-            drag_across_window(x11, xtst, display, dnd_window)
+            is_icon_probe = fixture == "native_dnd_icon.lua"
+            drag_across_window(x11, xtst, display, dnd_window,
+                               icon_mode=mode if is_icon_probe else None)
+            if mode == "reject-then-move":
+                again_out, again_err = wait_for_ready(child, 8, marker=b"REAL_GTK_DND_AGAIN\n")
+                dnd_out += again_out
+                dnd_err += again_err
+                drag_across_window(x11, xtst, display, dnd_window)
             stdout, stderr = finish_with_timeout(child, 8, dnd_out, dnd_err)
-            if child.returncode != 0 or f"REAL_GTK_DND_OK:{mode}" not in decode(stdout):
+            marker = f"GUI_DND_ICON_OK:{mode}" if is_icon_probe else f"REAL_GTK_DND_OK:{mode}"
+            if child.returncode != 0 or marker not in decode(stdout):
                 raise AssertionError(
                     f"real GTK4 DND failed with exit {child.returncode}\n"
                     + format_output(stdout, stderr)
                 )
-            success(f"native DND lifetime and propagation: {mode}")
+            if mode in ("copy-at-drop", "move-at-drop"):
+                assert "cannot change the negotiated action during drop" in decode(stderr), decode(stderr)
+            if fixture == "native_dnd_actions.lua" and mode == "drop-error":
+                assert "DND_FINAL_ERROR_SENTINEL" in decode(stderr), decode(stderr)
+            success(f"native DND visible icon: {mode}" if is_icon_probe else f"native DND lifetime and propagation: {mode}")
+
+        # Desktop application primitives: real GtkPaned, context GtkPopover,
+        # generic pointer/key controllers, geometry translation and modal window.
+        child = subprocess.Popen(
+            [binary, str(ROOT / "tests/gui/real_gtk_desktop.lua")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+        desktop_out, desktop_err = wait_for_ready(
+            child, 20, marker=b"REAL_GTK_DESKTOP_READY\n"
+        )
+        desktop_window = None
+        for _ in range(150):
+            if child.poll() is not None:
+                break
+            desktop_window = find_window(x11, display, "Babet real GTK desktop probe")
+            if desktop_window is not None:
+                break
+            time.sleep(0.04)
+        if desktop_window is None:
+            stdout, stderr = kill_and_collect(child, desktop_out, desktop_err)
+            raise AssertionError("desktop primitive window not found\n" + format_output(stdout, stderr))
+        time.sleep(0.25)
+        click_center(x11, xtst, display, desktop_window, count=1)
+        # Do not race the key injection against GTK's delivery of the pointer
+        # event.  ASan/UBSan can make the first event dispatch noticeably
+        # slower even after the X11 window is mapped.  Wait for an explicit
+        # acknowledgement from the Lua pointer callback instead of sleeping.
+        pointer_out, pointer_err = wait_for_ready(
+            child, 20, marker=b"REAL_GTK_DESKTOP_POINTER_OK\n"
+        )
+        desktop_out += pointer_out
+        desktop_err += pointer_err
+        x11.XSetInputFocus(display, desktop_window, 2, 0)
+        inject_keysym(x11, xtst, display, 0xff1b)  # Escape
+        stdout, stderr = finish_with_timeout(child, 20, desktop_out, desktop_err)
+        if child.returncode != 0 or "REAL_GTK_DESKTOP_OK" not in decode(stdout):
+            raise AssertionError(
+                f"real GTK4 desktop primitives failed with exit {child.returncode}\n"
+                + format_output(stdout, stderr)
+            )
+        success("Paned, context popover, pointer/key input and geometry primitives")
+
+        # Exercise visible popup/popdown independently of the desktop key
+        # probe. Wait for a real popup draw before activating its close button;
+        # an immediate popup/popdown in one callback can swallow GTK's next key.
+        child = subprocess.Popen(
+            [binary, str(ROOT / "tests/gui/real_gtk_popover.lua")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+        popover_out, popover_err = wait_for_ready(
+            child, 20, marker=b"REAL_GTK_POPOVER_READY\n"
+        )
+        popover_window = find_window(x11, display, "Babet real GTK popover probe")
+        if popover_window is None:
+            stdout, stderr = kill_and_collect(child, popover_out, popover_err)
+            raise AssertionError("popover probe window not found\n" + format_output(stdout, stderr))
+        x11.XSetInputFocus(display, popover_window, 2, 0)
+        click_center(x11, xtst, display, popover_window, count=1)
+        drawn_out, drawn_err = wait_for_ready(
+            child, 20, marker=b"REAL_GTK_POPOVER_DRAWN\n"
+        )
+        popover_out += drawn_out
+        popover_err += drawn_err
+        inject_keysym(x11, xtst, display, 0x20)  # Space activates focused close button
+        stdout, stderr = finish_with_timeout(child, 20, popover_out, popover_err)
+        if child.returncode != 0 or "REAL_GTK_POPOVER_OK" not in decode(stdout):
+            raise AssertionError(
+                f"real GTK4 visible popover failed with exit {child.returncode}\n"
+                + format_output(stdout, stderr)
+            )
+        success("context popover is drawn before a separate event closes it")
 
         # A separate Calendar window verifies real navigation. The four native
         # signals are reached through GTK's Ctrl+arrow key bindings, not setters

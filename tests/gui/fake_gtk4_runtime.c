@@ -4,7 +4,7 @@
 #include <stdarg.h>
 #include "fake_cairo.inc"
 
-#define MAX_WIDGETS 64
+#define MAX_WIDGETS 128
 
 typedef void (*FakeCallback)(void);
 typedef void (*FakeClosureNotify)(void *, void *);
@@ -17,6 +17,15 @@ typedef void (*DragSignal)(void *, double, double, void *);
 typedef unsigned int (*DropMotionSignal)(void *, double, double, void *);
 typedef void (*DropLeaveSignal)(void *, void *);
 typedef int (*DropSignal)(void *, const void *, double, double, void *);
+typedef void (*MotionSignal)(void *, double, double, void *);
+typedef void (*LeaveSignal)(void *, void *);
+typedef int (*KeyPressedSignal)(void *, unsigned int, unsigned int, unsigned int, void *);
+typedef void (*KeyReleasedSignal)(void *, unsigned int, unsigned int, unsigned int, void *);
+typedef void (*NotifySignal)(void *, void *, void *);
+typedef int (*CloseRequestSignal)(void *, void *);
+typedef void (*DragSourceBeginSignal)(void *, void *, void *);
+typedef void (*DragSourceEndSignal)(void *, void *, int, void *);
+typedef int (*DragSourceCancelSignal)(void *, void *, int, void *);
 
 typedef struct FakeDateTime {
     int year, month, day;
@@ -27,7 +36,7 @@ typedef struct FakeValue {
 } FakeValue;
 
 typedef struct FakeWidget {
-    int kind; /* 1 window, 2 box, 3 label, 4 button, 5 entry, 6 drawingArea, 7 scrolled, 8 spin, 9 calendar */
+    int kind; /* widgets/controllers use small stable fixture-only kind IDs */
     int refs;
     int floating;
     int alive;
@@ -68,7 +77,7 @@ typedef struct FakeWidget {
     unsigned char calendar_marks[32];
     unsigned int calendar_event_index;
     int margin_top, margin_bottom, margin_start, margin_end;
-    int hexpand, vexpand, visible, sensitive;
+    int hexpand, vexpand, visible, sensitive, presented;
     unsigned int gesture_button, current_button;
     FakeCallback pressed_cb;
     void *pressed_data;
@@ -76,6 +85,9 @@ typedef struct FakeWidget {
     int pressed;
     double drag_event_x, drag_event_y; /* surface coords of most recent drag event */
     unsigned int dnd_actions;
+    unsigned int selected_action;
+    unsigned int event_state;
+    struct FakeWidget *dnd_source; /* weak synthetic GdkDrop -> GdkDrag */
     int dnd_preload;
     int dnd_active;
     int dnd_in_drop;
@@ -86,6 +98,34 @@ typedef struct FakeWidget {
     FakeCallback dnd_cb[4]; /* enter, motion, leave, drop */
     void *dnd_data[4];
     FakeClosureNotify dnd_destroy[4];
+    FakeCallback released_cb;
+    void *released_data;
+    FakeClosureNotify released_destroy_notify;
+    FakeCallback motion_cb[3]; /* enter, motion, leave */
+    void *motion_data[3];
+    FakeClosureNotify motion_destroy[3];
+    FakeCallback key_cb[2]; /* pressed, released */
+    void *key_data[2];
+    FakeClosureNotify key_destroy[2];
+    FakeCallback position_cb;
+    void *position_data;
+    FakeClosureNotify position_destroy;
+    FakeCallback close_request_cb;
+    void *close_request_data;
+    FakeClosureNotify close_request_destroy;
+    FakeCallback drag_source_cb[3]; /* begin, end, cancel */
+    void *drag_source_data[3];
+    FakeClosureNotify drag_source_destroy[3];
+    int position;
+    int wrap_mode;
+    int propagation_phase;
+    int halign, valign;
+    int has_focus;
+    int pointer_full;
+    int desktop_emitted;
+    double pos_x, pos_y;
+    struct FakeWidget *paned_child[2];
+    struct FakeWidget *attached_popover;
 } FakeWidget;
 
 static FakeWidget *widgets[MAX_WIDGETS];
@@ -183,6 +223,25 @@ static DropSignal as_drop_signal(FakeCallback cb)
     return typed;
 }
 
+static MotionSignal as_motion_signal(FakeCallback cb)
+{ MotionSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static LeaveSignal as_leave_signal(FakeCallback cb)
+{ LeaveSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static KeyPressedSignal as_key_pressed_signal(FakeCallback cb)
+{ KeyPressedSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static KeyReleasedSignal as_key_released_signal(FakeCallback cb)
+{ KeyReleasedSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static NotifySignal as_notify_signal(FakeCallback cb)
+{ NotifySignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static CloseRequestSignal as_close_request_signal(FakeCallback cb)
+{ CloseRequestSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static DragSourceBeginSignal as_drag_source_begin_signal(FakeCallback cb)
+{ DragSourceBeginSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static DragSourceEndSignal as_drag_source_end_signal(FakeCallback cb)
+{ DragSourceEndSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+static DragSourceCancelSignal as_drag_source_cancel_signal(FakeCallback cb)
+{ DragSourceCancelSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
+
 static void destroy_widget(FakeWidget *w)
 {
     if (in_draw) { fputs("native destruction during drawing\n", stderr); abort(); }
@@ -201,6 +260,9 @@ static void destroy_widget(FakeWidget *w)
     for (size_t i = 0; i < widget_count; ++i) {
         FakeWidget *child = widgets[i];
         if (child && child->alive && child->parent == w) {
+            // GtkLabel/GtkButton do not dispose arbitrary context-popover
+            // children. The binding must unparent them from destroy itself.
+            if (child->kind == 29 && (w->kind == 3 || w->kind == 4)) continue;
             child->parent = NULL;
             if (--child->refs == 0) destroy_widget(child);
         }
@@ -209,6 +271,12 @@ static void destroy_widget(FakeWidget *w)
     if (w->destroy_cb) {
         WidgetSignal cb = as_widget_signal(w->destroy_cb);
         cb(w, w->destroy_data);
+    }
+    for (size_t i = 0; i < widget_count; ++i) {
+        if (widgets[i] && widgets[i]->alive && widgets[i]->parent == w) {
+            fputs("destroyed GTK widget still has a context popover child\n", stderr);
+            abort();
+        }
     }
     if (w->clicked_destroy_notify) {
         FakeClosureNotify notify = w->clicked_destroy_notify;
@@ -236,6 +304,15 @@ static void destroy_widget(FakeWidget *w)
         w->drag_destroy[i](w->drag_data[i], NULL);
     for (int i = 0; i < 4; ++i) if (w->dnd_destroy[i])
         w->dnd_destroy[i](w->dnd_data[i], NULL);
+    if (w->released_destroy_notify) w->released_destroy_notify(w->released_data, NULL);
+    for (int i = 0; i < 3; ++i) if (w->motion_destroy[i])
+        w->motion_destroy[i](w->motion_data[i], NULL);
+    for (int i = 0; i < 2; ++i) if (w->key_destroy[i])
+        w->key_destroy[i](w->key_data[i], NULL);
+    if (w->position_destroy) w->position_destroy(w->position_data, NULL);
+    if (w->close_request_destroy) w->close_request_destroy(w->close_request_data, NULL);
+    for (int i = 0; i < 3; ++i) if (w->drag_source_destroy[i])
+        w->drag_source_destroy[i](w->drag_source_data[i], NULL);
     if (w->dnd_content) {
         FakeWidget *content = w->dnd_content;
         w->dnd_content = NULL;
@@ -246,6 +323,15 @@ static void destroy_widget(FakeWidget *w)
         w->dnd_icon = NULL;
         if (--icon->refs == 0) destroy_widget(icon);
     }
+    /* Destruction markers are part of the fake-runtime lifetime contract.
+     * Keep desktop targets/controllers observable so failure-injection tests
+     * can distinguish a real leak from a missing test probe. */
+    if (w->kind == 1) log_line("destroy:window", NULL);
+    if (w->kind == 3) log_line("destroy:label", NULL);
+    if (w->kind == 10) log_line("destroy:gestureClick", NULL);
+    if (w->kind == 26) log_line("destroy:paned", NULL);
+    if (w->kind == 30) log_line("destroy:pointerMotion", NULL);
+    if (w->kind == 31) log_line("destroy:keyController", NULL);
     if (w->kind == 22) log_line("destroy:dragSource", NULL);
     if (w->kind == 25) log_line("destroy:widgetPaintable", NULL);
     if (w->kind == 5) log_line("destroy:entry", NULL);
@@ -286,8 +372,20 @@ void gtk_window_set_child(void *parent_p, void *child_p)
     child->parent = parent;
     ++child->refs;
 }
-void gtk_window_present(void *p) { (void)p; log_line("present", NULL); }
+void gtk_window_present(void *p) { ((FakeWidget *)p)->presented = 1; log_line("present", NULL); }
+int gtk_widget_get_mapped(void *p)
+{
+    for (FakeWidget *w = (FakeWidget *)p; w; w = w->parent) {
+        if (!w->alive || !w->visible) return 0;
+        if (w->kind == 1) return w->presented;
+    }
+    return 0;
+}
 void gtk_window_destroy(void *p) { destroy_widget((FakeWidget *)p); }
+
+void gtk_window_set_transient_for(void *p, void *parent) { (void)p; (void)parent; log_line("window-transient:", parent ? "set" : "clear"); }
+void gtk_window_set_modal(void *p, int modal) { ((FakeWidget *)p)->expanded = !!modal; log_line("window-modal:", modal ? "1" : "0"); }
+void gtk_window_set_icon_name(void *p, const char *name) { (void)p; log_line("window-icon:", name ? name : ""); }
 
 void *gtk_box_new(int orientation, int spacing)
 { (void)orientation; (void)spacing; return make_widget(2, NULL); }
@@ -307,6 +405,7 @@ static void log_box_order(FakeWidget *parent)
     fclose(stream);
 }
 
+void *gtk_separator_new(int orientation) { (void)orientation; return make_widget(32, NULL); }
 void gtk_box_append(void *parent_p, void *child_p)
 {
     FakeWidget *parent = (FakeWidget *)parent_p;
@@ -374,6 +473,47 @@ void gtk_box_reorder_child_after(void *parent_p, void *child_p, void *sibling_p)
     log_line("box-reorder:", child->text);
     log_box_order(parent);
 }
+
+static void fake_replace_parented_child(FakeWidget *parent, FakeWidget **slot, FakeWidget *child)
+{
+    FakeWidget *old = *slot;
+    if (old == child) return;
+    if (old) {
+        *slot = NULL;
+        if (old->parent == parent) old->parent = NULL;
+        if (--old->refs == 0) destroy_widget(old);
+    }
+    if (child) {
+        if (child->parent) abort();
+        child->parent = parent;
+        ++child->refs;
+        *slot = child;
+    }
+}
+void *gtk_paned_new(int orientation) { (void)orientation; return make_widget(26, NULL); }
+void gtk_paned_set_start_child(void *p, void *c)
+{
+    FakeWidget *w=(FakeWidget*)p, *child=(FakeWidget*)c;
+    fake_replace_parented_child(w,&w->paned_child[0],child);
+    log_line(child ? "paned-start:set:" : "paned-start:clear", child ? child->text : NULL);
+}
+void gtk_paned_set_end_child(void *p, void *c)
+{
+    FakeWidget *w=(FakeWidget*)p, *child=(FakeWidget*)c;
+    fake_replace_parented_child(w,&w->paned_child[1],child);
+    log_line(child ? "paned-end:set:" : "paned-end:clear", child ? child->text : NULL);
+}
+void gtk_paned_set_position(void *p, int position)
+{
+    FakeWidget *w=(FakeWidget*)p; w->position=position;
+    if (w->position_cb) as_notify_signal(w->position_cb)(w, NULL, w->position_data);
+}
+int gtk_paned_get_position(void *p) { return ((FakeWidget*)p)->position; }
+void gtk_paned_set_resize_start_child(void *p, int v) { (void)p; (void)v; }
+void gtk_paned_set_resize_end_child(void *p, int v) { (void)p; (void)v; }
+void gtk_paned_set_shrink_start_child(void *p, int v) { (void)p; (void)v; }
+void gtk_paned_set_shrink_end_child(void *p, int v) { (void)p; (void)v; }
+void gtk_paned_set_wide_handle(void *p, int v) { (void)p; (void)v; }
 void *gtk_scrolled_window_new(void) { return make_widget(7, NULL); }
 void gtk_scrolled_window_set_child(void *parent_p, void *child_p)
 {
@@ -398,9 +538,9 @@ void gtk_scrolled_window_set_child(void *parent_p, void *child_p)
 
 void *gtk_fixed_new(void) { return make_widget(11, NULL); }
 void gtk_fixed_put(void *p, void *c, double x, double y)
-{ (void)x; (void)y; gtk_box_append(p, c); }
+{ FakeWidget *child=(FakeWidget*)c; child->pos_x=x; child->pos_y=y; gtk_box_append(p, c); }
 void gtk_fixed_move(void *p, void *c, double x, double y)
-{ (void)p; (void)c; (void)x; (void)y; log_line("fixed-move", NULL); }
+{ (void)p; FakeWidget *child=(FakeWidget*)c; child->pos_x=x; child->pos_y=y; log_line("fixed-move", NULL); }
 void gtk_fixed_remove(void *p, void *c) { gtk_box_remove(p, c); }
 void *gtk_text_view_new(void) { return make_widget(12, NULL); }
 void *gtk_text_view_get_buffer(void *p)
@@ -465,6 +605,7 @@ void babet_fake_gtk_emit_text_changed(void)
 }
 #endif
 void gtk_text_view_set_editable(void *p, int e) { ((FakeWidget *)p)->editable = e; }
+void gtk_text_view_set_wrap_mode(void *p, int mode) { ((FakeWidget *)p)->wrap_mode = mode; log_line("text-wrap", NULL); }
 void *gtk_check_button_new_with_label(const char *label) { return make_widget(14, label); }
 void gtk_check_button_set_label(void *p, const char *s) { set_text((FakeWidget *)p, s); }
 void gtk_check_button_set_active(void *p, int active)
@@ -658,6 +799,21 @@ const void *gtk_drop_target_get_value(void *p)
         return NULL;
     return &target->dnd_value;
 }
+void *gtk_drop_target_get_drop(void *p)
+{
+    FakeWidget *target=(FakeWidget*)p;
+    return target && target->alive && target->kind == 23 && target->dnd_active ? target : NULL;
+}
+void *gdk_drop_get_drag(void *p)
+{
+    FakeWidget *target=(FakeWidget*)p;
+    return target ? target->dnd_source : NULL;
+}
+unsigned int gdk_drag_get_selected_action(void *p)
+{
+    FakeWidget *source=(FakeWidget*)p;
+    return source ? source->selected_action : 0U;
+}
 void *gtk_gesture_single_get_current_sequence(void *gesture)
 { (void)gesture; return NULL; } /* mouse events have no touch sequence */
 void *gtk_gesture_get_last_event(void *gesture, void *sequence)
@@ -673,6 +829,93 @@ int gdk_event_get_position(void *event, double *x, double *y)
 void gtk_widget_set_size_request(void *p, int width, int height)
 { FakeWidget *w = (FakeWidget *)p; w->width = width; w->height = height; }
 
+
+typedef struct FakePoint { float x; float y; } FakePoint;
+void gtk_widget_set_cursor_from_name(void *p, const char *name) { (void)p; log_line("cursor:", name ? name : ""); }
+void gtk_widget_set_tooltip_text(void *p, const char *text) { (void)p; log_line("tooltip:", text ? text : ""); }
+int gtk_widget_grab_focus(void *p)
+{
+    FakeWidget *target=(FakeWidget*)p;
+    for (size_t i=0;i<widget_count;++i) if (widgets[i]) widgets[i]->has_focus=0;
+    if (!target || !target->alive) return 0;
+    target->has_focus=1; return 1;
+}
+int gtk_widget_has_focus(void *p) { FakeWidget *w=(FakeWidget*)p; return w && w->has_focus; }
+int gtk_widget_get_width(void *p) { return ((FakeWidget*)p)->width; }
+int gtk_widget_get_height(void *p) { return ((FakeWidget*)p)->height; }
+static void fake_absolute_position(FakeWidget *w, double *x, double *y)
+{
+    *x=0.0; *y=0.0;
+    for (; w; w=w->parent) { *x += w->pos_x; *y += w->pos_y; }
+}
+int gtk_widget_compute_point(void *p, void *target_p, const FakePoint *in, FakePoint *out)
+{
+    FakeWidget *w=(FakeWidget*)p, *target=(FakeWidget*)target_p;
+    if (!w || !target || !in || !out) return 0;
+    FakeWidget *a=w, *b=target;
+    while (a && a->parent) a=a->parent;
+    while (b && b->parent) b=b->parent;
+    if (a != b) return 0;
+    double wx,wy,tx,ty; fake_absolute_position(w,&wx,&wy); fake_absolute_position(target,&tx,&ty);
+    out->x=(float)(in->x + wx - tx); out->y=(float)(in->y + wy - ty); return 1;
+}
+static FakeWidget *fake_pick_widget(FakeWidget *root, double x, double y)
+{
+    if (!root || !root->alive) return NULL;
+    /* Walk fixture children from newest to oldest to approximate GTK stacking. */
+    for (size_t i = widget_count; i > 0; --i) {
+        FakeWidget *child = widgets[i - 1];
+        if (!child || !child->alive || child->parent != root) continue;
+        const int width = child->width > 0 ? child->width : 0;
+        const int height = child->height > 0 ? child->height : 0;
+        if (width == 0 || height == 0) continue;
+        const double local_x = x - child->pos_x;
+        const double local_y = y - child->pos_y;
+        if (local_x < 0.0 || local_y < 0.0 || local_x >= width || local_y >= height) continue;
+        FakeWidget *deeper = fake_pick_widget(child, local_x, local_y);
+        return deeper ? deeper : child;
+    }
+    return root;
+}
+void *gtk_widget_pick(void *p, double x, double y, unsigned int flags)
+{
+    (void)flags;
+    return fake_pick_widget((FakeWidget*)p, x, y);
+}
+void gtk_widget_set_halign(void *p, int align) { ((FakeWidget*)p)->halign=align; }
+void gtk_widget_set_valign(void *p, int align) { ((FakeWidget*)p)->valign=align; }
+void gtk_widget_set_parent(void *child_p, void *parent_p)
+{
+    FakeWidget *child=(FakeWidget*)child_p,*parent=(FakeWidget*)parent_p;
+    if (!child || !parent || child->parent) abort();
+    child->parent=parent; ++child->refs; log_line("widget-parent:set:", child->text);
+}
+void gtk_widget_unparent(void *p)
+{
+    FakeWidget *child=(FakeWidget*)p;
+    if (!child || !child->parent) return;
+    log_line("widget-parent:clear:", child->text); child->parent=NULL; if (--child->refs==0) destroy_widget(child);
+}
+void *gtk_event_controller_motion_new(void) { return make_widget(30, NULL); }
+void *gtk_event_controller_key_new(void) { return make_widget(31, NULL); }
+unsigned int gtk_event_controller_get_current_event_state(void *p)
+{
+    FakeWidget *w=(FakeWidget*)p; return w ? w->event_state : 0U;
+}
+void gtk_event_controller_set_propagation_phase(void *p, int phase)
+{
+    FakeWidget *w=(FakeWidget*)p;
+    if (!w) return;
+    w->propagation_phase=phase;
+    char buffer[32]; snprintf(buffer, sizeof(buffer), "%d", phase);
+    log_line("controller-phase:", buffer);
+}
+const char *gdk_keyval_name(unsigned int keyval)
+{
+    if (keyval == 0xff1bU) return "Escape";
+    if (keyval == (unsigned int)'1') return "1";
+    return "Key";
+}
 void *gtk_label_new(const char *text) { return make_widget(3, text); }
 void gtk_label_set_text(void *p, const char *text)
 {
@@ -688,6 +931,30 @@ void gtk_button_set_label(void *p, const char *text)
     if (!w || !w->alive) return;
     set_text(w, text);
 }
+
+void *gtk_image_new_from_icon_name(const char *name) { return make_widget(27, name ? name : ""); }
+void gtk_image_set_from_icon_name(void *p, const char *name) { set_text((FakeWidget*)p, name ? name : ""); }
+void gtk_button_set_icon_name(void *p, const char *name) { set_text((FakeWidget*)p, name ? name : ""); }
+void *gtk_menu_button_new(void) { return make_widget(28, ""); }
+void gtk_menu_button_set_label(void *p, const char *label) { set_text((FakeWidget*)p, label ? label : ""); }
+void gtk_menu_button_set_icon_name(void *p, const char *name) { set_text((FakeWidget*)p, name ? name : ""); }
+void gtk_menu_button_set_popover(void *p, void *popover_p)
+{
+    FakeWidget *button=(FakeWidget*)p,*popover=(FakeWidget*)popover_p;
+    fake_replace_parented_child(button, &button->attached_popover, popover);
+}
+void gtk_menu_button_popup(void *p) { (void)p; log_line("menu-popup", NULL); }
+void gtk_menu_button_popdown(void *p) { (void)p; log_line("menu-popdown", NULL); }
+void *gtk_popover_new(void) { return make_widget(29, ""); }
+void gtk_popover_set_child(void *p, void *c) { FakeWidget *w=(FakeWidget*)p; fake_replace_parented_child(w, &w->paned_child[0], (FakeWidget*)c); }
+void gtk_popover_set_has_arrow(void *p, int v) { (void)p; (void)v; }
+void gtk_popover_set_autohide(void *p, int v) { (void)p; (void)v; }
+void gtk_popover_set_position(void *p, int v) { ((FakeWidget*)p)->position=v; }
+typedef struct FakeRectangle { int x,y,width,height; } FakeRectangle;
+void gtk_popover_set_pointing_to(void *p, const FakeRectangle *r) { (void)p; if (!r) abort(); log_line("popover-point", NULL); }
+void gtk_popover_popup(void *p) { (void)p; log_line("popover-popup", NULL); }
+void gtk_popover_popdown(void *p) { (void)p; log_line("popover-popdown", NULL); }
+void gtk_popover_present(void *p) { (void)p; log_line("popover-present", NULL); }
 void *gtk_entry_new(void) { return make_widget(5, ""); }
 void gtk_entry_set_placeholder_text(void *p, const char *text)
 { (void)p; log_line("placeholder:", text); }
@@ -1020,6 +1287,14 @@ unsigned long g_signal_connect_data(void *instance, const char *signal,
             return (unsigned long)(20 + i);
         }
     }
+    if (w->kind == 22) {
+        const char *names[] = {"drag-begin", "drag-end", "drag-cancel"};
+        for (int i = 0; i < 3; ++i) if (strcmp(signal, names[i]) == 0) {
+            w->drag_source_cb[i] = cb; w->drag_source_data[i] = data;
+            w->drag_source_destroy[i] = destroy_notify;
+            return (unsigned long)(50 + i);
+        }
+    }
     if (w->kind == 23) {
         const char *names[] = {"enter", "motion", "leave", "drop"};
         for (int i = 0; i < 4; ++i) if (strcmp(signal, names[i]) == 0) {
@@ -1031,6 +1306,30 @@ unsigned long g_signal_connect_data(void *instance, const char *signal,
     if (strcmp(signal, "pressed") == 0 && w->kind == 10) {
         w->pressed_cb = cb; w->pressed_data = data;
         w->pressed_destroy_notify = destroy_notify; return 5;
+    }
+    if (strcmp(signal, "released") == 0 && w->kind == 10) {
+        w->released_cb = cb; w->released_data = data;
+        w->released_destroy_notify = destroy_notify; w->pointer_full = 1; return 6;
+    }
+    if (w->kind == 30) {
+        const char *names[] = {"enter", "motion", "leave"};
+        for (int i=0;i<3;++i) if (strcmp(signal,names[i])==0) {
+            w->motion_cb[i]=cb; w->motion_data[i]=data; w->motion_destroy[i]=destroy_notify;
+            return (unsigned long)(60+i);
+        }
+    }
+    if (w->kind == 31) {
+        const char *names[] = {"key-pressed", "key-released"};
+        for (int i=0;i<2;++i) if (strcmp(signal,names[i])==0) {
+            w->key_cb[i]=cb; w->key_data[i]=data; w->key_destroy[i]=destroy_notify;
+            return (unsigned long)(70+i);
+        }
+    }
+    if (w->kind == 26 && strcmp(signal, "notify::position") == 0) {
+        w->position_cb=cb; w->position_data=data; w->position_destroy=destroy_notify; return 80;
+    }
+    if (w->kind == 1 && strcmp(signal, "close-request") == 0) {
+        w->close_request_cb=cb; w->close_request_data=data; w->close_request_destroy=destroy_notify; return 81;
     }
     return 0;
 }
@@ -1108,11 +1407,26 @@ static int dnd_rooted(FakeWidget *w)
     for (; w; w = w->parent) if (w->kind == 1) return 1;
     return 0;
 }
+
+static unsigned int fake_pick_action(unsigned int actions)
+{
+    if (actions & 2U) return 2U;
+    if (actions & 1U) return 1U;
+    if (actions & 4U) return 4U;
+    return 0U;
+}
+static const char *fake_action_name(unsigned int action)
+{
+    if (action == 1U) return "copy";
+    if (action == 2U) return "move";
+    if (action == 4U) return "link";
+    return "none";
+}
 static int fake_dnd_gesture(FakeWidget *source)
 {
     const char *limit_text = getenv("BABET_FAKE_GTK_DND_GESTURES");
     const int limit = limit_text ? atoi(limit_text) : 1;
-    if (source->pressed >= limit || !source->dnd_content || source->dnd_actions != 2U)
+    if (source->pressed >= limit || !source->dnd_content || source->dnd_actions == 0U)
         return 0;
     FakeWidget *hit = NULL;
     const char *hit_text = getenv("BABET_FAKE_GTK_DND_HIT");
@@ -1126,13 +1440,19 @@ static int fake_dnd_gesture(FakeWidget *source)
         }
     }
     if (!hit) return 0;
+    ++source->pressed;
+    source->selected_action = 0U;
+    if (source->drag_source_cb[0])
+        as_drag_source_begin_signal(source->drag_source_cb[0])(
+            source, source, source->drag_source_data[0]);
+    if (!source->alive) return 1;
+    /* GTK lets drag-begin replace a stale/empty image before rendering it. */
     if (!source->dnd_icon || !source->dnd_icon->alive ||
-        source->dnd_icon->paintable_widget != source->parent) {
+        !source->dnd_icon->paintable_widget || !source->dnd_icon->paintable_widget->alive) {
         fputs("missing widget drag icon: payload would be visible\n", stderr);
         abort();
     }
     log_line("dnd-icon-widget:", source->dnd_icon->paintable_widget->text);
-    ++source->pressed;
     FakeWidget *pins[MAX_WIDGETS], *targets[MAX_WIDGETS];
     size_t pin_count = 0, target_count = 0;
     dnd_pin_path(pins, &pin_count, source);
@@ -1154,7 +1474,9 @@ static int fake_dnd_gesture(FakeWidget *source)
     const int delayed = getenv("BABET_FAKE_GTK_DND_DELAYED") != NULL;
     for (size_t n = target_count; n > 0; --n) {
         FakeWidget *t = targets[n - 1];
-        t->dnd_active = t->dnd_actions == 2U && dnd_rooted(t);
+        t->dnd_active = (t->dnd_actions & source->dnd_actions) != 0U && dnd_rooted(t);
+        t->dnd_source = source;
+        { const char *mods=getenv("BABET_FAKE_GTK_DND_MODIFIERS"); t->event_state=mods ? (unsigned int)strtoul(mods,NULL,0) : 0U; }
         if (!t->dnd_active) continue;
         t->dnd_value.text = t->dnd_preload && !delayed ? payload : NULL;
         if (t->dnd_cb[0]) {
@@ -1162,7 +1484,13 @@ static int fake_dnd_gesture(FakeWidget *source)
                 t, 8.0, 12.0, t->dnd_data[0]);
             /* GTK would pass a cleared GdkDrop to gtk_drop_status(). */
             if (action && !t->dnd_active) abort();
-            log_line("dnd-hover:enter:", action == 2U ? "move" : "none");
+            const unsigned int allowed = t->dnd_actions & source->dnd_actions;
+            // GTK falls back to a mutually supported action when the preferred
+            // hover action is unavailable at the source. Zero still refuses.
+            const unsigned int chosen = action ? fake_pick_action(
+                (action & allowed) ? (action & allowed) : allowed) : 0U;
+            if (chosen) source->selected_action = chosen;
+            log_line("dnd-hover:enter:", fake_action_name(chosen));
         }
     }
     int motion_accept = 0;
@@ -1172,13 +1500,20 @@ static int fake_dnd_gesture(FakeWidget *source)
             const unsigned int action = as_drop_motion_signal(t->dnd_cb[1])(
                 t, 9.0, 24.0, t->dnd_data[1]);
             if (action && !t->dnd_active) abort();
-            log_line("dnd-hover:motion:", action == 2U ? "move" : "none");
-            if (action == 2U) motion_accept = 1;
+            const unsigned int allowed = t->dnd_actions & source->dnd_actions;
+            // GTK falls back to a mutually supported action when the preferred
+            // hover action is unavailable at the source. Zero still refuses.
+            const unsigned int chosen = action ? fake_pick_action(
+                (action & allowed) ? (action & allowed) : allowed) : 0U;
+            if (chosen) source->selected_action = chosen;
+            log_line("dnd-hover:motion:", fake_action_name(chosen));
+            if (chosen != 0U) motion_accept = (int)chosen;
         }
     }
     /* A parent's accepted hover can allow DROP_START to reach a child that
        refused hover feedback. Only native rejection makes that child transparent. */
     int delivered = 0, accepted = 0;
+    if (motion_accept) source->selected_action = (unsigned int)motion_accept;
     if (!getenv("BABET_FAKE_GTK_DND_CANCEL") && motion_accept) {
         for (size_t n = 0; n < target_count; ++n) {
             FakeWidget *t = targets[n];
@@ -1189,7 +1524,7 @@ static int fake_dnd_gesture(FakeWidget *source)
                 accepted = as_drop_signal(t->dnd_cb[3])(
                     t, &t->dnd_value, 9.0, 24.0, t->dnd_data[3]);
             t->dnd_in_drop = 0;
-            accepted = accepted && t->dnd_actions == 2U;
+            accepted = accepted && fake_pick_action(t->dnd_actions & source->dnd_actions) != 0U;
             t->dnd_active = 0;
             t->dnd_value.text = NULL;
             delivered = 1;
@@ -1206,6 +1541,15 @@ static int fake_dnd_gesture(FakeWidget *source)
         t->dnd_value.text = NULL;
     }
     log_line(accepted ? "dnd-complete:" : delivered ? "dnd-rejected:drop:" : "dnd-cancelled:", payload);
+    // Reproduce GTK 4.14/X11: a refused local drop may still emit a finished
+    // MOVE at the source. Babet must veto delete_data using the local result.
+    const int finished_on_reject = delivered && getenv("BABET_FAKE_GTK_DND_FINISHED_ON_REJECT");
+    if (!accepted && !finished_on_reject && source->drag_source_cb[2])
+        (void)as_drag_source_cancel_signal(source->drag_source_cb[2])(
+            source, source, 1, source->drag_source_data[2]);
+    if (source->drag_source_cb[1])
+        as_drag_source_end_signal(source->drag_source_cb[1])(
+            source, source, (accepted || finished_on_reject) && motion_accept == 2, source->drag_source_data[1]);
     free(payload);
     while (pin_count) g_object_unref(pins[--pin_count]);
     return 1;
@@ -1228,6 +1572,47 @@ int g_main_context_iteration(void *context, int may_block)
             draw_widget(w);
             return 1;
         }
+    }
+    if (getenv("BABET_FAKE_GTK_DESKTOP_EVENTS")) {
+        int emitted = 0;
+        for (size_t i = 0; i < widget_count; ++i) {
+            FakeWidget *w = widgets[i];
+            if (!w || !w->alive || w->desktop_emitted) continue;
+            if (w->kind == 10 && w->pointer_full && w->parent) {
+                w->desktop_emitted = 1; w->current_button = 3U; w->event_state = 4U;
+                if (w->pressed_cb) as_pressed_signal(w->pressed_cb)(w, 1, 12.0, 18.0, w->pressed_data);
+                if (w->alive && w->released_cb) as_pressed_signal(w->released_cb)(w, 1, 12.0, 18.0, w->released_data);
+                if (w->alive) w->current_button = 0U;
+                emitted = 1;
+            } else if (w->kind == 30 && w->parent) {
+                w->desktop_emitted = 1; w->event_state = 4U;
+                if (w->motion_cb[0]) as_motion_signal(w->motion_cb[0])(w, 2.0, 3.0, w->motion_data[0]);
+                if (w->alive && w->motion_cb[1]) as_motion_signal(w->motion_cb[1])(w, 4.0, 5.0, w->motion_data[1]);
+                if (w->alive && w->motion_cb[2]) as_leave_signal(w->motion_cb[2])(w, w->motion_data[2]);
+                emitted = 1;
+            } else if (w->kind == 31 && w->parent) {
+                w->desktop_emitted = 1;
+                if (w->key_cb[0]) {
+                    const int consumed = as_key_pressed_signal(w->key_cb[0])(
+                        w, 0xff1bU, 9U, 4U, w->key_data[0]);
+                    log_line("key-consumed:", consumed ? "1" : "0");
+                }
+                if (w->alive && w->key_cb[1]) as_key_released_signal(w->key_cb[1])(
+                    w, 0xff1bU, 9U, 4U, w->key_data[1]);
+                emitted = 1;
+            }
+        }
+        for (size_t i = 0; i < widget_count; ++i) {
+            FakeWidget *w = widgets[i];
+            if (w && w->alive && w->kind == 1 && !w->desktop_emitted && w->close_request_cb) {
+                w->desktop_emitted = 1;
+                const int stop = as_close_request_signal(w->close_request_cb)(w, w->close_request_data);
+                log_line("close-request-blocked:", stop ? "1" : "0");
+                if (!stop && w->alive) destroy_widget(w);
+                emitted = 1;
+            }
+        }
+        if (emitted) return 1;
     }
     for (size_t i = 0; i < widget_count; ++i) {
         FakeWidget *w = widgets[i];
@@ -1256,7 +1641,8 @@ int g_main_context_iteration(void *context, int may_block)
         if (w && w->alive && w->kind == 22 && w->parent &&
             fake_dnd_gesture(w))
             return 1;
-        if (w && w->alive && w->kind == 10 && w->parent && w->pressed < (w->parent->kind == 15 ? 4 : 2) && w->pressed_cb) {
+        if (w && w->alive && w->kind == 10 && w->parent && !w->pointer_full &&
+            w->pressed < (w->parent->kind == 15 ? 4 : 2) && w->pressed_cb) {
             ++w->pressed;
             w->current_button = 1U;
             PressedSignal cb = as_pressed_signal(w->pressed_cb);

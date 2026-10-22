@@ -22,6 +22,9 @@ using GtkWindowSetDefaultSize = void (*)(void *, int, int);
 using GtkWindowSetChild = void (*)(void *, void *);
 using GtkWindowPresent = void (*)(void *);
 using GtkWindowDestroy = void (*)(void *);
+using GtkWindowSetTransientFor = void (*)(void *, void *);
+using GtkWindowSetBoolean = void (*)(void *, int);
+using GtkWindowSetIconName = void (*)(void *, const char *);
 using GtkFixedNew = void *(*)();
 using GtkFixedPut = void (*)(void *, void *, double, double);
 using GtkFixedRemove = void (*)(void *, void *);
@@ -58,14 +61,35 @@ using GtkDropTargetSetPreload = void (*)(void *, int);
 using GtkDropTargetSetActions = void (*)(void *, unsigned int);
 using GtkDropTargetReject = void (*)(void *);
 using GtkDropTargetGetValue = const void *(*)(void *);
+using GtkDropTargetGetDrop = void *(*)(void *);
+using GdkDropGetDrag = void *(*)(void *);
+using GdkDragGetSelectedAction = unsigned int (*)(void *);
 using GValueGetString = const char *(*)(const void *);
 using GUtf8Validate = int (*)(const char *, std::ptrdiff_t, const char **);
 using GtkGestureSingleGetCurrentSequence = void *(*)(void *);
 using GtkGestureGetLastEvent = void *(*)(void *, void *);
 using GdkEventGetPosition = int (*)(void *, double *, double *);
 using GtkWidgetSetSizeRequest = void (*)(void *, int, int);
+using GtkWidgetSetString = void (*)(void *, const char *);
+using GtkWidgetGrabFocus = int (*)(void *);
+using GtkWidgetGetBoolean = int (*)(void *);
+using GtkWidgetGetInt = int (*)(void *);
+using GtkWidgetSetInt = void (*)(void *, int);
+struct GraphenePoint { float x; float y; };
+using GtkWidgetComputePoint = int (*)(void *, void *, const GraphenePoint *, GraphenePoint *);
+using GtkWidgetPick = void *(*)(void *, double, double, unsigned int);
+using GtkEventControllerNew = void *(*)();
+using GtkEventControllerGetCurrentEventState = unsigned int (*)(void *);
+using GtkEventControllerSetPropagationPhase = void (*)(void *, int);
+using GdkKeyvalName = const char *(*)(unsigned int);
 
 using GtkBoxNew = void *(*)(int, int);
+using GtkSeparatorNew = void *(*)(int);
+using GtkPanedNew = void *(*)(int);
+using GtkPanedSetChild = void (*)(void *, void *);
+using GtkPanedSetPosition = void (*)(void *, int);
+using GtkPanedGetPosition = int (*)(void *);
+using GtkPanedSetBoolean = void (*)(void *, int);
 using GtkBoxAppend = void (*)(void *, void *);
 using GtkBoxRemove = void (*)(void *, void *);
 using GtkBoxReorderChildAfter = void (*)(void *, void *, void *);
@@ -73,8 +97,22 @@ using GtkScrolledWindowNew = void *(*)();
 using GtkScrolledWindowSetChild = void (*)(void *, void *);
 using GtkLabelNew = void *(*)(const char *);
 using GtkLabelSetText = void (*)(void *, const char *);
+using GtkImageNewFromIconName = void *(*)(const char *);
+using GtkImageSetFromIconName = void (*)(void *, const char *);
 using GtkButtonNewWithLabel = void *(*)(const char *);
 using GtkButtonSetLabel = void (*)(void *, const char *);
+using GtkButtonSetIconName = void (*)(void *, const char *);
+using GtkMenuButtonNew = void *(*)();
+using GtkMenuButtonSetString = void (*)(void *, const char *);
+using GtkMenuButtonSetPopover = void (*)(void *, void *);
+using GtkMenuButtonPopup = void (*)(void *);
+using GtkPopoverNew = void *(*)();
+using GtkPopoverSetChild = void (*)(void *, void *);
+using GtkPopoverSetBoolean = void (*)(void *, int);
+using GtkPopoverSetPosition = void (*)(void *, int);
+struct GdkRectangle { int x; int y; int width; int height; };
+using GtkPopoverSetPointingTo = void (*)(void *, const GdkRectangle *);
+using GtkPopoverAction = void (*)(void *);
 using GtkEntryNew = void *(*)();
 using GtkEntrySetPlaceholder = void (*)(void *, const char *);
 using GtkEditableSetText = void (*)(void *, const char *);
@@ -108,6 +146,8 @@ using GtkStyleContextAddProviderForDisplay = void (*)(void *, void *, unsigned i
 using GtkStyleContextRemoveProviderForDisplay = void (*)(void *, void *);
 using GtkWidgetCssClass = void (*)(void *, const char *);
 using GtkWidgetGetParent = void *(*)(void *);
+using GtkWidgetSetParent = void (*)(void *, void *);
+using GtkWidgetUnparent = void (*)(void *);
 using GObjectRefSink = void *(*)(void *);
 using GObjectUnref = void (*)(void *);
 using GSignalConnectData = unsigned long (*)(void *, const char *, GtkCallback,
@@ -128,6 +168,9 @@ struct GtkApi
     GtkWindowSetChild window_set_child = nullptr;
     GtkWindowPresent window_present = nullptr;
     GtkWindowDestroy window_destroy = nullptr;
+    GtkWindowSetTransientFor window_set_transient_for = nullptr;
+    GtkWindowSetBoolean window_set_modal = nullptr;
+    GtkWindowSetIconName window_set_icon_name = nullptr;
     GtkFixedNew fixed_new = nullptr;
     GtkFixedPut fixed_put = nullptr;
     GtkFixedPut fixed_move = nullptr;
@@ -138,6 +181,7 @@ struct GtkApi
     GObjectGet object_get = nullptr;
     GFree glib_free = nullptr;
     GtkWidgetSetBoolean text_view_set_editable = nullptr;
+    GtkWidgetSetInt text_view_set_wrap_mode = nullptr;
     GtkCheckButtonNewWithLabel check_button_new_with_label = nullptr;
     GtkCheckButtonSetLabel check_button_set_label = nullptr;
     GtkCheckButtonSetActive check_button_set_active = nullptr;
@@ -165,13 +209,43 @@ struct GtkApi
     GtkDropTargetSetActions drop_target_set_actions = nullptr;
     GtkDropTargetReject drop_target_reject = nullptr;
     GtkDropTargetGetValue drop_target_get_value = nullptr;
+    GtkDropTargetGetDrop drop_target_get_drop = nullptr;
+    GdkDropGetDrag drop_get_drag = nullptr;
+    GdkDragGetSelectedAction drag_get_selected_action = nullptr;
     GValueGetString value_get_string = nullptr;
     GUtf8Validate utf8_validate = nullptr;
     GtkGestureSingleGetCurrentSequence gesture_single_get_current_sequence = nullptr;
     GtkGestureGetLastEvent gesture_get_last_event = nullptr;
     GdkEventGetPosition gdk_event_get_position = nullptr;
     GtkWidgetSetSizeRequest widget_set_size_request = nullptr;
+    GtkWidgetSetString widget_set_cursor_from_name = nullptr;
+    GtkWidgetSetString widget_set_tooltip_text = nullptr;
+    GtkWidgetGrabFocus widget_grab_focus = nullptr;
+    GtkWidgetGetBoolean widget_has_focus = nullptr;
+    GtkWidgetGetBoolean widget_get_mapped = nullptr;
+    GtkWidgetGetInt widget_get_width = nullptr;
+    GtkWidgetGetInt widget_get_height = nullptr;
+    GtkWidgetComputePoint widget_compute_point = nullptr;
+    GtkWidgetPick widget_pick = nullptr;
+    GtkWidgetSetInt widget_set_halign = nullptr;
+    GtkWidgetSetInt widget_set_valign = nullptr;
+    GtkEventControllerNew event_controller_motion_new = nullptr;
+    GtkEventControllerNew event_controller_key_new = nullptr;
+    GtkEventControllerGetCurrentEventState event_controller_get_current_event_state = nullptr;
+    GtkEventControllerSetPropagationPhase event_controller_set_propagation_phase = nullptr;
+    GdkKeyvalName keyval_name = nullptr;
     GtkBoxNew box_new = nullptr;
+    GtkSeparatorNew separator_new = nullptr;
+    GtkPanedNew paned_new = nullptr;
+    GtkPanedSetChild paned_set_start_child = nullptr;
+    GtkPanedSetChild paned_set_end_child = nullptr;
+    GtkPanedSetPosition paned_set_position = nullptr;
+    GtkPanedGetPosition paned_get_position = nullptr;
+    GtkPanedSetBoolean paned_set_resize_start_child = nullptr;
+    GtkPanedSetBoolean paned_set_resize_end_child = nullptr;
+    GtkPanedSetBoolean paned_set_shrink_start_child = nullptr;
+    GtkPanedSetBoolean paned_set_shrink_end_child = nullptr;
+    GtkPanedSetBoolean paned_set_wide_handle = nullptr;
     GtkBoxAppend box_append = nullptr;
     GtkBoxRemove box_remove = nullptr;
     GtkBoxReorderChildAfter box_reorder_child_after = nullptr;
@@ -179,8 +253,26 @@ struct GtkApi
     GtkScrolledWindowSetChild scrolled_window_set_child = nullptr;
     GtkLabelNew label_new = nullptr;
     GtkLabelSetText label_set_text = nullptr;
+    GtkImageNewFromIconName image_new_from_icon_name = nullptr;
+    GtkImageSetFromIconName image_set_from_icon_name = nullptr;
     GtkButtonNewWithLabel button_new_with_label = nullptr;
     GtkButtonSetLabel button_set_label = nullptr;
+    GtkButtonSetIconName button_set_icon_name = nullptr;
+    GtkMenuButtonNew menu_button_new = nullptr;
+    GtkMenuButtonSetString menu_button_set_label = nullptr;
+    GtkMenuButtonSetString menu_button_set_icon_name = nullptr;
+    GtkMenuButtonSetPopover menu_button_set_popover = nullptr;
+    GtkMenuButtonPopup menu_button_popup = nullptr;
+    GtkMenuButtonPopup menu_button_popdown = nullptr;
+    GtkPopoverNew popover_new = nullptr;
+    GtkPopoverSetChild popover_set_child = nullptr;
+    GtkPopoverSetBoolean popover_set_has_arrow = nullptr;
+    GtkPopoverSetBoolean popover_set_autohide = nullptr;
+    GtkPopoverSetPosition popover_set_position = nullptr;
+    GtkPopoverSetPointingTo popover_set_pointing_to = nullptr;
+    GtkPopoverAction popover_popup = nullptr;
+    GtkPopoverAction popover_popdown = nullptr;
+    GtkPopoverAction popover_present = nullptr;
     GtkEntryNew entry_new = nullptr;
     GtkEntrySetPlaceholder entry_set_placeholder = nullptr;
     GtkEditableSetText editable_set_text = nullptr;
@@ -245,6 +337,8 @@ struct GtkApi
     void (*cairo_set_font_size)(void *cr, double size) = nullptr;
     void (*cairo_show_text)(void *cr, const char *text) = nullptr;
     GtkWidgetGetParent widget_get_parent = nullptr;
+    GtkWidgetSetParent widget_set_parent = nullptr;
+    GtkWidgetUnparent widget_unparent = nullptr;
     GObjectRefSink object_ref_sink = nullptr;
     GObjectUnref object_unref = nullptr;
     GSignalConnectData signal_connect_data = nullptr;
@@ -376,6 +470,9 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(window_set_child, "gtk_window_set_child");
     BABET_GTK_RESOLVE(window_present, "gtk_window_present");
     BABET_GTK_RESOLVE(window_destroy, "gtk_window_destroy");
+    BABET_GTK_RESOLVE(window_set_transient_for, "gtk_window_set_transient_for");
+    BABET_GTK_RESOLVE(window_set_modal, "gtk_window_set_modal");
+    BABET_GTK_RESOLVE(window_set_icon_name, "gtk_window_set_icon_name");
     BABET_GTK_RESOLVE(fixed_new, "gtk_fixed_new");
     BABET_GTK_RESOLVE(fixed_put, "gtk_fixed_put");
     BABET_GTK_RESOLVE(fixed_move, "gtk_fixed_move");
@@ -386,6 +483,7 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(object_get, "g_object_get");
     BABET_GTK_RESOLVE(glib_free, "g_free");
     BABET_GTK_RESOLVE(text_view_set_editable, "gtk_text_view_set_editable");
+    BABET_GTK_RESOLVE(text_view_set_wrap_mode, "gtk_text_view_set_wrap_mode");
     BABET_GTK_RESOLVE(check_button_new_with_label, "gtk_check_button_new_with_label");
     BABET_GTK_RESOLVE(check_button_set_label, "gtk_check_button_set_label");
     BABET_GTK_RESOLVE(check_button_set_active, "gtk_check_button_set_active");
@@ -413,13 +511,43 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(drop_target_set_actions, "gtk_drop_target_set_actions");
     BABET_GTK_RESOLVE(drop_target_reject, "gtk_drop_target_reject");
     BABET_GTK_RESOLVE(drop_target_get_value, "gtk_drop_target_get_value");
+    BABET_GTK_RESOLVE(drop_target_get_drop, "gtk_drop_target_get_drop");
+    BABET_GTK_RESOLVE(drop_get_drag, "gdk_drop_get_drag");
+    BABET_GTK_RESOLVE(drag_get_selected_action, "gdk_drag_get_selected_action");
     BABET_GTK_RESOLVE(value_get_string, "g_value_get_string");
     BABET_GTK_RESOLVE(utf8_validate, "g_utf8_validate");
     BABET_GTK_RESOLVE(gesture_single_get_current_sequence, "gtk_gesture_single_get_current_sequence");
     BABET_GTK_RESOLVE(gesture_get_last_event, "gtk_gesture_get_last_event");
     BABET_GTK_RESOLVE(gdk_event_get_position, "gdk_event_get_position");
     BABET_GTK_RESOLVE(widget_set_size_request, "gtk_widget_set_size_request");
+    BABET_GTK_RESOLVE(widget_set_cursor_from_name, "gtk_widget_set_cursor_from_name");
+    BABET_GTK_RESOLVE(widget_set_tooltip_text, "gtk_widget_set_tooltip_text");
+    BABET_GTK_RESOLVE(widget_grab_focus, "gtk_widget_grab_focus");
+    BABET_GTK_RESOLVE(widget_has_focus, "gtk_widget_has_focus");
+    BABET_GTK_RESOLVE(widget_get_mapped, "gtk_widget_get_mapped");
+    BABET_GTK_RESOLVE(widget_get_width, "gtk_widget_get_width");
+    BABET_GTK_RESOLVE(widget_get_height, "gtk_widget_get_height");
+    BABET_GTK_RESOLVE(widget_compute_point, "gtk_widget_compute_point");
+    BABET_GTK_RESOLVE(widget_pick, "gtk_widget_pick");
+    BABET_GTK_RESOLVE(widget_set_halign, "gtk_widget_set_halign");
+    BABET_GTK_RESOLVE(widget_set_valign, "gtk_widget_set_valign");
+    BABET_GTK_RESOLVE(event_controller_motion_new, "gtk_event_controller_motion_new");
+    BABET_GTK_RESOLVE(event_controller_key_new, "gtk_event_controller_key_new");
+    BABET_GTK_RESOLVE(event_controller_get_current_event_state, "gtk_event_controller_get_current_event_state");
+    BABET_GTK_RESOLVE(event_controller_set_propagation_phase, "gtk_event_controller_set_propagation_phase");
+    BABET_GTK_RESOLVE(keyval_name, "gdk_keyval_name");
     BABET_GTK_RESOLVE(box_new, "gtk_box_new");
+    BABET_GTK_RESOLVE(separator_new, "gtk_separator_new");
+    BABET_GTK_RESOLVE(paned_new, "gtk_paned_new");
+    BABET_GTK_RESOLVE(paned_set_start_child, "gtk_paned_set_start_child");
+    BABET_GTK_RESOLVE(paned_set_end_child, "gtk_paned_set_end_child");
+    BABET_GTK_RESOLVE(paned_set_position, "gtk_paned_set_position");
+    BABET_GTK_RESOLVE(paned_get_position, "gtk_paned_get_position");
+    BABET_GTK_RESOLVE(paned_set_resize_start_child, "gtk_paned_set_resize_start_child");
+    BABET_GTK_RESOLVE(paned_set_resize_end_child, "gtk_paned_set_resize_end_child");
+    BABET_GTK_RESOLVE(paned_set_shrink_start_child, "gtk_paned_set_shrink_start_child");
+    BABET_GTK_RESOLVE(paned_set_shrink_end_child, "gtk_paned_set_shrink_end_child");
+    BABET_GTK_RESOLVE(paned_set_wide_handle, "gtk_paned_set_wide_handle");
     BABET_GTK_RESOLVE(box_append, "gtk_box_append");
     BABET_GTK_RESOLVE(box_remove, "gtk_box_remove");
     BABET_GTK_RESOLVE(box_reorder_child_after, "gtk_box_reorder_child_after");
@@ -427,8 +555,26 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(scrolled_window_set_child, "gtk_scrolled_window_set_child");
     BABET_GTK_RESOLVE(label_new, "gtk_label_new");
     BABET_GTK_RESOLVE(label_set_text, "gtk_label_set_text");
+    BABET_GTK_RESOLVE(image_new_from_icon_name, "gtk_image_new_from_icon_name");
+    BABET_GTK_RESOLVE(image_set_from_icon_name, "gtk_image_set_from_icon_name");
     BABET_GTK_RESOLVE(button_new_with_label, "gtk_button_new_with_label");
     BABET_GTK_RESOLVE(button_set_label, "gtk_button_set_label");
+    BABET_GTK_RESOLVE(button_set_icon_name, "gtk_button_set_icon_name");
+    BABET_GTK_RESOLVE(menu_button_new, "gtk_menu_button_new");
+    BABET_GTK_RESOLVE(menu_button_set_label, "gtk_menu_button_set_label");
+    BABET_GTK_RESOLVE(menu_button_set_icon_name, "gtk_menu_button_set_icon_name");
+    BABET_GTK_RESOLVE(menu_button_set_popover, "gtk_menu_button_set_popover");
+    BABET_GTK_RESOLVE(menu_button_popup, "gtk_menu_button_popup");
+    BABET_GTK_RESOLVE(menu_button_popdown, "gtk_menu_button_popdown");
+    BABET_GTK_RESOLVE(popover_new, "gtk_popover_new");
+    BABET_GTK_RESOLVE(popover_set_child, "gtk_popover_set_child");
+    BABET_GTK_RESOLVE(popover_set_has_arrow, "gtk_popover_set_has_arrow");
+    BABET_GTK_RESOLVE(popover_set_autohide, "gtk_popover_set_autohide");
+    BABET_GTK_RESOLVE(popover_set_position, "gtk_popover_set_position");
+    BABET_GTK_RESOLVE(popover_set_pointing_to, "gtk_popover_set_pointing_to");
+    BABET_GTK_RESOLVE(popover_popup, "gtk_popover_popup");
+    BABET_GTK_RESOLVE(popover_popdown, "gtk_popover_popdown");
+    BABET_GTK_RESOLVE(popover_present, "gtk_popover_present");
     BABET_GTK_RESOLVE(entry_new, "gtk_entry_new");
     BABET_GTK_RESOLVE(entry_set_placeholder, "gtk_entry_set_placeholder_text");
     BABET_GTK_RESOLVE(editable_set_text, "gtk_editable_set_text");
@@ -507,6 +653,8 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(cairo_set_font_size, "cairo_set_font_size");
     BABET_GTK_RESOLVE(cairo_show_text, "cairo_show_text");
     BABET_GTK_RESOLVE(widget_get_parent, "gtk_widget_get_parent");
+    BABET_GTK_RESOLVE(widget_set_parent, "gtk_widget_set_parent");
+    BABET_GTK_RESOLVE(widget_unparent, "gtk_widget_unparent");
     BABET_GTK_RESOLVE(object_ref_sink, "g_object_ref_sink");
     BABET_GTK_RESOLVE(object_unref, "g_object_unref");
     BABET_GTK_RESOLVE(signal_connect_data, "g_signal_connect_data");
@@ -552,6 +700,9 @@ void gtk4_window_set_default_size(void *w, int x, int y) noexcept { g_gtk.window
 void gtk4_window_set_child(void *w, void *c) noexcept { g_gtk.window_set_child(w, c); }
 void gtk4_window_present(void *w) noexcept { g_gtk.window_present(w); }
 void gtk4_window_destroy(void *w) noexcept { g_gtk.window_destroy(w); }
+void gtk4_window_set_transient_for(void *w, void *p) noexcept { g_gtk.window_set_transient_for(w, p); }
+void gtk4_window_set_modal(void *w, bool v) noexcept { g_gtk.window_set_modal(w, v ? 1 : 0); }
+void gtk4_window_set_icon_name(void *w, const char *n) noexcept { g_gtk.window_set_icon_name(w, n); }
 void *gtk4_fixed_new() noexcept { return g_gtk.fixed_new(); }
 void gtk4_fixed_put(void *p, void *c, double x, double y) noexcept { g_gtk.fixed_put(p, c, x, y); }
 void gtk4_fixed_move(void *p, void *c, double x, double y) noexcept { g_gtk.fixed_move(p, c, x, y); }
@@ -567,6 +718,7 @@ char *gtk4_text_buffer_dup_text(void *b) noexcept
 }
 void gtk4_free(void *p) noexcept { g_gtk.glib_free(p); }
 void gtk4_text_view_set_editable(void *v, bool b) noexcept { g_gtk.text_view_set_editable(v, b ? 1 : 0); }
+void gtk4_text_view_set_wrap_mode(void *v, int mode) noexcept { g_gtk.text_view_set_wrap_mode(v, mode); }
 void *gtk4_check_button_new_with_label(const char *s) noexcept { return g_gtk.check_button_new_with_label(s); }
 void gtk4_check_button_set_label(void *c, const char *s) noexcept { g_gtk.check_button_set_label(c, s); }
 void gtk4_check_button_set_active(void *c, bool b) noexcept { g_gtk.check_button_set_active(c, b ? 1 : 0); }
@@ -584,7 +736,9 @@ bool gtk4_expander_get_expanded(void *e) noexcept { return g_gtk.expander_get_ex
 void *gtk4_gesture_drag_new() noexcept { return g_gtk.gesture_drag_new(); }
 namespace
 {
+constexpr unsigned int GDK_ACTION_COPY_VALUE = 1U << 0;
 constexpr unsigned int GDK_ACTION_MOVE_VALUE = 1U << 1;
+constexpr unsigned int GDK_ACTION_LINK_VALUE = 1U << 2;
 GType gtk4_string_type() noexcept
 {
     return g_gtk.type_from_name ? g_gtk.type_from_name("gchararray") : 0;
@@ -593,6 +747,8 @@ GType gtk4_string_type() noexcept
 void *gtk4_drag_source_new() noexcept { return g_gtk.drag_source_new(); }
 void gtk4_drag_source_set_move_action(void *source) noexcept
 { g_gtk.drag_source_set_actions(source, GDK_ACTION_MOVE_VALUE); }
+void gtk4_drag_source_set_actions(void *source, unsigned int actions) noexcept
+{ g_gtk.drag_source_set_actions(source, actions); }
 bool gtk4_drag_source_set_widget_icon(void *source, void *widget) noexcept
 {
     void *paintable = g_gtk.widget_paintable_new(widget);
@@ -629,9 +785,15 @@ bool gtk4_drag_source_set_text(void *source, const char *text) noexcept
 }
 void *gtk4_drop_target_new_text_move() noexcept
 {
-    const GType string_type = gtk4_string_type();
-    return string_type ? g_gtk.drop_target_new(string_type, GDK_ACTION_MOVE_VALUE) : nullptr;
+    return gtk4_drop_target_new_text(GDK_ACTION_MOVE_VALUE);
 }
+void *gtk4_drop_target_new_text(unsigned int actions) noexcept
+{
+    const GType string_type = gtk4_string_type();
+    return string_type ? g_gtk.drop_target_new(string_type, actions) : nullptr;
+}
+void gtk4_drop_target_set_actions(void *target, unsigned int actions) noexcept
+{ g_gtk.drop_target_set_actions(target, actions); }
 void gtk4_drop_target_set_preload(void *target, bool preload) noexcept
 { g_gtk.drop_target_set_preload(target, preload ? 1 : 0); }
 void gtk4_drop_target_set_enabled(void *target, bool enabled) noexcept
@@ -648,7 +810,23 @@ const char *gtk4_drop_target_text(void *target) noexcept
 }
 const char *gtk4_value_text(const void *value) noexcept
 { return value ? g_gtk.value_get_string(value) : nullptr; }
+unsigned int gtk4_drag_action_copy() noexcept { return GDK_ACTION_COPY_VALUE; }
 unsigned int gtk4_drag_action_move() noexcept { return GDK_ACTION_MOVE_VALUE; }
+unsigned int gtk4_drag_action_link() noexcept { return GDK_ACTION_LINK_VALUE; }
+void *gtk4_drop_target_drag(void *target) noexcept
+{
+    void *drop = g_gtk.drop_target_get_drop(target);
+    return drop ? g_gtk.drop_get_drag(drop) : nullptr;
+}
+unsigned int gtk4_drop_target_selected_action(void *target) noexcept
+{
+    void *drag = gtk4_drop_target_drag(target);
+    return drag ? g_gtk.drag_get_selected_action(drag) : 0U;
+}
+unsigned int gdk4_drag_selected_action(void *drag) noexcept
+{
+    return drag ? g_gtk.drag_get_selected_action(drag) : 0U;
+}
 bool gtk4_utf8_valid(const char *text, std::size_t length) noexcept
 {
     return text && g_gtk.utf8_validate(text, static_cast<std::ptrdiff_t>(length), nullptr) != 0;
@@ -660,8 +838,50 @@ bool gtk4_gesture_surface_position(void *gesture, double &x, double &y) noexcept
     return event && g_gtk.gdk_event_get_position(event, &x, &y) != 0;
 }
 void gtk4_widget_set_size_request(void *w, int width, int height) noexcept { g_gtk.widget_set_size_request(w, width, height); }
+void gtk4_widget_set_cursor_name(void *w, const char *name) noexcept { g_gtk.widget_set_cursor_from_name(w, name); }
+void gtk4_widget_set_tooltip_text(void *w, const char *text) noexcept { g_gtk.widget_set_tooltip_text(w, text); }
+bool gtk4_widget_grab_focus(void *w) noexcept { return g_gtk.widget_grab_focus(w) != 0; }
+bool gtk4_widget_has_focus(void *w) noexcept { return g_gtk.widget_has_focus(w) != 0; }
+bool gtk4_widget_get_mapped(void *w) noexcept { return w && g_gtk.widget_get_mapped(w) != 0; }
+int gtk4_widget_get_width(void *w) noexcept { return g_gtk.widget_get_width(w); }
+int gtk4_widget_get_height(void *w) noexcept { return g_gtk.widget_get_height(w); }
+bool gtk4_widget_compute_point(void *w, void *target, double x, double y, double &out_x, double &out_y) noexcept
+{
+    GraphenePoint in{static_cast<float>(x), static_cast<float>(y)};
+    GraphenePoint out{0.0f, 0.0f};
+    if (!g_gtk.widget_compute_point(w, target, &in, &out)) return false;
+    out_x = out.x; out_y = out.y; return true;
+}
+void *gtk4_widget_pick(void *w, double x, double y) noexcept
+{
+    return g_gtk.widget_pick(w, x, y, 0U);
+}
+void gtk4_widget_set_halign(void *w, int align) noexcept { g_gtk.widget_set_halign(w, align); }
+void gtk4_widget_set_valign(void *w, int align) noexcept { g_gtk.widget_set_valign(w, align); }
+void *gtk4_event_controller_motion_new() noexcept { return g_gtk.event_controller_motion_new(); }
+void *gtk4_event_controller_key_new() noexcept { return g_gtk.event_controller_key_new(); }
+unsigned int gtk4_event_controller_current_state(void *controller) noexcept
+{
+    return g_gtk.event_controller_get_current_event_state(controller);
+}
+void gtk4_event_controller_set_propagation_phase(void *controller, int phase) noexcept
+{
+    g_gtk.event_controller_set_propagation_phase(controller, phase);
+}
+const char *gdk4_keyval_name(unsigned int keyval) noexcept { return g_gtk.keyval_name(keyval); }
 
 void *gtk4_box_new(int o, int s) noexcept { return g_gtk.box_new(o, s); }
+void *gtk4_separator_new(int o) noexcept { return g_gtk.separator_new(o); }
+void *gtk4_paned_new(int o) noexcept { return g_gtk.paned_new(o); }
+void gtk4_paned_set_start_child(void *p, void *c) noexcept { g_gtk.paned_set_start_child(p, c); }
+void gtk4_paned_set_end_child(void *p, void *c) noexcept { g_gtk.paned_set_end_child(p, c); }
+void gtk4_paned_set_position(void *p, int v) noexcept { g_gtk.paned_set_position(p, v); }
+int gtk4_paned_get_position(void *p) noexcept { return g_gtk.paned_get_position(p); }
+void gtk4_paned_set_resize_start(void *p, bool v) noexcept { g_gtk.paned_set_resize_start_child(p, v ? 1 : 0); }
+void gtk4_paned_set_resize_end(void *p, bool v) noexcept { g_gtk.paned_set_resize_end_child(p, v ? 1 : 0); }
+void gtk4_paned_set_shrink_start(void *p, bool v) noexcept { g_gtk.paned_set_shrink_start_child(p, v ? 1 : 0); }
+void gtk4_paned_set_shrink_end(void *p, bool v) noexcept { g_gtk.paned_set_shrink_end_child(p, v ? 1 : 0); }
+void gtk4_paned_set_wide_handle(void *p, bool v) noexcept { g_gtk.paned_set_wide_handle(p, v ? 1 : 0); }
 void gtk4_box_append(void *b, void *c) noexcept { g_gtk.box_append(b, c); }
 void gtk4_box_remove(void *b, void *c) noexcept { g_gtk.box_remove(b, c); }
 void gtk4_box_reorder_child_after(void *b, void *c, void *s) noexcept
@@ -669,9 +889,28 @@ void gtk4_box_reorder_child_after(void *b, void *c, void *s) noexcept
 void *gtk4_scrolled_window_new() noexcept { return g_gtk.scrolled_window_new(); }
 void gtk4_scrolled_window_set_child(void *s, void *c) noexcept { g_gtk.scrolled_window_set_child(s, c); }
 void *gtk4_label_new(const char *t) noexcept { return g_gtk.label_new(t); }
+void *gtk4_image_new_from_icon_name(const char *n) noexcept { return g_gtk.image_new_from_icon_name(n); }
+void gtk4_image_set_from_icon_name(void *i, const char *n) noexcept { g_gtk.image_set_from_icon_name(i, n); }
 void gtk4_label_set_text(void *l, const char *t) noexcept { g_gtk.label_set_text(l, t); }
 void *gtk4_button_new_with_label(const char *t) noexcept { return g_gtk.button_new_with_label(t); }
 void gtk4_button_set_label(void *b, const char *t) noexcept { g_gtk.button_set_label(b, t); }
+void gtk4_button_set_icon_name(void *b, const char *n) noexcept { g_gtk.button_set_icon_name(b, n); }
+void *gtk4_menu_button_new() noexcept { return g_gtk.menu_button_new(); }
+void gtk4_menu_button_set_label(void *b, const char *t) noexcept { g_gtk.menu_button_set_label(b, t); }
+void gtk4_menu_button_set_icon_name(void *b, const char *n) noexcept { g_gtk.menu_button_set_icon_name(b, n); }
+void gtk4_menu_button_set_popover(void *b, void *p) noexcept { g_gtk.menu_button_set_popover(b, p); }
+void gtk4_menu_button_popup(void *b) noexcept { g_gtk.menu_button_popup(b); }
+void gtk4_menu_button_popdown(void *b) noexcept { g_gtk.menu_button_popdown(b); }
+void *gtk4_popover_new() noexcept { return g_gtk.popover_new(); }
+void gtk4_popover_set_child(void *p, void *c) noexcept { g_gtk.popover_set_child(p, c); }
+void gtk4_popover_set_has_arrow(void *p, bool v) noexcept { g_gtk.popover_set_has_arrow(p, v ? 1 : 0); }
+void gtk4_popover_set_autohide(void *p, bool v) noexcept { g_gtk.popover_set_autohide(p, v ? 1 : 0); }
+void gtk4_popover_set_position(void *p, int v) noexcept { g_gtk.popover_set_position(p, v); }
+void gtk4_popover_set_pointing_to(void *p, int x, int y, int width, int height) noexcept
+{ GdkRectangle r{x, y, width, height}; g_gtk.popover_set_pointing_to(p, &r); }
+void gtk4_popover_popup(void *p) noexcept { g_gtk.popover_popup(p); }
+void gtk4_popover_popdown(void *p) noexcept { g_gtk.popover_popdown(p); }
+void gtk4_popover_present(void *p) noexcept { g_gtk.popover_present(p); }
 void *gtk4_entry_new() noexcept { return g_gtk.entry_new(); }
 void gtk4_entry_set_placeholder(void *e, const char *t) noexcept { g_gtk.entry_set_placeholder(e, t); }
 void gtk4_editable_set_text(void *e, const char *t) noexcept { g_gtk.editable_set_text(e, t); }
@@ -745,6 +984,8 @@ void cairo_set_source_rgba(void *cr, double r, double g, double b, double a) noe
 void cairo_set_font_size(void *cr, double size) noexcept { g_gtk.cairo_set_font_size(cr, size); }
 void cairo_show_text(void *cr, const char *text) noexcept { g_gtk.cairo_show_text(cr, text); }
 void *gtk4_widget_get_parent(void *w) noexcept { return g_gtk.widget_get_parent(w); }
+void gtk4_widget_set_parent(void *w, void *p) noexcept { g_gtk.widget_set_parent(w, p); }
+void gtk4_widget_unparent(void *w) noexcept { g_gtk.widget_unparent(w); }
 void *gtk4_object_ref_sink(void *o) noexcept { return g_gtk.object_ref_sink(o); }
 void gtk4_object_unref(void *o) noexcept { g_gtk.object_unref(o); }
 unsigned long gtk4_signal_connect(void *i, const char *s, GtkCallback c, void *d,

@@ -29,6 +29,9 @@ void gtk4_window_set_default_size(void *window, int width, int height) noexcept;
 void gtk4_window_set_child(void *window, void *child) noexcept;
 void gtk4_window_present(void *window) noexcept;
 void gtk4_window_destroy(void *window) noexcept;
+void gtk4_window_set_transient_for(void *window, void *parent) noexcept;
+void gtk4_window_set_modal(void *window, bool modal) noexcept;
+void gtk4_window_set_icon_name(void *window, const char *name) noexcept;
 
 // Additional GTK4 building blocks for freely positioned note boards.
 void *gtk4_fixed_new() noexcept;
@@ -42,6 +45,7 @@ void gtk4_text_buffer_set_text(void *buffer, const char *text) noexcept;
 char *gtk4_text_buffer_dup_text(void *buffer) noexcept;
 void gtk4_free(void *pointer) noexcept;
 void gtk4_text_view_set_editable(void *view, bool editable) noexcept;
+void gtk4_text_view_set_wrap_mode(void *view, int mode) noexcept;
 void *gtk4_check_button_new_with_label(const char *label) noexcept;
 void gtk4_check_button_set_label(void *check, const char *label) noexcept;
 void gtk4_check_button_set_active(void *check, bool active) noexcept;
@@ -62,22 +66,59 @@ void *gtk4_gesture_drag_new() noexcept;
 // model/data outside GTK.
 void *gtk4_drag_source_new() noexcept;
 void gtk4_drag_source_set_move_action(void *source) noexcept;
+void gtk4_drag_source_set_actions(void *source, unsigned int actions) noexcept;
 bool gtk4_drag_source_set_widget_icon(void *source, void *widget) noexcept;
 bool gtk4_drag_source_set_text(void *source, const char *text) noexcept;
 void *gtk4_drop_target_new_text_move() noexcept;
+void *gtk4_drop_target_new_text(unsigned int actions) noexcept;
+void gtk4_drop_target_set_actions(void *target, unsigned int actions) noexcept;
 void gtk4_drop_target_set_preload(void *target, bool preload) noexcept;
 void gtk4_drop_target_set_enabled(void *target, bool enabled) noexcept;
 void gtk4_drop_target_reject(void *target) noexcept;
 const char *gtk4_drop_target_text(void *target) noexcept;
 const char *gtk4_value_text(const void *value) noexcept;
+unsigned int gtk4_drag_action_copy() noexcept;
 unsigned int gtk4_drag_action_move() noexcept;
+unsigned int gtk4_drag_action_link() noexcept;
+unsigned int gtk4_drop_target_selected_action(void *target) noexcept;
+void *gtk4_drop_target_drag(void *target) noexcept;
+unsigned int gdk4_drag_selected_action(void *drag) noexcept;
 bool gtk4_utf8_valid(const char *text, std::size_t length) noexcept;
 // GdkEvent positions are surface-relative, unlike GtkGestureDrag offsets.
 // The stable event surface makes moving a gesture's own widget safe.
 bool gtk4_gesture_surface_position(void *gesture, double &x, double &y) noexcept;
 void gtk4_widget_set_size_request(void *widget, int width, int height) noexcept;
+void gtk4_widget_set_cursor_name(void *widget, const char *name) noexcept;
+void gtk4_widget_set_tooltip_text(void *widget, const char *text) noexcept;
+bool gtk4_widget_grab_focus(void *widget) noexcept;
+bool gtk4_widget_has_focus(void *widget) noexcept;
+bool gtk4_widget_get_mapped(void *widget) noexcept;
+int gtk4_widget_get_width(void *widget) noexcept;
+int gtk4_widget_get_height(void *widget) noexcept;
+bool gtk4_widget_compute_point(void *widget, void *target, double x, double y,
+                               double &out_x, double &out_y) noexcept;
+void *gtk4_widget_pick(void *widget, double x, double y) noexcept;
+void gtk4_widget_set_halign(void *widget, int align) noexcept;
+void gtk4_widget_set_valign(void *widget, int align) noexcept;
+
+void *gtk4_event_controller_motion_new() noexcept;
+void *gtk4_event_controller_key_new() noexcept;
+unsigned int gtk4_event_controller_current_state(void *controller) noexcept;
+void gtk4_event_controller_set_propagation_phase(void *controller, int phase) noexcept;
+const char *gdk4_keyval_name(unsigned int keyval) noexcept;
 
 void *gtk4_box_new(int orientation, int spacing) noexcept;
+void *gtk4_separator_new(int orientation) noexcept;
+void *gtk4_paned_new(int orientation) noexcept;
+void gtk4_paned_set_start_child(void *paned, void *child) noexcept;
+void gtk4_paned_set_end_child(void *paned, void *child) noexcept;
+void gtk4_paned_set_position(void *paned, int position) noexcept;
+int gtk4_paned_get_position(void *paned) noexcept;
+void gtk4_paned_set_resize_start(void *paned, bool enabled) noexcept;
+void gtk4_paned_set_resize_end(void *paned, bool enabled) noexcept;
+void gtk4_paned_set_shrink_start(void *paned, bool enabled) noexcept;
+void gtk4_paned_set_shrink_end(void *paned, bool enabled) noexcept;
+void gtk4_paned_set_wide_handle(void *paned, bool enabled) noexcept;
 void gtk4_box_append(void *box, void *child) noexcept;
 void gtk4_box_remove(void *box, void *child) noexcept;
 // Native in-place GtkBox reordering (no unparenting or refcount churn).
@@ -85,9 +126,27 @@ void gtk4_box_reorder_child_after(void *box, void *child, void *sibling) noexcep
 void *gtk4_scrolled_window_new() noexcept;
 void gtk4_scrolled_window_set_child(void *scrolled, void *child) noexcept;
 void *gtk4_label_new(const char *text) noexcept;
+void *gtk4_image_new_from_icon_name(const char *icon_name) noexcept;
+void gtk4_image_set_from_icon_name(void *image, const char *icon_name) noexcept;
 void gtk4_label_set_text(void *label, const char *text) noexcept;
 void *gtk4_button_new_with_label(const char *text) noexcept;
 void gtk4_button_set_label(void *button, const char *text) noexcept;
+void gtk4_button_set_icon_name(void *button, const char *icon_name) noexcept;
+void *gtk4_menu_button_new() noexcept;
+void gtk4_menu_button_set_label(void *button, const char *label) noexcept;
+void gtk4_menu_button_set_icon_name(void *button, const char *icon_name) noexcept;
+void gtk4_menu_button_set_popover(void *button, void *popover) noexcept;
+void gtk4_menu_button_popup(void *button) noexcept;
+void gtk4_menu_button_popdown(void *button) noexcept;
+void *gtk4_popover_new() noexcept;
+void gtk4_popover_set_child(void *popover, void *child) noexcept;
+void gtk4_popover_set_has_arrow(void *popover, bool enabled) noexcept;
+void gtk4_popover_set_autohide(void *popover, bool enabled) noexcept;
+void gtk4_popover_set_position(void *popover, int position) noexcept;
+void gtk4_popover_set_pointing_to(void *popover, int x, int y, int width, int height) noexcept;
+void gtk4_popover_popup(void *popover) noexcept;
+void gtk4_popover_popdown(void *popover) noexcept;
+void gtk4_popover_present(void *popover) noexcept;
 void *gtk4_entry_new() noexcept;
 void gtk4_entry_set_placeholder(void *entry, const char *text) noexcept;
 void gtk4_editable_set_text(void *entry, const char *text) noexcept;
@@ -153,6 +212,8 @@ void cairo_set_font_size(void *cr, double size) noexcept;
 void cairo_show_text(void *cr, const char *text) noexcept;
 
 void *gtk4_widget_get_parent(void *widget) noexcept;
+void gtk4_widget_set_parent(void *widget, void *parent) noexcept;
+void gtk4_widget_unparent(void *widget) noexcept;
 
 void *gtk4_object_ref_sink(void *object) noexcept;
 void gtk4_object_unref(void *object) noexcept;

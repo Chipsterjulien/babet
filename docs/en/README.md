@@ -15,7 +15,13 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for **Babet 2.31.0**.
+Documentation for **Babet 2.32.0**.
+
+Babet 2.32.0 expands the [GTK4 desktop API](modules/gui.md#desktop-application-primitives) with split panes,
+menus and context popovers, themed icons, pointer and keyboard events, geometry
+helpers and dialog-window controls. Native drag-and-drop gains COPY/MOVE/LINK,
+custom previews and lifecycle callbacks. GTK 4 remains optional and loaded only
+when requested.
 
 Babet 2.31.0 adds [native GTK4 drag-and-drop](modules/gui.md#native-gtk4-drag-and-drop-for-list-rows)
 with `setDragData` and `onDrop`, handle-widget drag icons and protected callbacks.

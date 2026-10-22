@@ -9,6 +9,11 @@ ko(){ echo "[FAIL] $1"; FAIL=$((FAIL+1)); }
 check(){ local label="$1"; shift; if "$@"; then ok "$label"; else ko "$label"; fi; }
 contains(){ grep -Fq -- "$2" "$1"; }
 absent(){ [ ! -e "$1" ]; }
+test_logs_ignored(){
+    # Read-only during preflight. --repair is an explicit user operation.
+    python3 "${ROOT}/tools/test_log_ignore.py" &&
+        python3 "${ROOT}/tools/test_log_ignore_contracts.py"
+}
 delivery_notes_absent(){
     local path
     local status=0
@@ -27,6 +32,8 @@ HEADER="src/lua_bindings/gui_gtk_loader.hpp"
 LOADER="src/lua_bindings/gui_gtk_loader.cpp"
 DESIGN="GUI_DESIGN.md"
 RUN="run_tests.sh"
+FAKE="tests/gui/fake_gtk4_runtime.c"
+WIDGET_HARNESS="tools/test_gui_widgets.py"
 
 check "GUI window constructor is registered" contains "$IMPL" '"window"'
 check "GUI box constructor is registered" contains "$IMPL" '"box"'
@@ -90,6 +97,44 @@ check "native DND regression is exercised" contains "${ROOT}/tools/test_gui_widg
 check "native DND rejection regression is exercised" contains "${ROOT}/tools/test_gui_widgets.py" 'native_dnd_reject.lua'
 check "drag payloads are validated as UTF-8" contains "$IMPL" 'gtk4_utf8_valid(payload, length)'
 check "real GTK DND integration uses XTest" contains "${ROOT}/tools/test_gui_real_gtk.py" 'real_gtk_dnd.lua'
+check "GtkPaned split-pane primitive is exposed" contains "$IMPL" '"paned"'
+check "GtkPaned position persistence callback is exposed" contains "$IMPL" '"onPositionChanged"'
+check "GtkPaned dense-slot removal regression is exercised" contains "${ROOT}/tests/gui/desktop_ui_contract.lua" 'slot_probe:remove(slot_a)'
+check "native separator primitive is exposed" contains "$IMPL" '"separator"'
+check "desktop menu button primitive is exposed" contains "$IMPL" '"menuButton"'
+check "desktop popover primitive is exposed" contains "$IMPL" '"popover"'
+check "context popovers can attach directly to a widget" contains "$IMPL" '"attachTo"'
+check "context popover loader owns explicit GTK parenting" contains "$LOADER" 'gtk_widget_set_parent'
+check "image/icon primitive is exposed" contains "$IMPL" '"image"'
+check "pointer press/release/motion API is exposed" contains "$IMPL" '"onPointer"'
+check "keyboard controller API is exposed" contains "$IMPL" '"onKey"'
+check "window key handlers run in capture phase" contains "$IMPL" 'gtk4_event_controller_set_propagation_phase(controller, 1)'
+check "desktop modifier constants are exposed" contains "$IMPL" '"MOD_CONTROL"'
+check "widget cursor and tooltip APIs are exposed" contains "$IMPL" '"setTooltipText"'
+check "widget focus API is exposed" contains "$IMPL" '"grabFocus"'
+check "widget allocated geometry is exposed" contains "$IMPL" '"getSize"'
+check "widget point translation is exposed" contains "$IMPL" '"translatePoint"'
+check "widget hit-testing is exposed" contains "$IMPL" '"pick"'
+check "loader resolves GTK widget hit-testing" contains "$LOADER" 'gtk_widget_pick'
+check "widget alignment is exposed" contains "$IMPL" '"setHAlign"'
+check "TextView wrap mode is exposed" contains "$IMPL" '"setWrapMode"'
+check "window transient/modal desktop APIs are exposed" contains "$IMPL" '"setTransientFor"'
+check "window close-request interception is exposed" contains "$IMPL" '"onCloseRequest"'
+check "rich DND actions are exposed" contains "$IMPL" '"setDragActions"'
+check "custom native drag icon is exposed" contains "$IMPL" '"setDragIcon"'
+check "drag begin/end/cancel callbacks are exposed" contains "$IMPL" '"onDragState"'
+check "desktop integration contract is exercised" contains "${ROOT}/tools/test_gui_widgets.py" 'desktop_ui_contract.lua'
+check "real GTK desktop primitives are exercised" contains "${ROOT}/tools/test_gui_real_gtk.py" 'real_gtk_desktop.lua'
+check "real GTK desktop pointer delivery is explicitly synchronized" contains "${ROOT}/tests/gui/real_gtk_desktop.lua" 'REAL_GTK_DESKTOP_POINTER_OK'
+check "real GTK desktop harness waits for pointer acknowledgement" contains "${ROOT}/tools/test_gui_real_gtk.py" 'REAL_GTK_DESKTOP_POINTER_OK'
+check "real GTK visible popover has a separate integration probe" contains "${ROOT}/tools/test_gui_real_gtk.py" 'real_gtk_popover.lua'
+check "real GTK rich DND copy action is exercised" contains "${ROOT}/tools/test_gui_real_gtk.py" 'copy-action'
+check "desktop controller connection failures are exercised" contains "${ROOT}/tools/test_gui_widgets.py" 'desktop_failures = ('
+check "fake GTK logs desktop target destruction" contains "$FAKE" 'destroy:label'
+check "fake GTK logs pointer-controller destruction" contains "$FAKE" 'destroy:pointerMotion'
+check "fake GTK logs key-controller destruction" contains "$FAKE" 'destroy:keyController'
+check "desktop failure regression checks click-controller teardown" contains "$WIDGET_HARNESS" 'destroy:gestureClick'
+check "desktop failure regression checks drag-source teardown" contains "$WIDGET_HARNESS" 'destroy:widgetPaintable'
 check "loader resolves GtkScrolledWindow child setter" contains "$LOADER" 'gtk_scrolled_window_set_child'
 check "loader resolves GtkSpinButton range constructor" contains "$LOADER" 'gtk_spin_button_new_with_range'
 check "loader resolves GtkCalendar selection" contains "$LOADER" 'gtk_calendar_select_day'
@@ -123,6 +168,7 @@ check "obsolete Entry lot note is absent from repository root" absent "${ROOT}/G
 check "obsolete DrawingArea lot note is absent from repository root" absent "${ROOT}/GUI_DRAWING_LOT2.fr.md"
 check "obsolete onClick integration note is absent from repository root" absent "${ROOT}/INTEGRATION_DRAWINGAREA_ONCLICK.fr.md"
 check "delivery notes (README_PATCH_*, LIRE_*) are absent from repository root" delivery_notes_absent
+check "Git ignores all babet-tests*.txt release logs" test_logs_ignored
 check "modified-only deletion manifest is absent from repository root" absent "${ROOT}/REMOVED_FILES.txt"
 check "modified-only applicator is absent from repository root" absent "${ROOT}/APPLY_TO_PROJECT.sh"
 check "modified-only payload is absent from repository root" absent "${ROOT}/payload"

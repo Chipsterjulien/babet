@@ -25,3 +25,4 @@ babet-fltk-tests.txt
 # Caches Python (lot 17)
 __pycache__/
 *.py[cod]
+babet-tests*.txt

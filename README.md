@@ -16,11 +16,17 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.31.0**. See the
+Current release: **2.32.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.32.0 expands the [GTK4 desktop API](docs/en/modules/gui.md#desktop-application-primitives) with split panes,
+menus and context popovers, themed icons, pointer and keyboard events, geometry
+helpers and dialog-window controls. Native drag-and-drop gains COPY/MOVE/LINK,
+custom previews and lifecycle callbacks. GTK 4 remains optional and loaded only
+when requested.
 
 Babet 2.31.0 adds [native GTK4 drag-and-drop](docs/en/modules/gui.md#native-gtk4-drag-and-drop-for-list-rows)
 through `setDragData` and `onDrop`, with a handle-widget drag icon and protected

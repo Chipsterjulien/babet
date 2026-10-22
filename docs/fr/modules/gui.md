@@ -677,37 +677,57 @@ Depuis Babet **2.31.0**, le DND natif est disponible en complément de `onDrag()
 
 - `poignee:setDragData(identifiant_ou_nil)` installe un **`GtkDragSource`** sur
   un widget non interactif (`label`, `box`, `drawingArea`, `fixed` ou
-  `progressBar`). La chaîne UTF-8 sert de donnée de déplacement ; `nil`
-  désactive la source sans reconstruire le widget. La chaîne doit être un UTF-8
-  valide et les octets NUL internes sont refusés afin de garder une sémantique
-  texte exacte. L’icône de glisser montre le widget-poignée, pas l’identifiant
-  transporté, avec un point d’accroche fixe en (10, 10).
+  `progressBar`). La chaîne UTF-8 est la donnée applicative ; `nil` désactive
+  la source sans reconstruire le widget. Les octets NUL internes et l’UTF-8
+  invalide sont refusés. MOVE reste l’action par défaut et l’aperçu par défaut
+  montre la poignée elle-même, jamais l’identifiant transporté.
 - `cible:onDrop(fonction_ou_nil)` installe un **`GtkDropTarget`** natif sur tout
-  widget non-fenêtre. Le callback reçoit `(phase, payload, x, y)` avec les
-  phases `"enter"`, `"motion"`, `"drop"` et `"leave"`. Pour `leave`,
-  `payload`, `x` et `y` valent `nil`. Pendant `enter`/`motion`, certains
-  backends peuvent ne pas avoir encore préchargé la chaîne ; `payload` peut
-  donc être `nil`. Lors de `drop`, la chaîne est disponible.
-- Le callback accepte le dépôt par défaut (`nil` ou toute valeur vraie). Un
-  retour explicite `false`, ou une erreur du callback, refuse cette notification.
-  Un refus pendant `enter` ou `motion` **n’annule pas définitivement le geste** :
+  widget non-fenêtre. Le callback protégé reçoit
+  `(phase, payload, x, y, action)` pour `"enter"`, `"motion"`, `"drop"` et
+  `"leave"`. `action` vaut la préférence courante `"copy"`, `"move"` ou
+  `"link"` ; `leave` reçoit nil pour payload/coordonnées/action. Pendant le
+  survol, le backend peut ne pas avoir encore préchargé la chaîne : `payload`
+  peut donc être nil sur `enter`/`motion`, mais il est présent sur `drop`.
+- Le callback accepte par défaut (`nil` ou `true`). `false`, ou une erreur du
+  callback, refuse la notification courante. Renvoyer `"copy"`, `"move"` ou
+  `"link"` accepte et préfère cette action activée **pendant `enter`/`motion`**.
+  Dans `drop`, l’action ne peut plus être changée : renvoyer `nil`, `true` ou
+  l’action reçue par le callback pour accepter, et `false` pour refuser. Une
+  autre action produit une erreur de callback contenue et refuse le transfert.
+  Entre widgets Babet, le callback `end` de la source reçoit alors un booléen de
+  suppression égal à `false`. Valider l’action reçue
+  **avant de modifier le modèle** : le refus ne défait pas les changements Lua.
+  Un refus pendant `enter`/`motion` **n’annule pas définitivement le geste** :
   d’autres mouvements, `leave`, et éventuellement `drop` peuvent suivre.
-  Vérifier de nouveau l’identifiant et la position finale dans `drop`, puis
-  renvoyer `false` si l’opération est interdite. Les callbacks restent protégés.
+  Revalider l’identifiant et la position dans `drop`.
 - `onDrop(nil)` désactive **la cible native** et son callback Lua, et annule le
   survol/préchargement en cours. Un enfant désactivé n’intercepte plus les dépôts
   destinés à une cible parente ou au traitement de texte natif du widget.
   `onDrop(fonction)` réactive ensuite le même contrôleur.
-- Une désactivation depuis un callback de dépôt annule aussi le transfert en
-  cours ; même une réactivation immédiate ne prend effet qu’au geste suivant.
-  GTK peut terminer le callback en cours sans accéder à des données libérées.
-  Cela n’annule pas les modifications du modèle déjà effectuées par le callback :
-  désactiver avant d’appliquer une modification si l’objectif est de l’annuler.
+- Une désactivation depuis un callback refuse le transfert courant pour cette
+  cible. Une réactivation immédiate ne prend effet qu’au geste suivant. Les
+  modifications du modèle déjà effectuées ne sont pas annulées.
 - Le transfert possède sa propre donnée : modifier ou effacer `setDragData()`
   pendant un geste concerne les gestes suivants, pas l’identifiant déjà transféré.
-- L'action GTK annoncée est **MOVE**. Babet transporte seulement l'identifiant ;
-  l'application garde son modèle, choisit la position et appelle ensuite
-  `box:reorder()`.
+- MOVE est le comportement compatible par défaut. `setDragActions(action_ou_table)`
+  et `setDropActions(action_ou_table)` activent toute combinaison de `copy`,
+  `move` et `link`. Ctrl préfère COPY, Maj préfère MOVE, et Ctrl+Maj préfère LINK
+  lorsque la cible l’autorise ; le callback peut remplacer cette préférence en
+  renvoyant une action activée pendant `enter`/`motion`. Babet ne fait aucune copie/déplacement du modèle :
+  l’application conserve la responsabilité de l’opération réelle.
+- `setDragIcon(widget_ou_nil)` choisit un widget vivant comme aperçu natif du
+  glisser. Au début de chaque glisser, un aperçu non affiché par GTK, masqué,
+  détaché ou détruit est remplacé par la poignée source. Un simple
+  `gui.label("Aperçu")` créé hors fenêtre n’est donc pas dessiné hors écran :
+  utiliser un widget affiché dans une fenêtre pour un aperçu personnalisé.
+  `nil` rétablit la poignée. Babet conserve le handle choisi sans le reparenter.
+  `onDragState(fonction_ou_nil)` signale `begin`, `end` et `cancel` via
+  `(phase, détail, action)` ; pour `end`, `détail` est le booléen indiquant si la
+  source doit supprimer ses données, et pour `cancel` c’est la raison native.
+  Après un refus local, GTK peut conserver le nom d’action précédemment choisi
+  et ne pas émettre `cancel` : se fier au booléen de `end` pour supprimer les
+  données, pas au nom d’action seul. Babet force ce booléen à `false` lorsque sa
+  cible locale a refusé le dépôt, y compris après une erreur de callback.
 
 Utiliser une poignée non interactive dédiée. Éviter de combiner `onDrag()` et
 `setDragData()` sur le même widget : `onDrag` peut démarrer puis perdre la
@@ -755,3 +775,95 @@ précède cette cible dans son propre modèle (ou `nil` pour la première place)
 Le repère d'insertion et la persistance restent donc des décisions de l'UI,
 mais le geste et le dépôt eux-mêmes utilisent bien `GtkDragSource` et
 `GtkDropTarget`, sans simulation avec `onDrag()`.
+
+
+## Primitives pour applications de bureau
+
+Disponibles depuis Babet **2.32.0**.
+
+Cette couche reste volontairement générique : elle fournit les mécanismes GTK4
+nécessaires à une application riche, sans introduire dans Babet de modèle de
+note, tâche, arbre ou persistance.
+
+### Volets, menus et menus contextuels
+
+- `gui.paned{orientation="horizontal"|"vertical", position=..., resizeStart=...,
+  resizeEnd=..., shrinkStart=..., shrinkEnd=..., wideHandle=...}` encapsule
+  `GtkPaned` et accepte exactement deux enfants. `getPosition()`,
+  `setPosition(px)` et `onPositionChanged(fonction_ou_nil)` permettent notamment
+  de mémoriser la largeur d’une barre latérale.
+  Valeurs par défaut : `orientation="horizontal"`, `resizeStart=false`,
+  `resizeEnd=true`, `shrinkStart=true`, `shrinkEnd=true`, `wideHandle=false`.
+  Sans `position`, GTK choisit la position initiale du séparateur. En particulier,
+  Babet utilise `resizeStart=false`, alors que GTK utilise `true` par défaut.
+- `gui.separator([orientation])` expose un vrai `GtkSeparator`.
+- `gui.menuButton{label="..."}` ou `gui.menuButton{icon="..."}`, associé à
+  `gui.popover{hasArrow=..., autohide=..., position="left|right|top|bottom"}`,
+  permet de composer une barre de menus ou un menu de marques avec les widgets
+  Babet ordinaires. Un popover accepte un seul enfant. Utiliser
+  `menuButton:setPopover(popover_ou_nil)`, `popup()` et `popdown()`.
+  Éviter `popup()` suivi immédiatement de `popdown()` dans le même callback
+  avec `autohide=true` : GTK peut alors absorber la touche suivante. Ouvrir
+  le menu puis le fermer lors d'un événement ultérieur.
+- Pour un menu contextuel placé au pointeur : `popover:attachTo(widget)`,
+  `setPointingTo(x,y[,largeur,hauteur])`, puis `popup()`. `attachTo(nil)` le
+  détache pour pouvoir le réutiliser ailleurs. Cet attachement est limité aux
+  popovers : il ne constitue pas un mécanisme générique permettant de contourner
+  les règles de parenté GTK. La destruction du parent détache ses popovers
+  contextuels ; une poignée conservée peut être rattachée à un autre widget
+  vivant. Les cycles de parenté sont refusés avant modification, y compris à
+  travers les menus et les popovers contextuels.
+
+Une barre haute peut donc être une `gui.box()` horizontale contenant des
+`menuButton`, `button`, `image` et `separator`. `gui.image(nomIcone)` et
+`setIconName(nomIcone)` utilisent le thème d’icônes du bureau cible.
+
+### Pointeur, clavier, focus et géométrie
+
+`widget:onPointer(fonction_ou_nil)` installe les contrôleurs natifs de clic et de
+mouvement. Le callback reçoit `(phase, x, y, bouton, nb_pressions, modificateurs)`
+avec `phase` égal à `press`, `release`, `enter`, `motion` ou `leave`; `leave`
+reçoit des coordonnées nil. Contrairement à `onClick`, tous les boutons sont
+remontés, donc le bouton 3 peut ouvrir un menu contextuel.
+
+`widget:onKey(fonction_ou_nil)` reçoit
+`(phase, nom_touche_ou_nil, keyval, keycode, modificateurs)` pour `press` et
+`release`. Une valeur vraie renvoyée par `press` consomme l’événement. Sur une
+fenêtre, ce contrôleur est installé en phase **capture** : les raccourcis globaux
+comme `Ctrl+1` ou `Échap` sont donc vus avant qu’un `TextView`/`Entry` focalisé ne
+puisse les consommer. Les masques `gui.MOD_SHIFT`, `gui.MOD_CONTROL`,
+`gui.MOD_ALT` et `gui.MOD_SUPER` sont exposés ; avec Lua 5.5, tester par exemple
+`(mods & gui.MOD_CONTROL) ~= 0`.
+
+Sur une `Entry` ou un `TextView`, GTK peut consommer les caractères saisis avant
+que `onKey` ne les reçoive. Utiliser `onChanged` pour suivre le texte et l’`onKey`
+de la fenêtre pour les raccourcis de l’application.
+
+Les aides communes sont `setCursor(nom_ou_nil)`, `setTooltipText(texte_ou_nil)`,
+`grabFocus()` / `hasFocus()`, `getSize()`, `translatePoint(cible,x,y)` et
+`pick(x,y)`. `pick()` effectue le hit-test GTK natif et remonte jusqu’au handle
+Babet le plus proche ; il permet notamment de distinguer un clic sur le fond
+libre d’un clic sur une note enfant. S’ajoutent `setHAlign(...)` / `setVAlign(...)`
+avec `fill`, `start`, `end`, `center` ou `baseline`. `TextView` accepte
+`wrap="none|char|word|word-char"` à la création et `setWrapMode(...)` ensuite.
+
+Ces primitives suffisent pour des poignées visibles au survol, du
+redimensionnement horizontal et des liserés d’insertion précis. Les zones de
+contact et l’apparence CSS restent entièrement décidées par l’application.
+
+`getSize`, `translatePoint` et `pick` reflètent la dernière mise en page terminée
+par GTK. Juste après un `add`, un `remove` ou une autre modification dans le même
+callback, leurs résultats peuvent encore décrire l’ancienne disposition. Les
+relire une fois la mise en page suivante effectuée ; le simple retour du callback
+ne force pas son exécution.
+
+### Fenêtres de bureau
+
+`window:setTitle(texte)`, `window:setIconName(nomIcone)`,
+`window:setTransientFor(parent_ou_nil)` et `window:setModal(booléen)` couvrent les
+fenêtres de propriétés/dialogues. `window:onCloseRequest(fonction_ou_nil)` appelle
+un callback protégé avant une fermeture demandée par l’utilisateur ; renvoyer
+`true` bloque cette fermeture. `window:close()` reste la fermeture programmée
+explicite.
+Si le callback de demande de fermeture lève une erreur, Babet la signale et
+laisse la fermeture se poursuivre.

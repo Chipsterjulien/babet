@@ -17,7 +17,13 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de **Babet 2.31.0**.
+Documentation de **Babet 2.32.0**.
+
+Babet 2.32.0 enrichit l’[API de bureau GTK4](modules/gui.md#primitives-pour-applications-de-bureau) avec volets séparés,
+menus et popovers contextuels, icônes du thème, événements pointeur/clavier,
+géométrie et gestion des fenêtres de dialogue. Le glisser-déposer natif gagne
+COPY/MOVE/LINK, les aperçus personnalisés et les callbacks de cycle de vie.
+GTK 4 reste optionnel et chargé à la demande.
 
 Babet 2.31.0 ajoute le [glisser-déposer GTK4 natif](modules/gui.md#drag-and-drop-gtk4-natif-pour-les-listes)
 avec `setDragData` et `onDrop`, une icône représentant la poignée et des callbacks

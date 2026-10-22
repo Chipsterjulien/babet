@@ -7,6 +7,44 @@ Le projet suit le versionnage sémantique pour ses publications. Les notes de
 migration et d’utilisation sont conservées avec chaque version lorsqu’un
 nouveau contrat ou une règle opérationnelle peut affecter les scripts existants.
 
+## [Non publié]
+
+## [2.32.0] - 2026-10-22
+
+### GUI — primitives d’application de bureau GTK4
+
+- Ajoute les volets séparés (`gui.paned`), séparateurs, images du thème, boutons
+  de menu et popovers, avec menus contextuels attachés aux widgets et placés au pointeur.
+- Ajoute les callbacks pointeur/clavier, masques de modificateurs, curseurs,
+  infobulles, contrôle du focus, alignement, taille allouée, traduction de
+  coordonnées et détection du widget sous le pointeur. Les callbacks clavier
+  de fenêtre utilisent la phase de capture pour les raccourcis de l’application.
+- Ajoute les modes de retour à la ligne de TextView et la modification du titre,
+  de l’icône, du parent transitoire et de la modalité des fenêtres, ainsi que les
+  callbacks protégés de demande de fermeture.
+- Étend le glisser-déposer natif avec COPY/MOVE/LINK, aperçus personnalisés et
+  callbacks begin/end/cancel. MOVE reste l’action par défaut.
+- Refuse les cycles de parenté passant par les menus et popovers contextuels ;
+  détache ces popovers à la destruction du parent pour permettre leur réutilisation.
+- Conserve l’action négociée pendant `drop` et empêche un dépôt local Babet refusé
+  de demander la suppression de la source lorsque GTK/X11 annonce un MOVE terminé.
+- Libère les ressources natives lors d’une erreur d’allocation Lua dans `setDragData`.
+- Réévalue l’aperçu au début du glisser et revient au widget source lorsque
+  l’aperçu personnalisé n’est pas affiché, pour éviter une icône invisible.
+
+### Tests et documentation
+
+- Renforce les régressions des widgets, de leur durée de vie, des erreurs
+  d’allocation et du vrai GTK/XTest, avec contrôle des pixels des aperçus de glisser.
+- Sépare le test clavier desktop de la présentation du popover. Un test dédié
+  attend son premier dessin avant de le fermer lors d’un événement ultérieur,
+  pour éviter la touche perdue par GTK après `popup()` / `popdown()` immédiats.
+- Ignore les journaux `babet-tests*.txt` et vérifie ces règles dans un dépôt Git
+  isolé, indépendamment de la configuration personnelle et des modèles Git.
+- Documente dans les deux manuels les valeurs par défaut de Paned, les touches
+  consommées par les champs de texte, la géométrie après mise en page, les erreurs
+  de demande de fermeture et l’enchaînement des événements des popovers.
+
 ## [2.31.0] - 2026-10-20
 
 ### GUI — drag-and-drop GTK4 natif
