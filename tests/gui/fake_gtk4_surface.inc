@@ -66,6 +66,7 @@ void gtk_drop_target_reject(void *t) { (void)t; }
 const void *gtk_drop_target_get_value(void *t) { (void)t; return NULL; }
 void *gtk_drop_target_get_drop(void *t) { return t; }
 void *gdk_drop_get_drag(void *d) { return d; }
+unsigned int gdk_drop_get_actions(void *d) { (void)d; return 7U; }
 unsigned int gdk_drag_get_selected_action(void *d) { (void)d; return 2U; }
 void *gtk_gesture_single_get_current_sequence(void *g) { (void)g; return NULL; }
 void *gtk_gesture_get_last_event(void *g, void *seq) { (void)seq; return g; }
@@ -121,6 +122,9 @@ void *gtk_scrolled_window_new(void) { return (void *)0x7; }
 void gtk_scrolled_window_set_child(void *s, void *c) { (void)s; (void)c; }
 void *gtk_label_new(const char *t) { (void)t; return (void *)0x3; }
 void gtk_label_set_text(void *l, const char *t) { (void)l; (void)t; }
+void gtk_label_set_wrap(void *l, int v) { (void)l; (void)v; }
+void gtk_label_set_wrap_mode(void *l, int m) { (void)l; (void)m; }
+void gtk_label_set_xalign(void *l, float a) { (void)l; (void)a; }
 void *gtk_image_new_from_icon_name(const char *name) { (void)name; return (void *)0x22; }
 void gtk_image_set_from_icon_name(void *image, const char *name) { (void)image; (void)name; }
 void *gtk_button_new_with_label(const char *t) { (void)t; return (void *)0x4; }

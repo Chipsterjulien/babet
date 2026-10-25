@@ -30,8 +30,9 @@ pair(handle:setDragData("initial-row"))
 pair(handle:setDragData("row-42"))
 pair(handle:setText("visible-handle")) -- live icon follows the handle, not the ID
 local phases = {}
-pair(target:onDrop(function(phase, payload, x, y)
+pair(target:onDrop(function(phase, payload, x, y, action, kind)
     phases[#phases + 1] = phase
+    assert(kind == "text")
     if phase == "enter" then
         assert(payload == "row-42" and x == 8 and y == 12)
     elseif phase == "motion" then

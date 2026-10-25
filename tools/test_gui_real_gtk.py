@@ -503,6 +503,38 @@ def main():
         success("containers, Entry coalescing, SpinButton, Calendar and CSS")
         success("DrawingArea Cairo draw and real double-click n_press")
 
+        # GtkLabel height-for-width behavior used by free-positioned notes.
+        # The Lua probe reports readiness only from its first onDraw, proving
+        # the initial three-line height before any input. A real click then
+        # widens the note and the next draw must observe two lines.
+        child = subprocess.Popen(
+            [binary, str(ROOT / "tests/gui/real_gtk_label_wrap.lua")],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+        wrap_out, wrap_err = wait_for_ready(
+            child, 20, marker=b"REAL_GTK_LABEL_WRAP_READY\n"
+        )
+        wrap_window = None
+        for _ in range(150):
+            if child.poll() is not None:
+                break
+            wrap_window = find_window(x11, display, "Babet real GTK label wrap probe")
+            if wrap_window is not None:
+                break
+            time.sleep(0.04)
+        if wrap_window is None:
+            stdout, stderr = kill_and_collect(child, wrap_out, wrap_err)
+            raise AssertionError("GtkLabel wrap probe window not found\n" + format_output(stdout, stderr))
+        click_center(x11, xtst, display, wrap_window, count=1)
+        stdout, stderr = finish_with_timeout(child, 20, wrap_out, wrap_err)
+        if child.returncode != 0 or "REAL_GTK_LABEL_WRAP_OK" not in decode(stdout):
+            raise AssertionError(
+                f"real GTK4 GtkLabel wrap failed with exit {child.returncode}\n"
+                + format_output(stdout, stderr)
+            )
+        success("GtkLabel first-frame wrapping and height-for-width relayout")
+
         # Independent native GtkProgressBar gesture. The main GTK probe has
         # already exited; reuse the same private Xvfb server and input helper.
         child = subprocess.Popen(

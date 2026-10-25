@@ -83,6 +83,7 @@ using Counter = size_t (*)();
 using Emit = void (*)();
 static Counter text_copies;
 static Counter live_widgets;
+static Counter file_errors;
 static Emit emit_text_changed;
 template <typename Function>
 static Function symbol(void *handle, const char *name)
@@ -98,6 +99,7 @@ static void load_counters()
 {
     void *handle = dlopen("libgtk-4.so.1", RTLD_NOW | RTLD_NOLOAD);
     check(handle != nullptr, "fake GTK must already be loaded");
+    file_errors = symbol<Counter>(handle, "babet_fake_gtk_file_errors");
     text_copies = symbol<Counter>(handle, "babet_fake_gtk_text_copies");
     live_widgets = symbol<Counter>(handle, "babet_fake_gtk_live_widgets");
     emit_text_changed = symbol<Emit>(handle, "babet_fake_gtk_emit_text_changed");
@@ -107,6 +109,8 @@ static void close_state(lua_State *L)
 {
     babet_gui::cleanup_on_main_thread(L);
     lua_close(L);
+    for (int i = 0; i < 16; ++i) (void)babet_gui::detail::gtk4_main_context_iteration(false);
+    check(file_errors() == 0, "GError leaked after file operation");
     check(text_copies() == 0, "GLib text copy leaked");
     check(live_widgets() == 0, "native widget/reference leaked");
     check(!babet_gui::session_active(), "GUI still active after closing its Lua state");
@@ -365,6 +369,141 @@ static void drag_source_setter_faults()
 }
 
 
+static void file_creation_faults(bool picture)
+{
+    int faults = 0, controls = 0;
+    for (int budget = 0; budget < 96; ++budget) {
+        Allocator a; lua_State *L = create_state(a); load_counters();
+        execute(L, picture ? R"lua(
+            function install()
+                pic = assert(gui.picture{file=os.getenv('BABET_TEST_PICTURE')})
+                assert(pic:setAlternativeText('image'))
+                assert(pic:setFile(nil))
+            end
+        )lua" : R"lua(
+            function install()
+                assert(gui.openFile({title='image',folder='/tmp',
+                    filters={{name='Images',patterns={'*.png'},mimeTypes={'image/*'}}}},
+                    function() error('late callback must be suppressed') end))
+            end
+        )lua");
+        lua_getglobal(L, "install");
+        a.budget = budget;
+        const int status = lua_pcall(L, 0, 0, 0);
+        a.budget = -1;
+        if (a.failures) { ++faults; check(status == LUA_ERRMEM, "construction Lua OOM not propagated"); }
+        else { ++controls; check(status == LUA_OK, "construction control failed"); }
+        lua_settop(L, 0);
+        close_state(L); // native completion runs AFTER Lua close
+    }
+    for (int budget = 0; budget < 3; ++budget) {
+        Allocator a; lua_State *L = create_state(a); load_counters();
+        execute(L, picture ? "function install() return gui.picture() end"
+                           : "function install() return gui.openFile({},function() error('late') end) end");
+        lua_getglobal(L, "install"); cpp_budget = budget;
+        const int status = lua_pcall(L, 0, 2, 0); cpp_budget = -1;
+        check(status == LUA_OK, "C++ allocation escaped boundary");
+        if (budget == 0) check(lua_isnil(L, -2) && lua_isstring(L, -1), "C++ OOM return pair");
+        close_state(L);
+    }
+    check(faults && controls, "construction sweep needs fault/control cases");
+    std::printf("[PASS] %s construction: %d Lua faults / %d controls, C++ faults and native cleanup\n",
+                picture ? "picture" : "file dialog", faults, controls);
+}
+static void file_completion_faults()
+{
+    int faults = 0, controls = 0;
+    for (int budget = 0; budget < 32; ++budget) {
+        Allocator a; lua_State *L = create_state(a); load_counters();
+        execute(L, R"lua(
+            seen = 0
+            assert(gui.openFile({multiple=true},function(paths)
+                assert(#paths == 2); seen = seen + 1
+            end))
+        )lua");
+        check(lua_checkstack(L, 128), "completion reserve stack");
+        const int top = lua_gettop(L); a.budget = budget;
+        (void)babet_gui::detail::gtk4_main_context_iteration(false);
+        a.budget = -1;
+        check(lua_gettop(L) == top, "completion corrupted Lua stack");
+        if (a.failures) ++faults;
+        else { ++controls; execute(L, "assert(seen==1)"); }
+        execute(L, "assert(gui.openFile({},function(p) assert(p); recovered=true end))");
+        (void)babet_gui::detail::gtk4_main_context_iteration(false);
+        execute(L, "assert(recovered)");
+        close_state(L);
+    }
+    check(faults && controls, "completion sweep needs fault/control cases");
+    std::printf("[PASS] file dialog completion: %d faults / %d controls, protected arguments and retry\n", faults, controls);
+}
+
+static void text_tag_faults()
+{
+    int faults=0, controls=0;
+    for(int operation=0;operation<4;++operation) {
+        for(int allocator=0;allocator<2;++allocator) {
+            for(int budget=0;budget<(allocator?20:64);++budget) {
+                Allocator a;lua_State *L=create_state(a);load_counters();
+                execute(L,R"lua(
+                    view=assert(gui.textView{text=string.rep('é🙂x',40)})
+                    name=string.rep('link',20)
+                    assert(view:createTag('existing',{underline=true}))
+                    assert(view:applyTag('existing',1,280))
+                )lua");
+                const char *operations[]={
+                    "function operation() return view:createTag(name,{foreground='#123456',background='#abcdef',weight=700,style='italic',scale=1.25}) end",
+                    "function operation() return view:tagsAt(3) end",
+                    "function operation() return view:tagRange('existing',3) end",
+                    "function operation() return view:removeTag('existing',3,6) end"};
+                execute(L,operations[operation]);
+                check(lua_checkstack(L,128),"tag reserve stack");lua_getglobal(L,"operation");
+                const int before=cpp_failures;
+                if(allocator)cpp_budget=budget;else a.budget=budget;
+                const int status=lua_pcall(L,0,2,0);cpp_budget=-1;a.budget=-1;
+                const bool fault=allocator ? cpp_failures!=before : a.failures!=0;
+                if(fault) {++faults;check(allocator ? status==LUA_OK && lua_isnil(L,-2) : status==LUA_ERRMEM,"tag fault contract");}
+                else {++controls;check(status==LUA_OK && !lua_isnil(L,-2),"tag successful control");}
+                lua_settop(L,0);check(text_copies()==0,"tag GLib copy leaked before cleanup");
+                execute(L,"assert(view:removeAllTags()); assert(view:applyTag('existing',1,280)); local a,b=view:tagRange('existing',3); assert(a==1 and b==280)");
+                close_state(L);
+            }
+        }
+    }
+    check(faults && controls,"tag sweep faults and controls");
+    std::printf("[PASS] TextView tags allocator: %d fault cases / %d controls; UTF-8, retry and cleanup\n",faults,controls);
+}
+static void file_drop_faults()
+{
+    int faults=0,controls=0;
+    for(int allocator=0;allocator<2;++allocator) {
+        for(int budget=0;budget<(allocator?12:48);++budget) {
+            Allocator a;lua_State *L=create_state(a);load_counters();
+            void *handle=dlopen("libgtk-4.so.1",RTLD_NOW|RTLD_NOLOAD);
+            const auto emit=symbol<Emit>(handle,"babet_fake_gtk_emit_files");
+            const auto reset=symbol<Emit>(handle,"babet_fake_gtk_reset_files");dlclose(handle);
+            execute(L,R"lua(
+                window=assert(gui.window()); target=assert(gui.label('target'))
+                assert(window:add(target));assert(target:setDropTypes({'files'}))
+                seen=0;assert(target:onDrop(function(phase,paths,x,y,action,kind)
+                    assert(kind=='files' and #paths==2)
+                    if phase=='drop' then seen=seen+1 end
+                    return true
+                end)); assert(window:show())
+            )lua");
+            check(lua_checkstack(L,128),"file drop reserve stack");const int top=lua_gettop(L),before=cpp_failures;reset();
+            if(allocator)cpp_budget=budget;else a.budget=budget;
+            emit();cpp_budget=-1;a.budget=-1;
+            check(lua_gettop(L)==top,"file drop altered Lua stack");
+            if(allocator?cpp_failures!=before:a.failures!=0)++faults;
+            else {++controls;execute(L,"assert(seen==1)");}
+            check(text_copies()==0,"file drop path leaked");
+            execute(L,"seen=0");reset();emit();execute(L,"assert(seen==1);assert(window:close())");close_state(L);
+        }
+    }
+    check(faults && controls,"file drop fault/control sweep");
+    std::printf("[PASS] file drop allocator: %d fault cases / %d controls; protected file list and retry\n",faults,controls);
+}
+
 int main(int argc, char **argv)
 {
     babet_runtime::register_main_thread();
@@ -374,5 +513,10 @@ int main(int argc, char **argv)
     else if (std::strcmp(argv[1], "drop") == 0) drop_faults();
     else if (std::strcmp(argv[1], "drop-setter") == 0) drop_setter_faults();
     else if (std::strcmp(argv[1], "source-setter") == 0) drag_source_setter_faults();
+    else if (std::strcmp(argv[1], "picture") == 0) file_creation_faults(true);
+    else if (std::strcmp(argv[1], "file-dialog") == 0) file_creation_faults(false);
+    else if (std::strcmp(argv[1], "file-completion") == 0) file_completion_faults();
+    else if (std::strcmp(argv[1], "tags") == 0) text_tag_faults();
+    else if (std::strcmp(argv[1], "file-drop") == 0) file_drop_faults();
     else check(false, "unknown test mode");
 }

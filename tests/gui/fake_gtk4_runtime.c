@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include "fake_cairo.inc"
 
 #define MAX_WIDGETS 128
@@ -33,11 +34,19 @@ typedef struct FakeDateTime {
 
 typedef struct FakeValue {
     const char *text;
+    void *files;
 } FakeValue;
 
 typedef struct FakeWidget {
+    unsigned int rich_drop_types;
+    struct FakeWidget *rich_tags[32];
+    unsigned char *rich_marks[32];
+    size_t rich_tag_count;
     int kind; /* widgets/controllers use small stable fixture-only kind IDs */
     int refs;
+    struct FakeWidget *file_owned[3];
+    struct FakeWidget *file_items[64];
+    unsigned int file_count;
     int floating;
     int alive;
     int clicked;
@@ -91,6 +100,7 @@ typedef struct FakeWidget {
     int dnd_preload;
     int dnd_active;
     int dnd_in_drop;
+    int dnd_external; /* transfer from another process: shared GdkDrop, no GdkDrag */
     struct FakeWidget *dnd_content;
     struct FakeWidget *dnd_icon; /* owned by source */
     struct FakeWidget *paintable_widget; /* weak; kind 25 */
@@ -118,6 +128,9 @@ typedef struct FakeWidget {
     FakeClosureNotify drag_source_destroy[3];
     int position;
     int wrap_mode;
+    int label_wrap;
+    int label_wrap_mode;
+    float label_xalign;
     int propagation_phase;
     int halign, valign;
     int has_focus;
@@ -130,6 +143,8 @@ typedef struct FakeWidget {
 
 static FakeWidget *widgets[MAX_WIDGETS];
 static size_t widget_count;
+/* GdkDrop shared by every target of an external transfer, as in GTK. */
+static FakeWidget fake_external_drop;
 static unsigned int next_source_id = 1;
 static int in_draw;
 
@@ -171,6 +186,7 @@ static FakeWidget *make_widget(int kind, const char *text)
     w->editable = 1;
     w->visible = 1;
     w->sensitive = 1;
+    w->label_xalign = 0.5f;
     if (kind == 9) { w->year = 2026; w->month = 10; w->day = 7; }
     if (!text) text = "";
     w->text = (char *)malloc(strlen(text) + 1);
@@ -249,6 +265,16 @@ static void destroy_widget(FakeWidget *w)
     for (size_t i = 0; i < widget_count; ++i)
         if (widgets[i] && widgets[i]->paintable_widget == w)
             widgets[i]->paintable_widget = NULL;
+    for (int j = 0; j < 3; ++j) if (w->file_owned[j]) {
+        FakeWidget *held = w->file_owned[j]; w->file_owned[j] = NULL;
+        if (--held->refs == 0) destroy_widget(held);
+    }
+    for (unsigned int j = 0; j < w->file_count; ++j)
+        if (--w->file_items[j]->refs == 0) destroy_widget(w->file_items[j]);
+    for (size_t j=0;j<w->rich_tag_count;++j) {
+        free(w->rich_marks[j]);
+        if (--w->rich_tags[j]->refs == 0) destroy_widget(w->rich_tags[j]);
+    }
     if (w->expander_child) {
         FakeWidget *held = w->expander_child;
         w->expander_child = NULL;
@@ -560,6 +586,7 @@ void gtk_text_buffer_set_text(void *p, const char *t, int n)
     (void)n;
     FakeWidget *w = (FakeWidget *)p;
     set_text(w, t);
+    for (size_t i=0;i<w->rich_tag_count;++i) { free(w->rich_marks[i]); w->rich_marks[i]=NULL; }
     if (w->changed_cb) {
         WidgetSignal cb = as_widget_signal(w->changed_cb);
         cb(w, w->changed_data);
@@ -674,7 +701,11 @@ void *gtk_gesture_drag_new(void) { return make_widget(21, NULL); }
 
 size_t g_type_from_name(const char *name)
 {
-    return name && strcmp(name, "gchararray") == 0 ? (size_t)64 : (size_t)0;
+    if(!name) return 0;
+    const char *names[]={"gchararray","gint","gboolean","gdouble","PangoUnderline","PangoStyle"};
+    const size_t types[]={64,24,20,60,300,301};
+    for(size_t i=0;i<6;++i) if(!strcmp(name,names[i])) return types[i];
+    return 0;
 }
 int g_utf8_validate(const char *text, long length, const char **end)
 {
@@ -795,19 +826,29 @@ void gtk_drop_target_reject(void *p)
 const void *gtk_drop_target_get_value(void *p)
 {
     FakeWidget *target = (FakeWidget *)p;
-    if (!target || !target->alive || target->kind != 23 || !target->dnd_value.text)
+    if (!target || !target->alive || target->kind != 23 || (!target->dnd_value.text && !target->dnd_value.files))
         return NULL;
     return &target->dnd_value;
 }
 void *gtk_drop_target_get_drop(void *p)
 {
     FakeWidget *target=(FakeWidget*)p;
-    return target && target->alive && target->kind == 23 && target->dnd_active ? target : NULL;
+    if (!target || !target->alive || target->kind != 23 || !target->dnd_active) return NULL;
+    return target->dnd_external ? &fake_external_drop : target;
 }
 void *gdk_drop_get_drag(void *p)
 {
     FakeWidget *target=(FakeWidget*)p;
     return target ? target->dnd_source : NULL;
+}
+unsigned int gdk_drop_get_actions(void *p)
+{
+    FakeWidget *target=(FakeWidget*)p;
+    if (!target) return 0U;
+    if (target->dnd_source) return target->dnd_source->dnd_actions;
+    /* External drop: actions offered by the other application. */
+    const char *offered = getenv("BABET_FAKE_GTK_DROP_SOURCE_ACTIONS");
+    return offered ? (unsigned int)strtoul(offered, NULL, 0) : 7U;
 }
 unsigned int gdk_drag_get_selected_action(void *p)
 {
@@ -923,6 +964,33 @@ void gtk_label_set_text(void *p, const char *text)
     if (!w || !w->alive) return;
     set_text(w, text);
     log_line("label:", text);
+    char state[96];
+    snprintf(state, sizeof(state), "wrap=%d,mode=%d,xalign=%.3f",
+             w->label_wrap, w->label_wrap_mode, (double)w->label_xalign);
+    log_line("label-state:", state);
+}
+void gtk_label_set_wrap(void *p, int wrap)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive) return;
+    w->label_wrap = wrap != 0;
+    log_line("label-wrap:", w->label_wrap ? "true" : "false");
+}
+void gtk_label_set_wrap_mode(void *p, int mode)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive) return;
+    w->label_wrap_mode = mode;
+    char buffer[32]; snprintf(buffer, sizeof(buffer), "%d", mode);
+    log_line("label-wrap-mode:", buffer);
+}
+void gtk_label_set_xalign(void *p, float alignment)
+{
+    FakeWidget *w = (FakeWidget *)p;
+    if (!w || !w->alive) return;
+    w->label_xalign = alignment;
+    char buffer[32]; snprintf(buffer, sizeof(buffer), "%.3f", (double)alignment);
+    log_line("label-xalign:", buffer);
 }
 void *gtk_button_new_with_label(const char *text) { return make_widget(4, text); }
 void gtk_button_set_label(void *p, const char *text)
@@ -1556,9 +1624,14 @@ static int fake_dnd_gesture(FakeWidget *source)
 }
 
 
+#include "fake_gtk4_files.inc"
+#include "fake_gtk4_rich_text.inc"
+
 int g_main_context_iteration(void *context, int may_block)
 {
     (void)context; (void)may_block;
+    if (file_complete_one()) return 1;
+    if (getenv("BABET_FAKE_GTK_DROP_FILES") && rich_emit_files()) return 1;
     /* Calendar events precede the fixture's final button, even when the Lua
        view callback has been removed. The button can then assert exact counts. */
     for (size_t i = 0; i < widget_count; ++i) {

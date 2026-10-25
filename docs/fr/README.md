@@ -17,7 +17,13 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de **Babet 2.32.0**.
+Documentation de **Babet 2.33.0**.
+
+Babet 2.33.0 ajoute les [images et sélecteurs de fichiers natifs](modules/gui.md#images-et-sélecteurs-de-fichiers),
+le [dépôt de fichiers depuis d’autres applications et les tags TextView](modules/gui.md#dépôt-de-fichiers-et-tags-textview),
+ainsi que les labels repliés pour l’affichage des notes. Les dépôts indiquent
+l’action réellement négociée avec l’application source, y compris avec des
+cibles imbriquées. GTK 4 reste optionnel et chargé à la demande.
 
 Babet 2.32.0 enrichit l’[API de bureau GTK4](modules/gui.md#primitives-pour-applications-de-bureau) avec volets séparés,
 menus et popovers contextuels, icônes du thème, événements pointeur/clavier,

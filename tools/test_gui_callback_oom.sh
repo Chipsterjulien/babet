@@ -34,3 +34,17 @@ LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" text
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drop
 BABET_FAKE_GTK_DND_HIT=target LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" drop-setter
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" source-setter
+
+python3 - "${ROOT_DIR}" "${TMP_ROOT}/picture.png" <<'PYIMG'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
+from test_gui_files import png_bytes
+Path(sys.argv[2]).write_bytes(png_bytes())
+PYIMG
+BABET_TEST_PICTURE="${TMP_ROOT}/picture.png" LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" picture
+LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" file-dialog
+LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" file-completion
+
+LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" tags
+LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" file-drop

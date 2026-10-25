@@ -15,7 +15,13 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for **Babet 2.32.0**.
+Documentation for **Babet 2.33.0**.
+
+Babet 2.33.0 adds [file pictures and native file dialogs](modules/gui.md#pictures-and-file-dialogs),
+[file drops from other applications and TextView tags](modules/gui.md#file-drops-and-textview-tags),
+and wrapped labels for note display. Drops report the action actually negotiated
+with the source application, including nested targets. GTK 4 remains optional
+and loaded only when requested.
 
 Babet 2.32.0 expands the [GTK4 desktop API](modules/gui.md#desktop-application-primitives) with split panes,
 menus and context popovers, themed icons, pointer and keyboard events, geometry

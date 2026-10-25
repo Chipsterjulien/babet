@@ -42,6 +42,9 @@ void *gtk_box_new(int o, int s) { (void)o; (void)s; return (void *)0x2; }
 void gtk_box_append(void *b, void *c) { (void)b; (void)c; }
 void *gtk_label_new(const char *t) { (void)t; return (void *)0x3; }
 void gtk_label_set_text(void *l, const char *t) { (void)l; (void)t; }
+void gtk_label_set_wrap(void *l, int v) { (void)l; (void)v; }
+void gtk_label_set_wrap_mode(void *l, int m) { (void)l; (void)m; }
+void gtk_label_set_xalign(void *l, float a) { (void)l; (void)a; }
 void *gtk_button_new_with_label(const char *t) { (void)t; return (void *)0x4; }
 void gtk_button_set_label(void *b, const char *t) { (void)b; (void)t; }
 void *gtk_widget_get_parent(void *w) { (void)w; return NULL; }

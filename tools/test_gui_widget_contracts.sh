@@ -57,6 +57,12 @@ check "GUI run is explicit" contains "$IMPL" '"run"'
 check "window show uses GTK present" contains "$IMPL" 'gtk4_window_present'
 check "window close uses GTK destroy" contains "$IMPL" 'gtk4_window_destroy'
 check "setText supports GTK labels" contains "$IMPL" 'gtk4_label_set_text'
+check "GtkLabel wrapping is exposed" contains "$IMPL" '"setWrap"'
+check "GtkLabel wrap modes use a dedicated Pango conversion" contains "$IMPL" 'parse_label_wrap_mode'
+check "GtkLabel text alignment is exposed" contains "$IMPL" '"setXAlign"'
+check "loader resolves GtkLabel wrapping" contains "$LOADER" 'gtk_label_set_wrap'
+check "loader resolves GtkLabel Pango wrap modes" contains "$LOADER" 'gtk_label_set_wrap_mode'
+check "loader resolves GtkLabel xalign" contains "$LOADER" 'gtk_label_set_xalign'
 check "setText supports GTK buttons" contains "$IMPL" 'gtk4_button_set_label'
 check "ScrolledWindow constructor is registered" contains "$IMPL" '"scrolledWindow"'
 check "SpinButton constructor is registered" contains "$IMPL" '"spinButton"'
@@ -151,12 +157,17 @@ check "button clicked signal installs lifetime notifier" contains "$IMPL" '&butt
 check "loader resolves GLib main-context iteration" contains "$LOADER" 'g_main_context_iteration'
 check "runtime harness includes widget contract preflight" contains "$RUN" 'tools/test_gui_widget_contracts.sh'
 check "runtime harness includes expanded GUI widget regression" contains "$RUN" 'tools/test_gui_widgets.py'
+check "runtime harness includes picture/file dialog regression" contains "$RUN" 'tools/test_gui_files.py'
+check "runtime harness includes real picture/file dialog regression" contains "$RUN" 'tools/test_gui_real_files.py'
 check "runtime harness includes optional real GTK regression" contains "$RUN" 'tools/test_gui_real_gtk.py'
 check "free-layout runtime suites are exercised" contains "${ROOT}/tools/test_gui_widgets.py" 'free_layout_drag.lua'
 check "real GTK moving-handle regression is exercised" contains "$RUN" 'tools/test_gui_real_drag.py'
 check "real GTK drag converts move errors into immediate test failures" contains "${ROOT}/tests/gui/real_gtk_drag.lua" 'pcall(canvas.move, canvas, block, x, y)'
 check "completed pipeline cleanup regression is exercised" contains "$RUN" 'tools/test_pipeline_completed_cleanup.py'
 check "real GTK regression exercises DrawingArea draw" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'area:onDraw'
+check "real GTK wrapped-label regression is exercised" contains "${ROOT}/tools/test_gui_real_gtk.py" 'real_gtk_label_wrap.lua'
+check "wrapped-label probe synchronizes on first rendered frame" contains "${ROOT}/tests/gui/real_gtk_label_wrap.lua" 'REAL_GTK_LABEL_WRAP_READY'
+check "wrapped-label probe verifies wider relayout" contains "${ROOT}/tests/gui/real_gtk_label_wrap.lua" 'REAL_GTK_LABEL_WRAP_OK'
 check "real GTK regression exercises Calendar day markers" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'calendar:markDay'
 check "real GTK regression checks double-click press count" contains "${ROOT}/tests/gui/real_gtk_contract.lua" 'n_press == 2'
 check "real GTK regression injects real X11 clicks" contains "${ROOT}/tools/test_gui_real_gtk.py" 'XTestFakeButtonEvent'
@@ -173,6 +184,17 @@ check "modified-only deletion manifest is absent from repository root" absent "$
 check "modified-only applicator is absent from repository root" absent "${ROOT}/APPLY_TO_PROJECT.sh"
 check "modified-only payload is absent from repository root" absent "${ROOT}/payload"
 check "design requires safe dead handles" contains "$DESIGN" 'dead handle'
+
+check "file drop type selection is registered" contains "$IMPL" '"setDropTypes"'
+check "TextView tags are registered" contains "$IMPL" '"createTag"'
+check "TextView byte hit testing is registered" contains "$IMPL" '"offsetAt"'
+check "rich text and file drop regression is exercised" contains "$RUN" 'tools/test_gui_rich_text.py'
+check "real TextView regression is exercised" contains "$RUN" 'tools/test_gui_real_text_tags.py'
+check "real cross-process drop regression is exercised" contains "$RUN" 'tools/test_gui_real_dnd_external.py'
+check "cross-process drop covers nested targets" contains "${ROOT}/tools/test_gui_real_dnd_external.py" '"nested"'
+check "nested fake drop follows GTK status order" contains "${ROOT}/tools/test_gui_rich_text.py" "'nested-move-only'"
+check "enter-only nested drop keeps the parent's status" contains "${ROOT}/tools/test_gui_rich_text.py" "'nested-enter'"
+check "real enter-only external drop is exercised" contains "${ROOT}/tools/test_gui_real_dnd_external.py" '"nested-enter"'
 
 echo "GUI widget structural contracts: ${PASS} PASS / ${FAIL} FAIL"
 [ "$FAIL" -eq 0 ]

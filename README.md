@@ -16,11 +16,17 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.32.0**. See the
+Current release: **2.33.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.33.0 adds [file pictures and native file dialogs](docs/en/modules/gui.md#pictures-and-file-dialogs),
+[file drops from other applications and TextView tags](docs/en/modules/gui.md#file-drops-and-textview-tags),
+and wrapped labels for note display. Drops report the action actually negotiated
+with the source application, including nested targets. GTK 4 remains optional
+and loaded only when requested.
 
 Babet 2.32.0 expands the [GTK4 desktop API](docs/en/modules/gui.md#desktop-application-primitives) with split panes,
 menus and context popovers, themed icons, pointer and keyboard events, geometry

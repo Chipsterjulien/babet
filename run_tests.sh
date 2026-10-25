@@ -256,6 +256,12 @@ if ! bash "${SCRIPT_DIR}/tools/test_gui_widget_contracts.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — isolation des sélecteurs GTK4"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_file_probe_environment.py"; then
+    echo "ÉCHEC : l'isolation des sélecteurs GTK4 a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — chargeur GTK4 dynamique isolé"
 if ! bash "${SCRIPT_DIR}/tools/test_gui_gtk_loader.sh"; then
     echo "ÉCHEC : la régression du chargeur GTK4 dynamique a échoué."
@@ -521,6 +527,18 @@ if ! BABET_TEST_GUI_SANITIZERS="${SANITIZER_MODE}" python3 "${SCRIPT_DIR}/tools/
     exit 1
 fi
 
+print_preflight_stage "Régression — images et sélecteurs de fichiers GUI"
+if ! BABET_TEST_GUI_SANITIZERS="${SANITIZER_MODE}" python3 "${SCRIPT_DIR}/tools/test_gui_files.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression GUI images/fichiers a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — tags TextView et dépôt de fichiers GUI"
+if ! BABET_TEST_GUI_SANITIZERS="${SANITIZER_MODE}" python3 "${SCRIPT_DIR}/tools/test_gui_rich_text.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression GUI tags/dépôt de fichiers a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — fermeture rapide des pipelines terminés"
 if ! python3 "${SCRIPT_DIR}/tools/test_pipeline_completed_cleanup.py" "${BINARY}"; then
     echo "ÉCHEC : le nettoyage des pipelines terminés est trop lent."
@@ -530,6 +548,24 @@ fi
 print_preflight_stage "Régression — GTK4 système réel sous Xvfb (optionnelle)"
 if ! python3 "${SCRIPT_DIR}/tools/test_gui_real_gtk.py" "${BINARY}"; then
     echo "ÉCHEC : la régression optionnelle contre le vrai GTK4 a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — images et sélecteurs sous vrai GTK4 (optionnelle)"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_real_files.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression GTK4 images/fichiers a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — tags TextView sous vrai GTK4 (optionnelle)"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_real_text_tags.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression GTK4 tags TextView a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Régression — dépôts depuis une autre application sous vrai GTK4 (optionnelle)"
+if ! python3 "${SCRIPT_DIR}/tools/test_gui_real_dnd_external.py" "${BINARY}"; then
+    echo "ÉCHEC : le dépôt GTK4 venant d'un autre processus est incorrect."
     exit 1
 fi
 

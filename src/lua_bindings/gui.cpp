@@ -20,6 +20,8 @@ extern "C"
 #include <memory>
 #include <new>
 #include <string>
+#include <vector>
+#include <stdexcept>
 
 namespace babet_gui
 {
@@ -61,6 +63,7 @@ enum class WidgetKind : unsigned char
     expander,
     paned,
     image,
+    picture,
     menu_button,
     popover,
 };
@@ -89,8 +92,11 @@ struct WidgetState
     unsigned long long drop_revision = 0; // invalidates an in-flight hover callback
     unsigned int drop_received_depth = 0;
     bool drop_enabled = false;
+    unsigned int drop_types = 1U; // text=1, files=2
+    std::vector<std::string> text_tags; // creation order; native definitions live in the buffer
     unsigned int drag_actions = 2U; // GDK_ACTION_MOVE
     unsigned int drop_actions = 2U; // GDK_ACTION_MOVE
+    unsigned long long drop_hover_window = 0; // last GTK hover status window that called this target
     WidgetState *popover_parent_state = nullptr; // retained while a context popover is attached
     void *content = nullptr; // expander: internal box, always parents user children
     bool drag_origin_valid = false;
@@ -132,6 +138,8 @@ lua_State *g_css_owner = nullptr;
 constexpr unsigned int CSS_PRIORITY_APPLICATION = 600U;
 
 void drain_deferred_widgets() noexcept;
+bool has_file_dialogs() noexcept;
+void cancel_file_dialogs(lua_State *owner = nullptr, WidgetState *parent = nullptr) noexcept;
 
 void clear_css_provider(lua_State *owner = nullptr) noexcept
 {
@@ -189,6 +197,19 @@ void release_state(WidgetState *state) noexcept
     }
 }
 
+// Hold logical state across protected Lua allocations: a finalizer may
+// explicitly finalize another handle, including the current receiver.
+class ScopedStateReference
+{
+public:
+    explicit ScopedStateReference(WidgetState *state) noexcept : state_(state) { retain_state(state_); }
+    ~ScopedStateReference() { release_state(state_); }
+    ScopedStateReference(const ScopedStateReference &) = delete;
+    ScopedStateReference &operator=(const ScopedStateReference &) = delete;
+private:
+    WidgetState *state_;
+};
+
 lua_State *main_lua_state(lua_State *L) noexcept
 {
     lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
@@ -233,6 +254,7 @@ const char *kind_name(WidgetKind kind) noexcept
     case WidgetKind::expander: return "expander";
     case WidgetKind::paned: return "paned";
     case WidgetKind::image: return "image";
+    case WidgetKind::picture: return "picture";
     case WidgetKind::menu_button: return "menuButton";
     case WidgetKind::popover: return "popover";
     }
@@ -304,6 +326,7 @@ void widget_destroyed(void *, void *data) noexcept
     // while tearing down native children.
     void *destroyed_native = state->native;
     state->native = nullptr;
+    cancel_file_dialogs(nullptr, state);
 
     if (state->popover_parent_state)
     {
@@ -338,7 +361,7 @@ void widget_destroyed(void *, void *data) noexcept
     if (state->kind == WidgetKind::window)
         g_live_windows.fetch_sub(1, std::memory_order_acq_rel);
 
-    if (g_live_widgets.load(std::memory_order_acquire) == 0)
+    if (g_live_widgets.load(std::memory_order_acquire) == 0 && !has_file_dialogs())
         g_gui_owner = nullptr;
 
     // Relâche la référence logique détenue par le signal native "destroy".
@@ -553,13 +576,67 @@ const char *drag_action_name(unsigned int action) noexcept
     return nullptr;
 }
 
-unsigned int preferred_drop_action(WidgetState *state, void *target) noexcept
+// A drop from another process has no GdkDrag from which Babet could read the
+// negotiated action. GTK sends one status per hover window: the action of the
+// first target that accepts it. Enter windows run from the outermost target
+// inward; motion windows from the deepest target outward. Each target is
+// called at most once per window, so a repeated target or a phase change
+// starts the next window. On X11, a drop right after entering a toplevel
+// follows an enter window only.
+struct DropNegotiation
+{
+    void *drop = nullptr;
+    unsigned long long window = 0;
+    char phase = 0;
+    unsigned int action = 0U; // first accepted action of the current window
+};
+DropNegotiation g_drop_negotiation;
+
+unsigned long long begin_hover_window(WidgetState *state, void *drop, char phase) noexcept
+{
+    auto &n = g_drop_negotiation;
+    if (n.drop != drop || n.phase != phase || state->drop_hover_window == n.window)
+    {
+        n.drop = drop;
+        n.phase = phase;
+        ++n.window;
+        n.action = 0U;
+    }
+    state->drop_hover_window = n.window;
+    return n.window;
+}
+
+void end_hover_window(unsigned long long window, unsigned int action) noexcept
+{
+    auto &n = g_drop_negotiation;
+    if (n.window == window && n.action == 0U) n.action = action;
+}
+
+unsigned int negotiated_drop_action(void *target) noexcept
+{
+    const auto &n = g_drop_negotiation;
+    void *drop = detail::gtk4_drop_target_current_drop(target);
+    return drop && n.drop == drop ? n.action : 0U;
+}
+
+unsigned int preferred_drop_action(WidgetState *state, void *target, bool dropping = false) noexcept
 {
     if (!state) return 0U;
-    const unsigned int allowed = state->drop_actions;
+    // Only offer Lua an action that the source also allows. Otherwise GTK
+    // silently negotiates another action (e.g. COPY) while Lua sees MOVE.
+    const unsigned int allowed = state->drop_actions &
+                                 detail::gtk4_drop_target_offered_actions(target);
     const unsigned int selected = detail::gtk4_drop_target_selected_action(target);
     if (drag_action_name(selected) && (allowed & selected) != 0U)
         return selected;
+    // A drag from another process has no GdkDrag here. GTK has already sent
+    // the last hover status to the source: report that action, or refuse the
+    // drop when this target does not allow it. Never invent another action.
+    if (dropping) {
+        const unsigned int negotiated = negotiated_drop_action(target);
+        if (negotiated != 0U)
+            return drag_action_name(negotiated) && (allowed & negotiated) != 0U ? negotiated : 0U;
+    }
 
     const unsigned int modifiers = detail::gtk4_event_controller_current_state(target);
     constexpr unsigned int SHIFT = 1U;
@@ -582,11 +659,59 @@ unsigned int preferred_drop_action(WidgetState *state, void *target) noexcept
     return 0U;
 }
 
+struct DropPayload {
+    int kind = 0; // 0 unknown, 1 text, 2 files
+    bool available = false;
+    std::string text;
+    std::vector<std::string> files;
+};
+
+bool snapshot_drop_payload(const void *value, unsigned int types, DropPayload &out)
+{
+    if (!value) {
+        out.kind = types == 1U ? 1 : (types == 2U ? 2 : 0);
+        return true; // preloading has not completed, including mixed types
+    }
+    const bool file_support = detail::gtk4_drop_files_available();
+    if (file_support && detail::rich_value_holds(value, detail::rich_gdk_file_list_get_type())) {
+        if (!(types & 2U)) return false;
+        void *list = detail::rich_g_value_get_boxed(value);
+        if (!list) return false;
+        for (auto *item = detail::rich_gdk_file_list_get_files(list); item; item = item->next) {
+            const std::unique_ptr<char, decltype(&detail::gtk4_free)> path(
+                detail::files_g_file_get_path(item->data), &detail::gtk4_free);
+            if (path && path.get()[0] == '/') out.files.emplace_back(path.get());
+        }
+        if (!out.files.empty()) { out.kind = 2; out.available = true; return true; }
+        // A mixed target asks GTK for files first, but a browser link is also
+        // offered as a URI list. Without any local path, keep it as text.
+        if (!(types & 1U)) return false;
+        std::string uris;
+        for (auto *item = detail::rich_gdk_file_list_get_files(list); item; item = item->next) {
+            const std::unique_ptr<char, decltype(&detail::gtk4_free)> uri(
+                detail::files_g_file_get_uri(item->data), &detail::gtk4_free);
+            if (!uri) return false;
+            if (!uris.empty()) uris += '\n';
+            uris += uri.get();
+        }
+        if (uris.empty()) return false;
+        out.kind = 1; out.available = true; out.text = std::move(uris);
+        return true;
+    }
+    if (!(types & 1U)) return false;
+    if (file_support && !detail::rich_value_holds(value, detail::rich_type_from_name("gchararray")))
+        return false;
+    const char *text = detail::gtk4_value_text(value);
+    if (!text) return false;
+    out.kind = 1; out.available = true; out.text = text;
+    return true;
+}
+
 struct DropInvocation
 {
     WidgetState *state;
     const char *phase;
-    const char *payload;
+    const DropPayload *payload;
     double x;
     double y;
     bool has_coords;
@@ -611,10 +736,18 @@ int invoke_drop_callback(lua_State *L)
 
     call->invoked = true;
     lua_pushstring(L, call->phase);
-    if (call->payload)
-        lua_pushstring(L, call->payload);
-    else
+    if (!call->payload->available)
         lua_pushnil(L);
+    else if (call->payload->kind == 1)
+        lua_pushlstring(L, call->payload->text.data(), call->payload->text.size());
+    else {
+        lua_newtable(L);
+        lua_Integer i=1;
+        for (const auto &path : call->payload->files) {
+            lua_pushlstring(L, path.data(), path.size());
+            lua_rawseti(L, -2, i++);
+        }
+    }
     if (call->has_coords)
     {
         lua_pushnumber(L, call->x);
@@ -629,7 +762,10 @@ int invoke_drop_callback(lua_State *L)
         lua_pushstring(L, action);
     else
         lua_pushnil(L);
-    lua_call(L, 5, 1);
+    if (call->payload->kind == 1) lua_pushliteral(L, "text");
+    else if (call->payload->kind == 2) lua_pushliteral(L, "files");
+    else lua_pushnil(L);
+    lua_call(L, 6, 1);
     if (lua_isnil(L, -1))
         call->accepted = true;
     else if (lua_is_strict_boolean(L, -1))
@@ -656,12 +792,21 @@ int invoke_drop_callback(lua_State *L)
     return 0;
 }
 
-unsigned int dispatch_drop(WidgetState *state, const char *phase, const char *payload,
+unsigned int dispatch_drop(WidgetState *state, const char *phase, const void *value,
                            double x, double y, bool has_coords,
                            unsigned int preferred_action) noexcept
 {
     if (!state || !state->native || !state->owner || !state->handle_key)
         return false;
+    // Copy before entering Lua: allocations/finalizers and the callback may
+    // destroy or reconfigure the source, target, GValue or GdkFileList.
+    DropPayload payload;
+    try {
+        if (!snapshot_drop_payload(value, state->drop_types, payload)) return 0U;
+    } catch (...) {
+        std::fputs("babet.gui callback error: cannot copy drop payload\n", stderr);
+        return 0U;
+    }
     lua_State *L = state->owner;
     const int base = lua_gettop(L);
     retain_state(state);
@@ -671,7 +816,7 @@ unsigned int dispatch_drop(WidgetState *state, const char *phase, const char *pa
         release_state(state);
         return false;
     }
-    DropInvocation call{state, phase, payload, x, y, has_coords, preferred_action, false, true};
+    DropInvocation call{state, phase, &payload, x, y, has_coords, preferred_action, false, true};
     const auto revision = state->drop_revision;
     const bool receiving = phase[0] == 'd';
     if (receiving)
@@ -696,17 +841,23 @@ unsigned int dispatch_drop(WidgetState *state, const char *phase, const char *pa
 unsigned int drop_enter(void *target, double x, double y, void *data) noexcept
 {
     auto *state = static_cast<WidgetState *>(data);
-    const char *payload = detail::gtk4_drop_target_text(target);
-    return dispatch_drop(state, "enter", payload, x, y, true,
-                         preferred_drop_action(state, target));
+    const void *payload = detail::rich_drop_value(target);
+    const auto window = begin_hover_window(state, detail::gtk4_drop_target_current_drop(target), 'e');
+    const unsigned int action = dispatch_drop(state, "enter", payload, x, y, true,
+                                              preferred_drop_action(state, target));
+    end_hover_window(window, action);
+    return action;
 }
 
 unsigned int drop_motion(void *target, double x, double y, void *data) noexcept
 {
     auto *state = static_cast<WidgetState *>(data);
-    const char *payload = detail::gtk4_drop_target_text(target);
-    return dispatch_drop(state, "motion", payload, x, y, true,
-                         preferred_drop_action(state, target));
+    const void *payload = detail::rich_drop_value(target);
+    const auto window = begin_hover_window(state, detail::gtk4_drop_target_current_drop(target), 'm');
+    const unsigned int action = dispatch_drop(state, "motion", payload, x, y, true,
+                                              preferred_drop_action(state, target));
+    end_hover_window(window, action);
+    return action;
 }
 
 void drop_leave(void *, void *data) noexcept
@@ -731,10 +882,10 @@ int drop_received(void *target, const void *value, double x, double y, void *dat
         source->local_drop_observed = true;
         source->local_drop_action = 0U; // safe even if Lua closes the source
     }
-    const char *payload = detail::gtk4_value_text(value);
     auto *state = static_cast<WidgetState *>(data);
-    const unsigned int action = payload ? dispatch_drop(state, "drop", payload, x, y, true,
-                         preferred_drop_action(state, target)) : 0U;
+    const unsigned int action = value ? dispatch_drop(state, "drop", value, x, y, true,
+                         preferred_drop_action(state, target, true)) : 0U;
+    g_drop_negotiation = DropNegotiation{}; // the next transfer starts a new window
     if (source)
     {
         if (source->active_drag == drag) source->local_drop_action = action;
@@ -1352,7 +1503,7 @@ int push_native_widget(lua_State *L, WidgetKind kind, void *native,
                 g_live_windows.fetch_sub(1, std::memory_order_acq_rel);
         }
         release_state(state);
-        if (g_live_widgets.load(std::memory_order_acquire) == 0)
+        if (g_live_widgets.load(std::memory_order_acquire) == 0 && !has_file_dialogs())
             g_gui_owner = nullptr;
         return push_fail_protected(L,
             "babet.gui: cannot attach GTK widget lifetime signal");
@@ -1426,6 +1577,9 @@ bool strict_c_string(lua_State *L, int index, const char *api,
         luaL_error(L, "%s: embedded NUL is not supported by GTK strings", api);
     return true;
 }
+
+#include "gui_picture.inc"
+#include "gui_file_dialog.inc"
 
 void parse_window_options(lua_State *L, const char *&title, int &width,
                           int &height)
@@ -1522,6 +1676,19 @@ int parse_wrap_mode(lua_State *L, int index, const char *api)
     if (std::strcmp(text, "word") == 0) return 2;
     if (std::strcmp(text, "word-char") == 0) return 3;
     luaL_error(L, "%s must be 'none', 'char', 'word' or 'word-char'", api);
+    return 0;
+}
+
+int parse_label_wrap_mode(lua_State *L, int index, const char *api)
+{
+    // GtkLabel uses PangoWrapMode, not GtkWrapMode.  Keep this conversion
+    // separate: the enum values differ (WORD=0, CHAR=1, WORD_CHAR=2).
+    const char *text = nullptr;
+    strict_c_string(L, index, api, text);
+    if (std::strcmp(text, "word") == 0) return 0;
+    if (std::strcmp(text, "char") == 0) return 1;
+    if (std::strcmp(text, "word-char") == 0) return 2;
+    luaL_error(L, "%s must be 'word', 'char' or 'word-char'", api);
     return 0;
 }
 
@@ -2659,10 +2826,11 @@ int widget_on_drag(lua_State *L)
         return luaL_error(L, "gui widget:onDrag: windows cannot receive drag gestures");
     // Interactive widgets own pointer gestures; their click/select/expand
     // handling can win over our GtkGestureDrag, making callbacks unreliable.
-    if (state->kind != WidgetKind::label && state->kind != WidgetKind::box &&
+    if (state->kind != WidgetKind::picture &&
+        state->kind != WidgetKind::label && state->kind != WidgetKind::box &&
         state->kind != WidgetKind::drawing_area && state->kind != WidgetKind::fixed &&
         state->kind != WidgetKind::progress_bar)
-        return luaL_error(L, "gui widget:onDrag: use a non-interactive widget (label, box, drawingArea, fixed, progressBar)");
+        return luaL_error(L, "gui widget:onDrag: use a non-interactive widget (label, box, drawingArea, fixed, progressBar, picture)");
     if (!state->drag_controller_attached && lua_type(L, 2) == LUA_TFUNCTION)
     {
         void *gesture = detail::gtk4_gesture_drag_new();
@@ -2700,10 +2868,11 @@ int widget_set_drag_data(lua_State *L)
     WidgetState *state = check_widget(L, 1, "gui widget:setDragData");
     if (state->kind == WidgetKind::window)
         return luaL_error(L, "gui widget:setDragData: windows cannot be drag sources");
-    if (state->kind != WidgetKind::label && state->kind != WidgetKind::box &&
+    if (state->kind != WidgetKind::picture &&
+        state->kind != WidgetKind::label && state->kind != WidgetKind::box &&
         state->kind != WidgetKind::drawing_area && state->kind != WidgetKind::fixed &&
         state->kind != WidgetKind::progress_bar)
-        return luaL_error(L, "gui widget:setDragData: use a non-interactive drag handle (label, box, drawingArea, fixed, progressBar)");
+        return luaL_error(L, "gui widget:setDragData: use a non-interactive drag handle (label, box, drawingArea, fixed, progressBar, picture)");
 
     if (lua_isnil(L, 2))
     {
@@ -2788,6 +2957,8 @@ int widget_on_drop(lua_State *L)
         void *target = detail::gtk4_drop_target_new_text(state->drop_actions);
         if (!target)
             return push_fail_protected(L, "babet.gui: cannot create GTK drop target");
+        detail::rich_set_drop_types(target, (state->drop_types & 1U) != 0U,
+                                    (state->drop_types & 2U) != 0U);
         // Stay inert until the allocating Lua callback-table update succeeds.
         // A caught allocation failure must not leave a target swallowing drops.
         detail::gtk4_drop_target_set_actions(target, 0U);
@@ -2835,6 +3006,45 @@ int widget_on_drop(lua_State *L)
     return push_ok_protected(L);
 }
 
+
+int widget_set_drop_types(lua_State *L)
+{
+    if (!lua_arity_is(L,2) || !lua_istable(L,2))
+        return luaL_error(L,"gui widget:setDropTypes expects one array of types");
+    auto *state=check_widget(L,1,"gui widget:setDropTypes");
+    if (state->kind==WidgetKind::window)
+        return luaL_error(L,"gui widget:setDropTypes: windows cannot be drop targets");
+    const auto n=lua_rawlen(L,2);
+    if (n<1 || n>2) return luaL_error(L,"gui widget:setDropTypes expects \"text\" and/or \"files\"");
+    unsigned int types=0;std::size_t entries=0;
+    lua_pushnil(L);
+    while(lua_next(L,2)) {
+        if(!lua_isinteger(L,-2) || lua_tointeger(L,-2)<1 ||
+           static_cast<unsigned long long>(lua_tointeger(L,-2))>n)
+            return luaL_error(L,"gui widget:setDropTypes: expected a dense array");
+        const char *name=nullptr;strict_c_string(L,-1,"gui widget:setDropTypes",name);
+        unsigned int bit=0;
+        if(std::strcmp(name,"text")==0) bit=1U;
+        else if(std::strcmp(name,"files")==0) bit=2U;
+        else return luaL_error(L,"gui widget:setDropTypes: unknown type '%s'",name);
+        if(types & bit) return luaL_error(L,"gui widget:setDropTypes: duplicate type '%s'",name);
+        types|=bit;++entries;lua_pop(L,1);
+    }
+    if(entries!=n) return luaL_error(L,"gui widget:setDropTypes: expected a dense array");
+    if((types & 2U) && !detail::gtk4_drop_files_available())
+        return push_fail_protected(L,"babet.gui: requires GTK 4.6 (file drops)");
+    if(state->drop_received_depth)
+        return push_fail_protected(L,"babet.gui: drop types cannot change during drop");
+    const ScopedStateReference keep(state);
+    const int result=push_ok_protected(L);
+    if(!state->native || !state->handle_key) return push_fail_protected(L,"babet.gui: drop target destroyed during the operation");
+    state->drop_types=types;++state->drop_revision;
+    if(state->drop_target_controller) {
+        detail::rich_set_drop_types(state->drop_target_controller,(types&1U)!=0,(types&2U)!=0);
+        detail::gtk4_drop_target_reject(state->drop_target_controller);
+    }
+    return result;
+}
 
 int widget_set_drag_actions(lua_State *L)
 {
@@ -3109,12 +3319,46 @@ int widget_set_valign(lua_State *L)
     return push_ok_protected(L);
 }
 
-int text_view_set_wrap_mode(lua_State *L)
+int widget_set_wrap_mode(lua_State *L)
 {
-    if (!lua_arity_is(L, 2)) return luaL_error(L, "gui textView:setWrapMode expects one wrap mode string");
-    WidgetState *state = check_kind(L, 1, WidgetKind::text_view, "gui textView:setWrapMode");
-    detail::gtk4_text_view_set_wrap_mode(state->native,
-                                         parse_wrap_mode(L, 2, "gui textView:setWrapMode"));
+    WidgetState *state = check_widget(L, 1, "gui widget:setWrapMode");
+    if (state->kind == WidgetKind::text_view)
+    {
+        if (!lua_arity_is(L, 2))
+            return luaL_error(L, "gui textView:setWrapMode expects one wrap mode string");
+        detail::gtk4_text_view_set_wrap_mode(
+            state->native, parse_wrap_mode(L, 2, "gui textView:setWrapMode"));
+        return push_ok_protected(L);
+    }
+    if (state->kind == WidgetKind::label)
+    {
+        if (!lua_arity_is(L, 2))
+            return luaL_error(L, "gui label:setWrapMode expects one wrap mode string");
+        detail::gtk4_label_set_wrap_mode(
+            state->native, parse_label_wrap_mode(L, 2, "gui label:setWrapMode"));
+        return push_ok_protected(L);
+    }
+    return luaL_error(L, "gui widget:setWrapMode: expected a label or textView handle");
+}
+
+int label_set_wrap(lua_State *L)
+{
+    if (!lua_arity_is(L, 2) || !lua_is_strict_boolean(L, 2))
+        return luaL_error(L, "gui label:setWrap expects one boolean");
+    WidgetState *state = check_kind(L, 1, WidgetKind::label, "gui label:setWrap");
+    detail::gtk4_label_set_wrap(state->native, lua_toboolean(L, 2) != 0);
+    return push_ok_protected(L);
+}
+
+int label_set_xalign(lua_State *L)
+{
+    if (!lua_arity_is(L, 2))
+        return luaL_error(L, "gui label:setXAlign expects one number between 0 and 1");
+    WidgetState *state = check_kind(L, 1, WidgetKind::label, "gui label:setXAlign");
+    const double alignment = finite_number(L, 2, "gui label:setXAlign");
+    if (alignment < 0.0 || alignment > 1.0)
+        return luaL_error(L, "gui label:setXAlign must be between 0 and 1");
+    detail::gtk4_label_set_xalign(state->native, static_cast<float>(alignment));
     return push_ok_protected(L);
 }
 
@@ -3521,6 +3765,8 @@ private:
     void *native_;
     lua_State *previous_;
 };
+
+#include "gui_text_tags.inc"
 
 int widget_add(lua_State *L)
 {
@@ -4241,12 +4487,14 @@ int l_run(lua_State *L)
             "gui.run: must be called from the main Lua thread, not from a coroutine");
     if (g_run_active.load(std::memory_order_acquire))
         return luaL_error(L, "gui.run: GUI event loop is already running");
-    if (g_live_windows.load(std::memory_order_acquire) <= 0)
-        return push_fail_protected(L, "babet.gui: gui.run requires a live window");
+    if (g_live_windows.load(std::memory_order_acquire) <= 0 && !has_file_dialogs())
+        return push_fail_protected(L, "babet.gui: gui.run requires a live window or pending file dialog");
     if (g_gui_owner != main_lua_state(L))
         return push_fail_protected(L, "babet.gui: this Lua state does not own the GUI");
-    if (!lua_checkstack(L, 2))
+    if (!lua_checkstack(L, 2)) {
+        cancel_file_dialogs(main_lua_state(L));
         return push_fail_protected(L, "babet.gui: cannot reserve Lua stack for GUI loop");
+    }
 
     g_quit_requested.store(false, std::memory_order_release);
     g_run_active.store(true, std::memory_order_release);
@@ -4255,11 +4503,12 @@ int l_run(lua_State *L)
     if (wake_source == 0)
     {
         g_run_active.store(false, std::memory_order_release);
+        cancel_file_dialogs(main_lua_state(L));
         return push_fail_protected(L, "babet.gui: cannot install GTK main-loop wake source");
     }
 
     while (!g_quit_requested.load(std::memory_order_acquire) &&
-           g_live_windows.load(std::memory_order_acquire) > 0)
+           (g_live_windows.load(std::memory_order_acquire) > 0 || has_file_dialogs()))
     {
         (void)detail::gtk4_main_context_iteration(true);
         drain_deferred_widgets();
@@ -4270,12 +4519,14 @@ int l_run(lua_State *L)
         {
             (void)detail::gtk4_source_remove(wake_source);
             g_run_active.store(false, std::memory_order_release);
+            cancel_file_dialogs(main_lua_state(L));
             return lua_error(L);
         }
     }
 
     (void)detail::gtk4_source_remove(wake_source);
     g_run_active.store(false, std::memory_order_release);
+    cancel_file_dialogs(main_lua_state(L));
     return push_ok_protected(L);
 }
 
@@ -4360,7 +4611,7 @@ bool session_active() noexcept
 {
     return g_run_active.load(std::memory_order_acquire) ||
            g_live_widgets.load(std::memory_order_acquire) > 0 ||
-           g_css_provider != nullptr;
+           g_css_provider != nullptr || has_file_dialogs();
 }
 
 void cleanup_on_main_thread(lua_State *L) noexcept
@@ -4370,6 +4621,7 @@ void cleanup_on_main_thread(lua_State *L) noexcept
 
     drain_deferred_widgets();
     lua_State *closing_owner = main_lua_state(L);
+    cancel_file_dialogs(closing_owner);
     clear_css_provider(closing_owner);
     if (g_gui_owner == closing_owner)
     {
@@ -4389,6 +4641,18 @@ void cleanup_on_main_thread(lua_State *L) noexcept
 
 void register_gui(lua_State *L)
 {
+    if (luaL_newmetatable(L, FILE_DIALOG_META)) {
+        lua_pushcfunction(L, file_dialog_gc);
+        lua_setfield(L, -2, "__gc");
+        lua_pushliteral(L, "Babet GUI file selection");
+        lua_setfield(L, -2, "__metatable");
+    }
+    lua_pop(L, 1);
+    lua_rawgetp(L, LUA_REGISTRYINDEX, &file_dialog_roots_key);
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1); lua_newtable(L);
+        lua_rawsetp(L, LUA_REGISTRYINDEX, &file_dialog_roots_key);
+    } else lua_pop(L, 1);
     if (luaL_newmetatable(L, DRAW_META))
     {
         lua_pushvalue(L, -1);
@@ -4449,6 +4713,8 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "setDragActions");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_drop_actions>);
         lua_setfield(L, -2, "setDropActions");
+        lua_pushcfunction(L, gui_lua_boundary<widget_set_drop_types>);
+        lua_setfield(L, -2, "setDropTypes");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_drag_icon>);
         lua_setfield(L, -2, "setDragIcon");
         lua_pushcfunction(L, gui_lua_boundary<widget_on_drag_state>);
@@ -4477,6 +4743,16 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "setHAlign");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_valign>);
         lua_setfield(L, -2, "setVAlign");
+        lua_pushcfunction(L, gui_lua_boundary<picture_set_file>);
+        lua_setfield(L, -2, "setFile");
+        lua_pushcfunction(L, gui_lua_boundary<picture_set_fit>);
+        lua_setfield(L, -2, "setContentFit");
+        lua_pushcfunction(L, gui_lua_boundary<picture_set_shrink>);
+        lua_setfield(L, -2, "setCanShrink");
+        lua_pushcfunction(L, gui_lua_boundary<picture_intrinsic_size>);
+        lua_setfield(L, -2, "getIntrinsicSize");
+        lua_pushcfunction(L, gui_lua_boundary<picture_set_alt>);
+        lua_setfield(L, -2, "setAlternativeText");
         lua_pushcfunction(L, gui_lua_boundary<widget_set_icon_name>);
         lua_setfield(L, -2, "setIconName");
         lua_pushcfunction(L, gui_lua_boundary<widget_remove>);
@@ -4507,8 +4783,26 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "setPlaceholder");
         lua_pushcfunction(L, gui_lua_boundary<entry_set_editable>);
         lua_setfield(L, -2, "setEditable");
-        lua_pushcfunction(L, gui_lua_boundary<text_view_set_wrap_mode>);
+        lua_pushcfunction(L, gui_lua_boundary<widget_set_wrap_mode>);
         lua_setfield(L, -2, "setWrapMode");
+        lua_pushcfunction(L, gui_lua_boundary<label_set_wrap>);
+        lua_setfield(L, -2, "setWrap");
+        lua_pushcfunction(L, gui_lua_boundary<label_set_xalign>);
+        lua_setfield(L, -2, "setXAlign");
+        lua_pushcfunction(L, gui_lua_boundary<text_create_tag>);
+        lua_setfield(L, -2, "createTag");
+        lua_pushcfunction(L, gui_lua_boundary<text_apply_tag>);
+        lua_setfield(L, -2, "applyTag");
+        lua_pushcfunction(L, gui_lua_boundary<text_remove_tag>);
+        lua_setfield(L, -2, "removeTag");
+        lua_pushcfunction(L, gui_lua_boundary<text_remove_all_tags>);
+        lua_setfield(L, -2, "removeAllTags");
+        lua_pushcfunction(L, gui_lua_boundary<text_tags_at>);
+        lua_setfield(L, -2, "tagsAt");
+        lua_pushcfunction(L, gui_lua_boundary<text_tag_range>);
+        lua_setfield(L, -2, "tagRange");
+        lua_pushcfunction(L, gui_lua_boundary<text_offset_at>);
+        lua_setfield(L, -2, "offsetAt");
         lua_pushcfunction(L, gui_lua_boundary<widget_on_changed>);
         lua_setfield(L, -2, "onChanged");
         lua_pushcfunction(L, gui_lua_boundary<entry_on_activate>);
@@ -4595,6 +4889,12 @@ void register_gui(lua_State *L)
     lua_setfield(L, -2, "separator");
     lua_pushcfunction(L, gui_lua_boundary<l_paned>);
     lua_setfield(L, -2, "paned");
+    lua_pushcfunction(L, gui_lua_boundary<l_picture>);
+    lua_setfield(L, -2, "picture");
+    lua_pushcfunction(L, gui_lua_boundary<l_open_file>);
+    lua_setfield(L, -2, "openFile");
+    lua_pushcfunction(L, gui_lua_boundary<l_save_file>);
+    lua_setfield(L, -2, "saveFile");
     lua_pushcfunction(L, gui_lua_boundary<l_image>);
     lua_setfield(L, -2, "image");
     lua_pushcfunction(L, gui_lua_boundary<l_menu_button>);

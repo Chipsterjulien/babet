@@ -63,6 +63,7 @@ using GtkDropTargetReject = void (*)(void *);
 using GtkDropTargetGetValue = const void *(*)(void *);
 using GtkDropTargetGetDrop = void *(*)(void *);
 using GdkDropGetDrag = void *(*)(void *);
+using GdkDropGetActions = unsigned int (*)(void *);
 using GdkDragGetSelectedAction = unsigned int (*)(void *);
 using GValueGetString = const char *(*)(const void *);
 using GUtf8Validate = int (*)(const char *, std::ptrdiff_t, const char **);
@@ -97,6 +98,9 @@ using GtkScrolledWindowNew = void *(*)();
 using GtkScrolledWindowSetChild = void (*)(void *, void *);
 using GtkLabelNew = void *(*)(const char *);
 using GtkLabelSetText = void (*)(void *, const char *);
+using GtkLabelSetBoolean = void (*)(void *, int);
+using GtkLabelSetWrapMode = void (*)(void *, int);
+using GtkLabelSetXAlign = void (*)(void *, float);
 using GtkImageNewFromIconName = void *(*)(const char *);
 using GtkImageSetFromIconName = void (*)(void *, const char *);
 using GtkButtonNewWithLabel = void *(*)(const char *);
@@ -159,6 +163,75 @@ using GSourceRemove = int (*)(unsigned int);
 
 struct GtkApi
 {
+    void * (*rich_gtk_text_tag_new)(const char *a) = nullptr;
+    void * (*rich_gtk_text_buffer_get_tag_table)(void *a) = nullptr;
+    int (*rich_gtk_text_tag_table_add)(void *a, void *b) = nullptr;
+    void * (*rich_gtk_text_tag_table_lookup)(void *a, const char *b) = nullptr;
+    void (*rich_gtk_text_buffer_get_bounds)(void *a, TextIter *b, TextIter *c) = nullptr;
+    char * (*rich_gtk_text_buffer_get_text)(void *a, const TextIter *b, const TextIter *c, int d) = nullptr;
+    void (*rich_gtk_text_buffer_get_iter_at_offset)(void *a, TextIter *b, int c) = nullptr;
+    void (*rich_gtk_text_buffer_apply_tag)(void *a, void *b, const TextIter *c, const TextIter *d) = nullptr;
+    void (*rich_gtk_text_buffer_remove_tag)(void *a, void *b, const TextIter *c, const TextIter *d) = nullptr;
+    void (*rich_gtk_text_buffer_remove_all_tags)(void *a, const TextIter *b, const TextIter *c) = nullptr;
+    int (*rich_gtk_text_iter_get_offset)(const TextIter *a) = nullptr;
+    int (*rich_gtk_text_iter_has_tag)(const TextIter *a, void *b) = nullptr;
+    int (*rich_gtk_text_iter_starts_tag)(const TextIter *a, void *b) = nullptr;
+    int (*rich_gtk_text_iter_backward_to_tag_toggle)(TextIter *a, void *b) = nullptr;
+    int (*rich_gtk_text_iter_forward_to_tag_toggle)(TextIter *a, void *b) = nullptr;
+    void (*rich_gtk_text_view_window_to_buffer_coords)(void *a, int b, int c, int d, int *e, int *f) = nullptr;
+    int (*rich_gtk_text_view_get_iter_at_location)(void *a, TextIter *b, int c, int d) = nullptr;
+    void * (*rich_g_value_init)(NativeValue *a, std::size_t b) = nullptr;
+    void (*rich_g_value_unset)(NativeValue *a) = nullptr;
+    void (*rich_g_value_set_string)(NativeValue *a, const char *b) = nullptr;
+    void (*rich_g_value_set_int)(NativeValue *a, int b) = nullptr;
+    void (*rich_g_value_set_boolean)(NativeValue *a, int b) = nullptr;
+    void (*rich_g_value_set_double)(NativeValue *a, double b) = nullptr;
+    void (*rich_g_value_set_enum)(NativeValue *a, int b) = nullptr;
+    void (*rich_g_object_set_property)(void *a, const char *b, const NativeValue *c) = nullptr;
+    std::ptrdiff_t (*rich_g_utf8_pointer_to_offset)(const char *a, const char *b) = nullptr;
+    void (*rich_gtk_drop_target_set_gtypes)(void *a, const std::size_t *b, std::size_t c) = nullptr;
+    std::size_t (*rich_gdk_file_list_get_type)() = nullptr;
+    const NativeSList * (*rich_gdk_file_list_get_files)(void *a) = nullptr;
+    void * (*rich_g_value_get_boxed)(const void *a) = nullptr;
+    int (*rich_g_type_check_value_holds)(const void *a, std::size_t b) = nullptr;
+    void * (*files_gtk_picture_new)() = nullptr;
+    void (*files_gtk_picture_set_paintable)(void *a, void *b) = nullptr;
+    void * (*files_gtk_picture_get_paintable)(void *a) = nullptr;
+    void (*files_gtk_picture_set_can_shrink)(void *a, int b) = nullptr;
+    void (*files_gtk_picture_set_content_fit)(void *a, int b) = nullptr;
+    void (*files_gtk_picture_set_alternative_text)(void *a, const char *b) = nullptr;
+    int (*files_gdk_paintable_get_intrinsic_width)(void *a) = nullptr;
+    int (*files_gdk_paintable_get_intrinsic_height)(void *a) = nullptr;
+    void * (*files_gdk_texture_new_from_filename)(const char *a, void **b) = nullptr;
+    void (*files_g_error_free)(void *a) = nullptr;
+    void * (*files_gtk_file_dialog_new)() = nullptr;
+    void (*files_gtk_file_dialog_set_title)(void *a, const char *b) = nullptr;
+    void (*files_gtk_file_dialog_set_modal)(void *a, int b) = nullptr;
+    void (*files_gtk_file_dialog_set_initial_folder)(void *a, void *b) = nullptr;
+    void (*files_gtk_file_dialog_set_initial_name)(void *a, const char *b) = nullptr;
+    void (*files_gtk_file_dialog_set_filters)(void *a, void *b) = nullptr;
+    unsigned int (*files_gtk_dialog_error_quark)() = nullptr;
+    void * (*files_g_cancellable_new)() = nullptr;
+    void (*files_g_cancellable_cancel)(void *a) = nullptr;
+    void * (*files_g_file_new_for_path)(const char *a) = nullptr;
+    char * (*files_g_file_get_path)(void *a) = nullptr;
+    char * (*files_g_file_get_uri)(void *a) = nullptr;
+    void * (*files_gtk_file_filter_new)() = nullptr;
+    std::size_t (*files_gtk_file_filter_get_type)() = nullptr;
+    void (*files_gtk_file_filter_set_name)(void *a, const char *b) = nullptr;
+    void (*files_gtk_file_filter_add_pattern)(void *a, const char *b) = nullptr;
+    void (*files_gtk_file_filter_add_mime_type)(void *a, const char *b) = nullptr;
+    void * (*files_g_list_store_new)(std::size_t a) = nullptr;
+    void (*files_g_list_store_append)(void *a, void *b) = nullptr;
+    unsigned int (*files_g_list_model_get_n_items)(void *a) = nullptr;
+    void * (*files_g_list_model_get_item)(void *a, unsigned int b) = nullptr;
+    void (*files_gtk_file_dialog_open)(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) = nullptr;
+    void * (*files_gtk_file_dialog_open_finish)(void *a, void *b, void **c) = nullptr;
+    void (*files_gtk_file_dialog_open_multiple)(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) = nullptr;
+    void * (*files_gtk_file_dialog_open_multiple_finish)(void *a, void *b, void **c) = nullptr;
+    void (*files_gtk_file_dialog_save)(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) = nullptr;
+    void * (*files_gtk_file_dialog_save_finish)(void *a, void *b, void **c) = nullptr;
+
     void *handle = nullptr;
     GtkDisableSetlocale disable_setlocale = nullptr;
     GtkInitCheck init_check = nullptr;
@@ -211,6 +284,7 @@ struct GtkApi
     GtkDropTargetGetValue drop_target_get_value = nullptr;
     GtkDropTargetGetDrop drop_target_get_drop = nullptr;
     GdkDropGetDrag drop_get_drag = nullptr;
+    GdkDropGetActions drop_get_actions = nullptr;
     GdkDragGetSelectedAction drag_get_selected_action = nullptr;
     GValueGetString value_get_string = nullptr;
     GUtf8Validate utf8_validate = nullptr;
@@ -253,6 +327,9 @@ struct GtkApi
     GtkScrolledWindowSetChild scrolled_window_set_child = nullptr;
     GtkLabelNew label_new = nullptr;
     GtkLabelSetText label_set_text = nullptr;
+    GtkLabelSetBoolean label_set_wrap = nullptr;
+    GtkLabelSetWrapMode label_set_wrap_mode = nullptr;
+    GtkLabelSetXAlign label_set_xalign = nullptr;
     GtkImageNewFromIconName image_new_from_icon_name = nullptr;
     GtkImageSetFromIconName image_set_from_icon_name = nullptr;
     GtkButtonNewWithLabel button_new_with_label = nullptr;
@@ -513,6 +590,7 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(drop_target_get_value, "gtk_drop_target_get_value");
     BABET_GTK_RESOLVE(drop_target_get_drop, "gtk_drop_target_get_drop");
     BABET_GTK_RESOLVE(drop_get_drag, "gdk_drop_get_drag");
+    BABET_GTK_RESOLVE(drop_get_actions, "gdk_drop_get_actions");
     BABET_GTK_RESOLVE(drag_get_selected_action, "gdk_drag_get_selected_action");
     BABET_GTK_RESOLVE(value_get_string, "g_value_get_string");
     BABET_GTK_RESOLVE(utf8_validate, "g_utf8_validate");
@@ -555,6 +633,9 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(scrolled_window_set_child, "gtk_scrolled_window_set_child");
     BABET_GTK_RESOLVE(label_new, "gtk_label_new");
     BABET_GTK_RESOLVE(label_set_text, "gtk_label_set_text");
+    BABET_GTK_RESOLVE(label_set_wrap, "gtk_label_set_wrap");
+    BABET_GTK_RESOLVE(label_set_wrap_mode, "gtk_label_set_wrap_mode");
+    BABET_GTK_RESOLVE(label_set_xalign, "gtk_label_set_xalign");
     BABET_GTK_RESOLVE(image_new_from_icon_name, "gtk_image_new_from_icon_name");
     BABET_GTK_RESOLVE(image_set_from_icon_name, "gtk_image_set_from_icon_name");
     BABET_GTK_RESOLVE(button_new_with_label, "gtk_button_new_with_label");
@@ -662,6 +743,74 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(timeout_add, "g_timeout_add");
     BABET_GTK_RESOLVE(source_remove, "g_source_remove");
 
+    resolve_optional(handle, "gtk_picture_new", candidate.files_gtk_picture_new);
+    resolve_optional(handle, "gtk_picture_set_paintable", candidate.files_gtk_picture_set_paintable);
+    resolve_optional(handle, "gtk_picture_get_paintable", candidate.files_gtk_picture_get_paintable);
+    resolve_optional(handle, "gtk_picture_set_can_shrink", candidate.files_gtk_picture_set_can_shrink);
+    resolve_optional(handle, "gtk_picture_set_content_fit", candidate.files_gtk_picture_set_content_fit);
+    resolve_optional(handle, "gtk_picture_set_alternative_text", candidate.files_gtk_picture_set_alternative_text);
+    resolve_optional(handle, "gdk_paintable_get_intrinsic_width", candidate.files_gdk_paintable_get_intrinsic_width);
+    resolve_optional(handle, "gdk_paintable_get_intrinsic_height", candidate.files_gdk_paintable_get_intrinsic_height);
+    resolve_optional(handle, "gdk_texture_new_from_filename", candidate.files_gdk_texture_new_from_filename);
+    resolve_optional(handle, "g_error_free", candidate.files_g_error_free);
+    resolve_optional(handle, "gtk_file_dialog_new", candidate.files_gtk_file_dialog_new);
+    resolve_optional(handle, "gtk_file_dialog_set_title", candidate.files_gtk_file_dialog_set_title);
+    resolve_optional(handle, "gtk_file_dialog_set_modal", candidate.files_gtk_file_dialog_set_modal);
+    resolve_optional(handle, "gtk_file_dialog_set_initial_folder", candidate.files_gtk_file_dialog_set_initial_folder);
+    resolve_optional(handle, "gtk_file_dialog_set_initial_name", candidate.files_gtk_file_dialog_set_initial_name);
+    resolve_optional(handle, "gtk_file_dialog_set_filters", candidate.files_gtk_file_dialog_set_filters);
+    resolve_optional(handle, "gtk_dialog_error_quark", candidate.files_gtk_dialog_error_quark);
+    resolve_optional(handle, "g_cancellable_new", candidate.files_g_cancellable_new);
+    resolve_optional(handle, "g_cancellable_cancel", candidate.files_g_cancellable_cancel);
+    resolve_optional(handle, "g_file_new_for_path", candidate.files_g_file_new_for_path);
+    resolve_optional(handle, "g_file_get_path", candidate.files_g_file_get_path);
+    resolve_optional(handle, "g_file_get_uri", candidate.files_g_file_get_uri);
+    resolve_optional(handle, "gtk_file_filter_new", candidate.files_gtk_file_filter_new);
+    resolve_optional(handle, "gtk_file_filter_get_type", candidate.files_gtk_file_filter_get_type);
+    resolve_optional(handle, "gtk_file_filter_set_name", candidate.files_gtk_file_filter_set_name);
+    resolve_optional(handle, "gtk_file_filter_add_pattern", candidate.files_gtk_file_filter_add_pattern);
+    resolve_optional(handle, "gtk_file_filter_add_mime_type", candidate.files_gtk_file_filter_add_mime_type);
+    resolve_optional(handle, "g_list_store_new", candidate.files_g_list_store_new);
+    resolve_optional(handle, "g_list_store_append", candidate.files_g_list_store_append);
+    resolve_optional(handle, "g_list_model_get_n_items", candidate.files_g_list_model_get_n_items);
+    resolve_optional(handle, "g_list_model_get_item", candidate.files_g_list_model_get_item);
+    resolve_optional(handle, "gtk_file_dialog_open", candidate.files_gtk_file_dialog_open);
+    resolve_optional(handle, "gtk_file_dialog_open_finish", candidate.files_gtk_file_dialog_open_finish);
+    resolve_optional(handle, "gtk_file_dialog_open_multiple", candidate.files_gtk_file_dialog_open_multiple);
+    resolve_optional(handle, "gtk_file_dialog_open_multiple_finish", candidate.files_gtk_file_dialog_open_multiple_finish);
+    resolve_optional(handle, "gtk_file_dialog_save", candidate.files_gtk_file_dialog_save);
+    resolve_optional(handle, "gtk_file_dialog_save_finish", candidate.files_gtk_file_dialog_save_finish);
+    resolve_optional(handle, "gtk_text_tag_new", candidate.rich_gtk_text_tag_new);
+    resolve_optional(handle, "gtk_text_buffer_get_tag_table", candidate.rich_gtk_text_buffer_get_tag_table);
+    resolve_optional(handle, "gtk_text_tag_table_add", candidate.rich_gtk_text_tag_table_add);
+    resolve_optional(handle, "gtk_text_tag_table_lookup", candidate.rich_gtk_text_tag_table_lookup);
+    resolve_optional(handle, "gtk_text_buffer_get_bounds", candidate.rich_gtk_text_buffer_get_bounds);
+    resolve_optional(handle, "gtk_text_buffer_get_text", candidate.rich_gtk_text_buffer_get_text);
+    resolve_optional(handle, "gtk_text_buffer_get_iter_at_offset", candidate.rich_gtk_text_buffer_get_iter_at_offset);
+    resolve_optional(handle, "gtk_text_buffer_apply_tag", candidate.rich_gtk_text_buffer_apply_tag);
+    resolve_optional(handle, "gtk_text_buffer_remove_tag", candidate.rich_gtk_text_buffer_remove_tag);
+    resolve_optional(handle, "gtk_text_buffer_remove_all_tags", candidate.rich_gtk_text_buffer_remove_all_tags);
+    resolve_optional(handle, "gtk_text_iter_get_offset", candidate.rich_gtk_text_iter_get_offset);
+    resolve_optional(handle, "gtk_text_iter_has_tag", candidate.rich_gtk_text_iter_has_tag);
+    resolve_optional(handle, "gtk_text_iter_starts_tag", candidate.rich_gtk_text_iter_starts_tag);
+    resolve_optional(handle, "gtk_text_iter_backward_to_tag_toggle", candidate.rich_gtk_text_iter_backward_to_tag_toggle);
+    resolve_optional(handle, "gtk_text_iter_forward_to_tag_toggle", candidate.rich_gtk_text_iter_forward_to_tag_toggle);
+    resolve_optional(handle, "gtk_text_view_window_to_buffer_coords", candidate.rich_gtk_text_view_window_to_buffer_coords);
+    resolve_optional(handle, "gtk_text_view_get_iter_at_location", candidate.rich_gtk_text_view_get_iter_at_location);
+    resolve_optional(handle, "g_value_init", candidate.rich_g_value_init);
+    resolve_optional(handle, "g_value_unset", candidate.rich_g_value_unset);
+    resolve_optional(handle, "g_value_set_string", candidate.rich_g_value_set_string);
+    resolve_optional(handle, "g_value_set_int", candidate.rich_g_value_set_int);
+    resolve_optional(handle, "g_value_set_boolean", candidate.rich_g_value_set_boolean);
+    resolve_optional(handle, "g_value_set_double", candidate.rich_g_value_set_double);
+    resolve_optional(handle, "g_value_set_enum", candidate.rich_g_value_set_enum);
+    resolve_optional(handle, "g_object_set_property", candidate.rich_g_object_set_property);
+    resolve_optional(handle, "g_utf8_pointer_to_offset", candidate.rich_g_utf8_pointer_to_offset);
+    resolve_optional(handle, "gtk_drop_target_set_gtypes", candidate.rich_gtk_drop_target_set_gtypes);
+    resolve_optional(handle, "gdk_file_list_get_type", candidate.rich_gdk_file_list_get_type);
+    resolve_optional(handle, "gdk_file_list_get_files", candidate.rich_gdk_file_list_get_files);
+    resolve_optional(handle, "g_value_get_boxed", candidate.rich_g_value_get_boxed);
+    resolve_optional(handle, "g_type_check_value_holds", candidate.rich_g_type_check_value_holds);
     g_gtk = candidate;
     g_load_state = GtkLoadState::loaded;
     return true;
@@ -693,6 +842,60 @@ bool gtk4_initialize(std::string &error)
 }
 
 bool gtk4_loaded() noexcept { return g_gtk.handle != nullptr; }
+
+// Optional image/file-dialog surface. Callers check availability first.
+void * files_gtk_picture_new() noexcept { return g_gtk.files_gtk_picture_new(); }
+void files_gtk_picture_set_paintable(void *a, void *b) noexcept { return g_gtk.files_gtk_picture_set_paintable(a,b); }
+void * files_gtk_picture_get_paintable(void *a) noexcept { return g_gtk.files_gtk_picture_get_paintable(a); }
+void files_gtk_picture_set_can_shrink(void *a, int b) noexcept { return g_gtk.files_gtk_picture_set_can_shrink(a,b); }
+void files_gtk_picture_set_content_fit(void *a, int b) noexcept { return g_gtk.files_gtk_picture_set_content_fit(a,b); }
+void files_gtk_picture_set_alternative_text(void *a, const char *b) noexcept { return g_gtk.files_gtk_picture_set_alternative_text(a,b); }
+int files_gdk_paintable_get_intrinsic_width(void *a) noexcept { return g_gtk.files_gdk_paintable_get_intrinsic_width(a); }
+int files_gdk_paintable_get_intrinsic_height(void *a) noexcept { return g_gtk.files_gdk_paintable_get_intrinsic_height(a); }
+void * files_gdk_texture_new_from_filename(const char *a, void **b) noexcept { return g_gtk.files_gdk_texture_new_from_filename(a,b); }
+void files_g_error_free(void *a) noexcept { return g_gtk.files_g_error_free(a); }
+void * files_gtk_file_dialog_new() noexcept { return g_gtk.files_gtk_file_dialog_new(); }
+void files_gtk_file_dialog_set_title(void *a, const char *b) noexcept { return g_gtk.files_gtk_file_dialog_set_title(a,b); }
+void files_gtk_file_dialog_set_modal(void *a, int b) noexcept { return g_gtk.files_gtk_file_dialog_set_modal(a,b); }
+void files_gtk_file_dialog_set_initial_folder(void *a, void *b) noexcept { return g_gtk.files_gtk_file_dialog_set_initial_folder(a,b); }
+void files_gtk_file_dialog_set_initial_name(void *a, const char *b) noexcept { return g_gtk.files_gtk_file_dialog_set_initial_name(a,b); }
+void files_gtk_file_dialog_set_filters(void *a, void *b) noexcept { return g_gtk.files_gtk_file_dialog_set_filters(a,b); }
+unsigned int files_gtk_dialog_error_quark() noexcept { return g_gtk.files_gtk_dialog_error_quark(); }
+void * files_g_cancellable_new() noexcept { return g_gtk.files_g_cancellable_new(); }
+void files_g_cancellable_cancel(void *a) noexcept { return g_gtk.files_g_cancellable_cancel(a); }
+void * files_g_file_new_for_path(const char *a) noexcept { return g_gtk.files_g_file_new_for_path(a); }
+char * files_g_file_get_path(void *a) noexcept { return g_gtk.files_g_file_get_path(a); }
+char * files_g_file_get_uri(void *a) noexcept { return g_gtk.files_g_file_get_uri ? g_gtk.files_g_file_get_uri(a) : nullptr; }
+void * files_gtk_file_filter_new() noexcept { return g_gtk.files_gtk_file_filter_new(); }
+std::size_t files_gtk_file_filter_get_type() noexcept { return g_gtk.files_gtk_file_filter_get_type(); }
+void files_gtk_file_filter_set_name(void *a, const char *b) noexcept { return g_gtk.files_gtk_file_filter_set_name(a,b); }
+void files_gtk_file_filter_add_pattern(void *a, const char *b) noexcept { return g_gtk.files_gtk_file_filter_add_pattern(a,b); }
+void files_gtk_file_filter_add_mime_type(void *a, const char *b) noexcept { return g_gtk.files_gtk_file_filter_add_mime_type(a,b); }
+void * files_g_list_store_new(std::size_t a) noexcept { return g_gtk.files_g_list_store_new(a); }
+void files_g_list_store_append(void *a, void *b) noexcept { return g_gtk.files_g_list_store_append(a,b); }
+unsigned int files_g_list_model_get_n_items(void *a) noexcept { return g_gtk.files_g_list_model_get_n_items(a); }
+void * files_g_list_model_get_item(void *a, unsigned int b) noexcept { return g_gtk.files_g_list_model_get_item(a,b); }
+void files_gtk_file_dialog_open(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept { return g_gtk.files_gtk_file_dialog_open(a,b,c,cb,d); }
+void * files_gtk_file_dialog_open_finish(void *a, void *b, void **c) noexcept { return g_gtk.files_gtk_file_dialog_open_finish(a,b,c); }
+void files_gtk_file_dialog_open_multiple(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept { return g_gtk.files_gtk_file_dialog_open_multiple(a,b,c,cb,d); }
+void * files_gtk_file_dialog_open_multiple_finish(void *a, void *b, void **c) noexcept { return g_gtk.files_gtk_file_dialog_open_multiple_finish(a,b,c); }
+void files_gtk_file_dialog_save(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept { return g_gtk.files_gtk_file_dialog_save(a,b,c,cb,d); }
+void * files_gtk_file_dialog_save_finish(void *a, void *b, void **c) noexcept { return g_gtk.files_gtk_file_dialog_save_finish(a,b,c); }
+bool gtk4_picture_available() noexcept { return g_gtk.files_gtk_picture_new && g_gtk.files_gtk_picture_set_paintable && g_gtk.files_gtk_picture_get_paintable && g_gtk.files_gtk_picture_set_can_shrink && g_gtk.files_gtk_picture_set_alternative_text && g_gtk.files_gdk_paintable_get_intrinsic_width && g_gtk.files_gdk_paintable_get_intrinsic_height; }
+bool gtk4_texture_file_available() noexcept { return g_gtk.files_gdk_texture_new_from_filename && g_gtk.files_g_error_free; }
+bool gtk4_content_fit_available() noexcept { return g_gtk.files_gtk_picture_set_content_fit; }
+bool gtk4_file_dialog_available() noexcept { return g_gtk.files_gtk_file_dialog_new && g_gtk.files_gtk_file_dialog_set_title && g_gtk.files_gtk_file_dialog_set_modal && g_gtk.files_gtk_file_dialog_set_initial_folder && g_gtk.files_gtk_file_dialog_set_initial_name && g_gtk.files_gtk_file_dialog_set_filters && g_gtk.files_gtk_dialog_error_quark && g_gtk.files_g_cancellable_new && g_gtk.files_g_cancellable_cancel && g_gtk.files_g_file_new_for_path && g_gtk.files_g_file_get_path && g_gtk.files_gtk_file_filter_new && g_gtk.files_gtk_file_filter_get_type && g_gtk.files_gtk_file_filter_set_name && g_gtk.files_gtk_file_filter_add_pattern && g_gtk.files_gtk_file_filter_add_mime_type && g_gtk.files_g_list_store_new && g_gtk.files_g_list_store_append && g_gtk.files_g_list_model_get_n_items && g_gtk.files_g_list_model_get_item && g_gtk.files_gtk_file_dialog_open && g_gtk.files_gtk_file_dialog_open_finish && g_gtk.files_gtk_file_dialog_open_multiple && g_gtk.files_gtk_file_dialog_open_multiple_finish && g_gtk.files_gtk_file_dialog_save && g_gtk.files_gtk_file_dialog_save_finish && g_gtk.files_g_error_free; }
+// GError has a public, stable GLib ABI.
+struct FileError { unsigned int domain; int code; char *message; };
+const char *gtk4_error_message(void *p) noexcept {
+    auto *e = static_cast<FileError *>(p);
+    return e && e->message ? e->message : "GTK error without details";
+}
+bool gtk4_dialog_dismissed(void *p) noexcept {
+    auto *e = static_cast<FileError *>(p);
+    return e && e->domain == g_gtk.files_gtk_dialog_error_quark() &&
+        (e->code == 1 || e->code == 2);
+}
 
 void *gtk4_window_new() noexcept { return g_gtk.window_new(); }
 void gtk4_window_set_title(void *w, const char *t) noexcept { g_gtk.window_set_title(w, t); }
@@ -818,6 +1021,15 @@ void *gtk4_drop_target_drag(void *target) noexcept
     void *drop = g_gtk.drop_target_get_drop(target);
     return drop ? g_gtk.drop_get_drag(drop) : nullptr;
 }
+void *gtk4_drop_target_current_drop(void *target) noexcept
+{
+    return target ? g_gtk.drop_target_get_drop(target) : nullptr;
+}
+unsigned int gtk4_drop_target_offered_actions(void *target) noexcept
+{
+    void *drop = g_gtk.drop_target_get_drop(target);
+    return drop ? g_gtk.drop_get_actions(drop) : 0U;
+}
 unsigned int gtk4_drop_target_selected_action(void *target) noexcept
 {
     void *drag = gtk4_drop_target_drag(target);
@@ -892,6 +1104,9 @@ void *gtk4_label_new(const char *t) noexcept { return g_gtk.label_new(t); }
 void *gtk4_image_new_from_icon_name(const char *n) noexcept { return g_gtk.image_new_from_icon_name(n); }
 void gtk4_image_set_from_icon_name(void *i, const char *n) noexcept { g_gtk.image_set_from_icon_name(i, n); }
 void gtk4_label_set_text(void *l, const char *t) noexcept { g_gtk.label_set_text(l, t); }
+void gtk4_label_set_wrap(void *l, bool v) noexcept { g_gtk.label_set_wrap(l, v ? 1 : 0); }
+void gtk4_label_set_wrap_mode(void *l, int m) noexcept { g_gtk.label_set_wrap_mode(l, m); }
+void gtk4_label_set_xalign(void *l, float a) noexcept { g_gtk.label_set_xalign(l, a); }
 void *gtk4_button_new_with_label(const char *t) noexcept { return g_gtk.button_new_with_label(t); }
 void gtk4_button_set_label(void *b, const char *t) noexcept { g_gtk.button_set_label(b, t); }
 void gtk4_button_set_icon_name(void *b, const char *n) noexcept { g_gtk.button_set_icon_name(b, n); }
@@ -1002,5 +1217,44 @@ unsigned int gtk4_timeout_add(unsigned int ms, GtkSourceCallback cb, void *d) no
     return g_gtk.timeout_add(ms, cb, d);
 }
 bool gtk4_source_remove(unsigned int id) noexcept { return g_gtk.source_remove(id) != 0; }
+
+
+void * rich_gtk_text_tag_new(const char *a) noexcept { return g_gtk.rich_gtk_text_tag_new(a); }
+void * rich_gtk_text_buffer_get_tag_table(void *a) noexcept { return g_gtk.rich_gtk_text_buffer_get_tag_table(a); }
+int rich_gtk_text_tag_table_add(void *a, void *b) noexcept { return g_gtk.rich_gtk_text_tag_table_add(a, b); }
+void * rich_gtk_text_tag_table_lookup(void *a, const char *b) noexcept { return g_gtk.rich_gtk_text_tag_table_lookup(a, b); }
+void rich_gtk_text_buffer_get_bounds(void *a, TextIter *b, TextIter *c) noexcept { g_gtk.rich_gtk_text_buffer_get_bounds(a, b, c); }
+char * rich_gtk_text_buffer_get_text(void *a, const TextIter *b, const TextIter *c, int d) noexcept { return g_gtk.rich_gtk_text_buffer_get_text(a, b, c, d); }
+void rich_gtk_text_buffer_get_iter_at_offset(void *a, TextIter *b, int c) noexcept { g_gtk.rich_gtk_text_buffer_get_iter_at_offset(a, b, c); }
+void rich_gtk_text_buffer_apply_tag(void *a, void *b, const TextIter *c, const TextIter *d) noexcept { g_gtk.rich_gtk_text_buffer_apply_tag(a, b, c, d); }
+void rich_gtk_text_buffer_remove_tag(void *a, void *b, const TextIter *c, const TextIter *d) noexcept { g_gtk.rich_gtk_text_buffer_remove_tag(a, b, c, d); }
+void rich_gtk_text_buffer_remove_all_tags(void *a, const TextIter *b, const TextIter *c) noexcept { g_gtk.rich_gtk_text_buffer_remove_all_tags(a, b, c); }
+int rich_gtk_text_iter_get_offset(const TextIter *a) noexcept { return g_gtk.rich_gtk_text_iter_get_offset(a); }
+int rich_gtk_text_iter_has_tag(const TextIter *a, void *b) noexcept { return g_gtk.rich_gtk_text_iter_has_tag(a, b); }
+int rich_gtk_text_iter_starts_tag(const TextIter *a, void *b) noexcept { return g_gtk.rich_gtk_text_iter_starts_tag(a, b); }
+int rich_gtk_text_iter_backward_to_tag_toggle(TextIter *a, void *b) noexcept { return g_gtk.rich_gtk_text_iter_backward_to_tag_toggle(a, b); }
+int rich_gtk_text_iter_forward_to_tag_toggle(TextIter *a, void *b) noexcept { return g_gtk.rich_gtk_text_iter_forward_to_tag_toggle(a, b); }
+void rich_gtk_text_view_window_to_buffer_coords(void *a, int b, int c, int d, int *e, int *f) noexcept { g_gtk.rich_gtk_text_view_window_to_buffer_coords(a, b, c, d, e, f); }
+int rich_gtk_text_view_get_iter_at_location(void *a, TextIter *b, int c, int d) noexcept { return g_gtk.rich_gtk_text_view_get_iter_at_location(a, b, c, d); }
+void * rich_g_value_init(NativeValue *a, std::size_t b) noexcept { return g_gtk.rich_g_value_init(a, b); }
+void rich_g_value_unset(NativeValue *a) noexcept { g_gtk.rich_g_value_unset(a); }
+void rich_g_value_set_string(NativeValue *a, const char *b) noexcept { g_gtk.rich_g_value_set_string(a, b); }
+void rich_g_value_set_int(NativeValue *a, int b) noexcept { g_gtk.rich_g_value_set_int(a, b); }
+void rich_g_value_set_boolean(NativeValue *a, int b) noexcept { g_gtk.rich_g_value_set_boolean(a, b); }
+void rich_g_value_set_double(NativeValue *a, double b) noexcept { g_gtk.rich_g_value_set_double(a, b); }
+void rich_g_value_set_enum(NativeValue *a, int b) noexcept { g_gtk.rich_g_value_set_enum(a, b); }
+void rich_g_object_set_property(void *a, const char *b, const NativeValue *c) noexcept { g_gtk.rich_g_object_set_property(a, b, c); }
+std::ptrdiff_t rich_g_utf8_pointer_to_offset(const char *a, const char *b) noexcept { return g_gtk.rich_g_utf8_pointer_to_offset(a, b); }
+void rich_gtk_drop_target_set_gtypes(void *a, const std::size_t *b, std::size_t c) noexcept { g_gtk.rich_gtk_drop_target_set_gtypes(a, b, c); }
+std::size_t rich_gdk_file_list_get_type() noexcept { return g_gtk.rich_gdk_file_list_get_type(); }
+const NativeSList * rich_gdk_file_list_get_files(void *a) noexcept { return g_gtk.rich_gdk_file_list_get_files(a); }
+void * rich_g_value_get_boxed(const void *a) noexcept { return g_gtk.rich_g_value_get_boxed(a); }
+int rich_g_type_check_value_holds(const void *a, std::size_t b) noexcept { return g_gtk.rich_g_type_check_value_holds(a, b); }
+bool gtk4_text_tags_available() noexcept { return g_gtk.rich_gtk_text_tag_new && g_gtk.rich_gtk_text_buffer_get_tag_table && g_gtk.rich_gtk_text_tag_table_add && g_gtk.rich_gtk_text_tag_table_lookup && g_gtk.rich_gtk_text_buffer_get_bounds && g_gtk.rich_gtk_text_buffer_get_text && g_gtk.rich_gtk_text_buffer_get_iter_at_offset && g_gtk.rich_gtk_text_buffer_apply_tag && g_gtk.rich_gtk_text_buffer_remove_tag && g_gtk.rich_gtk_text_buffer_remove_all_tags && g_gtk.rich_gtk_text_iter_get_offset && g_gtk.rich_gtk_text_iter_has_tag && g_gtk.rich_gtk_text_iter_starts_tag && g_gtk.rich_gtk_text_iter_backward_to_tag_toggle && g_gtk.rich_gtk_text_iter_forward_to_tag_toggle && g_gtk.rich_gtk_text_view_window_to_buffer_coords && g_gtk.rich_gtk_text_view_get_iter_at_location && g_gtk.rich_g_value_init && g_gtk.rich_g_value_unset && g_gtk.rich_g_value_set_string && g_gtk.rich_g_value_set_int && g_gtk.rich_g_value_set_boolean && g_gtk.rich_g_value_set_double && g_gtk.rich_g_value_set_enum && g_gtk.rich_g_object_set_property && g_gtk.rich_g_utf8_pointer_to_offset; }
+bool gtk4_drop_files_available() noexcept { return g_gtk.rich_gtk_drop_target_set_gtypes && g_gtk.rich_gdk_file_list_get_type && g_gtk.rich_gdk_file_list_get_files && g_gtk.rich_g_value_get_boxed && g_gtk.rich_g_type_check_value_holds && g_gtk.files_g_file_get_path; }
+std::size_t rich_type_from_name(const char *s) noexcept { return g_gtk.type_from_name(s); }
+const void *rich_drop_value(void *t) noexcept { return g_gtk.drop_target_get_value(t); }
+bool rich_value_holds(const void *v, std::size_t type) noexcept { return v && g_gtk.rich_g_type_check_value_holds && g_gtk.rich_g_type_check_value_holds(v, type); }
+void rich_set_drop_types(void *t, bool text, bool files) noexcept { if (!g_gtk.rich_gtk_drop_target_set_gtypes) return; std::size_t types[2]; std::size_t n=0; if(files) types[n++]=g_gtk.rich_gdk_file_list_get_type(); if(text) types[n++]=g_gtk.type_from_name("gchararray"); g_gtk.rich_gtk_drop_target_set_gtypes(t, types, n); }
 
 } // namespace babet_gui::detail

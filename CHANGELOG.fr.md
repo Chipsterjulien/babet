@@ -9,6 +9,61 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+## [2.33.0] - 2026-10-25
+
+### GUI — images, sélecteurs de fichiers, dépôt de fichiers et tags TextView
+
+- Ajoute `gui.picture` pour les fichiers image : dimensions intrinsèques, modes
+  d'ajustement, réduction, texte alternatif, méthodes communes et poignées de
+  glisser non interactives. Un échec de chargement conserve l'image précédente.
+- Ajoute `gui.openFile` / `gui.saveFile` asynchrones : dossier et nom initiaux,
+  parent, filtres et sélection multiple. Un sélecteur en attente garde
+  `gui.run()` actif sans fenêtre Babet. La destruction du parent, la sortie de
+  boucle et la fermeture Lua annulent les demandes, sans callback tardif.
+- Ajoute `label:setWrap(booléen)`, `label:setWrapMode("word"|"char"|"word-char")`
+  et `label:setXAlign(0..1)` pour l’affichage des notes à hauteur dépendante de
+  la largeur. Le mode de Label utilise `PangoWrapMode`, séparément du
+  `GtkWrapMode` de TextView ; `setText()` conserve ces réglages.
+- Ajoute `setDropTypes` pour le texte et les listes de fichiers. `onDrop` reçoit
+  un sixième argument `kind` ; les chemins locaux absolus gardent leur ordre et
+  les URI distantes sont filtrées. Une cible mixte reçoit une liste de fichiers
+  avec `kind == "files"` et un lien sans chemin local comme texte. Les transferts
+  texte et l’action MOVE par défaut restent compatibles ; les exemples d’import
+  de fichiers demandent explicitement COPY.
+- Ajoute les tags TextView natifs : définition du style, application et retrait,
+  recherche des tags présents et de leurs segments, caractère sous un point.
+  Les indices sont des octets Lua inclusifs, avec validation UTF-8 ; `setText`
+  garde les définitions et retire les applications.
+- Nouveaux symboles GTK optionnels : 4.6 pour les textures de fichier et le
+  dépôt de fichiers, 4.8 pour l’ajustement explicite, 4.10 pour les sélecteurs.
+  Les API existantes gardent leur socle GTK 4.0.
+- Les données de dépôt et les ressources des tags sont protégées face aux
+  callbacks, à la réentrance du GC et aux échecs d’allocation Lua/C++.
+- Les erreurs des nouvelles API sont en anglais, comme le reste de Babet, et
+  nomment la fonction concernée. Les échecs `nil, err` commencent par
+  `babet.gui:`, par exemple `"babet.gui: requires GTK 4.10"`.
+
+### Corrections
+
+- Glisser depuis une autre application (problème présent en 2.32) : `onDrop` ne
+  propose plus que les actions permises par la source, et `drop` reçoit l’action
+  réellement transmise à la source au dernier survol, dans l’ordre de GTK
+  (parent avant enfant à l’entrée, enfant avant parent pendant `motion`). Babet
+  pouvait annoncer MOVE alors que GTK négociait COPY, puis rejeter un `"copy"`
+  renvoyé au dépôt. Si la cible qui reçoit le dépôt n’autorise pas l’action
+  négociée, `action` vaut `nil` et le dépôt est refusé.
+
+### Tests et documentation
+
+- Tests sur faux GTK, tests GTK réel/Xvfb et injections d’erreurs mémoire pour
+  les images, sélecteurs, labels repliés, tags et dépôts, intégrés dans
+  `run_tests.sh`. Un nouveau test glisse depuis un processus GTK4 séparé :
+  fichiers, lien, cibles imbriquées et dépôt juste après l’entrée.
+- Documentation bilingue et exemples `gui_picture` et `gui_rich_text`. Le guide
+  précise que le sélecteur est toujours modal et décrit l’action reçue par une
+  cible imbriquée.
+
+
 ## [2.32.0] - 2026-10-22
 
 ### GUI — primitives d’application de bureau GTK4

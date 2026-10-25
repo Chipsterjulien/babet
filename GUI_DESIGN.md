@@ -142,6 +142,8 @@ The first runtime implementation is intentionally small. The target surface is:
 - `babet.gui.setCss()`
 - `container:add()` / Box and ScrolledWindow `remove()` / `clear()`
 - `widget:setText()` and common layout/state/CSS-class setters
+- `label:setWrap()` / `label:setWrapMode()` / `label:setXAlign()` for
+  height-for-width read-only note text
 - `button:onClick()` / `drawingArea:onClick()`
 - `entry:getText()` / `entry:setPlaceholder()` / `entry:setEditable()`
 - `entry:onChanged()` / `entry:onActivate()`
@@ -149,6 +151,13 @@ The first runtime implementation is intentionally small. The target surface is:
 - `window:close()`
 - `babet.gui.run()`
 - `babet.gui.quit()`
+
+Wrapped note display follows the same narrow-surface rule. `GtkLabel` uses
+`PangoWrapMode`, so its public `setWrapMode("word"|"char"|"word-char")` conversion
+must remain distinct from TextView's `GtkWrapMode` conversion. `setText()` must
+not reset wrapping or text alignment. A real-GTK/Xvfb regression checks the
+first rendered allocation and a wider relayout; the fake GTK remains the
+deterministic argument/loader contract.
 
 The runtime MVP now freezes the following shapes after red structural tests:
 `window({title=?, width=?, height=?})`, `box({orientation=?, spacing=?})`,
@@ -341,3 +350,53 @@ Desktop ownership and DND acceptance invariants:
   Lua invocation, independently of an application's onDragState callback. Only
   a mapped custom widget supplies the image; otherwise use the source handle.
   Preview roots never imply reparenting or off-screen widget rendering.
+
+## Pictures and asynchronous file selection (2.33.0)
+
+`gui.picture` loads a replacement GdkTexture before changing its paintable.
+Failed loads preserve the previous image. Optional symbols keep GTK 4.0 usable
+for existing APIs and empty pictures; file textures need 4.6, explicit fit 4.8,
+and GtkFileDialog 4.10.
+
+Pending selections have an internal Lua userdata holding the callback in a
+uservalue, rooted until completion/cancellation. A separate native state survives
+GIO completion without retaining a Lua pointer after cancellation. Parent
+destruction, event-loop exit and embedding cleanup cancel pending work. Late
+results are finished and released without invoking Lua. Callback argument
+construction runs inside lua_pcall, including path strings and selection tables.
+
+A parentless pending chooser is sufficient to enter gui.run(). The loop finishes
+when neither windows nor selections remain, or gui.quit() is requested.
+Existing string DND is unchanged.
+
+
+## TextView tags and external file drops (2.33.0)
+
+- TextView owns the GtkTextTagTable. WidgetState keeps only tag names in definition
+  order; each initial tag reference is released after the table accepts it.
+  Properties use typed GValues and g_object_set_property, never a variadic setter.
+- Lua byte ranges are inclusive. A complete text snapshot is freed with RAII;
+  conversion validates both UTF-8 boundaries before creating native iterators.
+  No allocating Lua call occurs while a native iterator will be reused. Logical
+  receiver state is pinned across protected allocation/finalization boundaries.
+- Queries use native tags rather than a shadow model, so native edits retain GTK
+  semantics. setText removes applications but keeps definitions. Hit testing uses
+  widget-to-buffer coordinates and the last allocated layout, not Lua byte widths.
+- GdkFileList and string payloads are copied before invoking Lua. GFile path
+  copies are freed on all exits. Lua tables and strings are constructed inside
+  the protected callback; allocation errors cannot unwind through GTK.
+- File formats are opt-in (GTK 4.6). Existing targets accept text by default.
+  Preloaded mixed targets can have unknown kind; drop always has a known payload.
+  Non-local entries are filtered, with no empty successful file drop.
+- setDropTypes cannot change a native target during its drop signal. Hover
+  reconfiguration invalidates the current transfer and its callback revision.
+  The existing nested-target and action contracts still apply, including MOVE
+  as the compatibility default. Importers must explicitly enable COPY.
+- Mixed targets request GdkFileList before gchararray: GtkDropTarget keeps the
+  first configured GType offered by the drop, and file lists also serialize as
+  text/plain. A URI list without any local path falls back to text URIs.
+- Hover actions are intersected with gdk_drop_get_actions(). A drop from another
+  process has no GdkDrag, so Babet mirrors GTK's status windows: the first target
+  accepting a window wins; enter windows run outer to inner, motion windows inner
+  to outer. drop reports that action, or refuses when the receiving target does
+  not allow it. On X11 a drop right after entering follows an enter window only.

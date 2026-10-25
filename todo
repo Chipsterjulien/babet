@@ -6,6 +6,22 @@ The ZIP supplied for each work session is the primary source of truth for
 files to modify. GitHub is a complementary reference and must not silently
 override a different local ZIP state.
 
+GUI 2.33.0 — wrapped GtkLabel for note display
+-----------------------------------------------
+
+[x] Expose `label:setWrap(boolean)` through dynamically loaded GTK 4.0.
+[x] Expose `label:setWrapMode("word"|"char"|"word-char")` with a dedicated
+    `PangoWrapMode` conversion instead of reusing TextView's `GtkWrapMode`.
+[x] Expose strict finite `label:setXAlign(0..1)` so wrapped lines can be left
+    aligned inside the label allocation.
+[x] Keep wrapping, mode and xalign unchanged across `label:setText()`, and cover
+    this contract in the fake GTK regression.
+[x] Extend the lazy-loader fixtures and structural contracts for the three GTK
+    label symbols without adding GTK headers or a direct GTK dependency.
+[x] Validate the first-frame 3-line -> wider 2-line height-for-width behavior
+    against real system GTK under Xvfb, then run the relevant GUI regression.
+[x] Document the API in EN/FR and record it in the 2.33.0 changelog/design.
+
 GUI native weight-log primitives — post-2.25.0 lots 2–6
 ---------------------------------------------------------
 

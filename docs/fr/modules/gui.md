@@ -108,6 +108,7 @@ La première surface reste volontairement petite :
 - `box:remove(enfant)` / `box:clear()`
 - `scrolledWindow:remove(enfant)` / `scrolledWindow:clear()`
 - `label:setText(texte)` / `button:setText(texte)` / `entry:setText(texte)`
+- mise en page des labels : `setWrap(booléen)`, `setWrapMode("word|char|word-char")`, `setXAlign(0..1)`
 - `button:onClick(fonction)`
 - `drawingArea:onClick(fonction_ou_nil)`
 - `spinButton:getValue()` / `spinButton:setValue(nombre)` / `spinButton:onChanged(fonction_ou_nil)`
@@ -122,6 +123,42 @@ et `height` entier positif. Les options de `box` acceptent
 `orientation = "vertical"|"horizontal"` et `spacing` entier positif ou nul.
 Les chaînes transmises à GTK refusent les NUL embarqués, car le toolkit attend
 des chaînes C.
+
+## Label : texte d’affichage avec retour à la ligne
+
+`gui.label()` est le widget à privilégier pour afficher une note non éditée dont
+la hauteur doit dépendre d’une largeur imposée. `gui.textView()` reste adapté à
+la note en cours d’édition. Un `GtkLabel` replié participe au calcul de hauteur
+en fonction de la largeur de GTK, ce qui évite la mesure transitoire à un pixel de
+large qui peut faire apparaître un TextView « éclaté » avant sa première
+allocation.
+
+```lua
+local note = assert(gui.label("Une note assez longue pour se replier sur plusieurs lignes."))
+assert(note:setWrap(true))
+assert(note:setWrapMode("word-char"))
+assert(note:setXAlign(0)) -- les lignes repliées partent du bord gauche
+assert(note:setSizeRequest(300, -1))
+```
+
+| Méthode | Contrat |
+| --- | --- |
+| `label:setWrap(booléen)` | Active ou désactive le retour automatique à la ligne. |
+| `label:setWrapMode("word"|"char"|"word-char")` | Choisit la stratégie Pango de coupure des lignes lorsque le retour est actif. |
+| `label:setXAlign(nombre)` | Aligne le texte dans la largeur allouée ; le nombre doit être fini et compris entre `0` et `1` (`0` = gauche, `1` = droite). |
+
+`label:setWrapMode()` n’accepte volontairement pas exactement les mêmes valeurs
+que `textView:setWrapMode()`. Pour un label, on désactive le retour avec
+`setWrap(false)` et le mode correspond à `PangoWrapMode`. Le TextView continue
+d’accepter `"none"|"char"|"word"|"word-char"` via `GtkWrapMode`. Cette
+distinction est nécessaire car les deux énumérations natives n’emploient pas
+les mêmes valeurs numériques.
+
+`label:setText()` ne modifie que le texte : le retour à la ligne, son mode et
+`xalign` restent configurés. Les classes CSS et le CSS applicatif continuent à
+s’appliquer normalement au label, notamment pour la couleur, la taille et la
+graisse de police, le soulignement et le barré. Un argument invalide provoque
+une erreur Lua selon les mêmes conventions que les autres setters GUI.
 
 ## Entry : saisie de texte sur une ligne
 
@@ -489,7 +526,7 @@ opérations non mutantes.
 Les opérations GTK sont réservées au thread principal. Une session GUI vivante
 et une session `babet.curses` active sont mutuellement exclusives. `gui.run()`
 possède la boucle interactive principale jusqu'à la destruction de toutes les
-fenêtres ou l'appel à `gui.quit()`. `gui.run()` doit être lancé depuis le thread
+fenêtres et la fin des sélecteurs en attente, ou l'appel à `gui.quit()`. `gui.run()` doit être lancé depuis le thread
 Lua principal lui-même ; un appel depuis une coroutine Lua est refusé même si
 cette coroutine est reprise sur le thread OS principal de Babet.
 
@@ -553,7 +590,7 @@ ni base de données. Les positions et contenus sont sauvegardés par l'applicati
 | `gui.progressBar()` | `setFraction(0..1)`, `getFraction()`, `setShowText(bool)`, `setText(label)`, `onClick(fn ou nil)` | Progression calculée ou manuelle, contrôlée par l'application. |
 | `gui.box()` | `reorder(child, previousChild ou nil)` | Changement d’ordre natif, sans démonter les enfants. |
 | `gui.expander {label = "...", expanded = false}` | `add(child)`, `remove(child)`, `clear()`, `setExpanded(bool)`, `getExpanded()`, `setText(label)` | Bloc repliable, **un seul enfant** GTK (utiliser `gui.box()` pour plusieurs éléments). |
-| Widget non interactif : label, box, drawingArea, fixed, progressBar | `onDrag(function(phase, x, y) ... end ou nil)` | Geste de déplacement, déclenché sur un **élément-poignée**. |
+| Widget non interactif : label, box, drawingArea, fixed, progressBar, picture | `onDrag(function(phase, x, y) ... end ou nil)` | Geste de déplacement, déclenché sur un **élément-poignée**. |
 | Tous les widgets | `setSizeRequest(width, height)` | Taille minimale demandée (dimension `-1` : automatique). |
 
 `onDrag` déclenche les phases `"begin"` (coordonnées locales du début), puis
@@ -676,14 +713,14 @@ assert(list:reorder(last, nil))
 Depuis Babet **2.31.0**, le DND natif est disponible en complément de `onDrag()` :
 
 - `poignee:setDragData(identifiant_ou_nil)` installe un **`GtkDragSource`** sur
-  un widget non interactif (`label`, `box`, `drawingArea`, `fixed` ou
-  `progressBar`). La chaîne UTF-8 est la donnée applicative ; `nil` désactive
+  un widget non interactif (`label`, `box`, `drawingArea`, `fixed`,
+  `progressBar` ou `picture` depuis la 2.33). La chaîne UTF-8 est la donnée applicative ; `nil` désactive
   la source sans reconstruire le widget. Les octets NUL internes et l’UTF-8
   invalide sont refusés. MOVE reste l’action par défaut et l’aperçu par défaut
   montre la poignée elle-même, jamais l’identifiant transporté.
 - `cible:onDrop(fonction_ou_nil)` installe un **`GtkDropTarget`** natif sur tout
   widget non-fenêtre. Le callback protégé reçoit
-  `(phase, payload, x, y, action)` pour `"enter"`, `"motion"`, `"drop"` et
+  `(phase, payload, x, y, action, kind)` pour `"enter"`, `"motion"`, `"drop"` et
   `"leave"`. `action` vaut la préférence courante `"copy"`, `"move"` ou
   `"link"` ; `leave` reçoit nil pour payload/coordonnées/action. Pendant le
   survol, le backend peut ne pas avoir encore préchargé la chaîne : `payload`
@@ -713,7 +750,16 @@ Depuis Babet **2.31.0**, le DND natif est disponible en complément de `onDrag()
   et `setDropActions(action_ou_table)` activent toute combinaison de `copy`,
   `move` et `link`. Ctrl préfère COPY, Maj préfère MOVE, et Ctrl+Maj préfère LINK
   lorsque la cible l’autorise ; le callback peut remplacer cette préférence en
-  renvoyant une action activée pendant `enter`/`motion`. Babet ne fait aucune copie/déplacement du modèle :
+  renvoyant une action activée pendant `enter`/`motion`. L’argument `action` ne
+  propose qu’une action également permise par la source, y compris lorsqu’elle
+  vient d’une autre application. Pendant `drop`, il vaut l’action réellement
+  transmise à la source au dernier survol. GTK retient la première cible qui
+  accepte : à l’entrée, le parent passe avant l’enfant ; pendant `motion`,
+  l’enfant passe avant le parent. L’action reçue au dépôt peut donc différer de
+  celle que la cible a renvoyée, par exemple quand on relâche juste après être
+  entré dans la fenêtre. Si la cible qui reçoit le dépôt n’autorise
+  pas cette action, `action` vaut `nil` et le dépôt est refusé quelle que soit
+  la valeur renvoyée. Babet ne fait aucune copie/déplacement du modèle :
   l’application conserve la responsabilité de l’opération réelle.
 - `setDragIcon(widget_ou_nil)` choisit un widget vivant comme aperçu natif du
   glisser. Au début de chaque glisser, un aperçu non affiché par GTK, masqué,
@@ -735,8 +781,8 @@ séquence lorsque le glisser-déposer natif prend la main au seuil de déplaceme
 
 Avec des cibles imbriquées, le parent reçoit aussi `enter`/`motion` pendant le
 survol de l’enfant. Si le parent accepte le survol, l’enfant peut recevoir `drop`
-même après avoir renvoyé `false` pendant le survol. **Toujours revalider le dépôt
-final.** Un `false` dans le `drop` de l’enfant ne transmet pas le dépôt au parent ;
+même après avoir renvoyé `false` pendant le survol ; son `action` est alors celle
+retenue par GTK, ici celle du parent. **Toujours revalider le dépôt final.** Un `false` dans le `drop` de l’enfant ne transmet pas le dépôt au parent ;
 seule la désactivation de l’enfant par `onDrop(nil)` le rend transparent.
 
 **Ne pas attendre `leave` après un dépôt.** GTK peut terminer un dépôt accepté
@@ -867,3 +913,254 @@ un callback protégé avant une fermeture demandée par l’utilisateur ; renvoy
 explicite.
 Si le callback de demande de fermeture lève une erreur, Babet la signale et
 laisse la fermeture se poursuivre.
+
+## Images et sélecteurs de fichiers
+
+Ces ajouts arrivent avec **Babet 2.33.0**. `gui.image(nomIcone)`
+reste réservé aux icônes du thème ; `gui.picture` affiche une image de fichier.
+Les nouveaux symboles sont optionnels : un GTK ancien conserve les API existantes.
+
+| API | GTK minimal |
+|---|---|
+| `gui.picture()` vide, `setFile(nil)`, `setCanShrink`, `getIntrinsicSize`, `setAlternativeText` | 4.0 |
+| `gui.picture{file=...}`, `picture:setFile(chemin)` | 4.6 |
+| Option explicite `contentFit`, `picture:setContentFit(...)` | 4.8 |
+| `gui.openFile`, `gui.saveFile` et leurs options | 4.10 |
+
+### Images de fichiers
+
+```lua
+local image, err = gui.picture {
+    file = "/home/julien/Images/photo.jpg", -- facultatif
+    contentFit = "contain",               -- facultatif ; explicite : GTK 4.8
+    canShrink = true,                      -- valeur par défaut
+}
+assert(image, err)
+assert(image:setAlternativeText("Photographie du jardin"))
+assert(image:setHExpand(true))
+```
+
+Sans `file`, le widget est vide. Sans `contentFit`, le comportement natif conserve
+les proportions (`contain`), y compris sur GTK 4.0–4.6. Fournir explicitement
+`contentFit = "contain"` nécessite néanmoins GTK 4.8.
+
+| Méthode | Résultat |
+|---|---|
+| `picture:setFile(chemin_ou_nil)` | `true, nil` ou `nil, err` |
+| `picture:setContentFit("fill" / "contain" / "cover" / "scale-down")` | `true, nil` ou `nil, err` |
+| `picture:setCanShrink(bool)` | `true, nil` |
+| `picture:getIntrinsicSize()` | largeur, hauteur en pixels ; `0, 0` si vide |
+| `picture:setAlternativeText(texte_ou_nil)` | `true, nil` |
+
+`setFile` charge la nouvelle texture avant de remplacer l'ancienne : un fichier
+illisible ou un format non pris en charge laisse l'image précédente intacte.
+`nil` vide l'image et libère sa référence à la texture. Le chargement est
+synchrone. PNG et JPEG sont pris en charge ; les formats supplémentaires, par
+exemple WebP, GIF ou SVG, dépendent de GTK et des chargeurs installés. L'image
+est statique ; les animations ne sont pas exposées. Le décodage natif n'est pas
+isolé dans un processus séparé.
+
+`fill` étire, `contain` conserve l'image entière et ses proportions, `cover`
+remplit la surface avec recadrage, `scale-down` évite l'agrandissement. Avec le
+mode par défaut, dans une Box verticale de largeur imposée, sans expansion
+verticale ni hauteur forcée, la hauteur demandée suit le rapport de l'image.
+`getIntrinsicSize()` donne les dimensions du fichier ; `getSize()` celles de la
+dernière mise en page du widget.
+
+Les méthodes communes (classes CSS, marges, taille, visibilité, sensibilité,
+infobulles, `onPointer`, `pick`, etc.) sont disponibles. `picture` est accepté
+comme poignée non interactive par `onDrag` et `setDragData`. Le DND par chaînes
+conserve son contrat actuel.
+
+### Sélecteurs asynchrones
+
+```lua
+local started, err = gui.openFile({
+    title = "Choisir une image",
+    parent = window,                 -- facultatif, fenêtre Babet vivante
+    folder = "/home/julien/Images",  -- facultatif
+    multiple = false,                -- openFile seulement
+    filters = {
+        {name = "Images", patterns = {"*.png", "*.jpg"}, mimeTypes = {"image/*"}},
+    },
+}, function(path, error_message)
+    if error_message then
+        print(error_message)
+    elseif path then
+        local ok, load_error = image:setFile(path)
+        if not ok then print(load_error) end
+    end
+end)
+if not started then print(err) end
+```
+
+`gui.saveFile(opts, callback)` accepte les mêmes options sauf `multiple`, qui
+est refusée. Elle accepte `name = "image.png"` pour proposer un nom initial.
+`openFile` refuse `name`. La table d'options et le callback sont obligatoires ;
+les options sont facultatives. Chaque filtre accepte `name`, `patterns` et
+`mimeTypes`, avec des listes denses. Textes et filtres utilisent UTF-8 ; les
+chemins utilisent les octets natifs du système. Mauvaises arités, types
+incorrects, options inconnues, NUL et textes UTF-8 invalides lèvent une erreur Lua.
+
+Les deux fonctions renvoient immédiatement `true, nil` au démarrage ou
+`nil, err` en cas d'échec, notamment `"babet.gui: requires GTK 4.10"`. Aucun repli sur
+GtkFileChooser n'est effectué. Le callback reçoit :
+
+- `callback(chemin_absolu)` pour une sélection simple ;
+- `callback({chemin1, chemin2, ...})` avec `multiple = true`, dans l'ordre du modèle GTK ;
+- `callback(nil)` si l'utilisateur annule ;
+- `callback(nil, err)` en cas d'erreur. Un fichier sans chemin local donne
+  `"babet.gui: file is not local"` ; en sélection multiple, l'ensemble est alors refusé.
+
+Le sélecteur est toujours modal : tant qu'il est ouvert, GTK bloque la saisie
+dans toutes les fenêtres Babet, avec ou sans `parent`. `parent` rattache le
+sélecteur à cette fenêtre et l'annule si elle est détruite. Sans parent,
+`gui.run()` peut démarrer avec seulement un sélecteur en attente. La boucle
+continue tant qu'il reste une fenêtre ou une sélection en cours, sauf appel à
+`gui.quit()`. Les callbacks s'exécutent au plus une fois sur le thread Lua
+principal, même si le démarrage vient d'une coroutine. Ils peuvent modifier les
+widgets, mais ne peuvent pas céder avec `yield`. Les erreurs, y compris pendant
+la préparation des arguments Lua, sont contenues et signalées sur stderr.
+
+La destruction du parent, la sortie de `gui.run()` ou la fermeture de l'état Lua
+annule les opérations concernées **sans callback applicatif**. Babet libère ses
+références natives ; une réponse GIO tardive est consommée et libérée sans
+accéder à l'ancien état Lua. L'annulation par l'utilisateur reste distincte et
+appelle bien `callback(nil)`.
+
+`saveFile` choisit seulement un chemin : **Babet n'écrit aucun fichier**. GTK
+confirme la sélection d'un fichier existant ; l'application reste responsable
+de l'écriture, de ses erreurs et de sa politique de remplacement.
+Exemple complet : `examples/gui_picture/main.lua`.
+
+## Dépôt de fichiers et tags TextView
+
+### Fichiers du gestionnaire de fichiers — GTK 4.6
+
+`cible:setDropTypes(types)` accepte une liste dense contenant `"text"`,
+`"files"`, ou les deux (une seule fois chacun). Par défaut : `{"text"}`.
+Cette méthode configure les formats ; installer le callback avec `onDrop`.
+Elle renvoie `true, nil`, ou `nil, err` si les listes de fichiers sont
+indisponibles (`"babet.gui: requires GTK 4.6 (file drops)"`). Les arguments incorrects lèvent une erreur
+Lua. Changer les types pendant `drop` renvoie `nil, err` ; les changer pendant
+le survol refuse le transfert courant et s'applique au suivant. Le réglage
+survit à `onDrop(nil)` puis à la réactivation du callback.
+
+Le callback protégé de `onDrop` reçoit maintenant six arguments :
+`(phase, payload, x, y, action, kind)` :
+
+- `kind == "text"` : la donnée reste la chaîne UTF-8 habituelle.
+- `kind == "files"` : la donnée est une liste dense de chemins locaux absolus,
+  dans l'ordre fourni par GTK. Les chemins conservent les octets natifs du
+  système de fichiers. Les URI non locales sont ignorées ; si aucun chemin
+  local ne reste, le dépôt est refusé sans fournir une liste vide au callback.
+- Pendant `enter`/`motion`, `payload` peut encore être `nil`. `kind` vaut le
+  seul type configuré, ou `nil` pour une cible mixte tant que GTK ne fournit pas
+  la donnée. Pendant `drop`, le type et la donnée sont connus.
+- Une cible mixte demande d'abord les fichiers : une liste venant d'un
+  gestionnaire de fichiers arrive avec `kind == "files"`, même si la source
+  propose aussi sa forme texte. Un navigateur propose souvent un lien sous forme
+  de liste d'URI : si elle ne contient aucun chemin local, la cible mixte la
+  reçoit avec `kind == "text"` (une URI par ligne). Une cible `{"files"}` seule
+  refuse ce lien.
+- Pendant `leave`, donnée, coordonnées et action restent nil. Le type suit les
+  formats configurés (nil pour une cible mixte) : il ne permet pas de retrouver
+  le transfert précédent. Conserver dans l'application l'état de survol utile.
+
+Les callbacks ayant un nombre fixe d'arguments restent compatibles. Ceux qui
+utilisent `...` reçoivent maintenant un sixième argument. Les règles sur les
+actions, cibles imbriquées, refus, erreurs de callback et nettoyage des
+indicateurs restent identiques. Les listes sont copiées avant l'appel Lua : le
+callback peut les conserver ou détruire des widgets sans les invalider.
+
+**Pour importer des fichiers, choisir explicitement COPY.** MOVE reste la
+valeur par défaut pour compatibilité ; accepter un MOVE externe peut demander
+à l'application source de supprimer ses originaux. Babet transmet uniquement
+des chemins et ne copie, ne déplace ni ne lie les fichiers. Valider et importer
+les données dans `drop` avant de confirmer l'acceptation.
+
+```lua
+assert(cible:setDropTypes({"files"}))
+assert(cible:setDropActions("copy"))
+assert(cible:onDrop(function(phase, chemins, x, y, action, kind)
+    if phase == "drop" then
+        if kind ~= "files" or action ~= "copy" then return false end
+        for _, chemin in ipairs(chemins) do print("Sélection :", chemin) end
+        -- Effectuer ici l'import de l'application ; renvoyer false si échec.
+    end
+    return true
+end))
+```
+
+### Tags TextView — GTK 4.0
+
+Les tags appliquent un style dans le tampon natif GTK. Ils n'analysent pas de
+balisage et n'ouvrent pas les URL. `createTag`, `applyTag`, `removeTag` et
+`removeAllTags` renvoient `true, nil` ou `nil, err`. Toutes les nouvelles
+méthodes TextView nécessitent leur groupe de symboles GTK optionnels ; si
+celui-ci manque, elles renvoient `nil, "babet.gui: requires GTK 4.0 (TextView tags)"`.
+
+`tv:createTag(nom, props)` définit un nom de tag UTF-8 non vide. Les propriétés
+suivantes sont toutes facultatives :
+
+| Propriété | Valeur |
+| --- | --- |
+| `foreground`, `background` | Couleur `"#rrggbb"` |
+| `underline`, `strikethrough` | Booléen |
+| `weight` | Entier de 100 à 900 |
+| `style` | `"normal"` ou `"italic"` |
+| `scale` | Nombre positif fini ; 1 conserve la taille courante |
+
+Un nom déjà défini ou une propriété inconnue renvoie `nil, err`. Une mauvaise
+arité, un mauvais type, un nom vide, NUL, un nom UTF-8 invalide ou une valeur de
+propriété incorrecte lèvent une erreur Lua. Les propriétés omises ne remplacent
+pas les autres styles. Les tags superposés suivent les priorités GTK : les tags
+définis plus tard ont une priorité supérieure.
+
+Les positions sont des **indices d'octets Lua, à partir de 1, bornes incluses**,
+comme ceux de `string.find`. `debut` doit pointer sur le premier octet d'un
+caractère UTF-8 et `fin` sur son dernier octet. Un indice isolé désigne le
+premier octet du caractère. Une position hors limites ou qui coupe une séquence
+UTF-8 renvoie `nil, err` ; les plages inversées ou vides sont refusées. Un tampon
+vide n'a aucun indice valide. Les indices portent sur le texte courant : il
+faut les recalculer après modification.
+
+| Méthode | Résultat / effet |
+| --- | --- |
+| `tv:applyTag(nom, debut, fin)` | Applique le tag défini sur cette plage |
+| `tv:removeTag(nom, debut, fin)` | Retire seulement ce tag sur cette plage ; un segment peut être scindé |
+| `tv:removeAllTags()` | Retire toutes les applications et conserve les définitions |
+| `tv:tagsAt(indice)` | Liste des noms présents, dans l'ordre de définition ; vide si aucun |
+| `tv:tagRange(nom, indice)` | Bornes inclusives en octets du segment continu qui contient le caractère ; un seul `nil` si absent |
+| `tv:offsetAt(x, y)` | Indice du premier octet du caractère sous le point ; un seul `nil` hors du texte |
+
+Un nom inconnu renvoie `nil, err`. `setText()` retire les applications de tags
+mais garde leurs définitions, même si le nouveau texte est identique. Les
+éditions utilisateur suivent les règles natives de GTK. `offsetAt` prend des
+coordonnées locales au TextView, comme son `onPointer`, et les convertit vers
+le tampon en tenant compte du défilement. Il utilise la dernière mise en page :
+l'appeler après allocation, pas immédiatement après un changement de layout.
+Il fonctionne sur un TextView non éditable et insensible. Un widget insensible
+ne reçoit cependant pas lui-même les événements pointeur : effectuer la requête
+depuis une autre source adaptée, après traduction des coordonnées. Les
+coordonnées négatives ou extérieures renvoient nil ; les coordonnées non
+numériques ou non finies lèvent une erreur Lua.
+
+```lua
+local texte = "Café : https://example.org"
+local tv = assert(gui.textView {text = texte, editable = false})
+assert(tv:createTag("lien", {foreground = "#1565c0", underline = true}))
+local debut, fin = texte:find("https://example.org", 1, true)
+assert(tv:applyTag("lien", debut, fin))
+assert(tv:onPointer(function(phase, x, y, bouton)
+    if phase ~= "release" or bouton ~= 1 then return end
+    local indice = tv:offsetAt(x, y)
+    if not indice then return end
+    local a, b = tv:tagRange("lien", indice)
+    if a then print(tv:getText():sub(a, b)) end
+end))
+```
+
+Les mutations de tags sont interdites dans `onDraw`, comme les autres mutations
+de widgets ; les lectures sont permises. Ces tags n'ajoutent aucun état asynchrone.
+Exemple complet : `examples/gui_rich_text/main.lua`.

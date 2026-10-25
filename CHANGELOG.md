@@ -9,6 +9,61 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+## [2.33.0] - 2026-10-25
+
+### GUI — pictures, file choosers, file drops and TextView tags
+
+- Add `gui.picture` for image files: intrinsic size, content-fit modes, shrink
+  control, alternative text, common methods and non-interactive drag handles.
+  A failed load keeps the previous image.
+- Add asynchronous `gui.openFile` / `gui.saveFile`: initial folder and name,
+  parent, filters and multiple selection. A pending chooser keeps `gui.run()`
+  alive without a Babet window. Parent destruction, loop exit and Lua cleanup
+  cancel pending requests without late callbacks.
+- Add `label:setWrap(boolean)`, `label:setWrapMode("word"|"char"|"word-char")`
+  and `label:setXAlign(0..1)` for height-for-width note display. Label wrapping
+  maps to `PangoWrapMode`, separately from TextView's `GtkWrapMode`;
+  `setText()` preserves these settings.
+- Add `setDropTypes` with text and file-list formats. `onDrop` receives a sixth
+  `kind` argument; file payloads contain local absolute paths in native order,
+  with remote URI entries filtered out. A mixed target receives file lists with
+  `kind == "files"` and a link without a local path as text. Existing text
+  transfers and the default MOVE action remain compatible; file import examples
+  explicitly request COPY.
+- Add native TextView tags: define styling, apply and remove ranges, query
+  covering tags and contiguous segments, and hit-test a point. Positions use
+  inclusive Lua byte indices with UTF-8 validation; `setText` keeps definitions
+  and clears applications.
+- New optional GTK symbols: 4.6 for file textures and file drops, 4.8 for
+  explicit content fit, 4.10 for file choosers. Existing APIs keep their GTK 4.0
+  baseline.
+- Protect copied drop payloads and tag resources against callback/GC reentrancy,
+  Lua allocation failure and C++ allocation exceptions.
+- Error messages of the new APIs are in English like the rest of Babet and name
+  the failing function. `nil, err` failures start with `babet.gui:`, for example
+  `"babet.gui: requires GTK 4.10"`.
+
+### Fixes
+
+- Drags from another application (issue present in 2.32): `onDrop` only proposes
+  actions allowed by the source, and `drop` receives the action actually sent to
+  the source by the last hover, in GTK order (parent before child on enter,
+  child before parent during `motion`). Babet could announce MOVE while GTK
+  negotiated COPY, then reject `"copy"` returned at drop time. When the target
+  receiving the drop does not allow the negotiated action, `action` is `nil` and
+  the drop is refused.
+
+### Tests and documentation
+
+- Add fake GTK, real GTK/Xvfb and allocation-failure regressions for pictures,
+  choosers, wrapped labels, tags and drops, integrated in `run_tests.sh`. A new
+  test drags from a separate GTK4 process: files, link, nested targets and a
+  drop right after entering.
+- Bilingual documentation and the `gui_picture` and `gui_rich_text` examples.
+  The guide states that choosers are always modal and explains the action
+  received by a nested target.
+
+
 ## [2.32.0] - 2026-10-22
 
 ### GUI — GTK4 desktop application primitives

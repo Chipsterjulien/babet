@@ -70,6 +70,10 @@ def main():
             "css-load-string:", "css-provider:add", "css-provider:remove",
             "css-class:add:app-card", "css-class:add:primary",
             "css-class:remove:primary",
+            "label-wrap:true", "label-wrap:false",
+            "label-wrap-mode:0", "label-wrap-mode:1", "label-wrap-mode:2",
+            "label-xalign:0.000", "label-xalign:0.500", "label-xalign:1.000",
+            "label-state:wrap=1,mode=2,xalign=0.000",
         ]:
             assert marker in log, marker
         assert "css-load-data:" not in log, "modern CSS API should be preferred when available"

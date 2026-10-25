@@ -7,11 +7,110 @@
 namespace babet_gui::detail
 {
 
+// Public ABI layouts from GtkTextIter, GValue and GSList (GTK/GLib 4.0).
+// Fields are storage only: native APIs initialize and interpret them.
+struct TextIter {
+    void *dummy1; void *dummy2;
+    int dummy3, dummy4, dummy5, dummy6, dummy7, dummy8;
+    void *dummy9; void *dummy10;
+    int dummy11, dummy12, dummy13; void *dummy14;
+};
+struct NativeValue {
+    std::size_t type;
+    union Data { int i; unsigned int u; long l; unsigned long ul;
+                 long long i64; unsigned long long u64; float f; double d; void *p; } data[2];
+};
+struct NativeSList { void *data; NativeSList *next; };
+
+void * rich_gtk_text_tag_new(const char *a) noexcept;
+void * rich_gtk_text_buffer_get_tag_table(void *a) noexcept;
+int rich_gtk_text_tag_table_add(void *a, void *b) noexcept;
+void * rich_gtk_text_tag_table_lookup(void *a, const char *b) noexcept;
+void rich_gtk_text_buffer_get_bounds(void *a, TextIter *b, TextIter *c) noexcept;
+char * rich_gtk_text_buffer_get_text(void *a, const TextIter *b, const TextIter *c, int d) noexcept;
+void rich_gtk_text_buffer_get_iter_at_offset(void *a, TextIter *b, int c) noexcept;
+void rich_gtk_text_buffer_apply_tag(void *a, void *b, const TextIter *c, const TextIter *d) noexcept;
+void rich_gtk_text_buffer_remove_tag(void *a, void *b, const TextIter *c, const TextIter *d) noexcept;
+void rich_gtk_text_buffer_remove_all_tags(void *a, const TextIter *b, const TextIter *c) noexcept;
+int rich_gtk_text_iter_get_offset(const TextIter *a) noexcept;
+int rich_gtk_text_iter_has_tag(const TextIter *a, void *b) noexcept;
+int rich_gtk_text_iter_starts_tag(const TextIter *a, void *b) noexcept;
+int rich_gtk_text_iter_backward_to_tag_toggle(TextIter *a, void *b) noexcept;
+int rich_gtk_text_iter_forward_to_tag_toggle(TextIter *a, void *b) noexcept;
+void rich_gtk_text_view_window_to_buffer_coords(void *a, int b, int c, int d, int *e, int *f) noexcept;
+int rich_gtk_text_view_get_iter_at_location(void *a, TextIter *b, int c, int d) noexcept;
+void * rich_g_value_init(NativeValue *a, std::size_t b) noexcept;
+void rich_g_value_unset(NativeValue *a) noexcept;
+void rich_g_value_set_string(NativeValue *a, const char *b) noexcept;
+void rich_g_value_set_int(NativeValue *a, int b) noexcept;
+void rich_g_value_set_boolean(NativeValue *a, int b) noexcept;
+void rich_g_value_set_double(NativeValue *a, double b) noexcept;
+void rich_g_value_set_enum(NativeValue *a, int b) noexcept;
+void rich_g_object_set_property(void *a, const char *b, const NativeValue *c) noexcept;
+std::ptrdiff_t rich_g_utf8_pointer_to_offset(const char *a, const char *b) noexcept;
+void rich_gtk_drop_target_set_gtypes(void *a, const std::size_t *b, std::size_t c) noexcept;
+std::size_t rich_gdk_file_list_get_type() noexcept;
+const NativeSList * rich_gdk_file_list_get_files(void *a) noexcept;
+void * rich_g_value_get_boxed(const void *a) noexcept;
+int rich_g_type_check_value_holds(const void *a, std::size_t b) noexcept;
+bool gtk4_text_tags_available() noexcept;
+bool gtk4_drop_files_available() noexcept;
+std::size_t rich_type_from_name(const char *) noexcept;
+const void *rich_drop_value(void *) noexcept;
+
+bool rich_value_holds(const void *, std::size_t) noexcept;
+void rich_set_drop_types(void *, bool, bool) noexcept;
+
 using GtkCallback = void (*)();
 using GtkClosureNotify = void (*)(void *, void *);
 using GtkSourceCallback = int (*)(void *);
 using GtkDrawCallback = void (*)(void *, void *, int, int, void *);
 using GtkDestroyNotify = void (*)(void *);
+
+using GtkAsyncReadyCallback = void (*)(void *, void *, void *);
+void * files_gtk_picture_new() noexcept;
+void files_gtk_picture_set_paintable(void *a, void *b) noexcept;
+void * files_gtk_picture_get_paintable(void *a) noexcept;
+void files_gtk_picture_set_can_shrink(void *a, int b) noexcept;
+void files_gtk_picture_set_content_fit(void *a, int b) noexcept;
+void files_gtk_picture_set_alternative_text(void *a, const char *b) noexcept;
+int files_gdk_paintable_get_intrinsic_width(void *a) noexcept;
+int files_gdk_paintable_get_intrinsic_height(void *a) noexcept;
+void * files_gdk_texture_new_from_filename(const char *a, void **b) noexcept;
+void files_g_error_free(void *a) noexcept;
+void * files_gtk_file_dialog_new() noexcept;
+void files_gtk_file_dialog_set_title(void *a, const char *b) noexcept;
+void files_gtk_file_dialog_set_modal(void *a, int b) noexcept;
+void files_gtk_file_dialog_set_initial_folder(void *a, void *b) noexcept;
+void files_gtk_file_dialog_set_initial_name(void *a, const char *b) noexcept;
+void files_gtk_file_dialog_set_filters(void *a, void *b) noexcept;
+unsigned int files_gtk_dialog_error_quark() noexcept;
+void * files_g_cancellable_new() noexcept;
+void files_g_cancellable_cancel(void *a) noexcept;
+void * files_g_file_new_for_path(const char *a) noexcept;
+char * files_g_file_get_path(void *a) noexcept;
+char * files_g_file_get_uri(void *a) noexcept;
+void * files_gtk_file_filter_new() noexcept;
+std::size_t files_gtk_file_filter_get_type() noexcept;
+void files_gtk_file_filter_set_name(void *a, const char *b) noexcept;
+void files_gtk_file_filter_add_pattern(void *a, const char *b) noexcept;
+void files_gtk_file_filter_add_mime_type(void *a, const char *b) noexcept;
+void * files_g_list_store_new(std::size_t a) noexcept;
+void files_g_list_store_append(void *a, void *b) noexcept;
+unsigned int files_g_list_model_get_n_items(void *a) noexcept;
+void * files_g_list_model_get_item(void *a, unsigned int b) noexcept;
+void files_gtk_file_dialog_open(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept;
+void * files_gtk_file_dialog_open_finish(void *a, void *b, void **c) noexcept;
+void files_gtk_file_dialog_open_multiple(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept;
+void * files_gtk_file_dialog_open_multiple_finish(void *a, void *b, void **c) noexcept;
+void files_gtk_file_dialog_save(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept;
+void * files_gtk_file_dialog_save_finish(void *a, void *b, void **c) noexcept;
+bool gtk4_picture_available() noexcept;
+bool gtk4_texture_file_available() noexcept;
+bool gtk4_content_fit_available() noexcept;
+bool gtk4_file_dialog_available() noexcept;
+const char *gtk4_error_message(void *) noexcept;
+bool gtk4_dialog_dismissed(void *) noexcept;
 
 // Charge libgtk-4.so.1 et résout uniquement la surface GTK/GLib nécessaire au
 // binding courant. N'initialise pas GTK et ne modifie pas la locale.
@@ -81,6 +180,8 @@ unsigned int gtk4_drag_action_copy() noexcept;
 unsigned int gtk4_drag_action_move() noexcept;
 unsigned int gtk4_drag_action_link() noexcept;
 unsigned int gtk4_drop_target_selected_action(void *target) noexcept;
+unsigned int gtk4_drop_target_offered_actions(void *target) noexcept;
+void *gtk4_drop_target_current_drop(void *target) noexcept;
 void *gtk4_drop_target_drag(void *target) noexcept;
 unsigned int gdk4_drag_selected_action(void *drag) noexcept;
 bool gtk4_utf8_valid(const char *text, std::size_t length) noexcept;
@@ -129,6 +230,9 @@ void *gtk4_label_new(const char *text) noexcept;
 void *gtk4_image_new_from_icon_name(const char *icon_name) noexcept;
 void gtk4_image_set_from_icon_name(void *image, const char *icon_name) noexcept;
 void gtk4_label_set_text(void *label, const char *text) noexcept;
+void gtk4_label_set_wrap(void *label, bool wrap) noexcept;
+void gtk4_label_set_wrap_mode(void *label, int mode) noexcept;
+void gtk4_label_set_xalign(void *label, float alignment) noexcept;
 void *gtk4_button_new_with_label(const char *text) noexcept;
 void gtk4_button_set_label(void *button, const char *text) noexcept;
 void gtk4_button_set_icon_name(void *button, const char *icon_name) noexcept;

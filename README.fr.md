@@ -17,11 +17,17 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.32.0**. Voir le
+Version actuelle : **2.33.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.33.0 ajoute les [images et sélecteurs de fichiers natifs](docs/fr/modules/gui.md#images-et-sélecteurs-de-fichiers),
+le [dépôt de fichiers depuis d’autres applications et les tags TextView](docs/fr/modules/gui.md#dépôt-de-fichiers-et-tags-textview),
+ainsi que les labels repliés pour l’affichage des notes. Les dépôts indiquent
+l’action réellement négociée avec l’application source, y compris avec des
+cibles imbriquées. GTK 4 reste optionnel et chargé à la demande.
 
 Babet 2.32.0 enrichit l’[API de bureau GTK4](docs/fr/modules/gui.md#primitives-pour-applications-de-bureau) avec volets séparés,
 menus et popovers contextuels, icônes du thème, événements pointeur/clavier,
