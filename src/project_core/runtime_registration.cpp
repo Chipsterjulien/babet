@@ -46,6 +46,7 @@
 #include "../lua_bindings/isfile.hpp"
 #include "../lua_bindings/json.hpp"
 #include "../lua_bindings/link.hpp"
+#include "../lua_bindings/lockFile.hpp"
 #include "../lua_bindings/listFiles.hpp"
 #include "../lua_bindings/lua_utils.hpp"
 #include "../lua_bindings/memoryUtils.hpp"
@@ -342,6 +343,9 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
 
     lua_pushcfunction(L, babet_lua_boundary<lua_writeFileAtomic>);
     lua_setfield(L, -2, "writeFileAtomic");
+
+    lua_pushcfunction(L, babet_lua_boundary<lua_lockFile>);
+    lua_setfield(L, -2, "lockFile");
 
     lua_pushcfunction(L, babet_lua_boundary<lua_createFileIterator>);
     lua_setfield(L, -2, "createFileIterator");

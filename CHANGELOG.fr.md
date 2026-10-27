@@ -9,6 +9,24 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+## [2.34.0] - 2026-10-27
+
+### Verrou exclusif de fichiers
+
+- Ajout de `babet.lockFile(path)`, indépendant de GTK, avec `flock` exclusif
+  sans attente : poignée ou `nil, "locked"` en cas de contention.
+- `lock:write(text)` met les métadonnées à jour sur le même inode ; aucun PID
+  automatique. `close()`, `<close>`, GC et fermeture de l'état Lua libèrent
+  la poignée. Le fichier doit rester permanent.
+- `O_CLOEXEC` et nettoyage dans l'enfant après `fork()` sans `LOCK_UN` : les
+  programmes lancés ne gardent pas le verrou du parent.
+- Tests de contention interprocessus, alias, workers, SIGKILL, héritage,
+  allocations Lua et erreurs d'écriture intégrés à `run_tests.sh`.
+- Les écritures de métadonnées ne gardent pas le verrou interne du registre ;
+  des tests bloquent l’écriture et vérifient que les autres acquisitions et
+  les appels à `fork()` continuent.
+
+
 ## [2.33.0] - 2026-10-25
 
 ### GUI — images, sélecteurs de fichiers, dépôt de fichiers et tags TextView

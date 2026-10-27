@@ -38,6 +38,7 @@ Le module FS couvre :
   - [`joinPath`](#joinpath)
 - [Créer, supprimer, renommer et lier](#fs-actions)
   - [`touch`](#touch)
+  - [`lockFile` — verrou exclusif](file-lock.md)
   - [`writeFileAtomic`](write-file-atomic.md)
   - [`mkdir`](#mkdir)
   - [`remove`](#remove)

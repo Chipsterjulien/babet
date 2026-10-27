@@ -16,11 +16,16 @@ in C++23. Embeds OpenSSL, SQLite, miniz, libarchive, zlib, liblzma, libbz2,
 libzstd, RE2, Abseil, nlohmann/json, cpp-httplib, and tomlplusplus
 statically — one binary, no system dependencies beyond glibc.
 
-Current release: **2.33.0**. See the
+Current release: **2.34.0**. See the
 [English changelog](CHANGELOG.md) or the
 [French changelog](CHANGELOG.fr.md).
 
 [Architecture overview](ARCHITECTURE.md) explains the roles of `--create-exe`, native plugins, `libbabet` and the optional system GUI.
+
+Babet 2.34.0 adds [`babet.lockFile`](docs/en/modules/file-lock.md) for cooperating
+processes that need one writer per data directory. Locks are exclusive and
+nonblocking, support in-place metadata writes, and are cleaned up on close,
+Lua state shutdown and process exit. GTK is not required.
 
 Babet 2.33.0 adds [file pictures and native file dialogs](docs/en/modules/gui.md#pictures-and-file-dialogs),
 [file drops from other applications and TextView tags](docs/en/modules/gui.md#file-drops-and-textview-tags),

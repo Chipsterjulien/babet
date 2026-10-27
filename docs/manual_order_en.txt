@@ -26,6 +26,7 @@ docs/en/modules/pipeline.md
 docs/en/modules/fs.md
 docs/en/modules/gui.md
 docs/en/modules/write-file-atomic.md
+docs/en/modules/file-lock.md
 docs/en/modules/http.md
 docs/en/modules/inotify.md
 docs/en/modules/json.md

@@ -15,7 +15,12 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for **Babet 2.33.0**.
+Documentation for **Babet 2.34.0**.
+
+Babet 2.34.0 adds [`babet.lockFile`](modules/file-lock.md) for cooperating
+processes that need one writer per data directory. Locks are exclusive and
+nonblocking, support in-place metadata writes, and are cleaned up on close,
+Lua state shutdown and process exit. GTK is not required.
 
 Babet 2.33.0 adds [file pictures and native file dialogs](modules/gui.md#pictures-and-file-dialogs),
 [file drops from other applications and TextView tags](modules/gui.md#file-drops-and-textview-tags),
@@ -52,6 +57,7 @@ self-test harness now contains 45 reachable suites.
 
 | I need to… | Chapter | What it contains |
 | --- | --- | --- |
+| reserve a directory for one writer process | [`lockFile — exclusive file locks`](modules/file-lock.md) | `flock`, in-place metadata, cleanup and process inheritance |
 | create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find` with `xdev` confinement, `copyTree`, permissions, and checksums |
 | atomically publish configuration or binary data | [`writeFileAtomic — atomic writing`](modules/write-file-atomic.md) | default no-overwrite, permissions, durability, path confinement, concurrency, and workers |
 | parse script arguments | [`Argparse — command line`](modules/argparse.md) | flags, options, positional arguments, defaults, choices, and conversion |

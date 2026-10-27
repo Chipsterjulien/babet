@@ -16,7 +16,7 @@ local expected = {
     getBasename=true, getExtension=true, getFilename=true,
     getMemoryUsage=true, getDetailedMemoryUsage=true, getPath=true,
     helloThere=true, isDir=true, isdir=true, isFile=true, isfile=true,
-    link=true, listFiles=true, md5sum=true, mergeTables=true, mkdir=true,
+    link=true, lockFile=true, listFiles=true, md5sum=true, mergeTables=true, mkdir=true,
     moveTree=true, joinPath=true, remove=true, rename=true, rmdir=true,
     rmdirAll=true, setMode=true, getMode=true, sha1sum=true,
     sha3_256sum=true, sha3_512sum=true, sha256sum=true, sha512sum=true,

@@ -17,7 +17,13 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de **Babet 2.33.0**.
+Documentation de **Babet 2.34.0**.
+
+Babet 2.34.0 ajoute [`babet.lockFile`](modules/file-lock.md) pour les processus
+coopérants qui ont besoin d’un seul écrivain par dossier de données. Ces
+verrous exclusifs sans attente permettent d’écrire des métadonnées en place
+et sont libérés à la fermeture, à la destruction de l’état Lua ou à la fin
+du processus. GTK n’est pas nécessaire.
 
 Babet 2.33.0 ajoute les [images et sélecteurs de fichiers natifs](modules/gui.md#images-et-sélecteurs-de-fichiers),
 le [dépôt de fichiers depuis d’autres applications et les tags TextView](modules/gui.md#dépôt-de-fichiers-et-tags-textview),
@@ -54,6 +60,7 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 
 | Je cherche à… | Chapitre à consulter | Ce que j’y trouverai |
 | --- | --- | --- |
+| réserver un dossier à un seul processus écrivain | [`lockFile — verrou exclusif`](modules/file-lock.md) | `flock`, métadonnées en place, fermeture et héritage des processus |
 | créer, supprimer, lister, rechercher, copier ou déplacer des fichiers | [`FS — système de fichiers`](modules/fs.md) | fichiers, dossiers, chemins, symlinks, `listFiles`, `find` avec confinement `xdev`, `copyTree`, permissions et checksums |
 | publier atomiquement une configuration ou un fichier binaire | [`writeFileAtomic — écriture atomique`](modules/write-file-atomic.md) | refus d’écrasement par défaut, permissions, durabilité, confinement des chemins, concurrence et workers |
 | lire les arguments d’un script | [`Argparse — ligne de commande`](modules/argparse.md) | flags, options, arguments positionnels, valeurs par défaut, choix et conversions |

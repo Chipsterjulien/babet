@@ -497,6 +497,12 @@ if [ -z "${PREBUILT_BINARY}" ]; then
     fi
 fi
 
+print_preflight_stage "Régression — verrous de fichiers, processus et workers"
+if ! python3 "${SCRIPT_DIR}/tools/test_file_lock.py" "${BINARY}"; then
+    echo "ÉCHEC : la régression des verrous de fichiers a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Régression — packaging --create-exe"
 if ! bash "${SCRIPT_DIR}/tests/test_packaging.sh" "${BINARY}"; then
     echo "ÉCHEC : les contrats de packaging --create-exe ont échoué."
@@ -623,6 +629,10 @@ case "${SANITIZER_MODE}" in
     ASAN_UBSAN) OOM_ARGS+=(--sanitizers) ;;
     UBSAN) OOM_ARGS+=(--ubsan) ;;
 esac
+if ! bash "${SCRIPT_DIR}/tools/test_file_lock_native.sh" "${OOM_ARGS[@]}"; then
+    echo "ÉCHEC : la régression native flock/fork/mémoire a échoué."
+    exit 1
+fi
 if ! bash "${SCRIPT_DIR}/tools/test_lua_longjmp_oom.sh" "${OOM_ARGS[@]}"; then
     echo "ÉCHEC : le test OOM Lua / RAII C++ a échoué."
     exit 1

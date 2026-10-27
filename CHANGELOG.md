@@ -9,6 +9,23 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+## [2.34.0] - 2026-10-27
+
+### Exclusive file locks
+
+- Add GTK-independent `babet.lockFile(path)` using nonblocking exclusive
+  `flock`: a handle on success or `nil, "locked"` on contention.
+- `lock:write(text)` updates metadata on the same inode; no automatic PID.
+  `close()`, `<close>`, GC and Lua state cleanup release handles. Keep the
+  lock file permanently.
+- `O_CLOEXEC` and fork-child cleanup without `LOCK_UN` prevent launched
+  programs from retaining their parent's lock.
+- Interprocess contention, aliases, workers, SIGKILL, descriptor inheritance,
+  Lua allocation and write-failure regressions run through `run_tests.sh`.
+- Metadata writes do not hold the process-wide registry gate; blocked-write
+  tests check that independent lock operations and forks keep progressing.
+
+
 ## [2.33.0] - 2026-10-25
 
 ### GUI — pictures, file choosers, file drops and TextView tags

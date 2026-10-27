@@ -17,11 +17,17 @@ liblzma, libbz2, libzstd, RE2, Abseil, nlohmann/json, cpp-httplib et
 tomlplusplus sont liés statiquement : un seul binaire, sans dépendance système
 autre que glibc.
 
-Version actuelle : **2.33.0**. Voir le
+Version actuelle : **2.34.0**. Voir le
 [journal des modifications français](CHANGELOG.fr.md) ou le
 [changelog anglais](CHANGELOG.md).
 
 La [vue d'ensemble de l'architecture](ARCHITECTURE.fr.md) résume les rôles de `--create-exe`, des plugins natifs, de `libbabet` et de la GUI système optionnelle.
+
+Babet 2.34.0 ajoute [`babet.lockFile`](docs/fr/modules/file-lock.md) pour les processus
+coopérants qui ont besoin d’un seul écrivain par dossier de données. Ces
+verrous exclusifs sans attente permettent d’écrire des métadonnées en place
+et sont libérés à la fermeture, à la destruction de l’état Lua ou à la fin
+du processus. GTK n’est pas nécessaire.
 
 Babet 2.33.0 ajoute les [images et sélecteurs de fichiers natifs](docs/fr/modules/gui.md#images-et-sélecteurs-de-fichiers),
 le [dépôt de fichiers depuis d’autres applications et les tags TextView](docs/fr/modules/gui.md#dépôt-de-fichiers-et-tags-textview),
