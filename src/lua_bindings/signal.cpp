@@ -1,3 +1,4 @@
+#include "callback_errors.hpp"
 // =====================================================================
 #include "lua_utils.hpp"
 // signal.cpp — implémentation des bindings signaux POSIX
@@ -395,15 +396,12 @@ void signal_dispatch_pending(lua_State *L)
 
             if (lua_isfunction(L, -1))
             {
-                // pcall pour ne pas propager une erreur du callback.
-                // Les handlers POSIX n'ont pas de mécanisme d'erreur
-                // propre : faire échouer le programme parce que le
-                // callback a un bug est pire que d'avaler l'erreur
-                // silencieusement. Le user qui veut savoir doit
-                // entourer son code de pcall lui-même.
-                if (lua_pcall(L, 0, 0, 0) != 0)
+                // Contenir l'erreur du callback et la signaler avec sa
+                // traceback via gui.onError, ou sur stderr par défaut.
+                if (babet_callbacks::pcall(L,0,0) != 0)
                 {
-                    lua_pop(L, 1); // pop le message d'erreur
+                    babet_callbacks::report(L, "babet.signal callback error: ");
+                    lua_pop(L,1); // consume reported error
                 }
             }
             else

@@ -11,6 +11,8 @@
 # --- Index + Pour démarrer --------------------------------------
 docs/fr/README.md
 docs/fr/getting-started.md
+docs/fr/modules/runtime.md
+docs/fr/runtime-exit.md
 docs/fr/security.md
 
 # --- Modules ----------------------------------------------------

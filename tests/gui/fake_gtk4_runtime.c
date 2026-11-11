@@ -123,6 +123,7 @@ typedef struct FakeWidget {
     FakeCallback close_request_cb;
     void *close_request_data;
     FakeClosureNotify close_request_destroy;
+    int in_close_request; /* GtkWindowPrivate.in_emit_close_request */
     FakeCallback drag_source_cb[3]; /* begin, end, cancel */
     void *drag_source_data[3];
     FakeClosureNotify drag_source_destroy[3];
@@ -258,6 +259,10 @@ static DragSourceEndSignal as_drag_source_end_signal(FakeCallback cb)
 static DragSourceCancelSignal as_drag_source_cancel_signal(FakeCallback cb)
 { DragSourceCancelSignal typed = NULL; memcpy(&typed, &cb, sizeof(typed)); return typed; }
 
+static void free_widget_storage(FakeWidget *w) {
+    for(size_t i=0;i<widget_count;++i)if(widgets[i]==w){widgets[i]=NULL;break;}
+    free(w->text);free(w);
+}
 static void destroy_widget(FakeWidget *w)
 {
     if (in_draw) { fputs("native destruction during drawing\n", stderr); abort(); }
@@ -368,11 +373,9 @@ static void destroy_widget(FakeWidget *w)
     if (w->kind == 6) log_line("destroy:drawingArea", NULL);
     if (w->kind == 15) log_line("destroy:progressBar", NULL);
     if (w->kind == 23) log_line("destroy:dropTarget", NULL);
-    for (size_t i = 0; i < widget_count; ++i) {
-        if (widgets[i] == w) { widgets[i] = NULL; break; }
-    }
-    free(w->text);
-    free(w);
+    /* GTK drops its toplevel reference, but signal/binding pins keep storage alive. */
+    if(w->kind==1 && w->refs>0 && --w->refs>0)return;
+    free_widget_storage(w);
 }
 
 static void set_text(FakeWidget *w, const char *text)
@@ -389,7 +392,7 @@ int gtk_init_check(void) { log_line("init_check", NULL); return 1; }
 
 void *gtk_window_new(void) { return make_widget(1, NULL); }
 void gtk_window_set_title(void *p, const char *t) { (void)p; log_line("title:", t); }
-void gtk_window_set_default_size(void *p, int x, int y) { (void)p; (void)x; (void)y; }
+void gtk_window_set_default_size(void *p,int x,int y) { FakeWidget *w=p;w->width=x;w->height=y; }
 void gtk_window_set_child(void *parent_p, void *child_p)
 {
     FakeWidget *parent = (FakeWidget *)parent_p;
@@ -408,6 +411,29 @@ int gtk_widget_get_mapped(void *p)
     return 0;
 }
 void gtk_window_destroy(void *p) { destroy_widget((FakeWidget *)p); }
+void g_object_unref(void *p);
+/* Mirrors gtk_window_emit_close_request(): GTK guards the emission against
+ * re-entrancy and reports a nested request as handled. The caller holds a
+ * reference, so the storage outlives a handler that destroys the window. */
+static int emit_close_request(FakeWidget *w)
+{
+    if (w->in_close_request) return 1;
+    if (!w->close_request_cb) return 0;
+    w->in_close_request = 1;
+    const int handled = as_close_request_signal(w->close_request_cb)(w, w->close_request_data);
+    w->in_close_request = 0;
+    return handled;
+}
+/* Mirrors gtk_window_close(): a no-op on a window that was never realized
+ * (never presented here) and while a close-request is already being emitted. */
+void gtk_window_close(void *p) {
+    FakeWidget *w=p;
+    if(!w->presented||w->in_close_request)return;
+    ++w->refs;
+    const int veto=emit_close_request(w);
+    if(w->alive&&!veto)destroy_widget(w);
+    g_object_unref(w);
+}
 
 void gtk_window_set_transient_for(void *p, void *parent) { (void)p; (void)parent; log_line("window-transient:", parent ? "set" : "clear"); }
 void gtk_window_set_modal(void *p, int modal) { ((FakeWidget *)p)->expanded = !!modal; log_line("window-modal:", modal ? "1" : "0"); }
@@ -1305,7 +1331,8 @@ void *g_object_ref_sink(void *p)
 void g_object_unref(void *p)
 {
     FakeWidget *w = (FakeWidget *)p;
-    if (!w || !w->alive) return;
+    if(!w)return;
+    if(!w->alive){if(--w->refs==0)free_widget_storage(w);return;}
     if (--w->refs == 0) destroy_widget(w);
 }
 unsigned long g_signal_connect_data(void *instance, const char *signal,
@@ -1679,9 +1706,11 @@ int g_main_context_iteration(void *context, int may_block)
             FakeWidget *w = widgets[i];
             if (w && w->alive && w->kind == 1 && !w->desktop_emitted && w->close_request_cb) {
                 w->desktop_emitted = 1;
-                const int stop = as_close_request_signal(w->close_request_cb)(w, w->close_request_data);
+                ++w->refs; /* as GTK does for the duration of the emission */
+                const int stop = emit_close_request(w);
                 log_line("close-request-blocked:", stop ? "1" : "0");
                 if (!stop && w->alive) destroy_widget(w);
+                g_object_unref(w);
                 emitted = 1;
             }
         }

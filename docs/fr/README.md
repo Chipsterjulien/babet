@@ -17,7 +17,15 @@ Linux. Ce manuel est organisé par besoin et par module : la table des matières
 ci-dessous indique non seulement le nom technique du module, mais aussi les
 fonctionnalités qu’il contient.
 
-Documentation de **Babet 2.34.0**.
+Documentation de **Babet 2.35.0**.
+
+Babet 2.35.0 ajoute les [minuteries GUI, callbacks de fin de processus et sélection de dossier](modules/gui.md),
+les tracebacks avec `gui.onError`, les notifications de redimensionnement et
+`requestClose`. Elle expose aussi le [contexte de lancement, les ressources
+embarquées et le contrôle des globales](modules/runtime.md), ainsi que
+`babet.exists`. GTK 4 reste optionnel ; le sélecteur de dossier nécessite GTK
+4.10. Les archives de release incluent un rapport ABI ; la glibc minimale reste
+liée à l'environnement de compilation.
 
 Babet 2.34.0 ajoute [`babet.lockFile`](modules/file-lock.md) pour les processus
 coopérants qui ont besoin d’un seul écrivain par dossier de données. Ces
@@ -51,6 +59,8 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 - [`Premiers pas`](getting-started.md) — installation, premier script,
   exécution d’un fichier ou d’un dossier, création d’un exécutable embarqué et
   utilisation via le `PATH`.
+- [`Sortie du programme`](runtime-exit.md) — code et nettoyage de `os.exit`,
+  finaliseurs, workers et différence avec Lua standard.
 - [`Sécurité`](security.md) — modèle de menace, protections réellement
   fournies, limites et règles de moindre privilège.
 - [`Cookbook`](cookbook.md) — recettes complètes combinant plusieurs modules.
@@ -60,6 +70,7 @@ Le harnais d'auto-test contient désormais 45 suites atteignables.
 
 | Je cherche à… | Chapitre à consulter | Ce que j’y trouverai |
 | --- | --- | --- |
+| identifier le mode de lancement, lire les ressources embarquées ou contrôler les globales | [`Runtime — contexte et ressources`](modules/runtime.md) | `runtimeInfo`, `embedded.read/list`, `strict` et composition des retours multiples |
 | réserver un dossier à un seul processus écrivain | [`lockFile — verrou exclusif`](modules/file-lock.md) | `flock`, métadonnées en place, fermeture et héritage des processus |
 | créer, supprimer, lister, rechercher, copier ou déplacer des fichiers | [`FS — système de fichiers`](modules/fs.md) | fichiers, dossiers, chemins, symlinks, `listFiles`, `find` avec confinement `xdev`, `copyTree`, permissions et checksums |
 | publier atomiquement une configuration ou un fichier binaire | [`writeFileAtomic — écriture atomique`](modules/write-file-atomic.md) | refus d’écrasement par défaut, permissions, durabilité, confinement des chemins, concurrence et workers |
@@ -102,6 +113,7 @@ avoir à ouvrir chaque fichier.
 | [`Argparse — arguments de ligne de commande`](modules/argparse.md) | Déclarer des flags, options et positionnels ; générer l’aide ; valider les choix ; convertir les valeurs. |
 | [`Exec — programmes externes et processus`](modules/exec.md) | Exécuter sans shell avec `exec`, ou piloter stdin/stdout/stderr progressivement avec `spawn`. |
 | [`Pipelines de processus`](modules/pipeline.md) | Relier plusieurs commandes sans shell, en capture complète ou en streaming, avec statuts par étape. |
+| [`Runtime — contexte et ressources embarquées`](modules/runtime.md) | Modes de lancement et chemins, ressources binaires du ZIP, globales strictes et composition des retours multiples. |
 | [`FS — fichiers, dossiers, chemins et attributs`](modules/fs.md) | Existence et types, création/suppression, chemins, listings, recherche, itérateur, copie/déplacement d’arbres, symlinks, modes Unix et checksums. |
 | [`writeFileAtomic — écriture atomique et durable`](modules/write-file-atomic.md) | Publier une chaîne Lua binaire par temporaire privé et renommage atomique, avec écrasement explicite, permissions exactes, `fsync`, confinement des chemins et support des workers. |
 | [`HTTP — requêtes web`](modules/http.md) | URL, méthodes, query, headers validés, corps binaires, réponses, téléchargement atomique vers fichier, redirections, vérification TLS, timeout et limites de taille. |

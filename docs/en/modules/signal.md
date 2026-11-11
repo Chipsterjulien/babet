@@ -299,9 +299,10 @@ or another message mechanism when every business event must be retained.
 <a id="signal-callback-errors"></a>
 ### Callback errors
 
-Babet invokes callbacks through `lua_pcall`. An uncaught error is removed from
-the stack and silently ignored; it is not propagated to the code that was
-running.
+Since Babet 2.35.0, callback errors are contained and reported with a
+traceback on stderr, prefixed with `babet.signal callback error:` (or passed to
+this state's `gui.onError`). They do not
+propagate to the interrupted code. Published 2.34.0 discarded them.
 
 ```lua
 babet.signal.handle("USR1", function()
@@ -309,7 +310,7 @@ babet.signal.handle("USR1", function()
 end)
 ```
 
-Protect the body explicitly to log failures:
+The body may also handle errors locally:
 
 ```lua
 babet.signal.handle("USR1", function()

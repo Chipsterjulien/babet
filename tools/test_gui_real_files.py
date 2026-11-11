@@ -55,7 +55,11 @@ def run_probes(binary, env, x11, xtst, display):
         folder = Path(tmp)
         env = probe_environment(env, folder)
         (folder / 'image.png').write_bytes(png_bytes())
-        for mode in ['picture', 'open', 'multiple', 'save', 'cancel']:
+        for mode in ['events', 'picture', 'open', 'multiple', 'save', 'cancel', 'folder']:
+            if mode == 'events':
+                result=subprocess.run([binary,str(ROOT/'tests/gui/real_gtk_event_loop.lua')],env=env,text=True,capture_output=True,timeout=20)
+                assert result.returncode==0 and 'REAL_EVENTS_OK' in result.stdout,(result.stdout,result.stderr)
+                print('[PASS] real GTK event loop/resize/close/process');passed+=1;continue
             if mode == 'picture':
                 args = [str(ROOT / 'tests/gui/real_gtk_picture.lua'),
                         str(folder / 'image.png'), str(ROOT / 'tests/gui/fixtures/picture.jpg')]
@@ -88,7 +92,7 @@ def run_probes(binary, env, x11, xtst, display):
                 x11.XFlush(display)
                 if mode in ['picture', 'cancel']:
                     native.inject_keysym(x11, xtst, display, 0xff1b)
-                elif mode == 'save':
+                elif mode in ['save', 'folder']:
                     chord(x11, xtst, display, 0xffe9, ord('s'))
                 else:
                     chord(x11, xtst, display, 0xffe3, ord('l'))

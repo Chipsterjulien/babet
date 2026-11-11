@@ -116,8 +116,11 @@ static void file_start(void *p, void *parent, void *cancel, FileReady cb, void *
     FileRequest *r = (FileRequest *)calloc(1, sizeof(*r));
     r->source = p; r->cancel = cancel; ++r->source->refs; ++r->cancel->refs;
     r->cb = cb; r->data = data; r->mode = mode; r->next = file_requests; file_requests = r;
-    log_line("file-start:", mode == 2 ? "save" : mode == 1 ? "multiple" : "open");
+    log_line("file-start:", mode == 3 ? "folder" : mode == 2 ? "save" : mode == 1 ? "multiple" : "open");
 }
+#ifndef BABET_FAKE_GTK_NO_FOLDER_DIALOG
+void gtk_file_dialog_select_folder(void *p,void *parent,void *c,FileReady cb,void *d){file_start(p,parent,c,cb,d,3);}
+#endif
 void gtk_file_dialog_open(void *p, void *parent, void *c, FileReady cb, void *d) { file_start(p,parent,c,cb,d,0); }
 void gtk_file_dialog_open_multiple(void *p, void *parent, void *c, FileReady cb, void *d) { file_start(p,parent,c,cb,d,1); }
 void gtk_file_dialog_save(void *p, void *parent, void *c, FileReady cb, void *d) { file_start(p,parent,c,cb,d,2); }
@@ -134,6 +137,9 @@ static void *file_finish(void *p, void *result, void **error)
     g_list_store_append(list, a); g_list_store_append(list, b); g_object_unref(a); g_object_unref(b);
     return list;
 }
+#ifndef BABET_FAKE_GTK_NO_FOLDER_DIALOG
+void *gtk_file_dialog_select_folder_finish(void *p,void *r,void **e){return file_finish(p,r,e);}
+#endif
 void *gtk_file_dialog_open_finish(void *p, void *r, void **e) { return file_finish(p,r,e); }
 void *gtk_file_dialog_open_multiple_finish(void *p, void *r, void **e) { return file_finish(p,r,e); }
 void *gtk_file_dialog_save_finish(void *p, void *r, void **e) { return file_finish(p,r,e); }

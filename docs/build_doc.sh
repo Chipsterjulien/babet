@@ -16,6 +16,10 @@
 #   ./build_doc.sh --list           # list detected languages, build nothing
 #   ./build_doc.sh -h | --help      # show help
 #
+# Languages are built in parallel, one job per language. Each job's
+# output is captured and printed as one block, in the order of the
+# language list, followed by a per-language report and the totals.
+#
 # Requirements : pandoc + a LaTeX engine (xelatex, lualatex, or pdflatex).
 # xelatex is recommended for proper UTF-8 / accent handling.
 #
@@ -126,7 +130,9 @@ build_one() {
     #   - language toggles stripped
     #   - {#ch-xxx} ids injected on chapter H1s
     #   - [text](other.md) links rewritten to [text](#ch-xxx)
-    #   - obsolete strings (test counts, version examples) fixed up
+    #   - links to other repository files rewritten to public URLs
+    # The chapter list comes from the order file. A broken link, or a
+    # chapter missing from the order file, fails the build.
     # The original docs/<lang>/ sources are never modified.
     local build_dir="$SCRIPT_DIR/build_$lang"
     local preprocess="$SCRIPT_DIR/preprocess_pdf.py"
@@ -137,7 +143,7 @@ build_one() {
     fi
 
     echo "Preprocessing docs/$lang/ -> docs/build_$lang/"
-    python3 "$preprocess" "$SCRIPT_DIR/$lang" "$build_dir" || {
+    python3 "$preprocess" "$SCRIPT_DIR/$lang" "$build_dir" "$order" || {
         echo "build_doc: preprocess failed for '$lang'" >&2
         return 1
     }
@@ -249,18 +255,84 @@ if [ ${#languages[@]} -eq 0 ]; then
     die "no languages to build (looked for $SCRIPT_DIR/manual_order_*.txt)" 1
 fi
 
+# Two jobs for the same language would write the same build directory
+# and the same PDF: keep the first occurrence of each language only.
+unique_languages=()
+for lang in "${languages[@]}"; do
+    duplicate=0
+    for seen in "${unique_languages[@]:+${unique_languages[@]}}"; do
+        [ "$seen" = "$lang" ] && { duplicate=1; break; }
+    done
+    [ "$duplicate" -eq 0 ] && unique_languages+=("$lang")
+done
+languages=("${unique_languages[@]}")
+
+# ---- Parallel build --------------------------------------------------
+# One background job per language. Each job writes its output to its own
+# log, so the blocks are never interleaved, and records its duration.
+log_dir="$(mktemp -d "${TMPDIR:-/tmp}/babet-build-doc.XXXXXX")" || \
+    die "cannot create a temporary directory for the build logs" 1
+
+pids=()
+cleanup() {
+    rm -rf -- "$log_dir"
+}
+# Jobs run in their own process groups (job control below), so Ctrl-C
+# reaches only this script: stop every job, pandoc and LaTeX included.
+interrupted() {
+    local pid
+    for pid in "${pids[@]:+${pids[@]}}"; do
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+    done
+    wait 2>/dev/null
+    cleanup
+    echo >&2
+    echo "build_doc: interrupted, builds stopped" >&2
+    exit 130
+}
+trap cleanup EXIT
+trap interrupted INT TERM
+
+if [ ${#languages[@]} -gt 1 ]; then
+    echo "Building ${#languages[@]} manuals in parallel: ${languages[*]}"
+fi
+
+set -m  # job control: each job becomes the leader of its own process group
+for index in "${!languages[@]}"; do
+    lang="${languages[$index]}"
+    (
+        started=$SECONDS
+        build_one "$lang"
+        rc=$?
+        echo $((SECONDS - started)) > "$log_dir/$index.seconds"
+        exit "$rc"
+    ) > "$log_dir/$index.log" 2>&1 < /dev/null &
+    pids+=("$!")
+done
+set +m
+
+# Collect in list order: print each job's block once it has finished.
 ok=0
 fail=0
-for lang in "${languages[@]}"; do
-    if build_one "$lang"; then
+report=()
+for index in "${!languages[@]}"; do
+    lang="${languages[$index]}"
+    rc=0
+    wait "${pids[$index]}" || rc=$?
+    cat "$log_dir/$index.log"
+    seconds="$(cat "$log_dir/$index.seconds" 2>/dev/null || echo "?")"
+    if [ "$rc" -eq 0 ]; then
         ok=$((ok + 1))
+        report+=("  [OK]    $lang  manual-$lang.pdf  (${seconds} s)")
     else
         fail=$((fail + 1))
+        report+=("  [FAIL]  $lang  manual-$lang.pdf  (${seconds} s)")
     fi
 done
 
 echo
 echo "=========================================="
+printf '%s\n' "${report[@]}"
 echo "Built : $ok    Failed : $fail    Total : ${#languages[@]}"
 echo "=========================================="
 

@@ -21,6 +21,11 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 WINDOW_TITLE = "Babet real GTK click probe"
 READY_MARKER = b"REAL_GTK_READY\n"
+# After a failed drop, GDK/X11 animates the drag icon back to its origin for
+# 0.5 s (ANIM_TIME in gdkdrag-x11.c), starting right after drag-end. A drag
+# begun during that animation finds no drop target and is cancelled. Since
+# GTK 4.24 a drop refused by its target takes this failed-drop path as well.
+FAILED_DROP_SETTLE = 0.75
 
 
 def skip(reason):
@@ -618,6 +623,9 @@ def main():
                 again_out, again_err = wait_for_ready(child, 8, marker=b"REAL_GTK_DND_AGAIN\n")
                 dnd_out += again_out
                 dnd_err += again_err
+                # The marker is printed from drag-end, i.e. when the refused
+                # transfer's return animation starts: let it finish first.
+                time.sleep(FAILED_DROP_SETTLE)
                 drag_across_window(x11, xtst, display, dnd_window)
             stdout, stderr = finish_with_timeout(child, 8, dnd_out, dnd_err)
             marker = f"GUI_DND_ICON_OK:{mode}" if is_icon_probe else f"REAL_GTK_DND_OK:{mode}"

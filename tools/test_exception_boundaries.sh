@@ -195,6 +195,33 @@ do
         "${label} does not enter through the audited boundary"
 done
 
+# 2.35 entries must be checked at their actual registration, not merely by the
+# presence of a boundary helper elsewhere in the translation unit.
+for specification in \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_timeout>|gui.timeout" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_idle>|gui.idle" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_cancel>|gui.cancel" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_on_error>|gui.onError" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<l_select_folder>|gui.selectFolder" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<window_on_resize>|window.onResize" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<window_request_close>|window.requestClose" \
+    "src/lua_bindings/gui.cpp|gui_lua_boundary<gui_process_on_exit>|GUI process.onExit bridge" \
+    "src/lua_bindings/process.cpp|process_lua_boundary<process_on_exit>|process.onExit" \
+    "src/project_core/runtime_info.cpp|boundary<runtime_info>|babet.runtimeInfo" \
+    "src/project_core/runtime_info.cpp|boundary<strict>|babet.strict" \
+    "src/project_core/runtime_info.cpp|boundary<embedded_read>|embedded.read" \
+    "src/project_core/runtime_info.cpp|boundary<embedded_list>|embedded.list" \
+    "src/project_core/runtime_registration.cpp|babet_lua_boundary<lua_exists>|babet.exists"
+do
+    IFS='|' read -r file pattern label <<< "${specification}"
+    require_pattern "${file}" \
+        "lua_pushcfunction[[:space:]]*\\([[:space:]]*L,[[:space:]]*${pattern}[[:space:]]*\\)" \
+        "${label} is not registered through its C++ exception boundary"
+done
+require_pattern "src/project_core/runtime_info.cpp" \
+    'return[[:space:]]+lua_cfunction_exception_boundary<Fn>' \
+    "runtime info boundary does not delegate to the common exception helper"
+
 require_pattern "src/lua_bindings/lua_utils.hpp" \
     'lua_build_results_protected' \
     "protected Lua result builder is missing"

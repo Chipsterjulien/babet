@@ -13,4 +13,5 @@
  */
 int lua_fileExists(lua_State *L);
 
+int lua_exists(lua_State*);
 #endif // FILEEXISTS_HPP

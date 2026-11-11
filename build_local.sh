@@ -664,9 +664,12 @@ if [ ! -f "${ZLIB_LIB}" ] || \
     verify_sha256 "${DOWNLOAD_DIR}/${ZLIB_TAR}" \
         "${ZLIB_SHA256}" "zlib"
 
-    if [ ! -d "${ZLIB_SOURCE_DIR}" ]; then
-        echo "Décompression de zlib ${ZLIB_VERSION}..."
-        tar -xzf "${DOWNLOAD_DIR}/${ZLIB_TAR}" -C "${ZLIB_ROOT}"
+    echo "Préparation propre des sources zlib ${ZLIB_VERSION}..."
+    if ! babet_refresh_dependency_source "${ZLIB_SOURCE_DIR}" \
+            "${DOWNLOAD_DIR}/${ZLIB_TAR}" "${ZLIB_DIR}" \
+            CMakeLists.txt zlib.h; then
+        echo "Échec : extraction des sources zlib incomplète."
+        exit 1
     fi
 
     rm -rf "${ZLIB_CMAKE_BUILD_DIR}" "${ZLIB_INSTALL_DIR}"
@@ -717,9 +720,12 @@ if [ ! -f "${XZ_LIB}" ] || \
     verify_sha256 "${DOWNLOAD_DIR}/${XZ_TAR}" \
         "${XZ_SHA256}" "XZ Utils"
 
-    if [ ! -d "${XZ_SOURCE_DIR}" ]; then
-        echo "Décompression de XZ Utils ${XZ_VERSION}..."
-        tar -xJf "${DOWNLOAD_DIR}/${XZ_TAR}" -C "${XZ_ROOT}"
+    echo "Préparation propre des sources XZ Utils ${XZ_VERSION}..."
+    if ! babet_refresh_dependency_source "${XZ_SOURCE_DIR}" \
+            "${DOWNLOAD_DIR}/${XZ_TAR}" "${XZ_DIR}" \
+            CMakeLists.txt src/liblzma/api/lzma.h; then
+        echo "Échec : extraction des sources XZ Utils incomplète."
+        exit 1
     fi
 
     rm -rf "${XZ_CMAKE_BUILD_DIR}" "${XZ_INSTALL_DIR}"
@@ -768,14 +774,23 @@ if [ ! -f "${BZIP2_LIB}" ] || [ ! -f "${BZIP2_INCLUDE}/bzlib.h" ]; then
     verify_sha256 "${DOWNLOAD_DIR}/${BZIP2_TAR}" \
         "${BZIP2_SHA256}" "bzip2"
 
-    if [ ! -d "${BZIP2_SOURCE_DIR}" ]; then
-        echo "Décompression de bzip2 ${BZIP2_VERSION}..."
-        tar -xzf "${DOWNLOAD_DIR}/${BZIP2_TAR}" -C "${BZIP2_ROOT}"
+    if ! babet_bzip2_source_complete "${BZIP2_SOURCE_DIR}"; then
+        if [ -e "${BZIP2_SOURCE_DIR}" ]; then
+            echo "Source bzip2 incomplète : réextraction propre..."
+        else
+            echo "Décompression de bzip2 ${BZIP2_VERSION}..."
+        fi
+        if ! babet_prepare_bzip2_source \
+                "${BZIP2_SOURCE_DIR}" "${BZIP2_ROOT}" \
+                "${DOWNLOAD_DIR}/${BZIP2_TAR}" "${BZIP2_DIR}"; then
+            echo "Échec : source bzip2 extraite incomplète."
+            exit 1
+        fi
     fi
 
     rm -rf "${BZIP2_INSTALL_DIR}"
     echo "Compilation de bzip2 ${BZIP2_VERSION} (libbz2 statique)..."
-    make -C "${BZIP2_SOURCE_DIR}" clean >/dev/null 2>&1 || true
+    make -C "${BZIP2_SOURCE_DIR}" clean >/dev/null
     make -C "${BZIP2_SOURCE_DIR}" \
          CC="${CC:-cc}" AR="${AR:-ar}" RANLIB="${RANLIB:-ranlib}" \
          CFLAGS="-O2 -fPIC -Wall -Winline -D_FILE_OFFSET_BITS=64" \
@@ -892,9 +907,12 @@ if [ "${ABSL_REBUILD}" -eq 1 ]; then
     verify_sha256 "${DOWNLOAD_DIR}/${ABSL_TAR}" \
         "${ABSL_SHA256}" "Abseil"
 
-    if [ ! -d "${ABSL_SOURCE_DIR}" ]; then
-        echo "Décompression d'Abseil ${ABSL_VERSION}..."
-        tar -xzf "${DOWNLOAD_DIR}/${ABSL_TAR}" -C "${ABSL_ROOT}"
+    echo "Préparation propre des sources Abseil ${ABSL_VERSION}..."
+    if ! babet_refresh_dependency_source "${ABSL_SOURCE_DIR}" \
+            "${DOWNLOAD_DIR}/${ABSL_TAR}" "${ABSL_DIR}" \
+            CMakeLists.txt absl/base/config.h; then
+        echo "Échec : extraction des sources Abseil incomplète."
+        exit 1
     fi
 
     rm -rf "${ABSL_CMAKE_BUILD_DIR}" "${ABSL_INSTALL_DIR}"
@@ -957,9 +975,12 @@ if [ "${RE2_REBUILD}" -eq 1 ]; then
     verify_sha256 "${DOWNLOAD_DIR}/${RE2_TAR}" \
         "${RE2_SHA256}" "RE2"
 
-    if [ ! -d "${RE2_SOURCE_DIR}" ]; then
-        echo "Décompression de RE2 ${RE2_VERSION}..."
-        tar -xzf "${DOWNLOAD_DIR}/${RE2_TAR}" -C "${RE2_ROOT}"
+    echo "Préparation propre des sources RE2 ${RE2_VERSION}..."
+    if ! babet_refresh_dependency_source "${RE2_SOURCE_DIR}" \
+            "${DOWNLOAD_DIR}/${RE2_TAR}" "${RE2_DIR}" \
+            CMakeLists.txt re2/re2.h; then
+        echo "Échec : extraction des sources RE2 incomplète."
+        exit 1
     fi
 
     rm -rf "${RE2_CMAKE_BUILD_DIR}" "${RE2_INSTALL_DIR}"
@@ -1165,10 +1186,12 @@ if [ "${LIBARCHIVE_REBUILD}" -eq 1 ]; then
     verify_sha256 "${DOWNLOAD_DIR}/${LIBARCHIVE_TAR}" \
         "${LIBARCHIVE_SHA256}" "libarchive"
 
-    if [ ! -d "${LIBARCHIVE_SOURCE_DIR}" ]; then
-        echo "Décompression de libarchive ${LIBARCHIVE_VERSION}..."
-        tar -xJf "${DOWNLOAD_DIR}/${LIBARCHIVE_TAR}" \
-            -C "${LIBARCHIVE_ROOT}"
+    echo "Préparation propre des sources libarchive ${LIBARCHIVE_VERSION}..."
+    if ! babet_refresh_dependency_source "${LIBARCHIVE_SOURCE_DIR}" \
+            "${DOWNLOAD_DIR}/${LIBARCHIVE_TAR}" "${LIBARCHIVE_DIR}" \
+            CMakeLists.txt libarchive/archive.h libarchive/archive_entry.h; then
+        echo "Échec : extraction des sources libarchive incomplète."
+        exit 1
     fi
 
     rm -rf "${LIBARCHIVE_CMAKE_BUILD_DIR}"
@@ -1316,13 +1339,12 @@ if [ ! -f "${SQLITE_C}" ] || [ ! -f "${SQLITE_H}" ]; then
     # Vérifié même si déjà en cache.
     verify_sha256 "${DOWNLOAD_DIR}/${SQLITE_ZIP}" "${SQLITE_SHA256}" "SQLite"
 
-    if [ ! -d "${SQLITE_INSTALL_DIR}" ]; then
-        echo "Décompression de SQLite ${SQLITE_VERSION}..."
-        unzip -q "${DOWNLOAD_DIR}/${SQLITE_ZIP}" -d "${SQLITE_BUILD_DIR}"
-        if [ $? -ne 0 ]; then
-            echo "Échec de la décompression de SQLite."
-            exit 1
-        fi
+    echo "Préparation propre des sources SQLite ${SQLITE_VERSION}..."
+    if ! babet_refresh_dependency_source "${SQLITE_INSTALL_DIR}" \
+            "${DOWNLOAD_DIR}/${SQLITE_ZIP}" "${SQLITE_DIR}" \
+            sqlite3.c sqlite3.h; then
+        echo "Échec : extraction des sources SQLite incomplète."
+        exit 1
     fi
 
     echo "SQLite ${SQLITE_VERSION} installé."
@@ -1343,18 +1365,19 @@ fi
 # Vérifié même si déjà en cache (cache empoisonné).
 verify_sha256 "$DOWNLOAD_DIR/$LUA_TAR" "${LUA_SHA256}" "Lua"
 
-# Décompresser Lua si nécessaire
-if [ ! -d "$LUA_BUILD_DIR/$LUA_DIR" ]; then
-    echo "Décompression de Lua $LUA_VERSION..."
-    tar -xzf "$DOWNLOAD_DIR/$LUA_TAR" -C "$LUA_BUILD_DIR"
-    if [ $? -ne 0 ]; then
-        echo "Échec de la décompression de Lua."
+# Une bibliothèque ou un en-tête absent impose une reconstruction depuis
+# l'archive vérifiée, même si le dossier et src/Makefile existent encore.
+# Les Makefile Lua sont modifiés ci-dessous : seule une installation complète
+# est réutilisée, pas un arbre source partiel ou une ancienne compilation ratée.
+if ! babet_lua_install_complete "$LUA_BUILD_DIR/$LUA_DIR"; then
+    echo "Préparation propre des sources Lua $LUA_VERSION..."
+    if ! babet_refresh_dependency_source "$LUA_BUILD_DIR/$LUA_DIR" \
+            "$DOWNLOAD_DIR/$LUA_TAR" "$LUA_DIR" \
+            Makefile src/Makefile src/lua.h src/lauxlib.h src/lualib.h \
+            src/luaconf.h src/lapi.c; then
+        echo "Échec : extraction des sources Lua incomplète."
         exit 1
     fi
-fi
-
-# Compiler Lua si les fichiers nécessaires sont absents
-if [ ! -f "$LUA_LIB" ] || [ ! -f "${LUA_INCLUDE}/lua.h" ]; then
     echo "Compilation de Lua $LUA_VERSION..."
     cd "$LUA_BUILD_DIR/$LUA_DIR" || exit 1
     sed -i 's/^MYCFLAGS=.*/MYCFLAGS=-fPIC/' src/Makefile
@@ -1365,6 +1388,10 @@ if [ ! -f "$LUA_LIB" ] || [ ! -f "${LUA_INCLUDE}/lua.h" ]; then
     make linux -j"$(nproc)"
     if [ $? -ne 0 ]; then
         echo "Échec de la compilation de Lua."
+        exit 1
+    fi
+    if ! babet_lua_install_complete "$LUA_BUILD_DIR/$LUA_DIR"; then
+        echo "Échec : bibliothèque ou en-têtes publics Lua manquants après compilation."
         exit 1
     fi
 else
@@ -1441,7 +1468,14 @@ if [ "${OPENSSL_CACHE_VALID}" -ne 1 ]; then
     # déterministes utilisent aussi le CLI OpenSSL vendored exact. Construire
     # build_libs + apps/openssl évite toute la suite de tests OpenSSL tout en
     # conservant ce driver de validation.
-    make -j"$(nproc)" build_libs apps/openssl
+    #
+    # Deux invocations successives, volontairement. La cible build_libs
+    # génère d'abord les en-têtes (build_generated), alors que les objets
+    # du CLI n'en dépendent pas dans le Makefile d'OpenSSL. Demandées au même
+    # make -j, les deux cibles démarrent en parallèle : apps/lib peut alors
+    # inclure include/openssl/opensslv.h encore vide, ce qui échoue avec
+    # « OPENSSL_API_COMPAT expresses an impossible API compatibility level ».
+    make -j"$(nproc)" build_libs && make -j"$(nproc)" apps/openssl
     if [ $? -ne 0 ]; then
         echo "Échec de la compilation des bibliothèques openssl."
         exit 1

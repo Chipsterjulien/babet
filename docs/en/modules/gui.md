@@ -1044,3 +1044,94 @@ end))
 Tag mutations are forbidden inside `onDraw`, like other widget mutations;
 queries are permitted. Tags add no asynchronous state.
 See `examples/gui_rich_text/main.lua` for a complete window with both features.
+
+## GUI loop and directory selection
+
+Available since Babet 2.35.0. GTK 4.0 is sufficient except
+for directory selection, which requires GTK 4.10.
+
+### Timers
+
+- `gui.timeout(ms, fn)` → `id, nil`: run once after at least `ms` milliseconds
+  (integer from 0 to 2147483647).
+- `gui.idle(fn)` → `id, nil`: run once on a later event-loop turn.
+- `gui.cancel(id)` → `bool, nil`: true when removed; false if already executed,
+  cancelled or unknown.
+
+Babet owns these identifiers and never reuses them within the process.
+Callbacks run protected, with no arguments, on the main Lua thread and may
+modify widgets. `onDraw` may schedule an `idle` for changes after drawing.
+To repeat a timer, explicitly schedule another one in its callback.
+
+Deadlines are checked at loop service points, with a bounded 25 ms wake interval
+outside blocking work. This is not real-time scheduling: slow callbacks delay
+others. Ordering among ready callbacks is unspecified. A newly created callback
+waits for another turn. `gui.run()` requires a live window or pending dialog;
+callbacks do not keep a windowless application running. All pending callbacks
+are cancelled on `run()` exit (including `quit()` and errors) or Lua state close.
+
+```lua
+local pending
+entry:onChanged(function()
+    if pending then gui.cancel(pending) end
+    pending = assert(gui.timeout(700, function()
+        pending = nil
+        rebuildPreview()
+    end))
+end)
+```
+
+### Process completion
+
+`proc:onExit(fn)` → `id, nil` observes a `babet.spawn` process from `gui.run()`.
+`fn(result, error)` receives the same values as `proc:wait(0)` exactly once,
+even when the process already exited. `proc:onExit(nil)` removes observation
+and returns `true, nil`. A new registration replaces the previous one;
+`gui.cancel(id)` also cancels it. The status remains available through `wait()`.
+Stopped processes are not completed. Closed handles may report `nil, 'closed'`
+if no status is available. No `waitpid(-1)` is used.
+
+An observer retains its handle. Cancellation does not kill a process whose
+handle the application still retains; an unreachable handle keeps its existing
+`close()` finalization behavior. Output pipes are not automatically drained:
+they may fill and block the child. Inherit streams, redirect to files, or read
+pipes incrementally. This API does not apply to `spawnPipeline` handles.
+
+### Errors
+
+GUI and signal callback errors print a traceback to stderr by default, prefixed
+with `babet.gui callback error:` for a GUI callback and with
+`babet.signal callback error:` for a signal callback. Without
+a terminal, consult the launcher's journal. `gui.onError(fn)` installs a handler
+for this Lua state receiving the error text; `gui.onError(nil)` restores default
+reporting. Both return `true, nil`. Handler failure prints both errors to stderr
+without infinite recursion. Errors never cross GTK. Under memory exhaustion,
+tracebacks may be incomplete. Signal callbacks outside GUI are also covered;
+workers do not inherit the handler.
+
+### Size and closure
+
+`window:onResize(fn_or_nil)` → `true, nil`. `fn(width, height)` receives the first
+positive size of a mapped window and subsequent changes after layout processing.
+Intermediate changes may be coalesced. Widget mutations are allowed; avoid
+resize feedback loops. `nil` removes the callback.
+
+`window:requestClose()` asks GTK to close the window; `onCloseRequest` may veto by
+returning true. GTK ignores the request when the window was never shown with
+`show()`, or when it arrives during that same window's `onCloseRequest`: nothing
+is emitted and the window stays open. Its `true, nil` result means the request
+was handed to GTK, not that the callback ran or that
+the window was destroyed. `window:close()` retains explicit destruction without
+`onCloseRequest`. Errors in `onCloseRequest` are reported and allow closure.
+
+### Directory selection
+
+`gui.selectFolder({title=?, parent=?, folder=?}, callback)` → `true, nil` when
+an asynchronous dialog starts, otherwise `nil, error`. `parent` is a Babet
+window and `folder` the initial directory. Filters, filenames and multiple
+selection are unsupported; unknown options raise Lua errors.
+The protected callback receives an absolute local path, `nil` for user
+cancellation, or `nil, error` for failure/non-local selection. The dialog is
+modal relative to its parent. Parent destruction, leaving `run()` or closing
+Lua cancels without late callbacks. GTK < 4.10 returns `nil, error`, while other
+widgets remain usable.

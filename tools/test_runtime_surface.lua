@@ -7,8 +7,9 @@ local expected = {
     archive=true, base64=true, compression=true, curses=true, gui=true,
     http=true, inotify=true, json=true, plugin=true, signal=true,
     socket=true, sqlite=true, time=true, toml=true, user=true,
-    websocket=true, workers=true,
+    websocket=true, workers=true, embedded=true,
 
+    exists=true, runtimeInfo=true, strict=true,
     setAttributes=true, getAttributes=true, chdir=true, copy=true,
     copyTree=true, crc32=true, crc32sum=true, currentDir=true,
     deepCopyTable=true, exec=true, spawn=true, pipeline=true,
@@ -47,7 +48,7 @@ local table_entries = {
     archive=true, base64=true, compression=true, curses=true, gui=true,
     http=true, inotify=true, json=true, plugin=true, signal=true,
     socket=true, sqlite=true, time=true, toml=true, user=true,
-    websocket=true, workers=true,
+    websocket=true, workers=true, embedded=true,
 }
 for name in pairs(table_entries) do
     assert(type(babet[name]) == "table", "babet." .. name .. " is not a table")

@@ -35,3 +35,10 @@ int lua_fileExists(lua_State *L)
     lua_pushnil(L);
     return 2;
 }
+int lua_exists(lua_State *L) {
+    if(!lua_arity_is(L,1)||!lua_is_strict_string(L,1))return luaL_error(L,"exists expects one path string");
+    fs::path path(luaL_checkstring_without_nul(L,1,"path"));std::error_code ec;
+    const auto status=fs::status(path,ec);
+    if(ec&&ec!=std::errc::no_such_file_or_directory&&ec!=std::errc::not_a_directory)return push_fail_protected(L,"exists: "+ec.message());
+    lua_pushboolean(L,fs::exists(status));lua_pushnil(L);return 2;
+}

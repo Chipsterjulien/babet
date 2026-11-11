@@ -1370,3 +1370,8 @@ as the normal result `(false, nil)`. A genuine inspection failure remains
   not preserved.
 - **No asynchronous I/O**: use [workers](workers.md) to parallelize independent
   work.
+
+
+## exists — Babet 2.35.0
+
+`babet.exists(path)` → `bool, nil` or `nil, error`. Accepts any existing type (file, directory, FIFO, device) without opening its contents. Follows symlinks; dangling links return `false, nil`. `fileExists` remains restricted to regular files. Access errors return `nil, error`.

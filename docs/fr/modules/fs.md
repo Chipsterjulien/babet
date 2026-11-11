@@ -1407,3 +1407,8 @@ reste `(nil, err)`.
   propriétaires, groupes, dates ou modes des dossiers.
 - **Pas d’I/O asynchrone** : utilise les [workers](workers.md) pour paralléliser
   des traitements indépendants.
+
+
+## exists — Babet 2.35.0
+
+`babet.exists(path)` → `bool, nil` ou `nil, erreur`. Accepte tout type existant (fichier, dossier, FIFO, périphérique), sans ouvrir le contenu. Suit les liens symboliques ; un lien cassé renvoie `false, nil`. `fileExists` reste réservé aux fichiers réguliers. Une erreur d’accès donne `nil, erreur`.

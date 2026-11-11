@@ -160,6 +160,41 @@ directory:
 $EDITOR dist/release-notes.md
 ~~~
 
-Then publish with GitHub CLI or the GitHub web interface.
+Then publish with the GitHub web interface, selecting the existing annotated tag.
+Attach both the runtime and SDK archives and their SHA256 files. The standalone
+binary, its SHA256 file and the ABI report can also be attached.
 
 Do not add versioned `GITHUB_RELEASE_*.md` files to the repository.
+
+## ABI et portabilité — depuis Babet 2.35.0
+
+Après le strip, `release.sh` produit `dist/babet-<version>-<arch>.abi.txt` et
+l'inclut sous `runtime-abi.txt` dans le tarball. `tools/runtime_abi.py` utilise
+Python 3 et `readelf` (binutils), sans exécuter le binaire. Il rapporte les
+versions maximales importées GLIBC, GLIBCXX et CXXABI, les symboles concernés
+et les bibliothèques partagées directes ; les chaînes arbitraires et les
+symboles exportés ne sont pas pris pour des dépendances.
+
+Les applications générées héritent des exigences du runtime. Pour viser Debian
+12 / Ubuntu 24.04, construire le runtime ET toutes les dépendances natives sur
+la distribution cible la plus ancienne (conteneur/chroot/VM), avec un build
+neuf. Ne pas réutiliser des bibliothèques compilées avec une glibc plus récente
+et ne pas modifier artificiellement les versions de symboles. Tester le runtime
+strippé et une application générée sur chaque distribution cible.
+
+Le rapport ne couvre pas GTK/plugins chargés par dlopen, les dépendances
+transitives, le SDK statique, les instructions CPU ou le noyau. Ce lot ne fournit
+pas de nouveau binaire portable et ne prouve pas l'exigence GLIBC 2.42 liée à
+`cfgetospeed` pour un binaire qui n'a pas été fourni.
+
+### English
+
+The stripped runtime now receives an `.abi.txt` report, also included as
+`runtime-abi.txt` in the tarball. Python 3 and readelf/binutils are required.
+The tool inspects versioned undefined ELF imports without executing the binary.
+Generated applications inherit runtime requirements. Build all native dependencies
+on the oldest supported distribution with a clean build tree, then test the
+stripped runtime and a generated application on each target. Never relabel symbol
+versions to fake compatibility. The report excludes dlopen GTK/plugins, transitive
+libraries, the static SDK, CPU ISA and kernel requirements. No portable binary
+is supplied by this change.

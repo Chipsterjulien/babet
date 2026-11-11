@@ -1,4 +1,4 @@
-> **Français** | [English](../../en/modules/file-lock.md)
+> [English](../../en/modules/file-lock.md) | **Français**
 
 # lockFile — verrou exclusif de fichier
 

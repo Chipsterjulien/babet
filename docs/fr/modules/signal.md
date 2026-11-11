@@ -305,9 +305,10 @@ mécanisme de messages.
 <a id="signal-callback-errors"></a>
 ### Erreurs du callback
 
-Babet appelle le callback avec `lua_pcall`. Une erreur non attrapée est retirée
-de la pile et silencieusement ignorée ; elle ne remonte pas au code qui était
-en cours d'exécution.
+Depuis Babet 2.35.0, les erreurs de callbacks sont contenues et
+affichées avec traceback sur stderr, précédées de
+`babet.signal callback error:` (ou transmises à `gui.onError` pour cet état).
+Elles ne remontent pas au code interrompu. La 2.34.0 publiée les ignorait.
 
 ```lua
 babet.signal.handle("USR1", function()
@@ -315,7 +316,7 @@ babet.signal.handle("USR1", function()
 end)
 ```
 
-Pour journaliser une erreur, protège explicitement le corps :
+Pour traiter une erreur localement, on peut aussi protéger le corps :
 
 ```lua
 babet.signal.handle("USR1", function()

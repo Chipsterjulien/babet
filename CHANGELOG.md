@@ -9,6 +9,69 @@ may affect existing scripts.
 
 ## [Unreleased]
 
+## [2.35.0] - 2026-11-11
+
+### GUI applications and runtime resources
+
+- Async `gui.selectFolder` (GTK 4.10), cancellation and protected callbacks.
+- `gui.timeout`, `gui.idle`, `gui.cancel` and `process:onExit` serviced by the GTK loop.
+- GUI/signal tracebacks on stderr and customizable `gui.onError` handler.
+- `window:onResize` and `requestClose`; `close` retains explicit destruction.
+- `babet.runtimeInfo`, binary `babet.embedded.read/list`, `exists` and optional `strict` checks.
+- Runtime ABI report included in releases; documented portable-build requirements.
+- Behavior, allocation and real GTK tests with FR/EN documentation. Strict arity remains; multi-return composition is documented.
+
+### Compatibility and validation
+
+- Signal callback errors now produce a traceback on stderr even in programs
+  that do not use the GUI (`babet.signal callback error:`).
+- Timers are one-shot; pending callbacks are cancelled on loop exit or Lua
+  state shutdown. `onDraw` may defer widget changes through `gui.idle`.
+- Process observers preserve cached exit status. They do not drain output
+  pipes and do not cover `spawnPipeline` handles.
+- `embedded.read` is binary and case-sensitive; `embedded.list` is sorted.
+  Both use the running image, without a filesystem fallback. Workers inherit
+  the launch context. Resource reads retain the existing 16 MiB limit.
+- `fileExists`, strict arity and explicit `window:close()` semantics remain
+  unchanged. Use `requestClose()` to invoke the close-request callback.
+- The ABI report describes imported symbol versions; it does not lower the
+  required glibc version or replace tests on older target distributions.
+- Full pre-release validation passed on the contributor's machine in normal
+  and ASan + UBSan modes, including real GTK, worker and embedded-resource tests.
+- Regenerate both manuals and fix PDF links to the runtime and file-lock chapters.
+
+### GUI cleanup and diagnostics
+
+- Release idle GUI ownership on every event-loop exit, including Lua allocation
+  failures after the last widget disappears. Keep ownership while a widget or
+  pending operation still needs it.
+- Report invalid `gui.selectFolder` parents under the correct API name during
+  both option validation and native setup.
+- Reserve all four Lua stack slots needed to cancel pending tasks. Audit the
+  exception boundaries of the new GUI, process and runtime entry points.
+- Add regression tests for loop-error ownership transfer between live Lua states,
+  retained widgets, cancelled tasks and file-dialog parent diagnostics.
+
+### Build fixes
+
+- Build OpenSSL libraries before its command-line tool in two successive
+  `make` calls, so parallel CLI compilation starts after generated headers
+  are ready.
+- Rebuild Lua from freshly extracted, SHA256-verified sources when its static
+  library or any public header is missing. An existing `src/Makefile` no
+  longer hides a missing top-level Makefile. Verify the resulting library
+  and all four public headers after the build.
+- Refresh zlib, XZ, Abseil, RE2, libarchive and SQLite sources whenever their
+  rebuild/install is required, instead of accepting an existing directory.
+  Keep complete installations cached and preserve the old source tree if
+  extraction or input validation fails. Add offline build-block regressions.
+- Repair incomplete cached bzip2 sources before rebuilding libbz2. Check all
+  required inputs, re-extract from the SHA256-verified archive and reject a
+  failed extraction before replacing the old tree. Do not ignore a failed
+  `make clean`.
+- Add offline bootstrap regressions, including the build-script path that
+  previously reused a leftover `libbz2.a` and failed when copying `bzlib.h`.
+
 ## [2.34.0] - 2026-10-27
 
 ### Exclusive file locks

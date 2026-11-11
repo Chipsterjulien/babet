@@ -21,7 +21,7 @@ def main():
         tmp=Path(tmp); picture=tmp/'image.png';picture.write_bytes(png_bytes())
         bad=tmp/'bad.png';bad.write_text('invalid')
         libraries={}
-        for variant,defines in [('full',[]),('no-fit',['BABET_FAKE_GTK_NO_CONTENT_FIT']),('no-texture',['BABET_FAKE_GTK_NO_TEXTURE_FILE','BABET_FAKE_GTK_NO_CONTENT_FIT']),('unavailable',['BABET_FAKE_GTK_NO_FILE_DIALOG'])]:
+        for variant,defines in [('full',[]),('no-folder',['BABET_FAKE_GTK_NO_FOLDER_DIALOG']),('no-fit',['BABET_FAKE_GTK_NO_CONTENT_FIT']),('no-texture',['BABET_FAKE_GTK_NO_TEXTURE_FILE','BABET_FAKE_GTK_NO_CONTENT_FIT']),('unavailable',['BABET_FAKE_GTK_NO_FILE_DIALOG'])]:
             folder=tmp/variant;folder.mkdir();libraries[variant]=folder
             run([*shlex.split(os.getenv('CC','cc')),'-std=c99','-Wall','-Wextra','-Werror','-fPIC','-shared',*flags,*['-D'+d for d in defines],str(ROOT/'tests/gui/fake_gtk4_runtime.c'),'-o',str(folder/'libgtk-4.so.1')])
         for mode in ['full','no-fit','no-texture']:
@@ -47,6 +47,14 @@ def main():
                 text=log.read_text()
                 for expected in ['file-title:Choose image','file-modal:true','file-folder:/tmp','filter-name:Images','filter-pattern:*.png','filter-pattern:*.jpg','filter-mime:image/*']:assert expected in text,expected
             print('[PASS] file dialog '+mode);passed+=1
+        for mode in ['open','cancel','error','remote','close-parent','unavailable']:
+            env={k:v for k,v in os.environ.items() if not k.startswith('BABET_FAKE_GTK_')}
+            env.update(LD_LIBRARY_PATH=str(libraries['no-folder' if mode=='unavailable' else 'full']),BABET_FAKE_GTK_FILE_RESULT=mode)
+            if mode=='close-parent':env['BABET_FAKE_GTK_FILE_HOLD']='1'
+            p=run([binary,str(ROOT/'tests/gui/folder_dialog_contract.lua'),mode],env)
+            assert 'FOLDER_OK:'+mode in p.stdout,p.stdout
+            assert 'callback error' not in p.stderr,p.stderr
+            print('[PASS] folder dialog '+mode);passed+=1
     print(f'GUI images/files: {passed} PASS / 0 FAIL')
 if __name__=='__main__':
     try:main()

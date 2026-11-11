@@ -6,7 +6,7 @@ struct FileDialogState {
     lua_State *owner = nullptr;
     WidgetState *parent = nullptr;
     FileDialogState *next = nullptr;
-    bool linked = false, multiple = false, save = false;
+    bool linked = false, multiple = false, save = false, folder = false;
     void *dialog = nullptr, *cancel = nullptr, *filters = nullptr, *temporary = nullptr;
     void *result = nullptr, *error = nullptr;
     char *path = nullptr;
@@ -63,7 +63,7 @@ void file_dialog_cancel(FileDialogState *s, bool unroot = true) noexcept
         detail::gtk4_object_unref(cancellable);
     }
     file_dialog_clear(s);
-    if (!has_file_dialogs() && g_live_widgets.load() == 0) g_gui_owner = nullptr;
+    if (!has_file_dialogs() && g_live_widgets.load() == 0 && !has_gui_tasks() && !g_run_active.load()) g_gui_owner = nullptr;
     file_dialog_release(s);
 }
 void cancel_file_dialogs(lua_State *owner, WidgetState *parent) noexcept
@@ -131,7 +131,7 @@ void file_dialog_done(void *source, void *result, void *data) noexcept
     auto *s = static_cast<FileDialogState *>(data);
     // Finish even a cancelled request to consume the native result. The source
     // is kept alive by GIO even after Babet has released its own dialog ref.
-    s->result = s->save ? detail::files_gtk_file_dialog_save_finish(source, result, &s->error)
+    s->result = s->folder ? detail::files_gtk_file_dialog_select_folder_finish(source,result,&s->error) : s->save ? detail::files_gtk_file_dialog_save_finish(source, result, &s->error)
         : s->multiple ? detail::files_gtk_file_dialog_open_multiple_finish(source, result, &s->error)
                       : detail::files_gtk_file_dialog_open_finish(source, result, &s->error);
     lua_State *L = s->owner;
@@ -142,13 +142,13 @@ void file_dialog_done(void *source, void *result, void *data) noexcept
         if (lua_checkstack(L, 4)) {
             lua_pushcfunction(L, file_dialog_invoke);
             lua_pushlightuserdata(L, s);
-            if (lua_pcall(L, 1, 0, 0) != LUA_OK) report_callback_error(L);
+            if (babet_callbacks::pcall(L,1,0) != LUA_OK) report_callback_error(L);
             lua_settop(L, base);
         } else std::fputs("babet.gui callback error: cannot grow file dialog stack\n", stderr);
         file_dialog_unroot(L, s);
     }
     file_dialog_clear(s);
-    if (!has_file_dialogs() && g_live_widgets.load() == 0) g_gui_owner = nullptr;
+    if (!has_file_dialogs() && g_live_widgets.load() == 0 && !has_gui_tasks() && !g_run_active.load()) g_gui_owner = nullptr;
     file_dialog_release(s);
 }
 
@@ -180,18 +180,20 @@ void file_copy_string_list(lua_State *L, int source, const char *api)
 }
 // Snapshot raw options before any native acquisition. GC/finalizers cannot
 // mutate a previously validated table between validation and GTK setters.
-void file_dialog_options(lua_State *L, bool save)
+void file_dialog_options(lua_State *L, bool save, bool folder)
 {
+    const char *folder_keys[]={"title","parent","folder",nullptr};
     const char *open_keys[] = {"title", "parent", "folder", "multiple", "filters", nullptr};
     const char *save_keys[] = {"title", "parent", "folder", "name", "filters", nullptr};
-    const char *api = save ? "gui.saveFile" : "gui.openFile";
-    file_option_keys(L, 1, save ? save_keys : open_keys, api);
+    const char *api = folder ? "gui.selectFolder" : save ? "gui.saveFile" : "gui.openFile";
+    const char *parent_api = folder ? "gui.selectFolder parent" : save ? "gui.saveFile parent" : "gui.openFile parent";
+    file_option_keys(L, 1, folder ? folder_keys : save ? save_keys : open_keys, api);
     lua_newtable(L);
     const int copy = lua_gettop(L);
     for (const char *key : {"title", "folder", "name", "multiple", "parent"}) {
         file_raw_field(L, 1, key);
         if (!lua_isnil(L, -1)) {
-            if (std::strcmp(key, "parent") == 0) check_kind(L, -1, WidgetKind::window, save ? "gui.saveFile parent" : "gui.openFile parent");
+            if (std::strcmp(key, "parent") == 0) check_kind(L, -1, WidgetKind::window, parent_api);
             else if (std::strcmp(key, "multiple") == 0) {
                 if (!lua_isboolean(L, -1)) luaL_error(L, "%s: multiple expects a boolean", api);
             } else file_string(L, -1, api, std::strcmp(key, "folder") != 0);
@@ -284,18 +286,20 @@ int file_dialog_configure(lua_State *L)
     }
     lua_pushboolean(L, 1); lua_pushnil(L); return 2;
 }
-int file_dialog_start(lua_State *L, bool save)
+int file_dialog_start(lua_State *L, bool save, bool folder=false)
 {
+    const char *api = folder ? "gui.selectFolder" : save ? "gui.saveFile" : "gui.openFile";
+    const char *parent_api = folder ? "gui.selectFolder parent" : save ? "gui.saveFile parent" : "gui.openFile parent";
     if (!lua_arity_is(L, 2) || !lua_istable(L, 1) || !lua_isfunction(L, 2))
-        return luaL_error(L, save ? "gui.saveFile expects (options, callback)" : "gui.openFile expects (options, callback)");
-    require_gui_initialized(L, save ? "gui.saveFile" : "gui.openFile");
-    file_dialog_options(L, save);
+        return luaL_error(L, "%s expects (options, callback)", api);
+    require_gui_initialized(L, api);
+    file_dialog_options(L, save, folder);
     const int options = lua_gettop(L);
-    if (!detail::gtk4_file_dialog_available()) return push_fail_protected(L, "babet.gui: requires GTK 4.10");
+    if (!(folder ? detail::gtk4_folder_dialog_available() : detail::gtk4_file_dialog_available())) return push_fail_protected(L, "babet.gui: requires GTK 4.10");
     auto *owner = main_lua_state(L);
     if (!lua_checkstack(owner, 32)) return push_fail_protected(L, "babet.gui: out of memory for callback");
     file_raw_field(L, options, "parent");
-    auto *parent = lua_isnil(L, -1) ? nullptr : check_kind(L, -1, WidgetKind::window, save ? "gui.saveFile parent" : "gui.openFile parent");
+    auto *parent = lua_isnil(L, -1) ? nullptr : check_kind(L, -1, WidgetKind::window, parent_api);
     lua_pop(L, 1);
     file_raw_field(L, options, "multiple");
     const bool multiple = lua_toboolean(L, -1); lua_pop(L, 1);
@@ -306,7 +310,7 @@ int file_dialog_start(lua_State *L, bool save)
     lua_pushvalue(L, 2); lua_setiuservalue(L, ud, 1);
     auto *s = new (std::nothrow) FileDialogState();
     if (!s) return push_fail_protected(L, "babet.gui: out of memory for file dialog");
-    *handle = s; s->save = save; s->multiple = multiple; s->owner = owner;
+    *handle = s; s->folder=folder; s->save = save; s->multiple = multiple; s->owner = owner;
     s->parent = parent; if (parent) retain_state(parent);
     // The userdata owns s before the next allocation; GC covers any Lua OOM.
     lua_rawgetp(L, LUA_REGISTRYINDEX, &file_dialog_roots_key);
@@ -327,10 +331,13 @@ int file_dialog_start(lua_State *L, bool save)
     pending_file_dialogs.fetch_add(1); g_gui_owner = owner;
     ++s->refs;
     void *native_parent = parent ? parent->native : nullptr;
-    if (save) detail::files_gtk_file_dialog_save(s->dialog, native_parent, s->cancel, file_dialog_done, s);
+    if (folder) detail::files_gtk_file_dialog_select_folder(s->dialog,native_parent,s->cancel,file_dialog_done,s);
+    else if (save) detail::files_gtk_file_dialog_save(s->dialog, native_parent, s->cancel, file_dialog_done, s);
     else if (multiple) detail::files_gtk_file_dialog_open_multiple(s->dialog, native_parent, s->cancel, file_dialog_done, s);
     else detail::files_gtk_file_dialog_open(s->dialog, native_parent, s->cancel, file_dialog_done, s);
     return 2; // success pair was allocated before starting the async operation
 }
 int l_open_file(lua_State *L) { return file_dialog_start(L, false); }
 int l_save_file(lua_State *L) { return file_dialog_start(L, true); }
+
+int l_select_folder(lua_State *L) { return file_dialog_start(L,false,true); }

@@ -1,0 +1,21 @@
+local g=babet.gui;assert(g.init());local w=assert(g.window());assert(w:show())
+local p=assert(babet.spawn('/bin/sh',{'-c','sleep 0.15; exit 8'},{stdin='null',stdout='null',stderr='null'}))
+assert(p:onExit(function()error('OBSERVER_AFTER_QUIT')end))
+local weak=setmetatable({},{__mode='v'})
+do local v={};weak[1]=v;assert(g.timeout(1000,function()assert(v);error('TIMER_AFTER_QUIT')end))end
+assert(g.idle(function()g.quit()end));assert(g.run());assert(w:close());collectgarbage('collect');assert(weak[1]==nil)
+assert(p:wait().code==8);assert(p:close())
+w=assert(g.window());assert(w:show());assert(g.timeout(25,function()w:close()end));assert(g.run())
+local a,b=assert(g.window{width=100,height=100}),assert(g.window{width=100,height=100})
+assert(a:onResize(function()pcall(function()b:close()end);a:close()end))
+assert(b:onResize(function()pcall(function()a:close()end);b:close()end))
+assert(a:show());assert(b:show());assert(g.run())
+-- Closing the same window inside close-request must also be safe.
+local closed=false;w=assert(g.window());assert(w:show())
+assert(w:onCloseRequest(function()closed=true;w:close();return true end));assert(w:requestClose());assert(closed)
+assert(not pcall(w.show,w))
+-- GTK ignores a nested close request: the handler runs once and its veto stands.
+local nested=0;w=assert(g.window());assert(w:show())
+assert(w:onCloseRequest(function()nested=nested+1;assert(w:requestClose());return true end))
+assert(w:requestClose());assert(nested==1);assert(w:close())
+print('EVENT_CANCEL_OK')

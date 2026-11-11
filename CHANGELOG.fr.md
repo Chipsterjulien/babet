@@ -9,6 +9,75 @@ nouveau contrat ou une règle opérationnelle peut affecter les scripts existant
 
 ## [Non publié]
 
+## [2.35.0] - 2026-11-11
+
+### Applications GUI et ressources du runtime
+
+- `gui.selectFolder` asynchrone (GTK 4.10), annulation et callbacks protégés.
+- `gui.timeout`, `gui.idle`, `gui.cancel` et `process:onExit` servis par la boucle GTK.
+- Tracebacks GUI/signaux sur stderr et gestionnaire `gui.onError`.
+- `window:onResize` et `requestClose` ; `close` conserve sa destruction explicite.
+- `babet.runtimeInfo`, ressources binaires `babet.embedded.read/list`, `exists` et contrôle facultatif `strict`.
+- Rapport ABI du runtime inclus dans les releases ; exigences de compilation portable documentées.
+- Tests de comportement et d'allocation, vrai GTK et documentation FR/EN. Arité stricte conservée ; composition des retours multiples documentée.
+
+### Compatibilité et validation
+
+- Les erreurs des callbacks de signaux produisent désormais une traceback sur
+  stderr même dans un programme sans GUI (`babet.signal callback error:`).
+- Les minuteries sont à exécution unique ; les rappels en attente sont annulés
+  à la sortie de boucle ou à la fermeture Lua. `onDraw` peut différer une
+  modification de widget par `gui.idle`.
+- Les observateurs de processus préservent le statut de sortie mémorisé. Ils
+  ne vident pas les tubes de sortie et ne couvrent pas `spawnPipeline`.
+- `embedded.read` est binaire et sensible à la casse ; `embedded.list` est
+  trié. Ces fonctions lisent l'image exécutée, sans repli sur les fichiers du
+  projet. Les workers héritent du contexte. La lecture reste limitée à 16 Mio.
+- `fileExists`, l'arité stricte et la destruction explicite de `window:close()`
+  restent inchangés. Utiliser `requestClose()` pour déclencher le callback
+  de demande de fermeture.
+- Le rapport ABI décrit les versions de symboles importées ; il ne réduit pas
+  la glibc minimale et ne remplace pas les essais sur les anciennes distributions.
+- La validation pré-release complète passe sur la machine du contributeur en
+  normal et ASan + UBSan, avec GTK réel, workers et ressources embarquées.
+- Régénération des deux manuels et correction des liens PDF vers les chapitres
+  runtime et verrou de fichier.
+
+### Nettoyage et diagnostics GUI
+
+- Libérer le propriétaire GUI inactif sur toutes les sorties de boucle, y
+  compris une erreur d'allocation Lua après disparition du dernier widget.
+  Conserver ce propriétaire tant qu'un widget ou une opération en a besoin.
+- Identifier correctement `gui.selectFolder` dans les erreurs de parent,
+  pendant la validation des options et la préparation native.
+- Réserver les quatre emplacements de pile Lua nécessaires à l'annulation des
+  tâches. Contrôler les frontières d'exception des nouvelles entrées GUI,
+  processus et runtime.
+- Ajouter des régressions sur le transfert de la GUI entre états Lua après une
+  erreur de boucle, les widgets conservés, l'annulation des tâches et les
+  diagnostics de parent des sélecteurs de fichiers.
+
+### Corrections de compilation
+
+- Compile les bibliothèques OpenSSL avant son outil en ligne de commande,
+  dans deux appels `make` successifs, pour que la compilation parallèle du CLI
+  commence après la génération des en-têtes.
+- Recompile Lua depuis des sources réextraites et vérifiées par SHA256 si la
+  bibliothèque statique ou un en-tête public manque. La présence de
+  `src/Makefile` ne masque plus l'absence du Makefile racine. Vérifie la
+  bibliothèque et les quatre en-têtes publics après compilation.
+- Réextrait les sources zlib, XZ, Abseil, RE2, libarchive et SQLite lorsqu'une
+  reconstruction/installation est nécessaire, au lieu d'accepter un dossier
+  existant. Conserve les installations complètes en cache et l'ancien arbre
+  source en cas d'échec d'extraction ou de validation. Ajoute des régressions
+  hors réseau sur les blocs de compilation.
+- Répare les sources bzip2 incomplètes en cache avant de recompiler libbz2.
+  Vérifie tous les fichiers nécessaires, réextrait l'archive contrôlée par
+  SHA256 et refuse une extraction échouée avant de remplacer l'ancien arbre.
+  Un échec de `make clean` n'est plus ignoré.
+- Ajoute des régressions hors réseau, dont le passage par le script de build
+  qui réutilisait un ancien `libbz2.a` puis échouait à copier `bzlib.h`.
+
 ## [2.34.0] - 2026-10-27
 
 ### Verrou exclusif de fichiers

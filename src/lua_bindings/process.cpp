@@ -1370,6 +1370,12 @@ int lua_spawn(lua_State *L)
     return process_lua_boundary<lua_spawn_impl>(L);
 }
 
+int process_on_exit(lua_State *L) {
+    if (!lua_arity_is(L,2)||(!lua_isfunction(L,2)&&!lua_isnil(L,2)))return luaL_error(L,"process:onExit expects function or nil");
+    (void)check_process(L,1);lua_getfield(L,LUA_REGISTRYINDEX,"babet.gui.processOnExit");
+    if(!lua_isfunction(L,-1))return push_fail_protected(L,"process:onExit requires babet.gui");
+    lua_pushvalue(L,1);lua_pushvalue(L,2);lua_pushcfunction(L,process_lua_boundary<process_wait>);lua_call(L,3,2);return 2;
+}
 void register_process_metatable(lua_State *L)
 {
     if (luaL_newmetatable(L, PROCESS_META))
@@ -1396,6 +1402,7 @@ void register_process_metatable(lua_State *L)
         lua_setfield(L, -2, "state");
         lua_pushcfunction(L, process_lua_boundary<process_pid>);
         lua_setfield(L, -2, "pid");
+        lua_pushcfunction(L,process_lua_boundary<process_on_exit>);lua_setfield(L,-2,"onExit");
         lua_pushcfunction(L, process_lua_boundary<process_wait>);
         lua_setfield(L, -2, "wait");
         lua_pushcfunction(L, process_lua_boundary<process_resume>);

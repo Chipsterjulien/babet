@@ -23,7 +23,8 @@ struct lua_State;
  * dans la coroutine active du thread principal depuis un hook count ou un appel Babet
  * interrompu. Les occurrences identiques sont coalescées ; plusieurs types
  * pending sont traités dans l'ordre fixe TERM, INT, HUP, USR1, USR2, PIPE.
- * Une erreur du callback est volontairement avalée après lua_pcall.
+ * Une erreur du callback est contenue et rapportée avec traceback sur stderr
+ * (ou via gui.onError pour cet état Lua).
  */
 void register_signal(lua_State *L);
 

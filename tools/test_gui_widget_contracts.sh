@@ -135,6 +135,7 @@ check "real GTK desktop pointer delivery is explicitly synchronized" contains "$
 check "real GTK desktop harness waits for pointer acknowledgement" contains "${ROOT}/tools/test_gui_real_gtk.py" 'REAL_GTK_DESKTOP_POINTER_OK'
 check "real GTK visible popover has a separate integration probe" contains "${ROOT}/tools/test_gui_real_gtk.py" 'real_gtk_popover.lua'
 check "real GTK rich DND copy action is exercised" contains "${ROOT}/tools/test_gui_real_gtk.py" 'copy-action'
+check "real GTK second drag waits for GDK's failed-drop animation" contains "${ROOT}/tools/test_gui_real_gtk.py" 'time.sleep(FAILED_DROP_SETTLE)'
 check "desktop controller connection failures are exercised" contains "${ROOT}/tools/test_gui_widgets.py" 'desktop_failures = ('
 check "fake GTK logs desktop target destruction" contains "$FAKE" 'destroy:label'
 check "fake GTK logs pointer-controller destruction" contains "$FAKE" 'destroy:pointerMotion'

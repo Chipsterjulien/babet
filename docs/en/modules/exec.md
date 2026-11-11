@@ -1270,3 +1270,8 @@ output in total, in addition to application and Lua-string allocations.
 - `babet.signal` callbacks are not dispatched during the call.
 
 See [`Security`](../security.md) for the general security model.
+
+
+## Async completion — Babet 2.35.0
+
+`proc:onExit(fn_or_nil)` observes a `babet.spawn` process through `gui.run()`. See [the GUI loop](gui.md) for cancellation, results and lifetime. Pipes are not drained automatically: read incrementally, inherit streams or redirect them.

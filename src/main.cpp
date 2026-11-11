@@ -1,3 +1,4 @@
+#include "project_core/runtime_info.hpp"
 #include "lua_bindings/curses.hpp"
 #include "lua_bindings/lua_utils.hpp"
 #include "lua_bindings/main_thread.hpp"
@@ -69,7 +70,7 @@ static void push_lua_arg(lua_State *L, int argc, char *argv[], int script_index)
 // lancée telle que tapée (dossier ou script), arg[1..n] = arguments
 // utilisateur.
 static int run_tool_script(const fs::path &anchorDir,
-                           const std::string &scriptPath,
+                           const std::string &scriptPath, const char *mode,
                            int argc, char *argv[])
 {
     lua_State *L = luaL_newstate();
@@ -78,9 +79,18 @@ static int run_tool_script(const fs::path &anchorDir,
         std::cerr << "Erreur : impossible d'allouer un état Lua" << std::endl;
         return 1;
     }
-    std::string package_prefix;
+    std::string package_prefix,directory,script,executable;
     try
     {
+        // `babet .` et `babet projet/` se normalisent en "/chemin/projet/" :
+        // retirer le séparateur final pour que projectDir ait la même forme
+        // quelle que soit l'écriture de l'argument (la racine "/" reste "/").
+        fs::path normalized_dir = fs::absolute(anchorDir).lexically_normal();
+        if (!normalized_dir.has_filename() && normalized_dir.has_relative_path())
+            normalized_dir = normalized_dir.parent_path();
+        directory = normalized_dir.string();
+        script=fs::absolute(scriptPath).lexically_normal().string();
+        executable=getExecutablePath();
         package_prefix = (anchorDir / "?.lua").string() + ";" +
                          (anchorDir / "?" / "init.lua").string() + ";";
     }
@@ -100,7 +110,8 @@ static int run_tool_script(const fs::path &anchorDir,
         register_bundled_modules(state);
         register_babet(state, &plugin_runtime, NativePluginMode::allowed);
         prepend_babet_package_path(state, package_prefix);
-        push_lua_arg(state, argc, argv, 1);
+        push_lua_arg(state,argc,argv,1);
+        set_babet_runtime_info(state,mode,directory.c_str(),script.c_str(),executable.c_str());
     };
     std::string setup_error;
     if (!lua_run_setup_protected(
@@ -115,7 +126,7 @@ static int run_tool_script(const fs::path &anchorDir,
     // Workers (Chantier 8) : indiquer le mode d'exécution pour que
     // require() utilisateur fonctionne aussi dans les workers
     // (cf. set_workers_init_context).
-    set_workers_init_context(anchorDir.string(), "", false);
+    set_workers_init_context(directory,"",false,mode,script,executable);
 
     std::string script_error;
     const bool ok = loadLuaFile(L, scriptPath, script_error);
@@ -291,6 +302,9 @@ int main(int argc, char *argv[])
                 std::cerr << "Erreur : impossible d'allouer un état Lua" << std::endl;
                 return 1;
             }
+            std::string executable;
+            try { executable=getExecutablePath(); }
+            catch(const std::exception &e){std::cerr<<e.what()<<std::endl;close_babet_lua_state(L);return 1;}
             auto setup_runtime = [&](lua_State *state)
             {
                 luaL_openlibs(state);
@@ -301,7 +315,8 @@ int main(int argc, char *argv[])
                 register_embedded_searcher(state, exePath);
                 // Binaire packagé = l'application elle-même est le script :
                 // arg[0] = binaire, arg[1..n] = ses arguments.
-                push_lua_arg(state, argc, argv, 0);
+                push_lua_arg(state,argc,argv,0);
+                set_babet_runtime_info(state,"embedded",nullptr,"main.lua",executable.c_str());
             };
             std::string setup_error;
             if (!lua_run_setup_protected(
@@ -317,7 +332,7 @@ int main(int argc, char *argv[])
             // Workers (Chantier 8) : indiquer le mode d'exécution
             // pour que require() utilisateur fonctionne aussi dans
             // les workers (cf. set_workers_init_context).
-            set_workers_init_context("", exePath, true);
+            set_workers_init_context("",exePath,true,"embedded","main.lua",executable);
 
             if (load_embedded_lua(L, fileData->data(), fileData->size(), "main.lua") || lua_pcall(L, 0, LUA_MULTRET, 0))
             {
@@ -423,7 +438,7 @@ int main(int argc, char *argv[])
         // ancrés au répertoire du script, pour que require() des
         // fichiers voisins fonctionne exactement comme en mode
         // dossier. arg[0] reste le chemin tel que tapé (via argv).
-        return run_tool_script(target.parent_path(), target.string(),
+        return run_tool_script(target.parent_path(),target.string(),"file",
                                argc, argv);
     }
 
@@ -453,7 +468,7 @@ int main(int argc, char *argv[])
                       << path << std::endl;
             return 1;
         }
-        return run_tool_script(target, mainLuaPath, argc, argv);
+        return run_tool_script(target,mainLuaPath,"directory",argc,argv);
     }
 
     // Ni fichier régulier ni dossier : chemin inexistant, FIFO,

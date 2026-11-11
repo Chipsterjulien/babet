@@ -15,7 +15,11 @@ extern "C" {
 // Exercise the actual binding/loader; only unrelated terminal services are
 // stubbed. Faults are injected in Lua allocation and C++ new independently.
 namespace babet_curses { bool session_active() noexcept { return false; } }
-void signal_dispatch_pending(lua_State *) {}
+static void (*signal_dispatch_hook)(lua_State *) = nullptr;
+void signal_dispatch_pending(lua_State *L)
+{
+    if (signal_dispatch_hook) signal_dispatch_hook(L);
+}
 
 static int cpp_budget = -1;
 static int cpp_failures = 0;
@@ -504,6 +508,107 @@ static void file_drop_faults()
     std::printf("[PASS] file drop allocator: %d fault cases / %d controls; protected file list and retry\n",faults,controls);
 }
 
+static Allocator *loop_error_allocator = nullptr;
+static void close_window_before_loop_oom(lua_State *L)
+{
+    signal_dispatch_hook = nullptr;
+    // This hook controls timing only. The actual OOM comes from the production
+    // dispatch_window_sizes allocation immediately after signal dispatch.
+    lua_getglobal(L, "close_before_loop_oom");
+    check(lua_pcall(L, 0, 0, 0) == LUA_OK, "close last window before loop OOM");
+    loop_error_allocator->budget = 0;
+}
+
+static void loop_error_ownership()
+{
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        const bool keep_widget = (scenario & 1) != 0;
+        const bool pending_task = (scenario & 2) != 0;
+        Allocator first_allocator, second_allocator;
+        lua_State *first = create_state(first_allocator);
+        lua_State *second = create_state(second_allocator);
+        load_counters();
+        execute(first, R"LUA(
+            weak = setmetatable({}, {__mode = 'v'})
+            window = assert(gui.window())
+            assert(window:show())
+            function close_before_loop_oom()
+                assert(window:close())
+                window = nil
+                collectgarbage('collect')
+            end
+            function run_loop_oom() return gui.run() end
+        )LUA");
+        if (keep_widget)
+            execute(first, "kept = assert(gui.label('still owned'))");
+        if (pending_task)
+            execute(first, R"LUA(
+                local captured = {}
+                weak[1] = captured
+                pending = assert(gui.timeout(10000, function()
+                    assert(captured)
+                    error('LOOP_OOM_LATE_CALLBACK')
+                end))
+            )LUA");
+        execute(second, "assert(not pcall(gui.window))");
+        lua_getglobal(first, "run_loop_oom");
+        loop_error_allocator = &first_allocator;
+        signal_dispatch_hook = close_window_before_loop_oom;
+        const int status = lua_pcall(first, 0, 0, 0);
+        first_allocator.budget = -1;
+        signal_dispatch_hook = nullptr;
+        loop_error_allocator = nullptr;
+        check(status == LUA_ERRMEM && first_allocator.failures > 0,
+              "loop ownership test must hit a real Lua allocation failure");
+        lua_settop(first, 0);
+        execute(first, "collectgarbage('collect'); assert(weak[1] == nil)");
+        if (pending_task)
+            execute(first, "assert(gui.cancel(pending) == false)");
+        if (keep_widget) {
+            execute(second, "assert(not pcall(gui.window))");
+            execute(first, "kept = nil; collectgarbage('collect')");
+        }
+        check(live_widgets() == 0, "no native widgets remain before ownership transfer");
+        // Keep the first Lua state alive: cleanup_on_main_thread must not hide
+        // the missing release on gui.run's own error path.
+        execute(second, "local w = assert(gui.window()); assert(w:close())");
+        close_state(second);
+        close_state(first);
+    }
+    std::printf("[PASS] GUI loop error ownership: 4 OOM cases; idle owner released, live widget retained, pending task cancelled\n");
+}
+
+static void deferred_faults() {
+    int faults=0,controls=0;
+    for(int mode=0;mode<3;++mode)for(int budget=0;budget<64;++budget){
+        Allocator a;lua_State *L=create_state(a);load_counters();
+        const char *code=mode==0?"function install() local id=assert(gui.timeout(0,function()error('cancelled')end));assert(gui.cancel(id))end"
+            :mode==1?"window=assert(gui.window());assert(window:show());function install()assert(gui.idle(function()window:close()end));assert(gui.run())end"
+            :"function install()assert(gui.selectFolder({},function()error('late folder')end))end";
+        execute(L,code);lua_getglobal(L,"install");a.budget=budget;
+        const int status=lua_pcall(L,0,0,0);a.budget=-1;
+        if(a.failures){++faults;check(status!=LUA_OK||mode==1,"deferred OOM must be reported");}
+        else{++controls;check(status==LUA_OK,"deferred control failed");}
+        lua_settop(L,0);close_state(L);
+    }
+    check(faults&&controls,"deferred sweep needs faults and controls");
+    std::printf("[PASS] deferred callbacks: %d faults / %d controls; timer, idle, folder and state cleanup\n",faults,controls);
+    // Cancelling the last headless timer must relinquish GUI ownership even
+    // while its Lua state remains alive (embedding hosts may have two states).
+    Allocator first_allocator, second_allocator;
+    lua_State *first=create_state(first_allocator);
+    lua_State *second=create_state(second_allocator);
+    load_counters();
+    execute(first,"pending=assert(gui.timeout(0,function()error('cancelled')end))");
+    execute(second,"assert(not pcall(gui.window))");
+    execute(first,"assert(gui.cancel(pending))");
+    execute(second,"local w=assert(gui.window());assert(w:close())");
+    close_state(second);
+    close_state(first);
+    std::printf("[PASS] deferred ownership: last cancellation releases the GUI for another live Lua state\n");
+    loop_error_ownership();
+}
+
 int main(int argc, char **argv)
 {
     babet_runtime::register_main_thread();
@@ -518,5 +623,6 @@ int main(int argc, char **argv)
     else if (std::strcmp(argv[1], "file-completion") == 0) file_completion_faults();
     else if (std::strcmp(argv[1], "tags") == 0) text_tag_faults();
     else if (std::strcmp(argv[1], "file-drop") == 0) file_drop_faults();
-    else check(false, "unknown test mode");
+    else if(std::strcmp(argv[1],"deferred")==0)deferred_faults();
+    else check(false,"unknown test mode");
 }

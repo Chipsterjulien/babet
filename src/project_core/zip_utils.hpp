@@ -67,4 +67,7 @@ std::optional<std::vector<char>> readEmbeddedFile(
     std::string *error = nullptr,
     const EmbeddedImageLayout *layout = nullptr);
 
+// Resource lookup is case-sensitive; legacy module lookup above is unchanged.
+std::optional<std::vector<char>> readEmbeddedResource(const std::string&,const std::string&,std::string*,const EmbeddedImageLayout*);
+std::optional<std::vector<std::string>> listEmbeddedFiles(const std::string&,std::string*,const EmbeddedImageLayout*);
 #endif // ZIP_UTILS_HPP

@@ -44,8 +44,11 @@ has "$BUILD" 'cache absent ou configuration obsolète, reconstruction' \
     "OpenSSL cache mismatch forces reconstruction"
 has "$BUILD" 'rm -rf -- "${OPENSSL_BUILD_DIR:?}/${OPENSSL_DIR}"' \
     "OpenSSL stale configured tree is discarded"
-has "$BUILD" 'make -j"$(nproc)" build_libs apps/openssl' \
+has "$BUILD" 'make -j"$(nproc)" build_libs && make -j"$(nproc)" apps/openssl' \
     "OpenSSL bootstrap builds static libraries plus the vendored TLS test CLI"
+# One parallel make for both goals races apps/lib against header generation.
+not_has "$BUILD" 'build_libs apps/openssl' \
+    "OpenSSL CLI never shares a parallel make with header generation"
 
 # Babet source-level section splitting stays a maintainer-only experiment and
 # is never enabled by build_local.sh.

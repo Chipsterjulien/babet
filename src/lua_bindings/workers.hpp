@@ -99,7 +99,8 @@ void register_workers(lua_State *L);
  */
 void set_workers_init_context(std::string projectDir,
                               std::string exePath,
-                              bool embedded);
+                              bool embedded,std::string mode="host",
+                              std::string script="",std::string executable="");
 
 /**
  * @brief Protection process-wide partagée avec le chargeur GTK.

@@ -661,11 +661,11 @@ void mergeFiles(const std::string &exe, const std::string &zip,
     std::cout << "Successfully created executable: " << output << std::endl;
 }
 
-std::optional<std::vector<char>> readEmbeddedFile(
+template<class Result,class Read>
+static std::optional<Result> withEmbeddedArchive(
     const std::string &exePath,
-    const std::string &archivePath,
     std::string *error,
-    const EmbeddedImageLayout *layout)
+    const EmbeddedImageLayout *layout, Read read)
 {
     if (error != nullptr)
     {
@@ -758,7 +758,11 @@ std::optional<std::vector<char>> readEmbeddedFile(
         ~ReaderGuard() { mz_zip_reader_end(zip); }
     } guard{&zip};
 
-    int idx = mz_zip_reader_locate_file(&zip, archivePath.c_str(), nullptr, 0);
+    return read(zip);
+}
+static std::optional<std::vector<char>> readEmbeddedFileImpl(const std::string &exePath,const std::string &archivePath,std::string *error,const EmbeddedImageLayout *layout,bool caseSensitive) {
+    return withEmbeddedArchive<std::vector<char>>(exePath,error,layout,[&](mz_zip_archive &zip)->std::optional<std::vector<char>> {
+    int idx = mz_zip_reader_locate_file(&zip, archivePath.c_str(), nullptr, caseSensitive ? MZ_ZIP_FLAG_CASE_SENSITIVE : 0);
     if (idx < 0)
     {
         return std::nullopt;
@@ -809,4 +813,22 @@ std::optional<std::vector<char>> readEmbeddedFile(
     }
 
     return data;
+    });
+}
+
+std::optional<std::vector<char>> readEmbeddedFile(const std::string &exe,const std::string &name,std::string *error,const EmbeddedImageLayout *layout){return readEmbeddedFileImpl(exe,name,error,layout,false);}
+std::optional<std::vector<char>> readEmbeddedResource(const std::string &exe,const std::string &name,std::string *error,const EmbeddedImageLayout *layout){return readEmbeddedFileImpl(exe,name,error,layout,true);}
+std::optional<std::vector<std::string>> listEmbeddedFiles(const std::string &exe,std::string *error,const EmbeddedImageLayout *layout){
+    return withEmbeddedArchive<std::vector<std::string>>(exe,error,layout,[&](mz_zip_archive &zip)->std::optional<std::vector<std::string>> {
+        std::vector<std::string> names;std::size_t total=0;
+        for(mz_uint i=0;i<mz_zip_reader_get_num_files(&zip);++i){
+            if(mz_zip_reader_is_file_a_directory(&zip,i))continue;
+            const auto size=mz_zip_reader_get_filename(&zip,i,nullptr,0);
+            if(!size||size>MAX_EMBEDDED_FILE_SIZE-total){if(error)*error="embedded filenames exceed 16 MiB or are invalid";return std::nullopt;}
+            std::string name(size,'\0');
+            if(mz_zip_reader_get_filename(&zip,i,name.data(),size)!=size||name.back()!='\0'||name.find('\0')!=size-1){if(error)*error="invalid embedded filename";return std::nullopt;}
+            total+=size;name.pop_back();names.push_back(std::move(name));
+        }
+        std::sort(names.begin(),names.end());return names;
+    });
 }

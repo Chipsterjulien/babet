@@ -286,6 +286,18 @@ if ! bash "${SCRIPT_DIR}/tools/test_ncurses_bootstrap.sh"; then
     exit 1
 fi
 
+print_preflight_stage "Préflight — bootstrap bzip2"
+if ! bash "${SCRIPT_DIR}/tools/test_bzip2_bootstrap.sh"; then
+    echo "ÉCHEC : le préflight du bootstrap bzip2 a échoué."
+    exit 1
+fi
+
+print_preflight_stage "Préflight — caches Lua et sources des dépendances"
+if ! python3 "${SCRIPT_DIR}/tools/test_dependency_bootstrap.py"; then
+    echo "ÉCHEC : le préflight des caches de dépendances a échoué."
+    exit 1
+fi
+
 print_preflight_stage "Préflight — bootstrap Zstandard"
 if ! bash "${SCRIPT_DIR}/tools/test_zstd_bootstrap.sh"; then
     echo "ÉCHEC : le préflight du bootstrap Zstandard a échoué."
@@ -527,6 +539,16 @@ if ! python3 "${SCRIPT_DIR}/tools/test_gui_drawing.py" "${BINARY}"; then
     exit 1
 fi
 
+print_preflight_stage "Régression — contexte, ressources embarquées, boucle GUI et ABI"
+if ! python3 "${SCRIPT_DIR}/tools/test_runtime_info.py" "${BINARY}"; then
+    echo "ÉCHEC : contexte et ressources embarquées."; exit 1
+fi
+if ! BABET_TEST_GUI_SANITIZERS="${SANITIZER_MODE}" python3 "${SCRIPT_DIR}/tools/test_gui_event_loop.py" "${BINARY}"; then
+    echo "ÉCHEC : minuteries, processus et erreurs GUI."; exit 1
+fi
+if ! python3 "${SCRIPT_DIR}/tools/test_runtime_abi.py"; then
+    echo "ÉCHEC : rapport ABI du runtime."; exit 1
+fi
 print_preflight_stage "Régression — GUI conteneurs, SpinButton, Calendar et propriétés communes"
 if ! BABET_TEST_GUI_SANITIZERS="${SANITIZER_MODE}" python3 "${SCRIPT_DIR}/tools/test_gui_widgets.py" "${BINARY}"; then
     echo "ÉCHEC : la régression des widgets GUI complémentaires a échoué."

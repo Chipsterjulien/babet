@@ -57,3 +57,5 @@ int g_main_context_iteration(void *c, int b) { (void)c; (void)b; return 1; }
 unsigned int g_timeout_add(unsigned int ms, FakeSourceCallback cb, void *d)
 { (void)ms; (void)cb; (void)d; return 1; }
 int g_source_remove(unsigned int id) { (void)id; return 1; }
+
+void gtk_window_close(void *w) { (void)w; }

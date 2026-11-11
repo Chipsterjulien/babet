@@ -1,3 +1,4 @@
+#include "../project_core/runtime_info.hpp"
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -886,8 +887,11 @@ namespace
         std::string exePath;    // mode embarqué
         bool embedded;
         bool initialized;
+        std::string mode;
+        std::string script;
+        std::string executable;
     };
-    WorkerInitContext g_init_ctx = {"", "", false, false};
+    WorkerInitContext g_init_ctx = {"","",false,false,"host","",""};
 
     // Profondeur max pour les arborescences LÉGITIMES (sans cycle).
     // Les cycles sont détectés séparément via un set des tables déjà
@@ -1956,6 +1960,7 @@ namespace
             {
                 return;
             }
+            set_babet_runtime_info(state,g_init_ctx.mode.c_str(),g_init_ctx.projectDir.c_str(),g_init_ctx.script.c_str(),g_init_ctx.executable.c_str());
             if (g_init_ctx.embedded && !g_init_ctx.exePath.empty())
             {
                 register_embedded_searcher(
@@ -3486,12 +3491,12 @@ void register_workers(lua_State *L)
 
 void set_workers_init_context(std::string projectDir,
                               std::string exePath,
-                              bool embedded)
+                              bool embedded,std::string mode,std::string script,std::string executable)
 {
     // Build the replacement first so allocation failure cannot leave the
     // process-wide worker init context half-updated. Moving the completed
     // strings into place is allocation-free with the default allocator.
     WorkerInitContext next{std::move(projectDir), std::move(exePath),
-                           embedded, true};
+                           embedded,true,std::move(mode),std::move(script),std::move(executable)};
     g_init_ctx = std::move(next);
 }

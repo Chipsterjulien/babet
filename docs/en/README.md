@@ -15,7 +15,14 @@ Babet is a standalone Lua binary for Linux scripting and automation. This
 manual is organised by need and by module: the tables below describe both the
 technical chapter name and the features it contains.
 
-Documentation for **Babet 2.34.0**.
+Documentation for **Babet 2.35.0**.
+
+Babet 2.35.0 adds [GUI timers, process-completion callbacks and directory selection](modules/gui.md),
+callback tracebacks with `gui.onError`, window resize notifications and
+`requestClose`. It also adds [launch context, embedded resources and strict
+globals](modules/runtime.md), plus `babet.exists`. GTK 4 remains optional;
+the directory chooser requires GTK 4.10. Release archives include a runtime ABI
+report; the minimum glibc version still depends on the build environment.
 
 Babet 2.34.0 adds [`babet.lockFile`](modules/file-lock.md) for cooperating
 processes that need one writer per data directory. Locks are exclusive and
@@ -48,6 +55,8 @@ self-test harness now contains 45 reachable suites.
 - [`Getting started`](getting-started.md) — installation, first script, running
   a file or directory, creating an embedded executable, and using Babet through
   `PATH`.
+- [`Program exit`](runtime-exit.md) — `os.exit` status and cleanup, finalizers,
+  workers, and the difference from stock Lua.
 - [`Security`](security.md) — threat model, actual protections, limitations,
   and least-privilege rules.
 - [`Cookbook`](cookbook.md) — complete recipes combining several modules.
@@ -57,6 +66,7 @@ self-test harness now contains 45 reachable suites.
 
 | I need to… | Chapter | What it contains |
 | --- | --- | --- |
+| identify launch mode, read embedded resources or check globals | [`Runtime — context and resources`](modules/runtime.md) | `runtimeInfo`, `embedded.read/list`, `strict` and multiple-return composition |
 | reserve a directory for one writer process | [`lockFile — exclusive file locks`](modules/file-lock.md) | `flock`, in-place metadata, cleanup and process inheritance |
 | create, remove, list, search, copy, or move files | [`FS — filesystem`](modules/fs.md) | files, directories, paths, symlinks, `listFiles`, `find` with `xdev` confinement, `copyTree`, permissions, and checksums |
 | atomically publish configuration or binary data | [`writeFileAtomic — atomic writing`](modules/write-file-atomic.md) | default no-overwrite, permissions, durability, path confinement, concurrency, and workers |
@@ -98,6 +108,7 @@ names below define each chapter's scope before you open it.
 | [`Argparse — command-line arguments`](modules/argparse.md) | Declare flags, options, and positional values; generate help; validate choices; convert values. |
 | [`Exec — external programs and processes`](modules/exec.md) | Run without a shell using `exec`, or progressively drive stdin/stdout/stderr using `spawn`. |
 | [`Process pipelines`](modules/pipeline.md) | Connect commands without a shell, using complete capture or streaming and per-stage statuses. |
+| [`Runtime — launch context and embedded resources`](modules/runtime.md) | Launch modes and paths, binary ZIP resources, strict globals and multiple-return composition. |
 | [`FS — files, directories, paths, and attributes`](modules/fs.md) | Existence and types, creation/removal, paths, listings, search, iterators, tree copy/move, symlinks, Unix modes, and checksums. |
 | [`writeFileAtomic — atomic and durable file writing`](modules/write-file-atomic.md) | Publish a binary Lua string through a private temporary file and atomic rename, with explicit overwrite, exact permissions, `fsync`, path confinement, and worker support. |
 | [`HTTP — web requests`](modules/http.md) | URLs, methods, query, validated headers, binary bodies, responses, atomic file downloads, redirects, TLS verification, timeout, and limits. |

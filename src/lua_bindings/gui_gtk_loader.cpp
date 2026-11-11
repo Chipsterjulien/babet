@@ -226,7 +226,9 @@ struct GtkApi
     unsigned int (*files_g_list_model_get_n_items)(void *a) = nullptr;
     void * (*files_g_list_model_get_item)(void *a, unsigned int b) = nullptr;
     void (*files_gtk_file_dialog_open)(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) = nullptr;
+    void (*files_gtk_file_dialog_select_folder)(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) = nullptr;
     void * (*files_gtk_file_dialog_open_finish)(void *a, void *b, void **c) = nullptr;
+    void * (*files_gtk_file_dialog_select_folder_finish)(void *a, void *b, void **c) = nullptr;
     void (*files_gtk_file_dialog_open_multiple)(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) = nullptr;
     void * (*files_gtk_file_dialog_open_multiple_finish)(void *a, void *b, void **c) = nullptr;
     void (*files_gtk_file_dialog_save)(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) = nullptr;
@@ -241,6 +243,7 @@ struct GtkApi
     GtkWindowSetChild window_set_child = nullptr;
     GtkWindowPresent window_present = nullptr;
     GtkWindowDestroy window_destroy = nullptr;
+    GtkWindowDestroy window_close = nullptr;
     GtkWindowSetTransientFor window_set_transient_for = nullptr;
     GtkWindowSetBoolean window_set_modal = nullptr;
     GtkWindowSetIconName window_set_icon_name = nullptr;
@@ -547,6 +550,7 @@ bool gtk4_load(std::string &error)
     BABET_GTK_RESOLVE(window_set_child, "gtk_window_set_child");
     BABET_GTK_RESOLVE(window_present, "gtk_window_present");
     BABET_GTK_RESOLVE(window_destroy, "gtk_window_destroy");
+    BABET_GTK_RESOLVE(window_close, "gtk_window_close");
     BABET_GTK_RESOLVE(window_set_transient_for, "gtk_window_set_transient_for");
     BABET_GTK_RESOLVE(window_set_modal, "gtk_window_set_modal");
     BABET_GTK_RESOLVE(window_set_icon_name, "gtk_window_set_icon_name");
@@ -775,7 +779,9 @@ bool gtk4_load(std::string &error)
     resolve_optional(handle, "g_list_model_get_n_items", candidate.files_g_list_model_get_n_items);
     resolve_optional(handle, "g_list_model_get_item", candidate.files_g_list_model_get_item);
     resolve_optional(handle, "gtk_file_dialog_open", candidate.files_gtk_file_dialog_open);
+    resolve_optional(handle, "gtk_file_dialog_select_folder", candidate.files_gtk_file_dialog_select_folder);
     resolve_optional(handle, "gtk_file_dialog_open_finish", candidate.files_gtk_file_dialog_open_finish);
+    resolve_optional(handle, "gtk_file_dialog_select_folder_finish", candidate.files_gtk_file_dialog_select_folder_finish);
     resolve_optional(handle, "gtk_file_dialog_open_multiple", candidate.files_gtk_file_dialog_open_multiple);
     resolve_optional(handle, "gtk_file_dialog_open_multiple_finish", candidate.files_gtk_file_dialog_open_multiple_finish);
     resolve_optional(handle, "gtk_file_dialog_save", candidate.files_gtk_file_dialog_save);
@@ -876,7 +882,9 @@ void files_g_list_store_append(void *a, void *b) noexcept { return g_gtk.files_g
 unsigned int files_g_list_model_get_n_items(void *a) noexcept { return g_gtk.files_g_list_model_get_n_items(a); }
 void * files_g_list_model_get_item(void *a, unsigned int b) noexcept { return g_gtk.files_g_list_model_get_item(a,b); }
 void files_gtk_file_dialog_open(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept { return g_gtk.files_gtk_file_dialog_open(a,b,c,cb,d); }
+void files_gtk_file_dialog_select_folder(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept { return g_gtk.files_gtk_file_dialog_select_folder(a,b,c,cb,d); }
 void * files_gtk_file_dialog_open_finish(void *a, void *b, void **c) noexcept { return g_gtk.files_gtk_file_dialog_open_finish(a,b,c); }
+void * files_gtk_file_dialog_select_folder_finish(void *a, void *b, void **c) noexcept { return g_gtk.files_gtk_file_dialog_select_folder_finish(a,b,c); }
 void files_gtk_file_dialog_open_multiple(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept { return g_gtk.files_gtk_file_dialog_open_multiple(a,b,c,cb,d); }
 void * files_gtk_file_dialog_open_multiple_finish(void *a, void *b, void **c) noexcept { return g_gtk.files_gtk_file_dialog_open_multiple_finish(a,b,c); }
 void files_gtk_file_dialog_save(void *a, void *b, void *c, GtkAsyncReadyCallback cb, void *d) noexcept { return g_gtk.files_gtk_file_dialog_save(a,b,c,cb,d); }
@@ -903,6 +911,7 @@ void gtk4_window_set_default_size(void *w, int x, int y) noexcept { g_gtk.window
 void gtk4_window_set_child(void *w, void *c) noexcept { g_gtk.window_set_child(w, c); }
 void gtk4_window_present(void *w) noexcept { g_gtk.window_present(w); }
 void gtk4_window_destroy(void *w) noexcept { g_gtk.window_destroy(w); }
+void gtk4_window_close(void *w) noexcept { g_gtk.window_close(w); }
 void gtk4_window_set_transient_for(void *w, void *p) noexcept { g_gtk.window_set_transient_for(w, p); }
 void gtk4_window_set_modal(void *w, bool v) noexcept { g_gtk.window_set_modal(w, v ? 1 : 0); }
 void gtk4_window_set_icon_name(void *w, const char *n) noexcept { g_gtk.window_set_icon_name(w, n); }
@@ -1258,3 +1267,7 @@ bool rich_value_holds(const void *v, std::size_t type) noexcept { return v && g_
 void rich_set_drop_types(void *t, bool text, bool files) noexcept { if (!g_gtk.rich_gtk_drop_target_set_gtypes) return; std::size_t types[2]; std::size_t n=0; if(files) types[n++]=g_gtk.rich_gdk_file_list_get_type(); if(text) types[n++]=g_gtk.type_from_name("gchararray"); g_gtk.rich_gtk_drop_target_set_gtypes(t, types, n); }
 
 } // namespace babet_gui::detail
+
+namespace babet_gui::detail {
+bool gtk4_folder_dialog_available() noexcept { return gtk4_file_dialog_available() && g_gtk.files_gtk_file_dialog_select_folder && g_gtk.files_gtk_file_dialog_select_folder_finish; }
+}

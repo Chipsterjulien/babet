@@ -113,7 +113,7 @@ echo "=========================================="
 echo ""
 
 # --- Vérification des outils requis ----------------------------------
-for tool in sha256sum strip tar ar; do
+for tool in sha256sum strip tar ar python3 readelf; do
     if ! command -v "${tool}" &>/dev/null; then
         echo "ERREUR: '${tool}' introuvable dans PATH" >&2
         exit 1
@@ -197,6 +197,9 @@ strip "${DIST_DIR}/${BINARY_NAME_VERSIONED}"
 SIZE_AFTER=$(stat -c%s "${DIST_DIR}/${BINARY_NAME_VERSIONED}")
 echo "      Taille : ${SIZE_BEFORE} -> ${SIZE_AFTER} octets"
 
+python3 "${SCRIPT_DIR}/tools/runtime_abi.py" "${DIST_DIR}/${BINARY_NAME_VERSIONED}" \
+    --output "${DIST_DIR}/${BINARY_NAME_VERSIONED}.abi.txt"
+
 # --- Étape 4 : sha256 du binaire ------------------------------------
 echo "[4/8] Calcul SHA256 du binaire..."
 BINARY_SHA256_FILE="${DIST_DIR}/${BINARY_NAME_VERSIONED}.sha256"
@@ -239,6 +242,7 @@ STAGE_PARENT="${DIST_DIR}/.stage"
 STAGE_DIR="${STAGE_PARENT}/${TARBALL_BASENAME}"
 mkdir -p "${STAGE_DIR}"
 cp "${DIST_DIR}/${BINARY_NAME_VERSIONED}" "${STAGE_DIR}/${PROJECT_NAME}"
+cp "${DIST_DIR}/${BINARY_NAME_VERSIONED}.abi.txt" "${STAGE_DIR}/runtime-abi.txt"
 for f in "${INCLUDE_FILES[@]:1}"; do
     cp "${SCRIPT_DIR}/${f}" "${STAGE_DIR}/"
 done

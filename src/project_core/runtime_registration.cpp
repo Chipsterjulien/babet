@@ -1,3 +1,4 @@
+#include "runtime_info.hpp"
 #include "runtime_registration.hpp"
 
 #ifndef BABET_SIZE_EXPERIMENT_NO_ARCHIVE_COMPRESSION
@@ -202,7 +203,8 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     register_pipeline(L);
 
     lua_pushcfunction(L, babet_lua_boundary<lua_fileExists>);
-    lua_setfield(L, -2, "fileExists");
+    lua_setfield(L,-2,"fileExists");
+    lua_pushcfunction(L,babet_lua_boundary<lua_exists>);lua_setfield(L,-2,"exists");
 
     lua_pushcfunction(L, babet_lua_boundary<lua_fileSize>);
     lua_setfield(L, -2, "fileSize");
@@ -423,6 +425,7 @@ void register_babet(lua_State *L, NativePluginRuntime *plugin_runtime,
     // Sous-table babet.gui : API GUI optionnelle. Son enregistrement ne charge
     // aucun toolkit ; GTK 4 n'est recherché que lors d'un appel Lua explicite.
     babet_gui::register_gui(L);
+    register_babet_runtime_info(L);
 
     // Sous-table babet.curses : interface terminal ncursesw. Toutes les
     // opérations restent limitées au thread principal et partagent le

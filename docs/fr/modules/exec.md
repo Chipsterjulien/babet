@@ -1325,3 +1325,8 @@ au total, plus les allocations du programme et des chaînes Lua.
 
 Pour les règles de sécurité générales, consulte
 [`Sécurité`](../security.md).
+
+
+## Fin asynchrone — Babet 2.35.0
+
+`proc:onExit(fn_ou_nil)` observe un processus `babet.spawn` depuis `gui.run()`. Voir [la boucle GUI](gui.md) pour annulation, résultat et durée de vie. Les pipes ne sont pas drainés automatiquement : les lire progressivement, hériter des flux ou les rediriger.

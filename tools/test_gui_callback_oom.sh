@@ -48,3 +48,5 @@ LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" file-completion
 
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" tags
 LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" file-drop
+
+LD_LIBRARY_PATH="${TMP_ROOT}" "${TMP_ROOT}/probe" deferred

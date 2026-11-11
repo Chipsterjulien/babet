@@ -1,4 +1,6 @@
 #include "gui.hpp"
+#include "callback_errors.hpp"
+#include <chrono>
 
 #include "curses.hpp"
 #include "gui_gtk_loader.hpp"
@@ -43,6 +45,7 @@ constexpr lua_Integer KEY_CALLBACK = -8;
 constexpr lua_Integer PANED_POSITION_CALLBACK = -9;
 constexpr lua_Integer CLOSE_REQUEST_CALLBACK = -10;
 constexpr lua_Integer DRAG_STATE_CALLBACK = -11;
+constexpr lua_Integer RESIZE_CALLBACK = -12;
 
 enum class WidgetKind : unsigned char
 {
@@ -75,6 +78,7 @@ struct WidgetState
     WidgetKind kind = WidgetKind::label;
     void *handle_key = nullptr; // weak Lua handle lookup; never dereferenced
     lua_State *callback_thread = nullptr; // synchronous setters use their caller
+    int resize_width=-1, resize_height=-1;
     bool drag_controller_attached = false;
     bool click_controller_attached = false;
     bool drag_source_controller_attached = false;
@@ -138,6 +142,8 @@ lua_State *g_css_owner = nullptr;
 constexpr unsigned int CSS_PRIORITY_APPLICATION = 600U;
 
 void drain_deferred_widgets() noexcept;
+bool has_gui_tasks() noexcept;
+void cancel_gui_tasks(lua_State*) noexcept;
 bool has_file_dialogs() noexcept;
 void cancel_file_dialogs(lua_State *owner = nullptr, WidgetState *parent = nullptr) noexcept;
 
@@ -218,10 +224,10 @@ lua_State *main_lua_state(lua_State *L) noexcept
     return main ? main : L;
 }
 
-void require_gui_initialized(lua_State *L, const char *api)
+void require_gui_initialized(lua_State *L, const char *api, bool deferred=false)
 {
     babet_runtime::require_main_thread(L, api);
-    require_not_drawing(L, api);
+    if (!deferred) require_not_drawing(L, api);
     if (!g_initialized)
         luaL_error(L, "%s: call babet.gui.init() first", api);
     if (babet_curses::session_active())
@@ -298,22 +304,7 @@ detail::GtkCallback gtk_callback(Function function) noexcept
 
 void report_callback_error(lua_State *L) noexcept
 {
-    static constexpr char prefix[] = "babet.gui callback error: ";
-    std::fwrite(prefix, 1, sizeof(prefix) - 1, stderr);
-    if (lua_type(L, -1) == LUA_TSTRING)
-    {
-        size_t length = 0;
-        const char *message = lua_tolstring(L, -1, &length);
-        if (message && length)
-            std::fwrite(message, 1, length, stderr);
-    }
-    else
-    {
-        static constexpr char fallback[] = "non-string Lua error";
-        std::fwrite(fallback, 1, sizeof(fallback) - 1, stderr);
-    }
-    std::fputc('\n', stderr);
-    std::fflush(stderr);
+    babet_callbacks::report(L, "babet.gui callback error: ");
 }
 
 void widget_destroyed(void *, void *data) noexcept
@@ -361,7 +352,7 @@ void widget_destroyed(void *, void *data) noexcept
     if (state->kind == WidgetKind::window)
         g_live_windows.fetch_sub(1, std::memory_order_acq_rel);
 
-    if (g_live_widgets.load(std::memory_order_acquire) == 0 && !has_file_dialogs())
+    if (g_live_widgets.load(std::memory_order_acquire) == 0 && !has_file_dialogs() && !has_gui_tasks() && !g_run_active.load())
         g_gui_owner = nullptr;
 
     // Relâche la référence logique détenue par le signal native "destroy".
@@ -408,7 +399,7 @@ void dispatch_widget_callback(WidgetState *state, lua_Integer slot) noexcept
         lua_settop(L, base);
         return;
     }
-    if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+    if (babet_callbacks::pcall(L, 0, 0) != LUA_OK)
     {
         report_callback_error(L);
         lua_settop(L, base);
@@ -513,7 +504,7 @@ void dispatch_drag(WidgetState *state, const char *phase, double x, double y) no
     DragInvocation call{state, phase, x, y};
     lua_pushcfunction(L, invoke_drag_callback);
     lua_pushlightuserdata(L, &call);
-    if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+    if (babet_callbacks::pcall(L, 1, 0) != LUA_OK)
         report_callback_error(L);
     lua_settop(L, base);
     release_state(state);
@@ -823,7 +814,7 @@ unsigned int dispatch_drop(WidgetState *state, const char *phase, const void *va
         ++state->drop_received_depth;
     lua_pushcfunction(L, invoke_drop_callback);
     lua_pushlightuserdata(L, &call);
-    const bool ok = lua_pcall(L, 1, 0, 0) == LUA_OK;
+    const bool ok = babet_callbacks::pcall(L, 1, 0) == LUA_OK;
     if (!ok)
         report_callback_error(L);
     lua_settop(L, base);
@@ -956,7 +947,7 @@ void dispatch_pointer(WidgetState *state, const char *phase, double x, double y,
     PointerInvocation call{state, phase, x, y, has_coords, button, n_press, modifiers};
     lua_pushcfunction(L, invoke_pointer_callback);
     lua_pushlightuserdata(L, &call);
-    if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+    if (babet_callbacks::pcall(L, 1, 0) != LUA_OK)
         report_callback_error(L);
     lua_settop(L, base);
     release_state(state);
@@ -1046,7 +1037,7 @@ bool dispatch_key(WidgetState *state, const char *phase, unsigned int keyval,
     KeyInvocation call{state, phase, keyval, keycode, modifiers, false};
     lua_pushcfunction(L, invoke_key_callback);
     lua_pushlightuserdata(L, &call);
-    const bool ok = lua_pcall(L, 1, 0, 0) == LUA_OK;
+    const bool ok = babet_callbacks::pcall(L, 1, 0) == LUA_OK;
     if (!ok) report_callback_error(L);
     lua_settop(L, base);
     release_state(state);
@@ -1109,7 +1100,7 @@ void dispatch_integer_callback(WidgetState *state, lua_Integer slot,
     IntegerInvocation call{state, slot, value};
     lua_pushcfunction(L, invoke_integer_callback);
     lua_pushlightuserdata(L, &call);
-    if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+    if (babet_callbacks::pcall(L, 1, 0) != LUA_OK)
         report_callback_error(L);
     lua_settop(L, base);
     release_state(state);
@@ -1153,7 +1144,7 @@ bool dispatch_boolean_callback(WidgetState *state, lua_Integer slot) noexcept
 {
     if (!state || !state->native || !state->owner || !state->handle_key)
         return false;
-    lua_State *L = state->owner;
+    lua_State *L = state->callback_thread ? state->callback_thread : state->owner;
     const int base = lua_gettop(L);
     retain_state(state);
     if (!lua_checkstack(L, 2))
@@ -1165,7 +1156,7 @@ bool dispatch_boolean_callback(WidgetState *state, lua_Integer slot) noexcept
     BooleanInvocation call{state, slot, false};
     lua_pushcfunction(L, invoke_boolean_callback);
     lua_pushlightuserdata(L, &call);
-    const bool ok = lua_pcall(L, 1, 0, 0) == LUA_OK;
+    const bool ok = babet_callbacks::pcall(L, 1, 0) == LUA_OK;
     if (!ok) report_callback_error(L);
     lua_settop(L, base);
     release_state(state);
@@ -1251,7 +1242,7 @@ void dispatch_drag_state(WidgetState *state, const char *phase,
     DragStateInvocation call{state, phase, delete_data, reason, action};
     lua_pushcfunction(L, invoke_drag_state_callback);
     lua_pushlightuserdata(L, &call);
-    if (lua_pcall(L, 1, 0, 0) != LUA_OK)
+    if (babet_callbacks::pcall(L, 1, 0) != LUA_OK)
         report_callback_error(L);
     lua_settop(L, base);
     release_state(state);
@@ -1328,7 +1319,7 @@ void widget_pressed(void *gesture, int n_press, double x, double y,
     lua_pushnumber(L, y);
     lua_pushinteger(L, static_cast<lua_Integer>(button));
     lua_pushinteger(L, static_cast<lua_Integer>(n_press));
-    if (lua_pcall(L, 4, 0, 0) != LUA_OK)
+    if (babet_callbacks::pcall(L, 4, 0) != LUA_OK)
         report_callback_error(L);
     lua_settop(L, base);
 }
@@ -1371,7 +1362,7 @@ void drawing_area_draw(void *, void *cr, int width, int height, void *data) noex
     ++g_draw_depth;
     lua_pushcfunction(L, prepare_draw_callback);
     lua_pushlightuserdata(L, state);
-    if (lua_pcall(L, 1, 3, 0) != LUA_OK)
+    if (babet_callbacks::pcall(L, 1, 3) != LUA_OK)
         report_callback_error(L);
     else if (lua_type(L, base + 2) == LUA_TFUNCTION)
     {
@@ -1384,7 +1375,7 @@ void drawing_area_draw(void *, void *cr, int width, int height, void *data) noex
         lua_pushvalue(L, base + 3);
         lua_pushinteger(L, width);
         lua_pushinteger(L, height);
-        if (lua_pcall(L, 3, 0, 0) != LUA_OK)
+        if (babet_callbacks::pcall(L, 3, 0) != LUA_OK)
             report_callback_error(L);
         // The original userdata is still rooted below pcall's arguments,
         // including on error/yield/OOM. Never leave a saved context usable.
@@ -1503,7 +1494,7 @@ int push_native_widget(lua_State *L, WidgetKind kind, void *native,
                 g_live_windows.fetch_sub(1, std::memory_order_acq_rel);
         }
         release_state(state);
-        if (g_live_widgets.load(std::memory_order_acquire) == 0 && !has_file_dialogs())
+        if (g_live_widgets.load(std::memory_order_acquire) == 0 && !has_file_dialogs() && !has_gui_tasks() && !g_run_active.load())
             g_gui_owner = nullptr;
         return push_fail_protected(L,
             "babet.gui: cannot attach GTK widget lifetime signal");
@@ -4463,6 +4454,8 @@ int window_close(lua_State *L)
     return push_ok_protected(L);
 }
 
+#include "gui_tasks.inc"
+
 int wake_main_loop(void *) noexcept
 {
     return 1; // keep the bounded wake source alive until gui.run removes it
@@ -4473,6 +4466,8 @@ int signal_dispatch_thunk(lua_State *L) noexcept
     // No C++ owner lives here; Lua failures are contained by the lua_pcall in
     // gui.run. signal_dispatch_pending already protects user signal callbacks.
     signal_dispatch_pending(L);
+    dispatch_window_sizes(L);
+    dispatch_gui_tasks(L);
     return 0;
 }
 
@@ -4493,6 +4488,8 @@ int l_run(lua_State *L)
         return push_fail_protected(L, "babet.gui: this Lua state does not own the GUI");
     if (!lua_checkstack(L, 2)) {
         cancel_file_dialogs(main_lua_state(L));
+        cancel_gui_tasks(main_lua_state(L));
+        release_idle_gui_owner();
         return push_fail_protected(L, "babet.gui: cannot reserve Lua stack for GUI loop");
     }
 
@@ -4504,6 +4501,8 @@ int l_run(lua_State *L)
     {
         g_run_active.store(false, std::memory_order_release);
         cancel_file_dialogs(main_lua_state(L));
+        cancel_gui_tasks(main_lua_state(L));
+        release_idle_gui_owner();
         return push_fail_protected(L, "babet.gui: cannot install GTK main-loop wake source");
     }
 
@@ -4520,6 +4519,10 @@ int l_run(lua_State *L)
             (void)detail::gtk4_source_remove(wake_source);
             g_run_active.store(false, std::memory_order_release);
             cancel_file_dialogs(main_lua_state(L));
+            cancel_gui_tasks(main_lua_state(L));
+            // Cancellation may have nothing left to visit: the last widget
+            // can disappear during this iteration before Lua runs out of memory.
+            release_idle_gui_owner();
             return lua_error(L);
         }
     }
@@ -4527,6 +4530,8 @@ int l_run(lua_State *L)
     (void)detail::gtk4_source_remove(wake_source);
     g_run_active.store(false, std::memory_order_release);
     cancel_file_dialogs(main_lua_state(L));
+    cancel_gui_tasks(main_lua_state(L));
+    release_idle_gui_owner();
     return push_ok_protected(L);
 }
 
@@ -4611,7 +4616,7 @@ bool session_active() noexcept
 {
     return g_run_active.load(std::memory_order_acquire) ||
            g_live_widgets.load(std::memory_order_acquire) > 0 ||
-           g_css_provider != nullptr || has_file_dialogs();
+           g_css_provider != nullptr || has_file_dialogs() || has_gui_tasks();
 }
 
 void cleanup_on_main_thread(lua_State *L) noexcept
@@ -4622,6 +4627,7 @@ void cleanup_on_main_thread(lua_State *L) noexcept
     drain_deferred_widgets();
     lua_State *closing_owner = main_lua_state(L);
     cancel_file_dialogs(closing_owner);
+    cancel_gui_tasks(closing_owner);
     clear_css_provider(closing_owner);
     if (g_gui_owner == closing_owner)
     {
@@ -4641,6 +4647,8 @@ void cleanup_on_main_thread(lua_State *L) noexcept
 
 void register_gui(lua_State *L)
 {
+    lua_newtable(L); lua_rawsetp(L,LUA_REGISTRYINDEX,&gui_tasks_key);
+    lua_pushcfunction(L,gui_lua_boundary<gui_process_on_exit>);lua_setfield(L,LUA_REGISTRYINDEX,"babet.gui.processOnExit");
     if (luaL_newmetatable(L, FILE_DIALOG_META)) {
         lua_pushcfunction(L, file_dialog_gc);
         lua_setfield(L, -2, "__gc");
@@ -4869,6 +4877,8 @@ void register_gui(lua_State *L)
         lua_setfield(L, -2, "onCloseRequest");
         lua_pushcfunction(L, gui_lua_boundary<window_show>);
         lua_setfield(L, -2, "show");
+        lua_pushcfunction(L,gui_lua_boundary<window_on_resize>);lua_setfield(L,-2,"onResize");
+        lua_pushcfunction(L,gui_lua_boundary<window_request_close>);lua_setfield(L,-2,"requestClose");
         lua_pushcfunction(L, gui_lua_boundary<window_close>);
         lua_setfield(L, -2, "close");
     }
@@ -4925,6 +4935,11 @@ void register_gui(lua_State *L)
     lua_setfield(L, -2, "calendar");
     lua_pushcfunction(L, gui_lua_boundary<l_drawing_area>);
     lua_setfield(L, -2, "drawingArea");
+    lua_pushcfunction(L,gui_lua_boundary<l_timeout>);lua_setfield(L,-2,"timeout");
+    lua_pushcfunction(L,gui_lua_boundary<l_idle>);lua_setfield(L,-2,"idle");
+    lua_pushcfunction(L,gui_lua_boundary<l_cancel>);lua_setfield(L,-2,"cancel");
+    lua_pushcfunction(L,gui_lua_boundary<l_on_error>);lua_setfield(L,-2,"onError");
+    lua_pushcfunction(L,gui_lua_boundary<l_select_folder>);lua_setfield(L,-2,"selectFolder");
     lua_pushcfunction(L, gui_lua_boundary<l_run>);
     lua_setfield(L, -2, "run");
     lua_pushcfunction(L, gui_lua_boundary<l_quit>);

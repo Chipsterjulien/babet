@@ -10,6 +10,8 @@
 # --- Index + getting started ------------------------------------
 docs/en/README.md
 docs/en/getting-started.md
+docs/en/modules/runtime.md
+docs/en/runtime-exit.md
 docs/en/security.md
 
 # --- Modules ----------------------------------------------------
